@@ -161,6 +161,10 @@ typedef struct BenchSwitch {
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
+    // The Old 3DS renderer cuts (roadmap P38, on by default there): each raced off, to measure what it is worth.
+    { "texture lookup memo off (P38)", { "DKR_TEX_MEMO", NULL }, 1, 0 },
+    { "lean display list walk off (P38)", { "DKR_WALK_LEAN", NULL }, 1, 0 },
+    { "lean draw path off (P38)", { "DKR_DRAW_LEAN", NULL }, 1, 0 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
