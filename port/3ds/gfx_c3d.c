@@ -1208,9 +1208,13 @@ static void wait_for_present(void) {
  * turns, so a frame is shown whenever its drawing happens to end: steps of 3, 3, 3 could reach the screen 2, 4 and 3
  * retraces apart, and the race jumps although the frame rate looks fine. So a frame that is ready early waits until
  * its step has passed since the last one was shown; one that is late goes at once and the count starts again from
- * it. DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only.
+ * it. The wait never makes the gap longer than the last one: the game measures its steps from how long its own
+ * frames took, and a frame held back holds the game back too (it waits for a free frame slot), so waiting for whole
+ * steps fed on itself and pulled the frame rate down (switch bench #247: 15.0 fps, 17.9 without pacing).
+ * DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only.
  */
-static u32 sPaceShown; // The retrace the last frame was handed over for.
+static u32 sPaceShown;    // The retrace the last frame was handed over for.
+static int sPaceInterval; // Retraces between the last two hand-overs.
 static unsigned int sPaceFrames, sPaceWaits, sPaceLate;
 
 /* Every 300 frames: how many waited to be on time, and how many were late (shown later than their step). */
@@ -1230,13 +1234,18 @@ static void pace_frame(void) {
     int step = plat_frame_step();
     s32 ahead;
     if (!plat_switch("DKR_FRAME_PACE", plat_old_3ds()) || step < 1 || step > 6) {
+        sPaceInterval = (int) (now - sPaceShown);
         sPaceShown = now;
         return;
+    }
+    if (step > sPaceInterval) {
+        step = sPaceInterval;
     }
     // A frame handed over now reaches the screen at the next retrace (the GPU takes a few ms): the last one handed
     // over at retrace P was shown at P + 1, so this one, due step retraces after it, is handed over at P + step.
     ahead = (s32) (sPaceShown + step - now);
     if (ahead <= 0 || ahead > 6) {
+        sPaceInterval = (int) (now - sPaceShown);
         sPaceShown = now; // Late (or after a load or the HOME menu): shown at once, the next counts from it.
         pace_count(0, ahead < 0);
         return;
@@ -1253,6 +1262,7 @@ static void pace_frame(void) {
             prof_part(PROF_PART_PRESENT_WAIT, ns);
         }
     }
+    sPaceInterval = (int) (now + ahead - sPaceShown);
     sPaceShown = now + ahead;
 }
 
