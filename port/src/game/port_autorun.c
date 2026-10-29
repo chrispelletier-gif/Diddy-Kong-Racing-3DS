@@ -155,11 +155,13 @@ typedef struct BenchSwitch {
  * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
  * bottom screen's race HUD less often gained nothing (#241). Rendering ahead by 2 frames won on both of its renderer
  * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. A steady 20 fps cap is raced against
- * 30, for its hitches and frame pacing rather than its frame rate, and the frame pacer (gfx_c3d.c) off against on.
+ * 30, for its hitches and frame pacing rather than its frame rate, the frame pacer (gfx_c3d.c) off against on, and
+ * the New 3DS's third top screen buffer (P35, #246), off on an Old 3DS until this bench says.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "20 fps cap, not 30", { "DKR_FPS_PIN", NULL }, 30, 20 },
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
+    { "third top screen buffer", { "DKR_TRIPLE_BUFFER", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

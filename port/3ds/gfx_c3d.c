@@ -1152,6 +1152,55 @@ static u64 sLastEndTick;
  * thread), so the swap is wrapped (-Wl,--wrap=gfxScreenSwapBuffers) to see when, not when the CPU ended the frame. */
 static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
+/*
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default on the New 3DS since switch bench #246:
+ * 48 to 60 fps on Crescent Island and Haunted Woods with the same GPU time; off on an Old 3DS until its bench
+ * says). libctru has two, so a frame finished before the last one reached the screen waits for it
+ * (wait_for_present). With three, of our own in linear memory, it is copied into one that is neither on screen nor
+ * waiting to be, and carries on. citro3d copies a frame into what gfxGetFramebuffer returns and shows it with
+ * gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours while sTripleFrame is set, which is fixed for
+ * each frame when it is handed over (triple_choose).
+ * sTripleShown is the buffer on screen, sTripleMaybe one that may have reached it (presented while another was still
+ * waiting, just as the screen took that), sTriplePresented the last presented: none of them is written next.
+ */
+#define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
+static int sTripleWanted;
+static volatile int sTripleFrame;
+static u8 *sTriple[3];
+static int sTripleNext, sTripleShown = -1, sTripleMaybe = -1, sTriplePresented = -1, sTripleFail;
+static unsigned int sTripleId;
+
+u8 *__real_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
+__attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height) {
+    u8 *fb = __real_gfxGetFramebuffer(screen, side, width, height); // libctru's sizes for the mode
+    if (screen == GFX_TOP && sTripleFrame) {
+        fb = sTriple[sTripleNext] + (gfxIs3D() && side != GFX_LEFT ? TRIPLE_BYTES / 2 : 0);
+    }
+    return fb;
+}
+
+/* What libctru's gfxPresentFramebuffer does for the top screen, with our buffer (in linear memory). */
+static void triple_present(bool hasStereo) {
+    GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
+    u32 mode = format | (1 << 8);
+    const u8 *fbA = sTriple[sTripleNext], *fbB = fbA;
+    if (gfxIs3D()) {
+        mode |= BIT(5);
+        fbB = hasStereo ? fbA + TRIPLE_BYTES / 2 : fbA;
+    } else if (!gfxIsWide()) {
+        mode |= BIT(6);
+    }
+    if (gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleMaybe = sTriplePresented; // Replaced, unless the screen took it just now.
+    } else {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    sTriplePresented = sTripleNext;
+    sTripleId ^= 1;
+    gspPresentBuffer(GSP_SCREEN_TOP, sTripleId, fbA, fbB, GSP_SCREEN_WIDTH * gspGetBytesPerPixel(format), mode);
+}
+
 void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo) {
     if (scr == GFX_TOP) {
@@ -1163,8 +1212,56 @@ __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool has
         sSwapGapUs = sLastSwapTick != 0 ? (unsigned int) ((now - sLastSwapTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
         sLastSwapTick = now;
         sSwapCount++;
+        if (sTripleFrame) {
+            triple_present(hasStereo);
+            return;
+        }
     }
     __real_gfxScreenSwapBuffers(scr, hasStereo);
+}
+
+/*
+ * Renderer thread, with the GPU done with the last frame and before C3D_FrameEnd: whether this frame goes to our three
+ * buffers, and which. Returns 0 when it must wait for the screen as with two (wait_for_present): the setting is off,
+ * or the three buffers are all in use (two frames presented within one refresh).
+ */
+static int triple_choose(void) {
+    int i;
+    if (!sTripleWanted || sStereo || sTripleFail) {
+        if (sTripleFrame) {
+            sTripleFrame = 0;
+            sTripleShown = sTripleMaybe = sTriplePresented = -1; // libctru's buffers are on screen again.
+        }
+        return 0;
+    }
+    if (sTriple[0] == NULL) {
+        for (i = 0; i < 3; i++) {
+            sTriple[i] = linearAlloc(TRIPLE_BYTES);
+            if (sTriple[i] == NULL) {
+                plat_log("top screen: no memory for a third buffer, two kept");
+                sTripleFail = 1;
+                for (i = 0; i < 3; i++) {
+                    linearFree(sTriple[i]);
+                    sTriple[i] = NULL;
+                }
+                return 0;
+            }
+        }
+    }
+    if (sTriplePresented >= 0 && !gspIsPresentPending(GSP_SCREEN_TOP)) {
+        sTripleShown = sTriplePresented;
+        sTripleMaybe = -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (i != sTripleShown && i != sTripleMaybe && i != sTriplePresented) {
+            sTripleNext = i;
+            sTripleFrame = 1;
+            return 1;
+        }
+    }
+    sTripleFrame = 0; // All three in use: wait like two (libctru's back buffer isn't on screen either).
+    sTripleShown = sTripleMaybe = sTriplePresented = -1;
+    return 0;
 }
 
 /*
@@ -2156,6 +2253,7 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2173,6 +2271,7 @@ static void read_switches(void) {
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
              plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
+    plat_log("switches: top screen buffers %d", sTripleWanted ? 3 : 2);
 }
 
 void gfxb_start_frame(void) {
@@ -2397,7 +2496,9 @@ void gfxb_end_frame(void) {
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
         pace_frame();
-        wait_for_present();
+        if (!triple_choose()) {
+            wait_for_present();
+        }
         find_recent_screen();
         watch_for_line();
         if (full_flush()) {
