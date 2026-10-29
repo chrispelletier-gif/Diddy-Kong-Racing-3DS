@@ -154,14 +154,13 @@ typedef struct BenchSwitch {
  * on a slower core without a second level cache. There VFP vectors won (#238), and the texture hash kept for 8 frames
  * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
  * bottom screen's race HUD less often gained nothing (#241). Rendering ahead by 2 frames won on both of its renderer
- * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. A steady 20 fps cap is raced against
- * 30, for its hitches and frame pacing rather than its frame rate, the frame pacer (gfx_c3d.c) off against on, and
- * the New 3DS's third top screen buffer (P35, #246), off on an Old 3DS until this bench says.
+ * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. In #251 a steady 20 fps cap matched
+ * or beat 30 with far fewer slower frames, and the New 3DS's third top screen buffer (P35) was a little ahead, so
+ * both are Old 3DS defaults now and the bench races at 20 there. The frame pacer (gfx_c3d.c) still cost frames on two
+ * tracks of three, so it is raced off against on.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "20 fps cap, not 30", { "DKR_FPS_PIN", NULL }, 30, 20 },
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
-    { "third top screen buffer", { "DKR_TRIPLE_BUFFER", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
@@ -186,13 +185,13 @@ static void apply_config(s32 config) {
     }
     if (sMode == MODE_SWITCH) {
         // The menus' settings have no say in the bench's races (user rule, 2026-10-29): each race draws with AA off,
-        // 32-bit buffers, 30 fps, render ahead 1 (2 on an Old 3DS), no 3D, 400 pixels and the default screen style
-        // (Balanced wide; the N64's 4:3 on an Old 3DS, which is being made to run well at that size first). Only where
-        // the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the results'
-        // graphics column says which.
+        // 32-bit buffers, 30 fps and render ahead 1 (20 fps and 2 on an Old 3DS), no 3D, 400 pixels and the default
+        // screen style (Balanced wide; the N64's 4:3 on an Old 3DS, which is being made to run well at that size
+        // first). Only where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the
+        // player's, and the results' graphics column says which.
         plat_set_gpu_config(PLAT_AA_OFF, 0);
         plat_set_60fps(0);
-        plat_override_switch("DKR_FPS_PIN", 30);
+        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 20 : 30);
         plat_override_switch("DKR_RENDER_AHEAD_PIN", plat_old_3ds() ? 2 : 1);
         plat_override_switch("DKR_STEREO3D", 0);
         plat_override_switch("DKR_WIDE800", 0);

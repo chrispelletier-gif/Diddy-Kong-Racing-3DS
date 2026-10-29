@@ -1153,9 +1153,9 @@ static u64 sLastEndTick;
 static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
 /*
- * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default on the New 3DS since switch bench #246:
- * 48 to 60 fps on Crescent Island and Haunted Woods with the same GPU time; off on an Old 3DS until its bench
- * says). libctru has two, so a frame finished before the last one reached the screen waits for it
+ * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: 48 to 60 fps
+ * on Crescent Island and Haunted Woods with the same GPU time; on an Old 3DS, #251 had it 0.7 to 1.1 fps ahead).
+ * libctru has two, so a frame finished before the last one reached the screen waits for it
  * (wait_for_present). With three, of our own in linear memory, it is copied into one that is neither on screen nor
  * waiting to be, and carries on. citro3d copies a frame into what gfxGetFramebuffer returns and shows it with
  * gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the first while sTripleGet is set (only around
@@ -2289,7 +2289,7 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
-    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 1) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
