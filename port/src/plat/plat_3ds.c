@@ -55,6 +55,14 @@ static int prio_from_n64(int n64Priority) {
     if (n64Priority >= 150) {
         return PRIO_GAME_HIGHEST;
     }
+    // Above the game's main thread (10) are its audio manager (12) and scheduler (13). When the renderer shares their
+    // core (an Old 3DS with the renderer on the game's core) it held them up for a whole display list walk (~30 ms
+    // there): the sound's small lead over the output ran out, and the audio manager then makes its frames up to 15%
+    // longer to catch up, which played the music fast. Both run briefly once a frame, so there they go above the
+    // renderer (DKR_SOUND_ABOVE_RENDERER=0 = old).
+    if (n64Priority > 10 && sRcpCore == 0 && plat_switch("DKR_SOUND_ABOVE_RENDERER", 1)) {
+        return PRIO_HARDWARE;
+    }
     prio = PRIO_GAME_LOWEST - n64Priority;
     if (prio < PRIO_GAME_HIGHEST + 1) {
         prio = PRIO_GAME_HIGHEST + 1;
