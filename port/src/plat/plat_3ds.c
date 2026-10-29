@@ -189,12 +189,25 @@ static volatile int sRendererPaused;
  * (see plat_3ds_exit).
  */
 void plat_3ds_quit_point(int parkedState) {
-    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE) {
+    if (parkedState == PLAT_3DS_PARKED_GPU_IDLE && sPauseRequested && !sQuitting) {
+        // A renderer on an Old 3DS's system core gives its share of that core back while the game is away: the share
+        // holds even while the renderer waits, and slowed the HOME menu, whose services run there.
+        int lent = sRcpCore == 1 && sSyscoreShare > 0;
+        if (lent) {
+            Result res = APT_SetAppCpuTimeLimit(5);
+            plat_log("system core time limit 5%% while away: %s (0x%08lX)", R_SUCCEEDED(res) ? "ok" : "failed",
+                     (unsigned long) res);
+        }
         while (sPauseRequested && !sQuitting) {
             sRendererPaused = 1;
             svcSleepThread(1000000);
         }
         sRendererPaused = 0;
+        if (lent && !sQuitting) {
+            Result res = APT_SetAppCpuTimeLimit(sSyscoreShare);
+            plat_log("system core time limit %d%% again: %s (0x%08lX)", sSyscoreShare, R_SUCCEEDED(res) ? "ok" : "failed",
+                     (unsigned long) res);
+        }
     }
     if (!sQuitting) {
         return;
