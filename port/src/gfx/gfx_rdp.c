@@ -1035,7 +1035,9 @@ static void read_switches(void) {
         return;
     }
     sSwitchEpoch = gPlatSwitchEpoch;
-    sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
+    // On by default on an Old 3DS only: switch bench #238 there, 8% less renderer time per triangle (the New 3DS's
+    // #176 showed nothing). Bit-identical to the C loop.
+    sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
     sTexRehash = plat_switch("DKR_TEX_REHASH", 1);
     if (sTexRehash < 1) {
         sTexRehash = 1;

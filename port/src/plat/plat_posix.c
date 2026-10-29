@@ -41,6 +41,18 @@ unsigned long long plat_render_idle_ns(void) {
     return 0;
 }
 
+int plat_old_3ds(void) {
+    return 0;
+}
+
+unsigned long long plat_screen_busy_ns(void) {
+    return 0;
+}
+
+unsigned long plat_screen_draws(void) {
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 

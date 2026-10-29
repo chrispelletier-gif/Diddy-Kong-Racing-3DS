@@ -54,6 +54,12 @@ void *plat_get_current_os_thread(void);
  */
 unsigned long long plat_idle_ns(void);
 unsigned long long plat_render_idle_ns(void);
+/* The time the bottom screen's own thread has spent drawing (ns), and how many areas it has drawn (P36: on an Old
+ * 3DS it shares the game's core). 0 where there is no such thread. */
+unsigned long long plat_screen_busy_ns(void);
+/* Nonzero on an Old 3DS (roadmap O8): some switches default differently there. */
+int plat_old_3ds(void);
+unsigned long plat_screen_draws(void);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);

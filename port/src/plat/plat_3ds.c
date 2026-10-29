@@ -586,6 +586,26 @@ void plat_log(const char *fmt, ...) {
 static u16 sImage[BS_WIDTH * BS_HEIGHT];
 static LightEvent sScreenEvent;
 static volatile int sScreenThreadStarted;
+static volatile unsigned long long sScreenBusyNs; // Time its thread has spent drawing (the profiler's P36 line)
+static volatile unsigned long sScreenDraws;       // Areas it has drawn
+
+int plat_old_3ds(void) {
+    static int sOld = -1;
+    if (sOld < 0) {
+        bool isNew3DS = false;
+        APT_CheckNew3DS(&isNew3DS);
+        sOld = !isNew3DS;
+    }
+    return sOld;
+}
+
+unsigned long long plat_screen_busy_ns(void) {
+    return sScreenBusyNs;
+}
+
+unsigned long plat_screen_draws(void) {
+    return sScreenDraws;
+}
 
 /* Copies rows of the image to the framebuffer, which is the screen turned on its side (the console lock is held). */
 static void screen_copy(int first, int end) {
@@ -638,6 +658,7 @@ static void screen_thread(void *arg) {
         LightLock_Unlock(&sConsoleLock);
         // Drawn without the lock, from the copy taken; only the copy to the screen holds it (see plat_3ds_exit).
         if (changes != 0) {
+            unsigned long long start = plat_time_ns();
             int area;
             for (area = 0; area < BS_AREA_COUNT; area++) {
                 if (changes & (1 << area)) {
@@ -647,8 +668,12 @@ static void screen_thread(void *arg) {
                     LightLock_Lock(&sConsoleLock);
                     screen_copy(first, end);
                     LightLock_Unlock(&sConsoleLock);
+                    sScreenDraws++;
                 }
             }
+            // Includes any time other threads took the core meanwhile: on the game's core at a low priority, this
+            // is an upper bound.
+            sScreenBusyNs += plat_time_ns() - start;
         }
     }
 }
@@ -754,17 +779,25 @@ static int same_standing(const RaceHud *a, const RaceHud *b) {
 }
 
 void plat_set_race_hud(const RaceHud *hud) {
-    static int sShown, sRacing;
+    static int sShown, sRacing, sEpoch = -1;
+    static u64 sIntervalNs = 66000000ULL;
     static RaceHud sLast;
     static u64 sLastNs;
     u64 now = svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000) * 1000;
     int racing = hud != NULL && hud->mode < RACE_HUD_MODE_FIRST_MENU;
+    if (sEpoch != gPlatSwitchEpoch) {
+        // DKR_BS_HUD_MS (P36, a switch bench entry): the race HUD's redraw interval. On an Old 3DS the screen's thread
+        // shares the game's core.
+        int ms = plat_switch("DKR_BS_HUD_MS", 66);
+        sEpoch = gPlatSwitchEpoch;
+        sIntervalNs = (u64) (ms > 0 ? ms : 66) * 1000000ULL;
+    }
     if (hud != NULL && sShown) {
         // A menu's companion only changes with what the menu has highlighted. In a race, the timer and the map move
         // every frame; 15 redraws a second is plenty for them, which keeps the screen's thread from taking much of
         // its core. A change of place, lap, item, bananas or scores is drawn straight away.
         if (!racing ? memcmp(hud, &sLast, sizeof(*hud)) == 0
-                    : now - sLastNs < 66000000ULL && same_standing(hud, &sLast)) {
+                    : now - sLastNs < sIntervalNs && same_standing(hud, &sLast)) {
             return;
         }
     }

@@ -37,7 +37,8 @@
  *   DKR_AUTORUN_SWITCH_TRACKS=id,...  Tracks (default: the GPU benchmark's three).
  *   DKR_AUTORUN_SWITCH_CHARACTER=n    Character (default Bumper).
  *   DKR_AUTORUN_SWITCH_CONFIGS=n,...  The races' switch sets: 0 every switch at its usual setting, n switch n-1 of
- *                                     sSwitches flipped (default all).
+ *                                     sSwitches flipped, and with two switches or more a last one with all of
+ *                                     them flipped together (default all).
  * Its files are switch_bench_state.txt and switch_bench_results.csv (with "config" and "pct_60fps" columns, as the
  * GPU benchmark's).
  *
@@ -151,15 +152,20 @@ typedef struct BenchSwitch {
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
  * transforms (P27) gained nothing and stay off. The Old 3DS (roadmap O8) is another matter: its renderer is CPU-bound
  * on a slower core without a second level cache, so the ones that save CPU time or memory reads are raced again there,
- * with the texture hash kept for 8 frames instead of worked out every frame. The list ends with an empty entry, so it
+ * with the texture hash kept for 8 frames instead of worked out every frame, and the bottom screen's race HUD
+ * redrawn less often (its thread shares the game's core there). VFP vectors won there (#238) and are on by default
+ * on an Old 3DS. The list ends with an empty entry, so it
  * may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "texture hash kept 8 frames (O8)", { "DKR_TEX_REHASH", NULL }, 1, 8 },
-    { "VFP vector transforms (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1 },
     { "cache flush by system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
+    { "bottom-screen HUD 5 redraws a second, not 15 (P36)", { "DKR_BS_HUD_MS", NULL }, 66, 200 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
+/* With two switches or more, a last race flips them all together: gains don't always add up. */
+#define SWITCH_ALL (SWITCH_CONFIGS > 2 ? SWITCH_CONFIGS : -1)
+#define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
 #define MAX_CONFIGS 16
 
 static s32 sMode; // enum Mode
@@ -176,10 +182,11 @@ static void apply_config(s32 config) {
         plat_clear_switch_overrides();
         return;
     }
-    if (config_count() == SWITCH_CONFIGS) {
+    if (sMode == MODE_SWITCH) {
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+            s32 flipped = config == i + 1 || config == SWITCH_ALL;
             for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[i].env[k], config == i + 1 ? sSwitches[i].test : sSwitches[i].usual);
+                plat_override_switch(sSwitches[i].env[k], flipped ? sSwitches[i].test : sSwitches[i].usual);
             }
         }
         return;
@@ -230,7 +237,7 @@ static s32 is_bench(void) {
 }
 
 static s32 config_count(void) {
-    return sMode == MODE_SWITCH ? SWITCH_CONFIGS : BENCH_CONFIGS;
+    return sMode == MODE_SWITCH ? SWITCH_RACES : BENCH_CONFIGS;
 }
 
 static const char *config_name(s32 config) {
@@ -238,7 +245,7 @@ static const char *config_name(s32 config) {
         return "?";
     }
     if (sMode == MODE_SWITCH) {
-        return config == 0 ? "usual settings" : sSwitches[config - 1].name;
+        return config == 0 ? "usual settings" : config == SWITCH_ALL ? "all switches together" : sSwitches[config - 1].name;
     }
     return sBenchConfigs[config].name;
 }
@@ -694,7 +701,7 @@ static void init(void) {
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
-        for (i = 1; i < SWITCH_CONFIGS; i++) {
+        for (i = 1; i < SWITCH_RACES; i++) {
             hash_text(config_name(i)); // A new switch starts a new run.
         }
     } else if (sMode == MODE_QUICK) {

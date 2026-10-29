@@ -322,6 +322,20 @@ static void show_overlay(void) {
         plat_overlay_show("");
     }
     if (++sLogCounter % 4 == 0) {
+        static unsigned long long sScreenLoggedNs;
+        static unsigned long sScreenLoggedDraws;
+        static u32 sScreenLoggedFrames;
+        unsigned long long screenNs = plat_screen_busy_ns();
+        unsigned long screenDraws = plat_screen_draws();
+        u32 frames = sRenderedFrames - sScreenLoggedFrames;
+        if (screenDraws != sScreenLoggedDraws && frames > 0) {
+            // P36: what drawing the bottom screen costs (on an Old 3DS it shares the game's core).
+            port_log("bottom screen: %.2f ms a frame at most, %.1f areas drawn a frame",
+                     (screenNs - sScreenLoggedNs) / 1e6 / frames, (double) (screenDraws - sScreenLoggedDraws) / frames);
+        }
+        sScreenLoggedNs = screenNs;
+        sScreenLoggedDraws = screenDraws;
+        sScreenLoggedFrames = sRenderedFrames;
         port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
                  "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
                  fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
