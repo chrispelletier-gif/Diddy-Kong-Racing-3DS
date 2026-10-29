@@ -1038,7 +1038,8 @@ static void read_switches(void) {
     // On by default on an Old 3DS only: switch bench #238 there, 8% less renderer time per triangle (the New 3DS's
     // #176 showed nothing). Bit-identical to the C loop.
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
-    sTexRehash = plat_switch("DKR_TEX_REHASH", 1);
+    // 8 frames on an Old 3DS (switch bench #241, with the system-call flush the best of its switches together).
+    sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
     if (sTexRehash < 1) {
         sTexRehash = 1;
     }

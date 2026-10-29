@@ -2083,7 +2083,9 @@ static void read_switches(void) {
     sSplitMode = plat_switch("DKR_GPU_SPLIT", 0);
     sLineWatch = plat_switch("DKR_LINE_WATCH", 0);
     sEarlyDepth = plat_switch("DKR_EARLY_DEPTH", 0) != 0;
-    sSvcFlush = plat_switch("DKR_SVC_FLUSH", 0) != 0;
+    // On by default on an Old 3DS only (switch bench #241: with the renderer on the system core the GPU service's
+    // flushes are slow there). The New 3DS's #176 showed no difference.
+    sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;

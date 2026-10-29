@@ -151,15 +151,12 @@ typedef struct BenchSwitch {
  * clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
  * transforms (P27) gained nothing and stay off. The Old 3DS (roadmap O8) is another matter: its renderer is CPU-bound
- * on a slower core without a second level cache, so the ones that save CPU time or memory reads are raced again there,
- * with the texture hash kept for 8 frames instead of worked out every frame, and the bottom screen's race HUD
- * redrawn less often (its thread shares the game's core there). VFP vectors won there (#238) and are on by default
- * on an Old 3DS. The list ends with an empty entry, so it
+ * on a slower core without a second level cache. There VFP vectors won (#238), and the texture hash kept for 8 frames
+ * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
+ * bottom screen's race HUD less often gained nothing (#241). Render ahead is raced now, since the bench pins it to 1. The list ends with an empty entry, so it
  * may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "texture hash kept 8 frames (O8)", { "DKR_TEX_REHASH", NULL }, 1, 8 },
-    { "cache flush by system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
-    { "bottom-screen HUD 5 redraws a second, not 15 (P36)", { "DKR_BS_HUD_MS", NULL }, 66, 200 },
+    { "render ahead 2 frames, not 1", { "DKR_RENDER_AHEAD_PIN", NULL }, 1, 2 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
