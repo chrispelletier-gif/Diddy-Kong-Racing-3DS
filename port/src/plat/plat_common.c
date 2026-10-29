@@ -354,6 +354,11 @@ const char *plat_version(void) {
 static volatile int sRenderAhead = -1;
 
 int plat_render_ahead(void) {
+    // The switch bench pins it for its races (DKR_RENDER_AHEAD_PIN), whatever the menu says.
+    int pinned = plat_switch("DKR_RENDER_AHEAD_PIN", 0);
+    if (pinned == 1 || pinned == 2) {
+        return pinned;
+    }
     if (sRenderAhead < 0) {
         const char *env = plat_getenv("DKR_RENDER_AHEAD");
         int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
@@ -385,7 +390,11 @@ static void read_60fps_setting(void) {
 }
 
 int plat_frame_retraces(void) {
+    int pinned = plat_switch("DKR_FPS_PIN", 0); // The switch bench's own frame rate (20, 30 or 60).
     read_60fps_setting();
+    if (pinned == 20 || pinned == 30 || pinned == 60) {
+        return 60 / pinned;
+    }
     return sFps60 ? 1 : sFps20 ? 3 : 2;
 }
 

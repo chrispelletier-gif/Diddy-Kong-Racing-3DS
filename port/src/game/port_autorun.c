@@ -183,6 +183,17 @@ static void apply_config(s32 config) {
         return;
     }
     if (sMode == MODE_SWITCH) {
+        // The menus' settings have no say in the bench's races (user rule, 2026-10-29): each race draws with AA off,
+        // 32-bit buffers, 30 fps, render ahead 1, no 3D, 400 pixels and the Balanced screen style. Only where the
+        // renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the results'
+        // graphics column says which.
+        plat_set_gpu_config(PLAT_AA_OFF, 0);
+        plat_set_60fps(0);
+        plat_override_switch("DKR_FPS_PIN", 30);
+        plat_override_switch("DKR_RENDER_AHEAD_PIN", 1);
+        plat_override_switch("DKR_STEREO3D", 0);
+        plat_override_switch("DKR_WIDE800", 0);
+        plat_override_switch("DKR_WIDESCREEN", 2);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             s32 flipped = config == i + 1 || config == SWITCH_ALL;
             for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {

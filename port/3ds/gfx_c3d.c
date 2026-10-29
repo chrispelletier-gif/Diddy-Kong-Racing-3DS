@@ -870,14 +870,21 @@ int plat_3ds_wide800_supported(void) {
     return !sWideUnsupported;
 }
 
+/* The screen settings as frames use them: the switch bench pins each for its races (DKR_WIDESCREEN, DKR_WIDE800,
+ * DKR_STEREO3D), so the player's choices in the menus don't change what it measures. */
+static int wide_setting(void) {
+    int style = plat_switch("DKR_WIDESCREEN", sWideSetting);
+    return style >= 0 && style <= 3 ? style : sWideSetting;
+}
+
 float plat_aspect_scale(void) {
-    return sWideSetting ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+    return wide_setting() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = sWideSetting;
+    int style = wide_setting();
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 
@@ -917,18 +924,20 @@ static float stereo_max_sep(void) {
  */
 static void apply_screen_mode(void) {
     float slider = osGet3DSliderState();
-    int stereo = sStereoSetting && slider > 0.0f && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
-    int wide800 = s800Setting && !stereo && !sWideUnsupported;
+    int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
+                 __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    int wide800 = plat_switch("DKR_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    int wideStyle = wide_setting();
     int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((sWideSetting != 0) != sWide && sTarget != NULL) {
+    if ((wideStyle != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = sWideSetting != 0;
+    sWide = wideStyle != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
     if (sTarget == NULL ||
