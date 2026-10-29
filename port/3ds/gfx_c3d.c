@@ -2376,6 +2376,8 @@ static int sUnifLoc[UNIF_COUNT];
 static float sUnifVal[UNIF_COUNT][4];
 static int sUnifKnown; // sUnifVal holds what citro3d has
 static int sUnifModel; // The uniforms are a model draw's (else the CPU draws' identity)
+static unsigned sUnifChanged; // Uniforms set since they were last written (bit per UNIF_*)
+static int sUnifTwice;        // DKR_UNIF_TWICE: changed uniforms written twice (unif_write_twice)
 
 static void transform_marker_path(char *out, size_t size) {
     snprintf(out, size, "%s/gpu_transform.txt", plat_data_dir());
@@ -2437,6 +2439,29 @@ static void set_unif(int u, float x, float y, float z, float w) {
     c[2] = z;
     c[3] = w;
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sUnifLoc[u], x, y, z, w);
+    sUnifChanged |= 1u << u;
+}
+
+/*
+ * The GPU misses some settings written right after a draw (see drain_before_draw), and a model draw changes the
+ * matrix uniforms right after the CPU draw before it. Missed, the draw lands with the identity matrix, nowhere on the
+ * screen: a tunnel's walls and ceiling vanished at one spot of a track with GPU vertex maths on (bug report #234),
+ * the reference renderer drawing them from the same draw. So the changed uniforms are written now and once more with
+ * the draw, as write_settings_twice does for the other settings. DKR_UNIF_TWICE=0 writes them once.
+ */
+static void unif_write_twice(void) {
+    unsigned changed = sUnifChanged;
+    int u;
+    sUnifChanged = 0;
+    if (!sUnifTwice || changed == 0) {
+        return;
+    }
+    C3Di_UpdateContext();
+    for (u = 0; u < UNIF_COUNT; u++) {
+        if (changed & (1u << u)) {
+            C3D_FVUnifDirty[GPU_VERTEX_SHADER][sUnifLoc[u]] = true;
+        }
+    }
 }
 
 /* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
@@ -2589,6 +2614,7 @@ static void read_switches(void) {
     sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
     // GPU vertex maths (P30) and stereo frames made once (P33): off everywhere until the Old 3DS bench says otherwise.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
+    sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", GFX_SURVEY_DEFAULT) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
@@ -4661,6 +4687,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     }
 
     set_cpu_uniforms();
+    unif_write_twice();
     if (timed) {
         t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
     }
@@ -4961,6 +4988,7 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
     }
     set_model_uniforms(params, su0, sv0, su1, sv1);
+    unif_write_twice();
     return 1;
 }
 
