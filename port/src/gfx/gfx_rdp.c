@@ -157,9 +157,11 @@ static u16 sBatchIndices[MAX_BATCH_TRIANGLES * 3];
 static s32 sBatchCount;    // Triangles
 static s32 sBatchVertices; // Vertices used
 static GfxDrawState sBatchState;
-/* The batch of model triangles (GPU vertex maths, P30), see sModelVerts. */
+/* The batch of model triangles (GPU vertex maths, P30), see sModelVerts, and the batch of mesh parts (P31, P34),
+ * see mesh_part, which share the state and parameters: only one of the three batches holds triangles at a time. */
 static s32 sModelCount;
 static GfxDrawState sModelState;
+static s32 sMeshPartCount;
 /* Changes whenever the batch's vertices become invalid (a flush, or a new triangle command): entries of the
  * triangle command's shared vertex table are only valid for the generation they were made in. */
 static u32 sBatchGeneration;
@@ -457,7 +459,7 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
     if (&e->tex == pinned || other == pinned) {
         return TRUE;
     }
-    if (sModelCount > 0 && (&e->tex == sModelState.textures[0] || &e->tex == sModelState.textures[1] ||
+    if ((sModelCount > 0 || sMeshPartCount > 0) && (&e->tex == sModelState.textures[0] || &e->tex == sModelState.textures[1] ||
                             other == sModelState.textures[0] || other == sModelState.textures[1])) {
         return TRUE;
     }
@@ -1174,6 +1176,7 @@ static COLD void trace_batch(void) {
 }
 
 static void flush_model_batch(void);
+static void flush_mesh_batch(void);
 
 /* Draws the batch of transformed triangles. */
 static NOINLINE HOT void flush_cpu_batch(void) {
@@ -1196,6 +1199,9 @@ static NOINLINE HOT void flush_cpu_batch(void) {
 
 /* Draws whichever batch holds triangles. */
 static inline void flush_batch(void) {
+    if (sMeshPartCount > 0) {
+        flush_mesh_batch();
+    }
     if (sModelCount > 0) {
         flush_model_batch();
     }
@@ -1210,7 +1216,8 @@ static inline s32 batch_has_room(void) {
 /* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
  * another state. */
 static void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
-    if (sModelCount > 0) {
+    if (sModelCount > 0 || sMeshPartCount > 0) {
+        flush_mesh_batch();
         flush_model_batch();
     }
     if (sBatchCount > 0 && (sBatchCount + triangles > MAX_BATCH_TRIANGLES ||
@@ -1686,7 +1693,7 @@ static void flush_model_batch(void) {
 /* Starts a triangle in the model batch of this state and these parameters (flushing whatever batch is in the way) and
  * returns where its indices go. */
 static u16 *model_triangle(const GfxDrawState *state, const GfxModelParams *params) {
-    if (sBatchCount > 0) {
+    if (sBatchCount > 0 || sMeshPartCount > 0) {
         flush_batch();
     }
     if (sModelCount > 0 && (sModelCount >= MAX_BATCH_TRIANGLES || sModelVertices + 3 > MAX_BATCH_VERTICES ||
@@ -1804,6 +1811,7 @@ static u32 mesh_hash(const Triangle *tris, s32 numTris, const Vertex *src, s32 n
 
 static void mesh_drop(MeshEntry *e) {
     if (e->mesh != NULL) {
+        flush_mesh_batch(); // Its parts may be waiting to be drawn
         gfxb_mesh_free(e->mesh);
         sMeshBytes -= e->bytes;
     }
@@ -1885,6 +1893,56 @@ static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, Me
 }
 
 /*
+ * The batch of mesh parts waiting to be drawn: runs of recorded meshes with the same state and parameters (most of a
+ * track's commands with one texture), drawn by the backend as one draw.
+ */
+#define MESH_BATCH_TRIANGLES 4096
+static GfxMeshPart sMeshParts[GFX_MAX_MESH_PARTS];
+static s32 sMeshTriangles;
+
+static void flush_mesh_batch(void) {
+    u32 part;
+    if (sMeshPartCount == 0) {
+        return;
+    }
+    part = walk_switch(WALK_DRAWS);
+    gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
+    prof_count(PROF_TRIANGLES, sMeshTriangles);
+    prof_count(PROF_DRAWS, 1);
+    walk_switch(part);
+    sMeshPartCount = 0;
+    sMeshTriangles = 0;
+}
+
+/* Adds triangles of a mesh to the mesh batch (flushing whatever batch is in the way). */
+static void mesh_part(const GfxDrawState *state, const GfxModelParams *params, void *mesh, s32 firstIndex,
+                      s32 numTriangles) {
+    GfxMeshPart *last;
+    if (sBatchCount > 0 || sModelCount > 0) {
+        flush_batch();
+    }
+    if (sMeshPartCount > 0 &&
+        (sMeshPartCount == GFX_MAX_MESH_PARTS || sMeshTriangles + numTriangles > MESH_BATCH_TRIANGLES ||
+         !draw_states_equal(state, &sModelState) || __builtin_memcmp(params, &sModelParams, sizeof(*params)) != 0)) {
+        flush_mesh_batch();
+    }
+    if (sMeshPartCount == 0) {
+        sModelState = *state;
+        sModelParams = *params;
+    }
+    last = sMeshPartCount > 0 ? &sMeshParts[sMeshPartCount - 1] : NULL;
+    if (last != NULL && last->mesh == mesh && last->firstIndex + last->numTriangles * 3 == firstIndex) {
+        last->numTriangles += numTriangles;
+    } else {
+        last = &sMeshParts[sMeshPartCount++];
+        last->mesh = mesh;
+        last->firstIndex = firstIndex;
+        last->numTriangles = numTriangles;
+    }
+    sMeshTriangles += numTriangles;
+}
+
+/*
  * Draws the command from its mesh, recording the mesh first if this is the first time (or its data changed). Returns
  * FALSE when it isn't to be drawn that way (meshes off for its kind, too big, data that keeps changing, out of room),
  * for the model batch to draw it.
@@ -1939,6 +1997,7 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
         s32 numVerts;
         if (e->mesh != NULL) {
             sMeshStats[3]++;
+            flush_mesh_batch();
             gfxb_mesh_free(e->mesh);
             sMeshBytes -= e->bytes;
             e->mesh = NULL;
@@ -1965,15 +2024,10 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
         e->hash = hash;
         sMeshStats[1]++;
     }
-    flush_batch();
     state = *baseState;
     for (i = 0; i < e->numRuns; i++) {
-        u32 part = walk_switch(WALK_DRAWS);
         state.cullMode = e->runs[i].doubleSided ? 0 : frontCull;
-        gfxb_draw_mesh(&state, params, e->mesh, e->runs[i].firstIndex, e->runs[i].numTriangles);
-        prof_count(PROF_TRIANGLES, e->runs[i].numTriangles);
-        prof_count(PROF_DRAWS, 1);
-        walk_switch(part);
+        mesh_part(&state, params, e->mesh, e->runs[i].firstIndex, e->runs[i].numTriangles);
         sMeshStats[0]++;
     }
     return TRUE;
