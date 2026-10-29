@@ -138,11 +138,13 @@ static const BenchConfig sBenchConfigs[] = {
 
 /*
  * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
- * is raced at its usual setting and, by itself, at its test setting; a switch can set two variables together.
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set up to three variables together,
+ * and several switches can share a variable (one that the others need).
  */
+#define BENCH_SWITCH_VARS 3
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
-    const char *env[2];
+    const char *env[BENCH_SWITCH_VARS];
     s8 usual, test;
 } BenchSwitch;
 
@@ -161,12 +163,18 @@ typedef struct BenchSwitch {
  * The Old 3DS renderer cuts (P38) each won in #255 (Jungle Falls 24.7 fps with all of them, 20.4 to 22.4 with one
  * off) and the walk and draw breakdowns cost 2.5 to 4 fps there, so those rows are gone. The 20 fps cap now holds
  * (src/video.c; #255 ran 60% of its frames at 30 under it), so 30 is raced against it. This list is the Old 3DS's:
- * its usual 20 fps would pin a New 3DS to 20 too.
+ * its usual 20 fps would pin a New 3DS to 20 too. The GPU route (ideas from other 3DS ports, shelved on the New 3DS
+ * after #237 where it gained nothing on a GPU-bound frame): GPU vertex maths (P30) by itself, then with the track's
+ * geometry kept on the GPU (P31), then with models recorded the first time they are drawn too (P34); off by default
+ * until this bench says otherwise on an Old 3DS.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
     { "30 fps cap, not 20", { "DKR_FPS_PIN", NULL }, 20, 30 },
-    { NULL, { NULL, NULL }, 0, 0 },
+    { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL, NULL }, 0, 1 },
+    { "P30 + track on the GPU (P31)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", NULL }, 0, 1 },
+    { "P30 + P31 + models recorded (P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
 /* With two switches or more, a last race flips them all together: gains don't always add up. */
@@ -201,10 +209,18 @@ static void apply_config(s32 config) {
         plat_override_switch("DKR_STEREO3D", 0);
         plat_override_switch("DKR_WIDE800", 0);
         plat_override_switch("DKR_WIDESCREEN", plat_old_3ds() ? 0 : 2);
+        // Every variable at its usual setting first, then the race's switches: a variable several switches share
+        // (the GPU route's rows) keeps the race's test setting.
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
-            s32 flipped = config == i + 1 || config == SWITCH_ALL;
-            for (k = 0; k < 2 && sSwitches[i].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[i].env[k], flipped ? sSwitches[i].test : sSwitches[i].usual);
+            for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
+            }
+        }
+        for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+            if (config == i + 1 || config == SWITCH_ALL) {
+                for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
+                    plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
+                }
             }
         }
         return;
