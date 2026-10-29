@@ -361,7 +361,9 @@ int plat_render_ahead(void) {
     }
     if (sRenderAhead < 0) {
         const char *env = plat_getenv("DKR_RENDER_AHEAD");
-        int frames = settings_get("renderahead", env != NULL ? atoi(env) : 1);
+        // An Old 3DS renders ahead by 2: its renderer and game take turns on one core, and the extra frame slot
+        // gained 2 fps on both of its renderer cores (switch benches #244, #245).
+        int frames = settings_get("renderahead", env != NULL ? atoi(env) : (plat_old_3ds() ? 2 : 1));
         sRenderAhead = frames == 2 ? 2 : 1;
         plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
     }
