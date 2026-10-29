@@ -145,13 +145,18 @@ typedef struct BenchSwitch {
     s8 usual, test;
 } BenchSwitch;
 
-/* Nothing to compare right now. Command list splits (P19) are off by default (#153), early depth (P20) was dropped
- * (#155), the white-line diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches: the
- * depth clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
+/* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
+ * diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches on the New 3DS: the depth
+ * clear as a memory fill (P18), the cheaper per-draw settings (P23) and edge trimming dropping what lies wholly
  * outside (P22) are on by default, while textures in VRAM (P17), cache flushes as a system call (P24) and VFP vector
- * transforms (P27) gained nothing and stay off. The bench says so instead of racing. The list ends with an empty
- * entry, so it may be otherwise empty. */
+ * transforms (P27) gained nothing and stay off. The Old 3DS (roadmap O8) is another matter: its renderer is CPU-bound
+ * on a slower core without a second level cache, so the ones that save CPU time or memory reads are raced again there,
+ * with the texture hash kept for 8 frames instead of worked out every frame. The list ends with an empty entry, so it
+ * may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
+    { "texture hash kept 8 frames (O8)", { "DKR_TEX_REHASH", NULL }, 1, 8 },
+    { "VFP vector transforms (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1 },
+    { "cache flush by system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

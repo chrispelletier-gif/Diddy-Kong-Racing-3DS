@@ -76,6 +76,7 @@ static struct {
         const u8 *addr;
     } timg;
     TmemLoad tmem[512 / 8 + 1]; // Indexed by TMEM address in units of 8 words (64 bytes)
+    u64 tmemValid;              // Bit i: tmem[i].valid, so that a load can forget the ones it covers at once
     const u8 *tlutAddr;
     u32 tlutCount;
     s32 tlutFirst; // The TLUT entry tlutAddr is (TMEM word - 256).
@@ -444,7 +445,11 @@ static GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
 
 /*
  * sample_hash() for this frame. The same texture is often loaded many times in a frame, and RDRAM doesn't change
- * while a display list runs, so its hash is only worked out the first time.
+ * while a display list runs, so its hash is only worked out the first time. With DKR_TEX_REHASH=n (Old 3DS work,
+ * roadmap O8) a texture's hash is kept for n frames: its samples are cache misses all over memory, which an Old 3DS,
+ * without a second level cache, pays dearly for (texture lookups were ~3.5 ms of its frame, #223). Textures the game
+ * frees are dropped from the cache anyway (prewarm_textures); a texture rewritten in place would show up to n - 1
+ * frames late. Palettes are always hashed every frame.
  */
 typedef struct HashCacheEntry {
     const u8 *data;
@@ -455,9 +460,11 @@ typedef struct HashCacheEntry {
 
 static HashCacheEntry sHashCache[HASH_CACHE_SIZE];
 
-static u32 frame_hash(const u8 *data, u32 size) {
+static s32 sTexRehash = 1; // DKR_TEX_REHASH: frames a texture's hash is kept
+
+static u32 frame_hash(const u8 *data, u32 size, u32 keepFrames) {
     HashCacheEntry *h = &sHashCache[(((uintptr_t) data >> 3) ^ size) % HASH_CACHE_SIZE];
-    if (h->frame != (u32) sFrameCount || h->data != data || h->size != size) {
+    if ((u32) sFrameCount - h->frame >= keepFrames || h->data != data || h->size != size) {
         h->data = data;
         h->size = size;
         h->frame = (u32) sFrameCount;
@@ -545,9 +552,9 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
         tlutHashBytes = entries * 2;
     }
     size = load->rowStride ? load->rowStride * height : load->size;
-    hash = frame_hash(load->addr, size);
+    hash = frame_hash(load->addr, size, (u32) sTexRehash);
     if (tlut != NULL) {
-        hash ^= frame_hash(tlut, tlutHashBytes) * 31;
+        hash ^= frame_hash(tlut, tlutHashBytes, 1) * 31;
     }
     // Copy mode never filters.
     filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
@@ -1029,6 +1036,10 @@ static void read_switches(void) {
     }
     sSwitchEpoch = gPlatSwitchEpoch;
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", 0) != 0;
+    sTexRehash = plat_switch("DKR_TEX_REHASH", 1);
+    if (sTexRehash < 1) {
+        sTexRehash = 1;
+    }
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1530,12 +1541,19 @@ static s32 bad_list_address(u32 addr, const Gfx *where) {
     return TRUE;
 }
 
-/* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone. */
+/* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone.
+ * Most of them are already gone, so only the valid ones (g.tmemValid) are visited. The load itself is marked valid. */
 static void forget_covered_loads(u32 tmem, u32 bytes) {
-    u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8, i;
-    for (i = first + 1; i < end && i < ARRAY_COUNT(g.tmem); i++) {
-        g.tmem[i].valid = FALSE;
+    u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8;
+    u64 covered, m;
+    if (end > 64) {
+        end = 64;
     }
+    covered = (end > first + 1) ? ((end >= 64 ? ~0ULL : (1ULL << end) - 1) & ~((2ULL << first) - 1)) : 0;
+    for (m = g.tmemValid & covered; m != 0; m &= m - 1) {
+        g.tmem[__builtin_ctzll(m)].valid = FALSE;
+    }
+    g.tmemValid = (g.tmemValid & ~covered) | (1ULL << first);
 }
 
 static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
@@ -1938,6 +1956,7 @@ static void prewarm_textures(void) {
     u32 head = __atomic_load_n(&sTexQueueHead, __ATOMIC_ACQUIRE);
     u32 tail = sTexQueueTail;
     u32 savedOmH;
+    u64 savedTmemValid;
     const u8 *savedTlut;
     u32 savedTlutCount;
     s32 savedTlutFirst;
@@ -1962,6 +1981,7 @@ static void prewarm_textures(void) {
     for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
         savedTmem[i] = g.tmem[i];
     }
+    savedTmemValid = g.tmemValid;
     savedOmH = g.omH;
     savedTlut = g.tlutAddr;
     savedTlutCount = g.tlutCount;
@@ -1977,6 +1997,7 @@ static void prewarm_textures(void) {
             for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
                 g.tmem[i] = noLoad;
             }
+            g.tmemValid = 0;
             run_command_list(e->cmd, e->numCommands, 0);
             if (lookup_texture(G_TX_RENDERTILE, NULL) != NULL) {
                 decoded++;
@@ -1991,6 +2012,7 @@ static void prewarm_textures(void) {
     for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
         g.tmem[i] = savedTmem[i];
     }
+    g.tmemValid = savedTmemValid;
     g.omH = savedOmH;
     g.tlutAddr = savedTlut;
     g.tlutCount = savedTlutCount;
