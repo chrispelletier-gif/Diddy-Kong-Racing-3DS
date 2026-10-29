@@ -252,6 +252,7 @@ typedef struct TexCacheEntry {
     u16 width, height;
     u8 fmt, siz, lineSwapped, used;
     u8 wrapS, wrapT, tlutType;
+    u8 gen; // Moves on when the entry is freed, so that the lookup memo notices (tex_memo_check)
     u32 lastFrame;
     GfxTexture tex;
     GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
@@ -309,7 +310,9 @@ static inline u32 tile_row_bytes(const Tile *tile) {
     return tile->line * ((tile->siz == G_IM_SIZ_32b) ? 16 : 8);
 }
 
-static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width, u32 height, const u8 *tlut) {
+/* Out of line (see decode_into_cache). */
+__attribute__((noinline)) static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width,
+                                                     u32 height, const u8 *tlut) {
     u32 x, y;
     u32 rowBytes = tile_row_bytes(tile);
     u8 swapMask = (tile->siz == G_IM_SIZ_32b) ? 8 : 4;
@@ -420,6 +423,7 @@ static void free_entry(TexCacheEntry *e) {
     gfxb_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
     e->used = FALSE;
+    e->gen++;
     sTexCacheAddr[e - sTexCache] = NULL;
 }
 
@@ -429,16 +433,21 @@ static void free_entry(TexCacheEntry *e) {
  * filter is a second texture object sharing the decoded pixels and GPU copy, so it costs no decode or upload; it
  * can't be the same object, since changing the filter in place would also change it for triangles already batched.
  */
-static GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
+__attribute__((noinline)) static GfxTexture *share_other_filter(TexCacheEntry *e, u8 filter) {
+    e->otherFilter = e->tex;
+    e->otherFilter.filter = filter;
+    e->otherFilter.backendData = NULL;
+    gfxb_texture_share(&e->otherFilter, &e->tex);
+    e->hasOtherFilter = TRUE;
+    return &e->otherFilter;
+}
+
+static inline GfxTexture *texture_with_filter(TexCacheEntry *e, u8 filter) {
     if (e->tex.filter == filter) {
         return &e->tex;
     }
     if (!e->hasOtherFilter) {
-        e->otherFilter = e->tex;
-        e->otherFilter.filter = filter;
-        e->otherFilter.backendData = NULL;
-        gfxb_texture_share(&e->otherFilter, &e->tex);
-        e->hasOtherFilter = TRUE;
+        return share_other_filter(e, filter); // Once a texture: kept out of the lookups' code
     }
     return &e->otherFilter;
 }
@@ -477,17 +486,230 @@ static inline u32 cycle_type(void) {
     return g.omH & (3 << G_MDSFT_CYCLETYPE);
 }
 
-/* Returns the texture for the given tile, decoding it if it isn't in the cache. */
-static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
+/* The filter the other mode draws textures with. Copy mode never filters. */
+static inline u8 tex_filter(void) {
+    return ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
+                                                                                            : GFX_FILTER_BILINEAR;
+}
+
+/*
+ * The palette a tile's texture is decoded with: NULL unless it is colour indexed, and its bytes that can change the
+ * texture (for the hash). Returns FALSE when a colour indexed tile has no palette loaded.
+ */
+static inline s32 tile_palette(const Tile *tile, const u8 **tlut, u32 *hashBytes) {
+    *tlut = NULL;
+    *hashBytes = 0;
+    if (tile->fmt == G_IM_FMT_CI) {
+        // The palette's first entry: CI4 tiles pick one of 16 palettes of 16, CI8 uses all 256 entries. The TLUT
+        // load put entries from g.tlutFirst on, g.tlutCount of them.
+        s32 first = (tile->siz == G_IM_SIZ_4b ? tile->palette * 16 : 0) - g.tlutFirst;
+        s32 entries = tile->siz == G_IM_SIZ_4b ? 16 : 256;
+        if (g.tlutAddr == NULL || first < 0 || first >= (s32) g.tlutCount) {
+            return FALSE;
+        }
+        if (entries > (s32) g.tlutCount - first) {
+            // CI8 with a short palette (DKR loads 64 entries): only those can change the texture.
+            entries = (s32) g.tlutCount - first;
+        }
+        *tlut = g.tlutAddr + first * 2;
+        *hashBytes = entries * 2;
+    }
+    return TRUE;
+}
+
+/*
+ * A memo of texture lookups (DKR_TEX_MEMO, Old 3DS work, roadmap O8): a draw's texture is nearly always the one the
+ * same tile and TMEM state resolved to a moment ago, so the answer is remembered under everything find_texture goes
+ * by apart from the texture bytes and the cache itself. An answer confirmed earlier in this frame is returned as it
+ * is (a texture's hash doesn't change within a frame, and a freed entry shows in its generation); one from an earlier
+ * frame is confirmed the way find_texture would, by the entry's hash against frame_hash (cheap: the hash cache mostly
+ * still holds it). Anything else goes through find_texture, which refreshes the memo. The lookups were 3.3-4.1 ms of
+ * an Old 3DS frame (#223), mostly find_texture's 7 KB of code and the cache entries it probes missing the caches; a
+ * memo hit runs a few dozen instructions over a set of two 32 byte memo entries and the cache entry's first line.
+ * Two way: a Jungle Falls race frame looks up ~130 textures under ~77 keys, of which a direct mapped memo of 256
+ * entries lost ~17 a frame to collisions, the two way one ~4 (PC, 900 frames).
+ */
+#define TEX_MEMO_SETS 256
+#define TEX_MEMO_WAYS 2
+
+typedef struct TexMemoEntry {
+    // The key: the TMEM load, the palette as tile_palette derives it, the tile (of its coordinates only the size
+    // matters to the lookup, so a texture that scrolls keeps its key) and the other mode's texture bits.
+    const u8 *addr;
+    const u8 *tlut;
+    u32 load;  // size | rowStride << 16 (tex_memo_key skips loads that don't fit)
+    u32 dims;  // lrs - uls | (lrt - ult) << 16
+    u32 tileA; // line | tmem << 9 | the palette bytes hashed << 18
+    u32 tileB; // fmt, siz, palette, cms, cmt, masks, maskt, lineSwapped and the other mode's bits (tex_memo_key)
+    // The answer.
+    u32 frame; // The frame it was last confirmed in
+    u32 entry; // The cache entry's index | its gen << 11 | the texture's height as bounded by the load << 19
+} __attribute__((aligned(32))) TexMemoEntry;
+
+static TexMemoEntry sTexMemo[TEX_MEMO_SETS * TEX_MEMO_WAYS];
+static s32 sTexMemoOn; // DKR_TEX_MEMO
+
+/* The other mode bits the lookup goes by, as tex_memo_key packs them: filter, TLUT type and cycle type (copy mode). */
+static inline u32 tex_memo_mode_bits(void) {
+    return ((g.omH >> G_MDSFT_TEXTFILT) & 0xF) | ((g.omH >> (G_MDSFT_CYCLETYPE - 4)) & 0x30);
+}
+
+/* Builds the key for a tile, or returns FALSE when it isn't memoed: the tile's TMEM slot isn't a load's own (then
+ * find_texture searches the others), the load is too big for the key, or it is colour indexed without a palette. */
+static inline s32 tex_memo_key(TexMemoEntry *k, const Tile *tile) {
+    const TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
+    u32 tlutHashBytes;
+    if (!load->valid || (load->size | load->rowStride) > 0xFFFF || !tile_palette(tile, &k->tlut, &tlutHashBytes)) {
+        return FALSE;
+    }
+    k->addr = load->addr;
+    k->load = load->size | (load->rowStride << 16);
+    k->dims = ((tile->lrs - tile->uls) & 0xFFFF) | ((u32) (tile->lrt - tile->ult) << 16);
+    k->tileA = tile->line | (tile->tmem << 9) | (tlutHashBytes << 18);
+    k->tileB = tile->fmt | (tile->siz << 3) | (tile->palette << 5) | (tile->cms << 9) | (tile->cmt << 11) |
+               (tile->masks << 13) | (tile->maskt << 17) | ((u32) load->lineSwapped << 21) |
+               (tex_memo_mode_bits() << 22);
+    return TRUE;
+}
+
+/* The set a key lives in: TEX_MEMO_WAYS entries. */
+static inline TexMemoEntry *tex_memo_set(const TexMemoEntry *k) {
+    u32 h = (u32) (uintptr_t) k->addr ^ (u32) (uintptr_t) k->tlut ^ k->load ^ k->dims ^ k->tileA ^ k->tileB;
+    return &sTexMemo[((h * 2654435761u) >> 24) * TEX_MEMO_WAYS];
+}
+
+static inline s32 tex_memo_same_key(const TexMemoEntry *m, const TexMemoEntry *k) {
+    return m->addr == k->addr && m->tlut == k->tlut && m->load == k->load && m->dims == k->dims &&
+           m->tileA == k->tileA && m->tileB == k->tileB;
+}
+
+/* Confirms a memo entry from an earlier frame: the cache entry still holds the texture, with the hash the bytes have
+ * now. The frame_hash calls keep this out of the hit path's code. */
+__attribute__((noinline)) static GfxTexture *tex_memo_confirm(TexMemoEntry *m, const TexMemoEntry *k,
+                                                              TexCacheEntry *e) {
+    u32 rowStride = k->load >> 16, height = m->entry >> 19;
+    u32 size = rowStride ? rowStride * height : (k->load & 0xFFFF);
+    u32 hash = frame_hash(k->addr, size, (u32) sTexRehash);
+    if (k->tlut != NULL) {
+        hash ^= frame_hash(k->tlut, k->tileA >> 18, 1) * 31;
+    }
+    if (!e->used || e->addr != k->addr || e->hash != hash) {
+        return NULL;
+    }
+    e->lastFrame = sFrameCount;
+    m->frame = (u32) sFrameCount;
+    return texture_with_filter(e, tex_filter());
+}
+
+/* The texture a memo entry (whose key matched) remembers, or NULL when it needs the full lookup again. */
+static inline GfxTexture *tex_memo_check(TexMemoEntry *m, const TexMemoEntry *k) {
+    TexCacheEntry *e = &sTexCache[m->entry & (TEX_CACHE_SIZE - 1)];
+    if (e->gen != ((m->entry >> 11) & 0xFF) || e->addr != k->addr) {
+        return NULL; // Freed since (and perhaps reused)
+    }
+    if (m->frame != (u32) sFrameCount) {
+        return tex_memo_confirm(m, k, e);
+    }
+    return texture_with_filter(e, tex_filter());
+}
+
+/* The entry of a set that holds the key, or else the one for find_texture's answer: the one confirmed longest ago. */
+static inline TexMemoEntry *tex_memo_find(TexMemoEntry *set, const TexMemoEntry *k, s32 *found) {
+    TexMemoEntry *m, *oldest = set;
+    for (m = set; m < set + TEX_MEMO_WAYS; m++) {
+        if (tex_memo_same_key(m, k)) {
+            *found = TRUE;
+            return m;
+        }
+        if (m->frame < oldest->frame) {
+            oldest = m;
+        }
+    }
+    *found = FALSE;
+    return oldest;
+}
+
+/* find_texture's answer, for the memo (when the lookup is memoed). */
+static inline void tex_memo_note(TexMemoEntry *k, const TexCacheEntry *e, u32 height) {
+    if (k != NULL) {
+        k->frame = (u32) sFrameCount;
+        k->entry = (u32) (e - sTexCache) | ((u32) e->gen << 11) | (height << 19);
+    }
+}
+
+/*
+ * Decodes a tile's texture into a cache entry (freeing what it held) and uploads it, or returns NULL when there is no
+ * memory for it. Out of line, and with the backend's upload inlined into it rather than into find_texture: a lookup
+ * that misses the memo but hits the cache then only fetches find_texture's own code (roadmap O8).
+ */
+__attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry *e, const TmemLoad *load,
+                                                                  const Tile *tile, u32 width, u32 height,
+                                                                  const u8 *tlut, u32 hash) {
+    u8 tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
+    u8 wrapS = wrap_mode(tile->cms, tile->masks);
+    u8 wrapT = wrap_mode(tile->cmt, tile->maskt);
+    u32 *pixels;
+    unsigned long long texStart;
+
+    walk_switch(WALK_DECODE); // Timed as PROF_TEXTURE instead
+    texStart = plat_time_ns();
+    if (e->used) {
+        if (sFrameCount - (s32) e->lastFrame < 60) {
+            sRecentEvictions++;
+        }
+        free_entry(e);
+    }
+    pixels = plat_malloc(width * height * 4);
+    if (pixels == NULL) {
+        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
+        e->used = FALSE;
+        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+        walk_switch(WALK_TEXTURES);
+        return NULL;
+    }
+    decode_texture(pixels, load, tile, width, height, tlut);
+    e->used = TRUE;
+    e->addr = load->addr;
+    sTexCacheAddr[e - sTexCache] = load->addr;
+    e->tlut = tlut;
+    e->hash = hash;
+    e->width = width;
+    e->height = height;
+    e->fmt = tile->fmt;
+    e->siz = tile->siz;
+    e->lineSwapped = load->lineSwapped;
+    e->wrapS = wrapS;
+    e->wrapT = wrapT;
+    e->tlutType = tlutType;
+    e->lastFrame = sFrameCount;
+    e->tex.width = width;
+    e->tex.height = height;
+    e->tex.pixels = (const unsigned int *) pixels;
+    e->tex.format = texture_format(tile, tlutType);
+    e->tex.filter = tex_filter();
+    e->tex.wrapS = wrapS;
+    e->tex.wrapT = wrapT;
+    e->tex.backendData = NULL;
+    gfxb_texture_upload(&e->tex);
+    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    walk_switch(WALK_TEXTURES);
+    if (!sPrewarming) {
+        // Only the decodes that interrupt a frame: these are the hitches.
+        prof_count(PROF_TEXTURE_UPLOADS, 1);
+    }
+    return e;
+}
+
+/* Returns the texture for the given tile, decoding it if it isn't in the cache. memo, when not NULL, takes what it
+ * resolved to. Out of line, so that lookup_texture's memo path doesn't carry its code. */
+__attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned, TexMemoEntry *memo) {
     Tile *tile = &g.tiles[tileIndex & 7];
     TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63], shifted;
     u32 width, height, size, hash, i, slot, oldest;
-    const u8 *tlut = NULL;
-    u32 tlutHashBytes = 0;
+    const u8 *tlut;
+    u32 tlutHashBytes;
     u8 filter, wrapS, wrapT, tlutType;
     TexCacheEntry *e;
-    u32 *pixels;
-    unsigned long long texStart;
 
     if (!load->valid) {
         // Loaded at an unaligned TMEM address, or inside a bigger load. Search for the load covering it, and start
@@ -536,29 +758,15 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
             height = rows;
         }
     }
-    if (tile->fmt == G_IM_FMT_CI) {
-        // The palette's first entry: CI4 tiles pick one of 16 palettes of 16, CI8 uses all 256 entries. The TLUT
-        // load put entries from g.tlutFirst on, g.tlutCount of them.
-        s32 first = (tile->siz == G_IM_SIZ_4b ? tile->palette * 16 : 0) - g.tlutFirst;
-        s32 entries = tile->siz == G_IM_SIZ_4b ? 16 : 256;
-        if (g.tlutAddr == NULL || first < 0 || first >= (s32) g.tlutCount) {
-            return NULL;
-        }
-        if (entries > (s32) g.tlutCount - first) {
-            // CI8 with a short palette (DKR loads 64 entries): only those can change the texture.
-            entries = (s32) g.tlutCount - first;
-        }
-        tlut = g.tlutAddr + first * 2;
-        tlutHashBytes = entries * 2;
+    if (!tile_palette(tile, &tlut, &tlutHashBytes)) {
+        return NULL;
     }
     size = load->rowStride ? load->rowStride * height : load->size;
     hash = frame_hash(load->addr, size, (u32) sTexRehash);
     if (tlut != NULL) {
         hash ^= frame_hash(tlut, tlutHashBytes, 1) * 31;
     }
-    // Copy mode never filters.
-    filter = ((g.omH & (3 << G_MDSFT_TEXTFILT)) == G_TF_POINT || cycle_type() == G_CYC_COPY) ? GFX_FILTER_POINT
-                                                                                            : GFX_FILTER_BILINEAR;
+    filter = tex_filter();
     tlutType = (tlut != NULL) ? (g.omH >> G_MDSFT_TEXTLUT) & 3 : 0;
     wrapS = wrap_mode(tile->cms, tile->masks);
     wrapT = wrap_mode(tile->cmt, tile->maskt);
@@ -573,6 +781,7 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
             e->siz == tile->siz && e->tlut == tlut && e->hash == hash && e->lineSwapped == load->lineSwapped &&
             e->wrapS == wrapS && e->wrapT == wrapT && e->tlutType == tlutType) {
             e->lastFrame = sFrameCount;
+            tex_memo_note(memo, e, height);
             return texture_with_filter(e, filter);
         }
         if (!e->used) {
@@ -587,60 +796,34 @@ static GfxTexture *find_texture(s32 tileIndex, const GfxTexture *pinned) {
         return NULL; // Can't happen: at most three of the eight entries are in use.
     }
 
-    walk_switch(WALK_DECODE); // Timed as PROF_TEXTURE instead
-    texStart = plat_time_ns();
-    e = &sTexCache[oldest];
-    if (e->used) {
-        if (sFrameCount - (s32) e->lastFrame < 60) {
-            sRecentEvictions++;
-        }
-        free_entry(e);
-    }
-    pixels = plat_malloc(width * height * 4);
-    if (pixels == NULL) {
-        gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
-        e->used = FALSE;
-        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
-        walk_switch(WALK_TEXTURES);
+    e = decode_into_cache(&sTexCache[oldest], load, tile, width, height, tlut, hash);
+    if (e == NULL) {
         return NULL;
     }
-    decode_texture(pixels, load, tile, width, height, tlut);
-    e->used = TRUE;
-    e->addr = load->addr;
-    sTexCacheAddr[e - sTexCache] = load->addr;
-    e->tlut = tlut;
-    e->hash = hash;
-    e->width = width;
-    e->height = height;
-    e->fmt = tile->fmt;
-    e->siz = tile->siz;
-    e->lineSwapped = load->lineSwapped;
-    e->wrapS = wrapS;
-    e->wrapT = wrapT;
-    e->tlutType = tlutType;
-    e->lastFrame = sFrameCount;
-    e->tex.width = width;
-    e->tex.height = height;
-    e->tex.pixels = (const unsigned int *) pixels;
-    e->tex.format = texture_format(tile, tlutType);
-    e->tex.filter = filter;
-    e->tex.wrapS = wrapS;
-    e->tex.wrapT = wrapT;
-    e->tex.backendData = NULL;
-    gfxb_texture_upload(&e->tex);
-    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
-    walk_switch(WALK_TEXTURES);
-    if (!sPrewarming) {
-        // Only the decodes that interrupt a frame: these are the hitches.
-        prof_count(PROF_TEXTURE_UPLOADS, 1);
-    }
+    tex_memo_note(memo, e, height);
     return &e->tex;
 }
 
-/* The texture the tile shows: from the cache, or decoded into it. */
-static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
+/* The texture the tile shows: from the memo, the cache, or decoded into it. Out of line: one copy of the memo's code
+ * instead of one per call in make_draw_state. The memo sits out prewarm_textures, whose lookups are one-offs against
+ * a scratch tile and TMEM state. */
+__attribute__((noinline)) static GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     u32 part = walk_switch(WALK_TEXTURES);
-    GfxTexture *tex = find_texture(tileIndex, pinned);
+    TexMemoEntry key, *m = NULL;
+    GfxTexture *tex = NULL;
+    if (sTexMemoOn && !sPrewarming && tex_memo_key(&key, &g.tiles[tileIndex & 7])) {
+        s32 found;
+        m = tex_memo_find(tex_memo_set(&key), &key, &found);
+        if (found) {
+            tex = tex_memo_check(m, &key);
+        }
+    }
+    if (tex == NULL) {
+        tex = find_texture(tileIndex, pinned, m != NULL ? &key : NULL);
+        if (m != NULL && tex != NULL) {
+            *m = key;
+        }
+    }
     walk_switch(part);
     return tex;
 }
@@ -1043,6 +1226,9 @@ static void read_switches(void) {
     if (sTexRehash < 1) {
         sTexRehash = 1;
     }
+    // Remembers what each tile's texture lookup resolved to (tex_memo_check). Stale entries are checked, so it can
+    // be switched either way between frames.
+    sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
