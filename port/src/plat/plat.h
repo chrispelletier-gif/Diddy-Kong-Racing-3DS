@@ -286,6 +286,12 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
  */
 int plat_render_ahead(void);
 void plat_set_render_ahead(int frames);
+/*
+ * The game time the frame the renderer is drawing now covers, in retraces (its logic step), set by the renderer thread
+ * before each display list. The Old 3DS frame pacer (gfx_c3d.c) shows each frame that long after the one before.
+ */
+void plat_set_frame_step(int retraces);
+int plat_frame_step(void);
 /* What the renderer thread is doing right now. */
 extern const char *volatile gPlatGfxStage;
 

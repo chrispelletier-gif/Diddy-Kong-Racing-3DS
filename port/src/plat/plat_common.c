@@ -370,6 +370,16 @@ int plat_render_ahead(void) {
     return sRenderAhead;
 }
 
+static volatile int sFrameStep;
+
+void plat_set_frame_step(int retraces) {
+    sFrameStep = retraces;
+}
+
+int plat_frame_step(void) {
+    return sFrameStep;
+}
+
 void plat_set_render_ahead(int frames) {
     sRenderAhead = frames == 2 ? 2 : 1;
     settings_set("renderahead", sRenderAhead);

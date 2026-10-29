@@ -1141,6 +1141,7 @@ static struct {
     int frame;
     unsigned int gapUs, gpuUs;
     unsigned int swaps, replaced, swapGapUs; // Since the previous frame end; swapGapUs is between the last two swaps.
+    int step;                                // The frame's logic step, in retraces (the game time it covers).
     int haveNote;
     PlatGameNote note;
 } sTiming[TIMING_FRAMES];
@@ -1201,6 +1202,60 @@ static void wait_for_present(void) {
     }
 }
 
+/*
+ * Frame pacing (Old 3DS, roadmap O8). Each frame moves the game on by its logic step: the retraces its main loop
+ * measured for the frame before. On an Old 3DS with the renderer on the game's core, the renderer and the game take
+ * turns, so a frame is shown whenever its drawing happens to end: steps of 3, 3, 3 could reach the screen 2, 4 and 3
+ * retraces apart, and the race jumps although the frame rate looks fine. So a frame that is ready early waits until
+ * its step has passed since the last one was shown; one that is late goes at once and the count starts again from
+ * it. DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only.
+ */
+static u32 sPaceShown; // The retrace the last frame was handed over for.
+static unsigned int sPaceFrames, sPaceWaits, sPaceLate;
+
+/* Every 300 frames: how many waited to be on time, and how many were late (shown later than their step). */
+static void pace_count(int waited, int late) {
+    sPaceFrames++;
+    sPaceWaits += waited;
+    sPaceLate += late;
+    if (sPaceFrames == 300) {
+        plat_log("frame pacing: of %u frames, %u waited to be on time, %u were late", sPaceFrames, sPaceWaits,
+                 sPaceLate);
+        sPaceFrames = sPaceWaits = sPaceLate = 0;
+    }
+}
+
+static void pace_frame(void) {
+    u32 now = gPlatCounters[PLAT_COUNTER_VI];
+    int step = plat_frame_step();
+    s32 ahead;
+    if (!plat_switch("DKR_FRAME_PACE", plat_old_3ds()) || step < 1 || step > 6) {
+        sPaceShown = now;
+        return;
+    }
+    // A frame handed over now reaches the screen at the next retrace (the GPU takes a few ms): the last one handed
+    // over at retrace P was shown at P + 1, so this one, due step retraces after it, is handed over at P + step.
+    ahead = (s32) (sPaceShown + step - now);
+    if (ahead <= 0 || ahead > 6) {
+        sPaceShown = now; // Late (or after a load or the HOME menu): shown at once, the next counts from it.
+        pace_count(0, ahead < 0);
+        return;
+    }
+    pace_count(1, 0);
+    {
+        unsigned long long start = plat_time_ns();
+        while ((s32) (gPlatCounters[PLAT_COUNTER_VI] - (now + ahead)) < 0) {
+            svcSleepThread(1000 * 1000);
+        }
+        if (prof_enabled()) {
+            unsigned long long ns = plat_time_ns() - start;
+            prof_add(PROF_GPU_WAIT, ns);
+            prof_part(PROF_PART_PRESENT_WAIT, ns);
+        }
+    }
+    sPaceShown = now + ahead;
+}
+
 static u8 *sScreenSeen[2], *sShownScreen;
 
 static void find_recent_screen(void) {
@@ -1237,6 +1292,7 @@ static void record_timing(void) {
         sTiming[sTimingNext].swaps = swaps - lastSwaps;
         sTiming[sTimingNext].replaced = replaced - lastReplaced;
         sTiming[sTimingNext].swapGapUs = sSwapGapUs;
+        sTiming[sTimingNext].step = plat_frame_step();
         sTiming[sTimingNext].haveNote = plat_get_game_note(&sTiming[sTimingNext].note);
         sTimingNext = (sTimingNext + 1) % TIMING_FRAMES;
     }
@@ -1248,7 +1304,7 @@ static void record_timing(void) {
 static void log_timing(void) {
     int i;
     plat_log("last %d frames (CPU time since the previous frame ended, GPU time of the one before, top screen swaps "
-             "since then and the time between the last two, player):", TIMING_FRAMES);
+             "since then and the time between the last two, logic step, player):", TIMING_FRAMES);
     for (i = 0; i < TIMING_FRAMES; i++) {
         int k = (sTimingNext + i) % TIMING_FRAMES;
         char note[80];
@@ -1260,11 +1316,11 @@ static void log_timing(void) {
         } else {
             plat_snprintf(note, sizeof(note), "(player note busy)");
         }
-        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, %s", sTiming[k].frame,
+        plat_log("  frame %d: +%u.%u ms, gpu %u.%u ms, %u swap%s +%u.%u ms%s, step %d, %s", sTiming[k].frame,
                  sTiming[k].gapUs / 1000, sTiming[k].gapUs / 100 % 10, sTiming[k].gpuUs / 1000,
                  sTiming[k].gpuUs / 100 % 10, sTiming[k].swaps, sTiming[k].swaps == 1 ? "" : "s",
                  sTiming[k].swapGapUs / 1000, sTiming[k].swapGapUs / 100 % 10,
-                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", note);
+                 sTiming[k].replaced != 0 ? " (REPLACED one before it was shown)" : "", sTiming[k].step, note);
     }
 }
 
@@ -2330,6 +2386,7 @@ void gfxb_end_frame(void) {
         sDrainSplits = 0;
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
+        pace_frame();
         wait_for_present();
         find_recent_screen();
         watch_for_line();
