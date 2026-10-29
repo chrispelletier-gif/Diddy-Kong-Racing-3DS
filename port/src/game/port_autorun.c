@@ -165,6 +165,10 @@ static const BenchSwitch sSwitches[] = {
     { "texture lookup memo off (P38)", { "DKR_TEX_MEMO", NULL }, 1, 0 },
     { "lean display list walk off (P38)", { "DKR_WALK_LEAN", NULL }, 1, 0 },
     { "lean draw path off (P38)", { "DKR_DRAW_LEAN", NULL }, 1, 0 },
+    // The profiler's breakdowns (off by default on an Old 3DS, where their clock reads are system calls): each raced
+    // on, to measure what the breakdown costs the frame there.
+    { "walk breakdown on (P38)", { "DKR_WALK_PARTS", NULL }, 0, 1 },
+    { "draw breakdown on (P38)", { "DKR_DRAW_PARTS", NULL }, 0, 1 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

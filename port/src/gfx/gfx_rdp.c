@@ -169,6 +169,13 @@ static s32 sFrameCount;
  * one. Each span between two reads also holds about one read's own cost, which is taken back out of its part (and,
  * through PROF_PART_WALK_TIMER, out of the renderer's time). Draws and texture decodes are timed elsewhere, so their
  * parts here only keep them out of the others.
+ *
+ * On the 3DS a clock read is a system call (svcGetSystemTick), and the walk makes 1,400-1,900 of them in a race frame
+ * (one per command that changes the part, two per texture lookup, draw state and draw): on an Old 3DS they are about
+ * 2 ms of a frame as calibrated, and each one also evicts the renderer's code and data from the 16 KB caches, which
+ * the calibration does not see. DKR_WALK_PARTS=0 (the Old 3DS's default) leaves the breakdown off: the walk then
+ * reads nothing, and the renderer's time (PROF_RDP, one read at each end of the display list) still counts. The
+ * reads sit out of line and cold, so the hot loop carries one load and branch per command.
  */
 enum WalkPart {
     WALK_COMMANDS,
@@ -185,35 +192,36 @@ enum WalkPart {
 };
 #define WALK_REPORTED WALK_DRAWS // Parts before this one are reported, in the order of the PROF_PART_WALK ones
 
-static s32 sWalkTimed;
+static s32 sWalkParts; // DKR_WALK_PARTS: time the walk's parts while the profiler is on (read_switches)
+static s32 sWalkTimed; // This display list's parts are being timed (walk_begin)
 static u32 sWalkPart;
 static unsigned long long sWalkLast;
 static unsigned long long sWalkTicks[WALK_PART_COUNT];
 static u32 sWalkSpans[WALK_PART_COUNT];
 static unsigned long long sWalkReadCost; // Ticks one clock read takes, in 1/256ths
 
-/* The clock read and bookkeeping of walk_switch, out of line: only the profiler takes it. */
-static NOINLINE void walk_switch_timed(u32 part) {
+/* The timed walk's switch to this part (walk_switch): the clock read and bookkeeping, out of line and cold, as only
+ * the profiler takes them. */
+static COLD u32 walk_switch_timed(u32 part) {
     u32 old = sWalkPart;
-    unsigned long long now = plat_ticks();
-    sWalkTicks[old] += now - sWalkLast;
-    sWalkSpans[old]++;
-    sWalkLast = now;
-    sWalkPart = part;
-}
-
-/* Switches the walk's timing to this part. Returns the part it was in, to switch back to. */
-static inline u32 walk_switch(u32 part) {
-    u32 old = sWalkPart;
-    if (sWalkTimed && part != old) {
-        walk_switch_timed(part);
+    if (part != old) {
+        unsigned long long now = plat_ticks();
+        sWalkTicks[old] += now - sWalkLast;
+        sWalkSpans[old]++;
+        sWalkLast = now;
+        sWalkPart = part;
     }
     return old;
 }
 
+/* Switches the walk's timing to this part. Returns the part it was in, to switch back to (nothing while untimed). */
+static inline u32 walk_switch(u32 part) {
+    return sWalkTimed ? walk_switch_timed(part) : 0;
+}
+
 static void walk_begin(void) {
     s32 i;
-    sWalkTimed = prof_enabled();
+    sWalkTimed = sWalkParts && prof_enabled();
     if (!sWalkTimed) {
         return;
     }
@@ -1271,6 +1279,9 @@ static void read_switches(void) {
     // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
     // that have none. The frames are the same either way.
     sWalkLean = plat_switch("DKR_WALK_LEAN", plat_old_3ds()) != 0;
+    // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
+    // that cost the walk a few milliseconds a frame.
+    sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1861,7 +1872,7 @@ static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             trace_command(depth, w0, w1);
         }
         if (sWalkTimed) {
-            walk_switch(info & 7);
+            walk_switch_timed(info & 7);
         }
         if (!(info & OP_KEEPS_STATE)) {
             sTriStateValid = FALSE;

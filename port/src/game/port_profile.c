@@ -344,15 +344,21 @@ static void show_overlay(void) {
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                  prof_limit(&s), percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
                  percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)));
-        if (sPartNs[PROF_PART_WALK_TIMER] != sPartLoggedNs[PROF_PART_WALK_TIMER]) {
+        {
             // The renderer's parts since the last log line (the counters are the renderer's, read without a lock:
-            // a part caught mid-update is off by one draw). The backend's are only timed on the 3DS.
+            // a part caught mid-update is off by one draw). The backend's are only timed on the 3DS, and either
+            // breakdown can be off (DKR_WALK_PARTS, DKR_DRAW_PARTS: the Old 3DS's defaults, as their clock reads are
+            // system calls there), which leaves the renderer's time above whole.
             u32 frames = sRenderedFrames - sPartLoggedFrames;
             double perFrame[PROF_PART_COUNT];
-            s32 p, backendTimed = sPartNs[PROF_PART_BACKEND] != sPartLoggedNs[PROF_PART_BACKEND];
+            s32 p, walkTimed = FALSE;
+            s32 backendTimed = sPartNs[PROF_PART_BACKEND] != sPartLoggedNs[PROF_PART_BACKEND];
             for (p = 0; p < PROF_PART_COUNT; p++) {
                 unsigned long long now = sPartNs[p];
                 perFrame[p] = frames ? (now - sPartLoggedNs[p]) / 1e6 / frames : 0.0;
+                if (p >= PROF_PART_WALK_COMMANDS && p <= PROF_PART_WALK_FRAMEEND && now != sPartLoggedNs[p]) {
+                    walkTimed = TRUE;
+                }
                 sPartLoggedNs[p] = now;
             }
             sPartLoggedFrames = sRenderedFrames;
@@ -370,19 +376,27 @@ static void show_overlay(void) {
             if (perFrame[PROF_PART_WALK_FRAMEEND] < 0.0) {
                 perFrame[PROF_PART_WALK_FRAMEEND] = 0.0;
             }
-            port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
-                     "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
-                     "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
-                     perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
-                         perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
-                         perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
-                         perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
-                     perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
-                     perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
-                     perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
-                     perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
-                     perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
-                     perFrame[PROF_PART_WALK_TIMER]);
+            if (!walkTimed) {
+                port_log("%s: not timed in parts (DKR_WALK_PARTS=0%s), waits at the frame end: GPU %.2f, screen "
+                         "%.2f ms, timer %.2f ms taken out",
+                         backendTimed ? "display list walk" : "renderer parts",
+                         backendTimed ? "" : ", DKR_DRAW_PARTS=0", perFrame[PROF_PART_END_GPU_WAIT],
+                         perFrame[PROF_PART_PRESENT_WAIT], perFrame[PROF_PART_WALK_TIMER]);
+            } else {
+                port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
+                         "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
+                         "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
+                         perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
+                             perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
+                             perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
+                             perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
+                         perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
+                         perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
+                         perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
+                         perFrame[PROF_PART_WALK_TIMER]);
+            }
         }
     }
     prof_window_start(PROF_WINDOW_OVERLAY);

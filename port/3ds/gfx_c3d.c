@@ -2287,6 +2287,7 @@ static int sDrawLean; // DKR_DRAW_LEAN: the one-pass draw, see gfxb_draw_indexed
 static void set_frame_band(void);
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
 static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
+static int sDrawParts;     // DKR_DRAW_PARTS: time each draw's parts while the profiler is on (gfxb_draw_indexed)
 
 static void read_switches(void) {
     int recent, i;
@@ -2306,6 +2307,8 @@ static void read_switches(void) {
     sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
     // The lean draw (gfxb_draw_indexed): on by default on an Old 3DS only, until a New 3DS bench has measured it.
     sDrawLean = plat_switch("DKR_DRAW_LEAN", plat_old_3ds()) != 0;
+    // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
+    sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2320,9 +2323,11 @@ static void read_switches(void) {
              "settings path %s",
              sSplitMode == 0 ? "off" : sSplitMode == 1 ? "before blending" : "on state changes", sLineWatch,
              sRecentOn ? "on" : "off", sRecentCount, sEarlyDepth ? "on" : "off", sFastState ? "short" : "full");
-    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s",
+    plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s, draws timed in "
+             "parts %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
-             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all");
+             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
+             sDrawParts ? "on" : "off");
     plat_log("switches: top screen buffers %d", sTripleWanted ? 3 : 2);
     plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
 }
@@ -4082,6 +4087,10 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
  * ticks and handed over at the end of the frame: converting a reading to nanoseconds takes three 64-bit divisions,
  * which cost more than some of the parts (P23). As in the display list walk, each span between two readings holds
  * about one reading's cost, which is taken back out of its part and, through PROF_PART_WALK_TIMER, of the renderer's.
+ * A reading is a system call (svcGetSystemTick), and a draw takes five to seven of them: on an Old 3DS, with its
+ * 137 or so draws a frame, that is about half a millisecond as calibrated, and each one also evicts the draw's code
+ * and data from the 16 KB caches. DKR_DRAW_PARTS=0 (the Old 3DS's default) takes no readings; the readings are out
+ * of line and cold, so a draw without them carries one test per reading in its hot path.
  */
 enum { DRAW_PART_BACKEND, DRAW_PART_CLIP, DRAW_PART_STATE, DRAW_PART_TWICE, DRAW_PART_WRITE, DRAW_PART_COUNT };
 static const int sDrawPartProf[DRAW_PART_COUNT] = { PROF_PART_BACKEND, PROF_PART_CLIP, PROF_PART_STATE,
@@ -4093,6 +4102,29 @@ static unsigned int sDrawPartReads;                      // All the readings tak
 static inline void draw_part(int part, unsigned long long ticks, int reads) {
     sDrawPartTicks[part] += ticks;
     sDrawPartSpanReads[part] += reads;
+}
+
+/* A reading: the time since the reading before is charged to part (-1: none), with the readings within that span. */
+static __attribute__((noinline, cold)) unsigned long long draw_reading(unsigned long long since, int part,
+                                                                       int spanReads) {
+    unsigned long long now = plat_ticks();
+    if (part >= 0) {
+        draw_part(part, now - since, spanReads);
+    }
+    return now;
+}
+
+/* The draw's last reading: the whole draw since its first one, and the readings the draw took in all. */
+static __attribute__((noinline, cold)) void draw_readings_end(unsigned long long start, int spanReads, int reads) {
+    draw_part(DRAW_PART_BACKEND, plat_ticks() - start, spanReads);
+    sDrawPartReads += reads;
+}
+
+/* A draw that ends after its second reading with nothing left to draw: the whole of it was its first part (the
+ * clipping, or the lean draw's vertex pass). */
+static __attribute__((noinline, cold)) void draw_readings_empty(unsigned long long t0, unsigned long long t1) {
+    draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
+    sDrawPartReads += 2;
 }
 
 static void hand_over_draw_parts(void) {
@@ -4246,22 +4278,20 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     int first, vertex, count, fmt, flat = gfx_flat_mode(state), indexed = indexed_enabled();
     int vertBytes, written;
     u16 *ibo = NULL;
-    // Timed in parts while the profiler is on (draw_part).
-    int timed = prof_enabled(), twiceReads = 0;
-    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
+    // Timed in parts while the profiler is on and DKR_DRAW_PARTS says so (draw_part).
+    int timed = sDrawParts && prof_enabled(), twiceReads = 0;
+    unsigned long long t0 = 0, t1 = 0, t2 = 0;
 
     if (timed) {
-        t0 = plat_ticks();
+        t0 = draw_reading(0, -1, 0);
     }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
-        t1 = plat_ticks();
-        draw_part(DRAW_PART_CLIP, t1 - t0, 1);
+        t1 = draw_reading(t0, DRAW_PART_CLIP, 1);
     }
     if (numTriangles == 0) {
         if (timed) {
-            draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
-            sDrawPartReads += 2;
+            draw_readings_empty(t0, t1);
         }
         return;
     }
@@ -4295,17 +4325,16 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
-        unsigned long long tw = timed ? plat_ticks() : 0;
+        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
         if (timed) {
-            draw_part(DRAW_PART_TWICE, plat_ticks() - tw, 1);
+            draw_reading(tw, DRAW_PART_TWICE, 1);
             twiceReads = 2;
         }
     }
 
     if (timed) {
-        t2 = plat_ticks();
-        draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
+        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
     }
     vertex = use_vertex_format(fmt);
     if (indexed && vertex + numVerts > 0xFFFF) {
@@ -4323,8 +4352,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
         sIboUsed += count;
     }
     if (timed) {
-        t3 = plat_ticks();
-        draw_part(DRAW_PART_WRITE, t3 - t2, 1);
+        draw_reading(t2, DRAW_PART_WRITE, 1);
     }
     draw_prims(vertex, count, ibo);
     if (hangDraw != NULL) {
@@ -4333,8 +4361,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
     if (timed) {
-        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 4 + twiceReads);
-        sDrawPartReads += 5 + twiceReads;
+        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
     }
 }
 
@@ -4417,10 +4444,10 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     int first, vertex, count, fmt, stride, flat, start, written, any, i;
     u8 *out;
     u16 *ibo;
-    // Timed in parts while the profiler is on (draw_part). Here the vertex pass, band test and cutting included, is
-    // counted as writing the vertices (PROF_PART_WRITE), and PROF_PART_CLIP stays empty.
+    // Timed in parts while the profiler is on and DKR_DRAW_PARTS says so (draw_part). Here the vertex pass, band test
+    // and cutting included, is counted as writing the vertices (PROF_PART_WRITE), and PROF_PART_CLIP stays empty.
     int timed, twiceReads = 0;
-    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3;
+    unsigned long long t0 = 0, t1 = 0, t2 = 0;
 
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
@@ -4434,9 +4461,9 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         draw_indexed_full(state, verts, numVerts, indices, numTriangles);
         return;
     }
-    timed = prof_enabled();
+    timed = sDrawParts && prof_enabled();
     if (timed) {
-        t0 = plat_ticks();
+        t0 = draw_reading(0, -1, 0);
     }
     flat = gfx_flat_mode(state);
     texture_scales(state->textures[0], &su0, &sv0);
@@ -4454,17 +4481,14 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
         numTriangles = count / 3;
         if (count == 0) {
             if (timed) {
-                t1 = plat_ticks();
-                draw_part(DRAW_PART_WRITE, t1 - t0, 1);
-                draw_part(DRAW_PART_BACKEND, t1 - t0, 1);
-                sDrawPartReads += 2;
+                t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+                draw_readings_empty(t0, t1);
             }
             return;
         }
     }
     if (timed) {
-        t1 = plat_ticks();
-        draw_part(DRAW_PART_WRITE, t1 - t0, 1);
+        t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
     }
     if (__builtin_expect(sLogFrame == -2, 0)) {
         read_log_draws_setting();
@@ -4479,16 +4503,15 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     set_all_state(state, &su0, &sv0, &su1, &sv1);
     if (first) {
-        unsigned long long tw = timed ? plat_ticks() : 0;
+        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
         if (timed) {
-            draw_part(DRAW_PART_TWICE, plat_ticks() - tw, 1);
+            draw_reading(tw, DRAW_PART_TWICE, 1);
             twiceReads = 2;
         }
     }
     if (timed) {
-        t2 = plat_ticks();
-        draw_part(DRAW_PART_STATE, t2 - t1, 1 + twiceReads);
+        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
     }
     vertex = use_vertex_format(fmt);
     if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
@@ -4505,8 +4528,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     }
     sIboUsed += count;
     if (timed) {
-        t3 = plat_ticks();
-        draw_part(DRAW_PART_WRITE, t3 - t2, 1);
+        draw_reading(t2, DRAW_PART_WRITE, 1);
     }
     if (sStereo) {
         draw_prims_stereo(vertex, count, ibo);
@@ -4519,8 +4541,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     sVboUsed += written * stride;
     sFrameTriangles += numTriangles;
     if (timed) {
-        draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 4 + twiceReads);
-        sDrawPartReads += 5 + twiceReads;
+        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
     }
 }
 
