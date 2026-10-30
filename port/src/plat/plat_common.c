@@ -365,7 +365,8 @@ int plat_render_ahead(void) {
     return plat_switch("BENCH_RENDER_AHEAD", sRenderAhead); // The switch bench may set its own
 }
 
-static volatile int sFrameStep;
+// Per thread: the walk sets it for the frame it walks, the two-core renderer's second thread for the frame it ends.
+static __thread int sFrameStep;
 
 void plat_set_frame_step(int retraces) {
     sFrameStep = retraces;

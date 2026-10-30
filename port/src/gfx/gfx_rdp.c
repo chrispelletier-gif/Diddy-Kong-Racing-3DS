@@ -3133,6 +3133,7 @@ static COLD void end_reference_frame(void) {
 
 void port_gfx_run_task(void *taskPtr) {
     OSTask *task = (OSTask *) taskPtr;
+    int snapshot;
     port_gfx_init();
     sFrameCount++;
 #ifdef PORT_GFX_REFERENCE
@@ -3140,10 +3141,11 @@ void port_gfx_run_task(void *taskPtr) {
 #endif
     // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly;
     // so are frames with GPU vertex maths, whose walk asks the backend about each model (gfxb_model_check).
-    gfx_split_frame_start(REF_ACTIVE() || gPlatSnapshotRequested || sFrameCount == sTraceFrame ||
+    snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
+    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
                           plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1));
 #ifdef PORT_GFX_REFERENCE
-    if (UNLIKELY(gPlatSnapshotRequested)) {
+    if (UNLIKELY(snapshot)) {
         start_snapshot();
     }
 #endif
@@ -3157,6 +3159,7 @@ void port_gfx_run_task(void *taskPtr) {
     sModelMesh = sGpuTransform && sModelMeshSwitch;
     if (!sTrackMesh && !sModelMesh) {
         if (sMeshBytes > 0) {
+            gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
             mesh_drop_all();
         }
     } else {

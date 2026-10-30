@@ -122,11 +122,14 @@ static void backend_thread(void *arg) {
         plat_sem_wait(sData);
         while (sTail != sHead) {
             SplitRecord *rec;
+            unsigned int op, bytes;
             void *p;
             __sync_synchronize(); // The record is read after the head that covers it.
             rec = (SplitRecord *) (sRing + sTail % SPLIT_RING_BYTES);
+            op = rec->op;
+            bytes = rec->bytes;
             p = rec + 1;
-            switch (rec->op) {
+            switch (op) {
                 case OP_START:
                     gfxb_start_frame();
                     break;
@@ -146,7 +149,7 @@ static void backend_thread(void *arg) {
                 case OP_INDEXED: {
                     SplitDraw *d = p;
                     const GfxVertex *verts = (const GfxVertex *) (d + 1);
-                    if (rec->op == OP_TRIANGLES) {
+                    if (op == OP_TRIANGLES) {
                         gfxb_draw_triangles(&d->state, verts, d->numTriangles);
                     } else {
                         gfxb_draw_indexed(&d->state, verts, d->numVerts, (const unsigned short *) (verts + d->numVerts),
@@ -166,9 +169,10 @@ static void backend_thread(void *arg) {
                 default:
                     break;
             }
-            __sync_synchronize(); // Done with the record before the walk may write over it.
-            sTail += rec->bytes;
-            if (rec->op == OP_END) {
+            // Done with the record before the walk may write over it (op and bytes were read before, as locals).
+            __sync_synchronize();
+            sTail += bytes;
+            if (op == OP_END) {
                 plat_sem_post(sFrameSlots);
             }
             if (sWalkWaiting) {
@@ -214,10 +218,18 @@ void gfx_split_drain(void) {
 int gfx_split_frame_start(int direct) {
     int want = !direct && plat_switch("DKR_SPLIT_RENDER", 0) != 0;
     if (want && !sActive) {
+        // The other core's share comes first: without it the second thread can't be made there.
+        plat_split_render_cores(TRUE);
         want = start_backend();
+        if (!want) {
+            plat_split_render_cores(FALSE);
+        }
     }
     if (!want) {
         gfx_split_drain();
+        if (sActive) {
+            plat_split_render_cores(FALSE);
+        }
         sActive = FALSE;
         gfxb_start_frame();
         return FALSE;

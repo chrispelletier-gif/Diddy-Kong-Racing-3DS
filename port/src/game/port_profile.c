@@ -16,6 +16,7 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "gfx/gfx_split.h"
 
 #define USER_FILE "profiler.txt"
 
@@ -119,7 +120,9 @@ void prof_add(int stage, unsigned long long ns) {
         return;
     }
     if (stage == PROF_GPU_WAIT) {
-        sTaskGpuWaitNs += ns;
+        if (!gfx_split_active()) { // Else the waits are the second renderer thread's, not the walk's
+            sTaskGpuWaitNs += ns;
+        }
     } else if (stage == PROF_TEXTURE) {
         sTaskTextureNs += ns;
     }

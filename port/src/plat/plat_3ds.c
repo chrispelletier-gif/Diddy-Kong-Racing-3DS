@@ -114,9 +114,9 @@ void plat_init(void) {
     // The system's own services, the GPU's among them, run there too: at the renderer's priority the sound held
     // them up and frame times doubled (bug report #78), so there it runs below them (DKR_SYSCORE_PRIO).
     // With the renderer on the system core the sound stays on the game's core (the DSP voices barely use it).
-    // On an Old 3DS the renderer and the game share core 0, so there the setting also moves the game's audio manager
-    // (the N64 sequencer and synth driver, n64thread4) to the system core, as the F-Zero X 3DS port does with its
-    // sound; at a 50% share by default (F-Zero settled on 60% for a heavier software mixer).
+    // On an Old 3DS it moves the audio task (the DSP voices' event work) at a 50% share by default. The game's audio
+    // manager (n64thread4) stays on core 0: the N64 OS emulation (os_core.c) relies on every game thread sharing one
+    // core with strict priorities, and the sound lists it edits are shared with the game thread.
     sAudioCore = sRcpCore == 1 ? 0 : sRcpCore;
     if (sRcpCore != 1 && settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
         const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
@@ -170,6 +170,40 @@ static void start_idle_meters(void) {
 
 int plat_renderer_syscore_share(void) {
     return sRcpCore == 1 ? sSyscoreShare : 0;
+}
+
+/*
+ * The two-core renderer going on or off (gfx_split.c). With the renderer on the game's core its second half runs on
+ * the system core, which needs a share of that core (DKR_SPLIT_SHARE, 80% by default): raised while it is on, and put
+ * back as it was when it goes off, so the switch bench's other races run with the system's services as usual.
+ */
+void plat_split_render_cores(int on) {
+    static int sRaised;
+    static u32 sBefore;
+    if (sRcpCore != 0) {
+        return;
+    }
+    if (on && !sRaised) {
+        const char *env = plat_getenv("DKR_SPLIT_SHARE");
+        int share = env != NULL ? atoi(env) : 80;
+        Result res;
+        if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
+            sBefore = 0;
+        }
+        res = APT_SetAppCpuTimeLimit(share);
+        plat_log("system core time limit %d%% for the two-core renderer (was %lu%%): %s (0x%08lX)", share,
+                 (unsigned long) sBefore, R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        if (R_SUCCEEDED(res)) {
+            sRaised = 1;
+            sSyscoreShare = share;
+        }
+    } else if (!on && sRaised) {
+        Result res = APT_SetAppCpuTimeLimit(sBefore >= 5 ? sBefore : 5);
+        plat_log("system core time limit back to %lu%%: %s (0x%08lX)", (unsigned long) (sBefore >= 5 ? sBefore : 5),
+                 R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        sRaised = 0;
+        sSyscoreShare = 0;
+    }
 }
 
 /* The Sound page's results label (audio_ndsp.c). */
@@ -340,28 +374,16 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
                 core = 0;
                 prio = PRIO_RCP;
             } else {
-                const char *env = plat_getenv("DKR_SPLIT_SHARE");
-                int share = env != NULL ? atoi(env) : 80;
+                // The share was raised first (plat_split_render_cores).
                 core = 1;
-                prio = PRIO_SYSCORE_RCP;
-                if (sAudioCore != 1 || share > 50) {
-                    Result res = APT_SetAppCpuTimeLimit(share);
-                    plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
-                             R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
-                    if (R_SUCCEEDED(res)) {
-                        sSyscoreShare = share;
-                    }
-                }
+                // Below the audio task when that is on the system core too (Mixing core System): threads of equal
+                // priority never preempt each other, and a backend behind by a frame would hold the sound up.
+                prio = PRIO_SYSCORE_AUDIO + 1;
             }
             break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
-            if (sAudioCore == 1 && sRcpCore == 0 && strcmp(name, "n64thread4") == 0) {
-                // The audio manager (see plat_init): below the system's own services there, as the audio task is.
-                core = 1;
-                prio = PRIO_SYSCORE_AUDIO;
-            }
             break;
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);

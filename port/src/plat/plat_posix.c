@@ -177,6 +177,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+void plat_split_render_cores(int on) {
+    (void) on;
+}
+
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {
     (void) thread;
     (void) n64Priority;
