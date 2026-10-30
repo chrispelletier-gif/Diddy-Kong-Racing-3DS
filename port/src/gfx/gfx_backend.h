@@ -190,6 +190,8 @@ typedef struct GfxModelParams {
 /* What gfxb_model_check says about a model draw whose model space box is boxMin..boxMax. */
 enum { GFX_MODEL_CPU, GFX_MODEL_GPU, GFX_MODEL_HIDDEN };
 int gfxb_gpu_transform(void);
+/* Whether the walk may cull back faces itself this frame (DKR_CPU_CULL): not while the frame is drawn for two eyes. */
+int gfxb_cpu_cull_ok(void);
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);

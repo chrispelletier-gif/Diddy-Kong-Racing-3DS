@@ -2875,6 +2875,10 @@ static void transform_frame_drawn(int frame) {
     }
 }
 
+int gfxb_cpu_cull_ok(void) {
+    return !sStereo;
+}
+
 int gfxb_gpu_transform(void) {
     return sTransformOn;
 }

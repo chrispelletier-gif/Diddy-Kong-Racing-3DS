@@ -168,9 +168,12 @@ typedef struct BenchSwitch {
  * still raced, as the bench needs one row),
  * the 20 fps cap stays (30 reached 30 on only 11% of frames), and the GPU route gained nothing there either (P31 equal,
  * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
+ * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
+ * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
+    { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

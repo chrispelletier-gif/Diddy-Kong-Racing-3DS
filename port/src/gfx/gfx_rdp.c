@@ -1322,6 +1322,12 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
+static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
+/* Back faces culled here rather than by the GPU (DKR_CPU_CULL, on by default on an Old 3DS only), this frame: a
+ * command's double sided triangles no longer split its draw from the one sided ones (about one draw in eight), and
+ * back faces cost no vertices, indices or GPU time. Off for 3D (stereo) frames, whose eye offset the test leaves out,
+ * and for the host's clipping sweep, which looks at back faces. */
+static s32 sCpuCull;
 static s32 sSwitchEpoch = -1;
 
 /* Reads the renderer's experimental switches when they change (see plat_switch). */
@@ -1351,6 +1357,7 @@ static void read_switches(void) {
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
+    sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -2206,6 +2213,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     s32 tex0, tex1, anyFlat, zeroTex1;
     u32 generation;
+    float keepSign; // The sign of a kept triangle's determinant, for the culling below
 
     if (sAnyPending) {
         if (model_triangles(tris, count, textured)) {
@@ -2237,6 +2245,12 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         state.textures[1] = NULL;
     }
     viewport_init(&vp);
+    // The GPU (and the host's renderer) culls by the sign of a triangle's area on the screen. For the finished
+    // vertices' x, y and w (with the viewport folded in, see below) that is the sign of the 3x3 determinant of their
+    // (x, y, w) rows wherever all three w are positive, and of the part in front of the camera of one that crosses it
+    // (clipping keeps the winding). Folding the viewport scales the determinant by scaleX * scaleY. Culling mode 1
+    // drops triangles clockwise on the screen, whose determinant is negative, and mode 2 counter clockwise ones.
+    keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     // Texture coordinates are only worked out for the textures the draw uses; the others are left at zero.
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
@@ -2286,6 +2300,16 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
         }
         state.flat = flat;
+        if (sCpuCull && state.cullMode != 0 && !flat) {
+            // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
+            const RspVertex *a = &g.verts[idx[0]], *b = &g.verts[idx[1]], *c = &g.verts[idx[2]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue; // A back face, or edge on (no area: nothing would be drawn)
+            }
+            state.cullMode = 0;
+        }
         batchKey = state.cullMode | (flat << 2);
         if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
             // Only the culling and flatness change from one triangle to the next, so the batch's state is still this
@@ -3155,6 +3179,7 @@ void port_gfx_run_task(void *taskPtr) {
     prewarm_textures();
     forget_all_loads();
     sGpuTransform = !gfx_split_active() && gfxb_gpu_transform();
+    sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
     if (!sTrackMesh && !sModelMesh) {
