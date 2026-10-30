@@ -171,11 +171,18 @@ typedef struct BenchSwitch {
  * Bench #263 (v24, System 80%): the two-core renderer (P21) ran 29 fps against 20-21, with 93% of frames at 30, and
  * showed the 20 fps cap had never held on the port (its code sat in the N64 branch of src/video.c). So 30 is the Old
  * 3DS's cap and the bench races at 30 there; P21 is still raced while its best renderer core is found.
+ * The two-core renderer is now the Old 3DS default, raced off; with the GPU mostly idle (7-9 ms of a 33 ms frame) the
+ * looks an Old 3DS has off for speed are raced on one at a time (anti-aliasing 2x, Balanced widescreen, colour boost),
+ * and render ahead 1, as the split already keeps two frames in flight.
  * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
  * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
+    { "two-core renderer off (P21)", { "DKR_SPLIT_RENDER", NULL }, 1, 0 },
+    { "render ahead 1, not 2", { "BENCH_RENDER_AHEAD", NULL }, 2, 1 },
+    { "anti-aliasing 2x", { "BENCH_AA", NULL }, PLAT_AA_OFF, PLAT_AA_2X },
+    { "Balanced widescreen", { "BENCH_WIDESCREEN", NULL }, 0, 2 },
+    { "colour boost on", { "BENCH_COLOUR", NULL }, 0, 1 },
     { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
@@ -214,7 +221,6 @@ static void apply_config(s32 config) {
             { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
             { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
         };
-        plat_set_gpu_config(plat_old_3ds() ? PLAT_AA_OFF : PLAT_AA_2X);
         plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
@@ -222,6 +228,7 @@ static void apply_config(s32 config) {
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
         plat_override_switch("BENCH_RENDER_AHEAD", plat_old_3ds() ? 2 : 1);
         plat_override_switch("BENCH_WIDESCREEN", plat_old_3ds() ? 0 : 2);
+        plat_override_switch("BENCH_AA", plat_old_3ds() ? PLAT_AA_OFF : PLAT_AA_2X);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
@@ -234,6 +241,7 @@ static void apply_config(s32 config) {
                 }
             }
         }
+        plat_set_gpu_config(plat_switch("BENCH_AA", PLAT_AA_OFF)); // The bench's anti-aliasing, or a row's
         return;
     }
     plat_set_gpu_config(sBenchConfigs[config].aa);
