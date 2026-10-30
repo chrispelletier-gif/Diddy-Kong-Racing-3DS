@@ -167,6 +167,9 @@ typedef struct BenchSwitch {
 static const BenchSwitch sSwitches[] = {
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
     { "30 fps cap, not 20", { "DKR_FPS_PIN", NULL }, 20, 30 },
+    { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL, NULL }, 0, 1 },
+    { "P30 + track on the GPU (P31)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", NULL }, 0, 1 },
+    { "P30 + P31 + models recorded (P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
