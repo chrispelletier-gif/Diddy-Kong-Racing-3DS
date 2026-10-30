@@ -102,9 +102,11 @@ static s32 sTraceFrame = -1;
 static s32 sTracing; // This frame is the traced one (DKR_TRACE_FRAME, or a snapshot): one flag for the walk to test
 
 /* Code the walk rarely or never runs (logging, tracing, diagnostics) is kept out of its hot functions, so that
- * what runs every frame stays within the Old 3DS's 16 KB instruction cache (roadmap O9). */
-#define COLD __attribute__((noinline, cold))
-#define NOINLINE __attribute__((noinline))
+ * what runs every frame stays within the Old 3DS's 16 KB instruction cache (roadmap O9), and the per-draw functions
+ * are HOT: laid out together on the 3DS (plat.h PLAT_HOT). */
+#define COLD PLAT_COLD
+#define NOINLINE PLAT_NOINLINE
+#define HOT PLAT_HOT
 #define UNLIKELY(x) __builtin_expect((x) != 0, 0)
 
 /*
@@ -299,7 +301,8 @@ static s32 sPrewarming;       // Decoding textures the game has just loaded, out
 static u32 sRecentEvictions;  // Entries replaced although drawn in the last 60 frames (should stay 0)
 
 /* A cheap hash of the texture data, used to notice when memory has been reused for something else. */
-static u32 sample_hash(const u8 *data, u32 size) {
+/* Out of line: a texture is hashed once in DKR_TEX_REHASH frames, so the lookups' code doesn't carry the loop. */
+static NOINLINE u32 sample_hash(const u8 *data, u32 size) {
     u32 h = 2166136261u ^ size;
     u32 step = (size > 256) ? size / 64 : 1;
     u32 i;
@@ -504,7 +507,8 @@ static HashCacheEntry sHashCache[HASH_CACHE_SIZE];
 
 static s32 sTexRehash = 1; // DKR_TEX_REHASH: frames a texture's hash is kept
 
-static u32 frame_hash(const u8 *data, u32 size, u32 keepFrames) {
+/* Out of line: one copy, not one for the texture and one for the palette in each caller. */
+static NOINLINE HOT u32 frame_hash(const u8 *data, u32 size, u32 keepFrames) {
     HashCacheEntry *h = &sHashCache[(((uintptr_t) data >> 3) ^ size) % HASH_CACHE_SIZE];
     if ((u32) sFrameCount - h->frame >= keepFrames || h->data != data || h->size != size) {
         h->data = data;
@@ -618,8 +622,7 @@ static inline s32 tex_memo_same_key(const TexMemoEntry *m, const TexMemoEntry *k
 
 /* Confirms a memo entry from an earlier frame: the cache entry still holds the texture, with the hash the bytes have
  * now. The frame_hash calls keep this out of the hit path's code. */
-__attribute__((noinline)) static GfxTexture *tex_memo_confirm(TexMemoEntry *m, const TexMemoEntry *k,
-                                                              TexCacheEntry *e) {
+static NOINLINE HOT GfxTexture *tex_memo_confirm(TexMemoEntry *m, const TexMemoEntry *k, TexCacheEntry *e) {
     u32 rowStride = k->load >> 16, height = m->entry >> 19;
     u32 size = rowStride ? rowStride * height : (k->load & 0xFFFF);
     u32 hash = frame_hash(k->addr, size, (u32) sTexRehash);
@@ -840,7 +843,7 @@ __attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const G
 /* The texture the tile shows: from the memo, the cache, or decoded into it. Out of line: one copy of the memo's code
  * instead of one per call in make_draw_state. The memo sits out prewarm_textures, whose lookups are one-offs against
  * a scratch tile and TMEM state. */
-static NOINLINE GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
+static NOINLINE HOT GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *pinned) {
     u32 part = walk_switch(WALK_TEXTURES);
     TexMemoEntry key, *m = NULL;
     GfxTexture *tex = NULL;
@@ -882,7 +885,7 @@ static inline float texel_centre_shift(const GfxTexture *tex) {
     return (tex->filter == GFX_FILTER_BILINEAR) ? 0.5f : 0.0f;
 }
 
-static NOINLINE void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size, float centreShift) {
+static NOINLINE HOT void tex_axis_init(TexAxis *a, u8 shift, u16 tileStart, u32 size, float centreShift) {
     float scale = 1.0f / 32.0f;
     float offset = tileStart * 0.25f - centreShift;
     if (shift > 10) {
@@ -940,6 +943,7 @@ static inline u8 equation_texel_use(const GfxCCEquation *eq) {
     return sCCTexelUse[eq->a] | sCCTexelUse[eq->b] | sCCTexelUse[eq->c] | sCCTexelUse[eq->d];
 }
 
+/* Not HOT: it runs for a G_SETCOMBINE, a third as often as a draw. */
 static NOINLINE void decode_combiner(void) {
     u32 w0 = g.combineW0, w1 = g.combineW1;
     GfxCombiner *cc = &g.combiner;
@@ -980,8 +984,8 @@ static inline s32 scissor_right(u32 cyc) {
     return right;
 }
 
-/* Builds the draw state for the current RSP/RDP state. */
-static void make_draw_state(GfxDrawState *s, s32 isRect) {
+/* Builds the draw state for the current RSP/RDP state. Out of line: one copy, for triangles and rectangles. */
+static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
     u32 cyc = cycle_type();
     u32 omL = g.omL;
     u32 blendBits;
@@ -1094,8 +1098,19 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
     walk_switch(part);
 }
 
-static s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
-    return __builtin_memcmp(a, b, sizeof(GfxDrawState)) == 0;
+/* Compared a word at a time in place: a library memcmp is a call into code that is otherwise never in the
+ * instruction cache, which is what a triangle command pays for here. The state's size is whole words. */
+static inline s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
+    const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
+    u32 i;
+    _Static_assert(sizeof(GfxDrawState) % 4 == 0 && _Alignof(GfxDrawState) == 4, "draw states are compared as words");
+#pragma GCC unroll 1
+    for (i = 0; i < sizeof(GfxDrawState) / 4; i++) {
+        if (wa[i] != wb[i]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 static void trace_state(const GfxDrawState *st, s32 count) {
@@ -1130,7 +1145,7 @@ static COLD void trace_batch(void) {
     plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
 }
 
-static NOINLINE void flush_batch(void) {
+static NOINLINE HOT void flush_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
         if (UNLIKELY(sTracing)) {
@@ -1181,7 +1196,7 @@ static inline u16 batch_vertex(GfxVertex **out) {
 /******************************** RSP ********************************/
 
 /* Kept a loop (not unrolled into 8 copies) so that it takes a few cache lines: it runs between draws. */
-static NOINLINE void load_matrix(const Mtx *mtx, s32 index) {
+static NOINLINE HOT void load_matrix(const Mtx *mtx, s32 index) {
     const s32 *m = (const s32 *) mtx;
     float *out = &g.matrices[index][0][0];
     s32 k;
@@ -1344,7 +1359,7 @@ static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anc
     return flat;
 }
 
-static NOINLINE void load_vertices(const Vertex *src, s32 count, s32 dest) {
+static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
     float(*m)[4] = g.matrices[g.curMatrix];
     RspVertex *verts = &g.verts[dest];
     s32 i, n = MIN(count, MAX_VERTICES - dest);
@@ -1439,11 +1454,20 @@ typedef struct SharedVertex {
     u32 key[SHARED_PER_VERTEX]; // Texture coordinates, as the triangle holds them
     u16 index[SHARED_PER_VERTEX];
 } SharedVertex;
-static SharedVertex sShared[MAX_VERTICES];
-static u8 sSharedCount[MAX_VERTICES];
+/* One object, so that the corner loop reaches the entries and the counts from one base register. */
+static struct {
+    SharedVertex entries[MAX_VERTICES];
+    u32 countWords[MAX_VERTICES / 4]; // The counts (a byte each), as words for clearing
+} sShared;
+#define sSharedCount ((u8 *) sShared.countWords)
 
-static inline void shared_vertices_clear(void) {
-    __builtin_memset(sSharedCount, 0, sizeof(sSharedCount));
+/* Word stores rather than a library memset (see draw_states_equal); out of line, so that there is one copy. */
+static NOINLINE HOT void shared_vertices_clear(void) {
+    u32 i;
+#pragma GCC unroll 16
+    for (i = 0; i < ARRAY_COUNT(sShared.countWords); i++) {
+        sShared.countWords[i] = 0;
+    }
 }
 
 /* Whether a flat triangle reaches both sides of the N64 screen (a full screen picture), as gfx_flat_x sees them. */
@@ -1458,7 +1482,7 @@ static NOINLINE s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *
     return left && right;
 }
 
-static NOINLINE void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
+static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
     Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
@@ -1543,7 +1567,7 @@ static NOINLINE void draw_dkr_triangles(const Triangle *tris, s32 count, s32 tex
             }
         }
         for (k = 0; k < 3; k++) {
-            SharedVertex *shared = &sShared[idx[k]];
+            SharedVertex *shared = &sShared.entries[idx[k]];
             u32 key = uv[k].texCoords; // Both coordinates, as the table's key
             const RspVertex *in;
             GfxVertex *v;
@@ -1828,7 +1852,7 @@ static COLD void log_bad_list_address(u32 addr, const Gfx *where) {
  * no test of the depth, which never changes within it: the compiler would otherwise unswitch the loop on it, into
  * two copies of the whole loop.
  */
-static NOINLINE s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 depth) {
+static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 depth) {
     u32 op = w0 >> 24;
     if (UNLIKELY(bad_list_address(w1))) {
         log_bad_list_address(w1, where);
@@ -1843,7 +1867,7 @@ static NOINLINE s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 dept
 
 /* A load at TMEM word tmem of bytes bytes overwrote the later 64 byte slots it covers: earlier loads there are gone.
  * Most of them are already gone, so only the valid ones (g.tmemValid) are visited. The load itself is marked valid. */
-static void forget_covered_loads(u32 tmem, u32 bytes) {
+static HOT void forget_covered_loads(u32 tmem, u32 bytes) {
     u32 first = (tmem / 8) & 63, end = (tmem + (bytes + 7) / 8 + 7) / 8;
     u64 covered, m;
     if (end > 64) {
@@ -1856,7 +1880,7 @@ static void forget_covered_loads(u32 tmem, u32 bytes) {
     g.tmemValid = (g.tmemValid & ~covered) | (1ULL << first);
 }
 
-static void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
+static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     // Commands left to run: a G_DMADL's count, or (no list is that long) as good as no limit, so that the loop tests
     // one count rather than the limit and the count.
     s32 remaining = (maxCommands < 0) ? 0x7FFFFFFF : maxCommands;
@@ -2341,6 +2365,38 @@ void port_gfx_init(void) {
     }
 }
 
+#ifdef PORT_GFX_REFERENCE
+/* A snapshot: the frame is also drawn by the reference renderer, both images are saved as for DKR_DIFF_EVERY, and
+ * every draw is logged. */
+static COLD void start_snapshot(void) {
+    char path[256];
+    gPlatSnapshotRequested = 0;
+    if (!sRefInitialised) {
+        refb_init();
+        sRefInitialised = TRUE;
+    }
+    sRefActive = TRUE;
+    sTraceFrame = sFrameCount;
+    plat_log_keep();
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
+    plat_log_copy_to(path);
+    gfxb_log_draws((int) sFrameCount);
+    plat_log("snapshot of frame %d", (int) sFrameCount);
+}
+
+/* Saves the reference renderer's and the GPU's pictures of a snapshot or DKR_DIFF_EVERY frame. */
+static COLD void end_reference_frame(void) {
+    char path[256];
+    refb_end_frame();
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_ref.png", plat_data_dir(), (int) sFrameCount);
+    refb_save_png(path);
+    plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
+    gfxb_capture_frame(path);
+    sRefActive = FALSE;
+    // The renderer closes the snapshot's log once the GPU has drawn the frame.
+}
+#endif
+
 void port_gfx_run_task(void *taskPtr) {
     OSTask *task = (OSTask *) taskPtr;
     port_gfx_init();
@@ -2350,24 +2406,8 @@ void port_gfx_run_task(void *taskPtr) {
 #endif
     gfxb_start_frame();
 #ifdef PORT_GFX_REFERENCE
-    if (gPlatSnapshotRequested) {
-        // A snapshot: the frame is also drawn by the reference renderer, both images are saved as for DKR_DIFF_EVERY,
-        // and every draw is logged.
-        gPlatSnapshotRequested = 0;
-        if (!sRefInitialised) {
-            refb_init();
-            sRefInitialised = TRUE;
-        }
-        sRefActive = TRUE;
-        sTraceFrame = sFrameCount;
-        plat_log_keep();
-        {
-            char path[256];
-            plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
-            plat_log_copy_to(path);
-        }
-        gfxb_log_draws((int) sFrameCount);
-        plat_log("snapshot of frame %d", (int) sFrameCount);
+    if (UNLIKELY(gPlatSnapshotRequested)) {
+        start_snapshot();
     }
 #endif
     REF_CALL(refb_start_frame());
@@ -2390,15 +2430,8 @@ void port_gfx_run_task(void *taskPtr) {
     gfxb_end_frame();
     walk_end();
 #ifdef PORT_GFX_REFERENCE
-    if (sRefActive) {
-        char path[256];
-        refb_end_frame();
-        plat_snprintf(path, sizeof(path), "%s/diff_%05d_ref.png", plat_data_dir(), (int) sFrameCount);
-        refb_save_png(path);
-        plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
-        gfxb_capture_frame(path);
-        sRefActive = FALSE;
-        // The renderer closes the snapshot's log once the GPU has drawn the frame.
+    if (UNLIKELY(sRefActive)) {
+        end_reference_frame();
     }
 #endif
 }

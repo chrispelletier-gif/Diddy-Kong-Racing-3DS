@@ -69,17 +69,24 @@ static void user_file_path(char *path, s32 size) {
     plat_snprintf(path, size, "%s/" USER_FILE, plat_data_dir());
 }
 
-/* On with DKR_PROFILE, the Settings menu's Profiler row, and during the unattended test run (which can start and stop at any time). */
-int prof_enabled(void) {
-    if (sEnabled < 0) {
-        char path[256];
-        char text[16];
-        int length;
-        user_file_path(path, sizeof(path));
-        length = plat_load_file_start(path, text, sizeof(text) - 1);
-        text[length > 0 ? length : 0] = '\0';
-        sUserOn = PLAT_DEBUG_TOOLS && text[0] == '1'; // A player's build has no Profiler row to turn it off.
-        sEnabled = plat_getenv("DKR_PROFILE") != NULL;
+/* The first call's read of the Profiler row's file and DKR_PROFILE, out of prof_enabled: the renderer asks it at
+ * every draw. */
+static PLAT_COLD void read_profile_setting(void) {
+    char path[256];
+    char text[16];
+    int length;
+    user_file_path(path, sizeof(path));
+    length = plat_load_file_start(path, text, sizeof(text) - 1);
+    text[length > 0 ? length : 0] = '\0';
+    sUserOn = PLAT_DEBUG_TOOLS && text[0] == '1'; // A player's build has no Profiler row to turn it off.
+    sEnabled = plat_getenv("DKR_PROFILE") != NULL;
+}
+
+/* On with DKR_PROFILE, the Settings menu's Profiler row, and during the unattended test run (which can start and stop at any time).
+ * Out of line: one copy next to the renderer's per-draw code, rather than one in each of its callers. */
+PLAT_HOT PLAT_NOINLINE int prof_enabled(void) {
+    if (__builtin_expect(sEnabled < 0, 0)) {
+        read_profile_setting();
     }
     return sEnabled || sUserOn || port_autorun_enabled();
 }

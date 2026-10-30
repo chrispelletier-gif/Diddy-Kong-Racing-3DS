@@ -151,7 +151,7 @@ static inline float gfx_flat_px(float x, float narrow, float width) {
 }
 
 /* Backend entry points. */
-void gfxb_init(void);
+void gfxb_init(void) __attribute__((cold));
 void gfxb_start_frame(void);
 void gfxb_end_frame(void);
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
