@@ -5190,6 +5190,10 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
             twiceReads = 2;
         }
     }
+    // With GPU vertex maths on, the one shader also draws the CPU path: after a model draw its
+    // uniforms must be set back to the identity, exactly as the full draw above does.
+    set_cpu_uniforms();
+    unif_write_twice();
     if (timed) {
         t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
     }
