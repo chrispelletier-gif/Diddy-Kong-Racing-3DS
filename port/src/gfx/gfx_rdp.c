@@ -203,7 +203,7 @@ static u32 sWalkSpans[WALK_PART_COUNT];
 static unsigned long long sWalkReadCost; // Ticks one clock read takes, in 1/256ths
 
 /* The timed walk's switch to this part (walk_switch): the clock read and bookkeeping, out of line and cold, as only
- * the profiler takes them. */
+ * the profiler takes them. Callers test for a change of part first, so that runs of commands in one part cost no call. */
 static COLD u32 walk_switch_timed(u32 part) {
     u32 old = sWalkPart;
     if (part != old) {
@@ -218,7 +218,10 @@ static COLD u32 walk_switch_timed(u32 part) {
 
 /* Switches the walk's timing to this part. Returns the part it was in, to switch back to (nothing while untimed). */
 static inline u32 walk_switch(u32 part) {
-    return sWalkTimed ? walk_switch_timed(part) : 0;
+    if (!sWalkTimed) {
+        return 0;
+    }
+    return part != sWalkPart ? walk_switch_timed(part) : part;
 }
 
 static void walk_begin(void) {
@@ -450,6 +453,8 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
                                other == sBatchState.textures[0] || other == sBatchState.textures[1]);
 }
 
+static void tex_memo_forget(void);
+
 /* Frees a cache entry's textures. */
 static void free_entry(TexCacheEntry *e) {
     if (e->hasOtherFilter) {
@@ -460,6 +465,9 @@ static void free_entry(TexCacheEntry *e) {
     plat_free((void *) e->tex.pixels);
     e->used = FALSE;
     e->gen++;
+    if (e->gen == 0) {
+        tex_memo_forget(); // The 8-bit generation wrapped: a memo entry from 256 frees ago must not match it again
+    }
     sTexCacheAddr[e - sTexCache] = NULL;
 }
 
@@ -585,6 +593,14 @@ typedef struct TexMemoEntry {
 
 static TexMemoEntry sTexMemo[TEX_MEMO_SETS * TEX_MEMO_WAYS];
 static s32 sTexMemoOn; // DKR_TEX_MEMO
+
+/* Empties the memo (a zeroed entry has no load address, which no key has). */
+static COLD void tex_memo_forget(void) {
+    u32 *w = (u32 *) sTexMemo, n = sizeof(sTexMemo) / (sizeof(u32));
+    while (n--) {
+        *w++ = 0;
+    }
+}
 
 /* The other mode bits the lookup goes by, as tex_memo_key packs them: filter, TLUT type and cycle type (copy mode). */
 static inline u32 tex_memo_mode_bits(void) {
@@ -1103,7 +1119,7 @@ static void build_draw_state(GfxDrawState *s, s32 isRect) {
 static inline s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b) {
     const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
     u32 i;
-    _Static_assert(sizeof(GfxDrawState) % 4 == 0 && _Alignof(GfxDrawState) == 4, "draw states are compared as words");
+    _Static_assert(sizeof(GfxDrawState) % 4 == 0 && _Alignof(GfxDrawState) >= 4, "draw states are compared as words");
 #pragma GCC unroll 1
     for (i = 0; i < sizeof(GfxDrawState) / 4; i++) {
         if (wa[i] != wb[i]) {
@@ -1532,7 +1548,10 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     shared_vertices_clear();
     for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
-        const TexCoords *uv = &t->uv0;         // uv0, uv1 and uv2, in a row
+        TexCoords uv[3]; // uv0, uv1 and uv2, copied out as the three loads they are (not indexed past uv0)
+        uv[0] = t->uv0;
+        uv[1] = t->uv1;
+        uv[2] = t->uv2;
         const u8 *idx = &t->verticesArray[1]; // vi0, vi1 and vi2
         u8 flat = 0, batchKey;
         u16 *out;
@@ -1895,7 +1914,7 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         if (UNLIKELY(sTracing)) {
             trace_command(depth, w0, w1);
         }
-        if (sWalkTimed) {
+        if (sWalkTimed && (info & 7) != sWalkPart) {
             walk_switch_timed(info & 7);
         }
         if (!(info & OP_KEEPS_STATE)) {

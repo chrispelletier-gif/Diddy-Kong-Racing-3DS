@@ -4525,6 +4525,13 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     any = test_and_write_vertices(verts, out, sLeanOutside, numVerts, stride, fmt, flat, su0, sv0, su1, sv1);
     written = numVerts;
     count = numTriangles * 3;
+    if (count == 0) { // Nothing to draw (no caller passes 0 today): touch no GPU state, as the full path does not
+        if (timed) {
+            t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+            draw_readings_empty(t0, t1);
+        }
+        return;
+    }
     if (__builtin_expect(any, 0)) {
         written = clip_cut_lean(verts, indices, numTriangles, out, stride, fmt, flat, su0, sv0, su1, sv1, numVerts,
                                 &count);
