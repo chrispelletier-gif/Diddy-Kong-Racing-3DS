@@ -18,12 +18,11 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
-/* The display transfer converts to the screen's format and, with anti-aliasing, averages each 2x2 (or 2x1) block of
- * pixels. It can't widen pixels: an RGB565 target hangs a real 3DS's transfer to an RGB8 screen (emulators do it), so
- * with 16-bit buffers the top screen is RGB565 too (see link_target). */
-#define DISPLAY_TRANSFER_FLAGS(format, scaling)                                                                        \
-    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(format) |  \
-     GX_TRANSFER_OUT_FORMAT((format) == GX_TRANSFER_FMT_RGB565 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGB8) |     \
+/* The display transfer converts the RGBA8 target to the screen's RGB8 and, with anti-aliasing, averages each 2x2 (or
+ * 2x1) block of pixels. */
+#define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
      GX_TRANSFER_SCALING(scaling))
 
 #define TOP_WIDTH 400
@@ -110,13 +109,9 @@ static C3D_RenderTarget *sTargetRight; // The right eye's, while the screen is i
 static int sRenderScale = 1, sScaleX = 1;
 static int sDefaultAa = PLAT_AA_4X;              // The setting (settings.txt, else DKR_AA).
 static volatile int sWantedAa = PLAT_AA_4X;      // plat_set_gpu_config, applied by the renderer between frames.
-/* 16-bit buffers (RGB565 colour, 16-bit depth) halve the memory the GPU reads and writes per pixel; the N64 game drew
- * to a 16-bit framebuffer itself. The setting (settings.txt, else DKR_FB16), the wanted one and the targets' own. */
-static int sDefaultFb16;
-static volatile int sWantedFb16;
-static int sTargetFb16;
-/* A memory fill of the colour buffer takes a pixel in the buffer's format: black either way. */
-#define CLEAR_BLACK (sTargetFb16 ? 0 : 0x000000FF)
+/* A memory fill of the colour buffer takes a pixel in the buffer's format (RGBA8): black. The 16-bit buffers setting
+ * (RGB565 colour, 16-bit depth) was removed on 2026-10-29 because it changed the picture (fog went missing). */
+#define CLEAR_BLACK 0x000000FF
 static DVLB_s *sShaderDvlb;
 static shaderProgram_s sProgram;
 static u8 *sVbo; // The vertex buffer of the frame being built
@@ -164,8 +159,9 @@ static int sStereo;             // This frame is drawn twice, once for each eye
 static int s800;                // The screen shows 800 pixels across
 static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
 /* Stereo: the shader moves each vertex across by sEyeSep * (w - sEyeConv) in clip space, in opposite directions for
- * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. */
-static float sEyeSep, sEyeConv = 130.0f;
+ * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. Flat draws (HUD, text) get
+ * w = sEyeConv * sHudW. The player's tuning (roadmap G5a-G5e, "stereo tuning" below) sets all three each frame. */
+static float sEyeSep, sEyeConv = 130.0f, sHudW = 1.0f;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
 static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
 static int sOnceFrame;       // This frame is
@@ -428,10 +424,11 @@ static inline void to_screen(const GfxVertex *v, float *pos) {
 }
 
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
- * that it sits at the depth of the screen (scaling the whole position leaves where it lands unchanged). */
+ * that it sits at the depth of the screen, or nearer or farther by the HUD depth setting (scaling the whole position
+ * leaves where it lands unchanged). */
 static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
     float z = 0.5f * (v->z - v->w);
-    float f = (sStereo && v->w > 0.0f) ? sEyeConv / v->w : 1.0f;
+    float f = (sStereo && v->w > 0.0f) ? sEyeConv * sHudW / v->w : 1.0f;
     pos[0] = v->y * f;
     pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
@@ -780,7 +777,7 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target in the current buffer formats (sTargetFb16). */
+/* A render target: RGBA8 colour, 24-bit depth and stencil. */
 static C3D_RenderTarget *new_target(int width, int height) {
     C3D_RenderTarget *target = NULL;
     int tries;
@@ -789,19 +786,16 @@ static C3D_RenderTarget *new_target(int width, int height) {
         if (tries == 1 && evict_vram_textures() == 0) {
             break;
         }
-        target = C3D_RenderTargetCreate(width, height, sTargetFb16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                        sTargetFb16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     }
     return target;
 }
 
 /*
  * The render target for the top screen: twice the screen's resolution down for anti-aliasing (scale), and across for
- * 4x anti-aliasing or the 800 pixel mode (across), with 16-bit buffers or not. The doubled one needs 3MB of VRAM
- * (half that with 16-bit buffers), so fall back if it does not fit.
+ * 4x anti-aliasing or the 800 pixel mode (across). The doubled one needs 3MB of VRAM, so fall back if it does not fit.
  */
-static void create_target(int scale, int across, int fb16) {
-    sTargetFb16 = fb16;
+static void create_target(int scale, int across) {
     sTarget = NULL;
     if (scale == 2 || across == 2) {
         sTarget = new_target(TOP_HEIGHT * scale, TOP_WIDTH * across);
@@ -820,18 +814,16 @@ static void create_target(int scale, int across, int fb16) {
  * unless the screen shows 800 pixels. In 3D, sTarget is the left eye's and sTargetRight the right eye's.
  */
 static u32 sTransferFlags;
+static C3D_RenderTarget *sLinked; // The target the top screen shows (link_target)
 
 static void link_target(void) {
     u32 scaling = GX_TRANSFER_SCALE_NO;
     if (sRenderScale == 2) {
         scaling = sScaleX == 2 && !s800 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_X;
     }
-    sTransferFlags = DISPLAY_TRANSFER_FLAGS(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8, scaling);
-    // Called with the GPU idle, so no transfer is still writing the old framebuffers (which this may reallocate).
-    if (gfxGetScreenFormat(GFX_TOP) != (sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES)) {
-        gfxSetScreenFormat(GFX_TOP, sTargetFb16 ? GSP_RGB565_OES : GSP_BGR8_OES);
-    }
+    sTransferFlags = DISPLAY_TRANSFER_FLAGS(scaling);
     C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sTransferFlags);
+    sLinked = sTarget;
     if (sStereo && sTargetRight != NULL) {
         C3D_RenderTargetSetOutput(sTargetRight, GFX_TOP, GFX_RIGHT, sTransferFlags);
     } else {
@@ -839,11 +831,49 @@ static void link_target(void) {
     }
 }
 
-/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) and 16-bit buffers for the frames from the next
- * one; -1 for either is the player's setting. */
-void plat_set_gpu_config(int aa, int fb16) {
+/*
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off; shelved after switch bench #246, where it never switched): with anti-aliasing on, a frame the GPU took nearly a whole
+ * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
+ * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
+ * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
+ * the low resolution instead of flickering between the two. Never in 3D (which has no anti-aliasing) or while a
+ * snapshot is taken. The main target keeps its sizes in sMainScale and sMainScaleX while the low one is in use.
+ * Switching targets needs no wait for the GPU: the screen is linked to the frame's target just before it is handed
+ * over (adaptive_link, inside citro3d's frame). DKR_ADAPTIVE_AA=2 counts every anti-aliased frame as slow, to see the
+ * switching itself (each hold, then one probe frame).
+ */
+#define ADAPT_HOLD 60
+#define ADAPT_HOLD_MAX 960
+#define ADAPT_PROBE 30
+static int sAdaptive;
+static C3D_RenderTarget *sLowTarget, *sMainTarget;
+static int sMainScale, sMainScaleX, sLowActive, sLowFresh, sLowFailed;
+static int sAdaptHold, sAdaptHoldLen = ADAPT_HOLD, sAdaptProbe, sAdaptLastFrame = -1;
+static int sAdaptSeen, sAdaptLow, sAdaptSlow;
+
+/* Back to the main target (the frame's choice is made again in adaptive_pick). */
+static void adaptive_restore_main(void) {
+    if (sLowActive) {
+        sTarget = sMainTarget;
+        sRenderScale = sMainScale;
+        sScaleX = sMainScaleX;
+        sLowActive = 0;
+    }
+}
+
+/* With the GPU idle and not in a citro3d frame (apply_screen_mode): the low target is made again for the new mode. */
+static void adaptive_delete_low(void) {
+    if (sLowTarget != NULL) {
+        C3D_RenderTargetDelete(sLowTarget);
+        sLowTarget = NULL;
+    }
+    sLowFailed = 0;
+}
+
+/* From any thread (the GPU benchmark): anti-aliasing (PLAT_AA_*) for the frames from the next one; -1 is the player's
+ * setting. */
+void plat_set_gpu_config(int aa) {
     sWantedAa = aa < 0 ? sDefaultAa : aa;
-    sWantedFb16 = fb16 < 0 ? sDefaultFb16 : fb16 != 0;
 }
 
 /* The Settings menu: the player's anti-aliasing choice (PLAT_AA_*), saved, and used from the next frame. */
@@ -855,17 +885,6 @@ void plat_3ds_set_antialias_setting(int aa) {
 
 int plat_3ds_antialias_setting(void) {
     return sDefaultAa;
-}
-
-/* The Settings menu: 16-bit colour and depth buffers on or off, saved, and used from the next frame. */
-void plat_3ds_set_fb16_setting(int on) {
-    sDefaultFb16 = on != 0;
-    sWantedFb16 = sDefaultFb16;
-    settings_set("fb16", sDefaultFb16);
-}
-
-int plat_3ds_fb16_setting(void) {
-    return sDefaultFb16;
 }
 
 /* The Settings menu: the colour boost level (0 off, 1 to 3 stronger; see add_colour_boost), from the next frame. */
@@ -881,10 +900,6 @@ int plat_3ds_colour_setting(void) {
 /* The anti-aliasing (PLAT_AA_*) of the frames being drawn now. With 800 pixels across, either is 2x. */
 int plat_antialias(void) {
     return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
-}
-
-int plat_fb16(void) {
-    return sTargetFb16;
 }
 
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
@@ -908,11 +923,9 @@ int plat_3ds_wide800_supported(void) {
     return !sWideUnsupported;
 }
 
-/* The screen settings as frames use them: the switch bench pins each for its races (DKR_WIDESCREEN, DKR_WIDE800,
- * DKR_STEREO3D), so the player's choices in the menus don't change what it measures. */
+/* The widescreen setting, unless the switch bench sets its own (BENCH_WIDESCREEN). */
 static int wide_setting(void) {
-    int style = plat_switch("DKR_WIDESCREEN", sWideSetting);
-    return style >= 0 && style <= 3 ? style : sWideSetting;
+    return plat_switch("BENCH_WIDESCREEN", sWideSetting);
 }
 
 float plat_aspect_scale(void) {
@@ -939,7 +952,10 @@ float plat_camera_fov(float fovy) {
  * The stereo depth: how far apart the eyes' pictures are, as a fraction of the screen's half width, for the farthest
  * things with the 3D slider all the way up (DKR_STEREO_SEP, in thousandths), and the distance from the camera that
  * stays at the screen's depth (DKR_STEREO_CONV, in the game's units: the camera follows the kart about 130 behind).
+ * The player's 3D depth and convergence settings scale these.
  */
+static float sBaseConv = 130.0f;
+
 static float stereo_max_sep(void) {
     static float sSep = -1.0f;
     if (sSep < 0.0f) {
@@ -947,11 +963,200 @@ static float stereo_max_sep(void) {
         const char *conv = plat_getenv("DKR_STEREO_CONV");
         sSep = (env != NULL ? atoi(env) : 25) / 1000.0f;
         if (conv != NULL && atoi(conv) > 0) {
-            sEyeConv = (float) atoi(conv);
+            sBaseConv = (float) atoi(conv);
         }
-        plat_log("stereo: separation %.3f, screen depth at %.0f", sSep, sEyeConv);
+        plat_log("stereo: separation %.3f, screen depth at %.0f", sSep, sBaseConv);
     }
     return sSep;
+}
+
+/******************************** Stereo tuning ********************************/
+
+/*
+ * The 3D settings on the Screen page (roadmap G5a-G5e, after the Donkey Kong 64 3DS port's): 3D depth (percent of the
+ * usual separation), convergence (percent of the usual screen depth: higher brings the kart and what is near it out
+ * of the screen), HUD depth (steps out of the screen, or into it when negative), auto convergence and its comfort
+ * target. Saved in settings.txt, changed from the menu's thread and read by the renderer between frames.
+ */
+enum { STEREO_DEPTH, STEREO_CONV, STEREO_HUD, STEREO_AUTO, STEREO_COMFORT, STEREO_TUNING_COUNT };
+static const struct {
+    const char *key;
+    int lo, hi, step, usual;
+} sTuningRange[STEREO_TUNING_COUNT] = {
+    { "stereo_depth", 25, 200, 25, 100 }, { "stereo_conv", 50, 200, 10, 100 },  { "stereo_hud", -5, 5, 1, 0 },
+    { "stereo_auto", 0, 1, 1, 1 },        { "stereo_comfort", 0, 100, 25, 50 },
+};
+static volatile int sTuning[STEREO_TUNING_COUNT];
+
+static void read_stereo_tuning(void) {
+    int i, v;
+    for (i = 0; i < STEREO_TUNING_COUNT; i++) {
+        v = settings_get(sTuningRange[i].key, sTuningRange[i].usual);
+        sTuning[i] = v < sTuningRange[i].lo || v > sTuningRange[i].hi ? sTuningRange[i].usual : v;
+    }
+    plat_log("stereo tuning: depth %d%%, convergence %d%%, HUD %d, auto convergence %d, comfort %d%%",
+             sTuning[STEREO_DEPTH], sTuning[STEREO_CONV], sTuning[STEREO_HUD], sTuning[STEREO_AUTO],
+             sTuning[STEREO_COMFORT]);
+}
+
+int plat_3ds_stereo_tuning(int which) {
+    return which >= 0 && which < STEREO_TUNING_COUNT ? sTuning[which] : 0;
+}
+
+/* Steps a setting by step, wrapping round at either end, and saves it. */
+void plat_3ds_step_stereo_tuning(int which, int step) {
+    int v;
+    if (which < 0 || which >= STEREO_TUNING_COUNT) {
+        return;
+    }
+    v = sTuning[which] + (step < 0 ? -1 : 1) * sTuningRange[which].step;
+    v = v > sTuningRange[which].hi ? sTuningRange[which].lo : v < sTuningRange[which].lo ? sTuningRange[which].hi : v;
+    sTuning[which] = v;
+    settings_set(sTuningRange[which].key, v);
+}
+
+/*
+ * Auto convergence (G5d/G5e). While a frame is drawn in 3D, near_depth_note keeps the nearest vertex of the 3D draws in
+ * each patch of a grid over the screen (leaving out its bottom quarter, where the track under the kart is always
+ * close, and the very edges). Between frames, near_depth_take makes one value of them: the second nearest patch, so
+ * one small thing (a banana, a spark) is not the whole story, or none when fewer than three patches had anything (a
+ * sky). auto_convergence then smooths it, quick to follow something coming close and slow to let go, jumping at a
+ * camera cut, and brings the screen's depth near enough that the nearest thing comes out of the screen by at most the
+ * comfort target: a percentage of how far the farthest things go into it. The vertices are already transformed on the
+ * CPU, so nothing has to be read back from the GPU.
+ */
+#define NEAR_COLS 8
+#define NEAR_ROWS 4
+static float sNear[NEAR_COLS * NEAR_ROWS];
+
+static void near_depth_clear(void) {
+    int i;
+    for (i = 0; i < NEAR_COLS * NEAR_ROWS; i++) {
+        sNear[i] = 0.0f;
+    }
+}
+
+static void near_depth_note(const GfxVertex *verts, int numVerts) {
+    int i, col, row;
+    for (i = 0; i < numVerts; i++) {
+        const GfxVertex *v = &verts[i];
+        float w = v->w, x, y;
+        if (!(w > 1.0f)) {
+            continue;
+        }
+        // Over x -0.9..0.9 and y -0.5..0.9 of the screen (+y up).
+        x = (v->x / w + 0.9f) * (NEAR_COLS / 1.8f);
+        y = (v->y / w + 0.5f) * (NEAR_ROWS / 1.4f);
+        if (!(x >= 0.0f && x < NEAR_COLS && y >= 0.0f && y < NEAR_ROWS)) {
+            continue;
+        }
+        col = (int) x;
+        row = (int) y;
+        if (sNear[row * NEAR_COLS + col] == 0.0f || w < sNear[row * NEAR_COLS + col]) {
+            sNear[row * NEAR_COLS + col] = w;
+        }
+    }
+}
+
+static float near_depth_take(void) {
+    float nears[NEAR_COLS * NEAR_ROWS], t;
+    int i, j, n = 0;
+    for (i = 0; i < NEAR_COLS * NEAR_ROWS; i++) {
+        if (sNear[i] > 0.0f) {
+            // Kept in order, nearest first.
+            for (j = n++; j > 0 && nears[j - 1] > sNear[i]; j--) {
+                nears[j] = nears[j - 1];
+            }
+            nears[j] = sNear[i];
+        }
+    }
+    near_depth_clear();
+    if (n < 3) {
+        return -1.0f;
+    }
+    t = nears[1];
+    return t;
+}
+
+static struct {
+    float history[5];
+    int count, cursor, cutFrames;
+    float near;    // The smoothed nearest distance
+    float invConv; // 1 / the screen's depth, eased
+    float last;
+} sAuto;
+
+static void auto_convergence_reset(void) {
+    memset(&sAuto, 0, sizeof(sAuto));
+}
+
+static float auto_convergence(float nearest, float manual, float comfort) {
+    float sorted[5], median, target;
+    int i, j;
+
+    if (nearest <= 0.0f) {
+        // Nothing to go by this frame: keep the last.
+        return sAuto.last > 0.0f && sAuto.last < manual ? sAuto.last : manual;
+    }
+    sAuto.history[sAuto.cursor] = nearest;
+    sAuto.cursor = (sAuto.cursor + 1) % 5;
+    sAuto.count = sAuto.count < 5 ? sAuto.count + 1 : 5;
+    for (i = 0; i < sAuto.count; i++) {
+        float h = sAuto.history[(sAuto.cursor + 4 - i) % 5];
+        for (j = i; j > 0 && sorted[j - 1] > h; j--) {
+            sorted[j] = sorted[j - 1];
+        }
+        sorted[j] = h;
+    }
+    median = sorted[sAuto.count / 2];
+    if (sAuto.near <= 0.0f) {
+        sAuto.near = median;
+    } else {
+        // A camera cut stays changed for a second frame, a flicker does not: then jump straight to it.
+        sAuto.cutFrames = nearest * 2.0f < sAuto.near ? sAuto.cutFrames + 1 : 0;
+        if (sAuto.cutFrames >= 2) {
+            sAuto.near = nearest;
+            sAuto.invConv = 0.0f;
+            sAuto.cutFrames = 0;
+        } else {
+            sAuto.near += (median - sAuto.near) * (median < sAuto.near ? 0.3f : 0.05f);
+        }
+    }
+    // What is at distance d comes out of the screen by sep * (conv / d - 1); the farthest go in by sep.
+    target = sAuto.near * (1.0f + comfort);
+    target = target < manual ? target : manual;
+    target = target > sAuto.near * 0.25f ? target : sAuto.near * 0.25f;
+    target = target > 10.0f ? target : 10.0f;
+    if (sAuto.invConv <= 0.0f) {
+        sAuto.invConv = 1.0f / target;
+    } else {
+        sAuto.invConv += (1.0f / target - sAuto.invConv) * (1.0f / target > sAuto.invConv ? 0.25f : 0.04f);
+    }
+    sAuto.last = 1.0f / sAuto.invConv;
+    return sAuto.last < manual ? sAuto.last : manual;
+}
+
+/* Between frames: the separation for the slider, the screen's depth and the HUD's for the coming frame. */
+static void apply_stereo_tuning(int stereo, float slider) {
+    float manual;
+    sEyeSep = stereo ? slider * stereo_max_sep() * sTuning[STEREO_DEPTH] / 100.0f : 0.0f;
+    manual = sBaseConv * sTuning[STEREO_CONV] / 100.0f;
+    if (stereo && sTuning[STEREO_AUTO]) {
+        static float sLogged;
+        float nearest = near_depth_take();
+        sEyeConv = auto_convergence(nearest, manual, sTuning[STEREO_COMFORT] / 100.0f);
+        if (sEyeConv < sLogged * 0.8f || sEyeConv > sLogged * 1.25f) {
+            // Only when it moves a good way, so the log shows what it does without a line every frame.
+            plat_log("stereo: auto convergence %.0f of %.0f (nearest %.0f)", sEyeConv, manual, nearest);
+            sLogged = sEyeConv;
+        }
+    } else {
+        near_depth_clear();
+        auto_convergence_reset();
+        sEyeConv = manual;
+    }
+    // Each step out of the screen brings the HUD an eighth of the way to the eyes.
+    sHudW = 1.0f - sTuning[STEREO_HUD] * 0.08f;
 }
 
 /*
@@ -961,25 +1166,27 @@ static float stereo_max_sep(void) {
  * first; a new target is cleared like the very first one.
  */
 static void apply_screen_mode(void) {
-    float slider = osGet3DSliderState();
+    float slider;
+    adaptive_restore_main();
+    slider = osGet3DSliderState();
+    // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
-    int wide800 = plat_switch("DKR_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
-    int wideStyle = wide_setting();
-    int aa = stereo ? PLAT_AA_OFF : sWantedAa, fb16 = sWantedFb16;
+    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    int aa = stereo ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((wideStyle != 0) != sWide && sTarget != NULL) {
+    if ((wide_setting() != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = wideStyle != 0;
+    sWide = wide_setting() != 0;
     sScale3D = sWide ? 1.0f : NARROW;
-    sEyeSep = stereo ? slider * stereo_max_sep() : 0.0f;
+    apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && fb16 == sTargetFb16)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -987,14 +1194,15 @@ static void apply_screen_mode(void) {
         plat_sleep_ns(250000);
     }
     C3D_FrameEnd(0);
-    newTarget = scale != sRenderScale || across != sScaleX || fb16 != sTargetFb16;
+    adaptive_delete_low();
+    newTarget = scale != sRenderScale || across != sScaleX;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
             C3D_RenderTargetDelete(sTargetRight); // Made again below, in the new formats.
             sTargetRight = NULL;
         }
-        create_target(scale, across, fb16);
+        create_target(scale, across);
         sFrameStarted = 0;
         if (wide800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target: don't try again every frame.
@@ -1026,9 +1234,8 @@ static void apply_screen_mode(void) {
     sStereo = stereo;
     s800 = wide800;
     link_target();
-    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s, %s buffers)",
-             sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels", sScaleX, sRenderScale,
-             aa_name(plat_antialias()), sTargetFb16 ? "16-bit" : "32-bit");
+    plat_log("top screen: %s, render target %dx%d (anti-aliasing %s)", sStereo ? "3D" : s800 ? "800 pixels" : "400 pixels",
+             sScaleX, sRenderScale, aa_name(plat_antialias()));
     if (newTarget && scale == 2 && sRenderScale != 2) {
         sWantedAa = PLAT_AA_OFF; // Didn't fit: don't try again every frame.
     }
@@ -1054,6 +1261,7 @@ PLAT_COLD static void read_screen_settings(void) {
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
     s800Setting = settings_get("wide800", !old3ds) != 0;
     sStereoSetting = settings_get("stereo3d", !old3ds) != 0;
+    read_stereo_tuning();
     if (R_SUCCEEDED(cfguInit())) {
         if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
             sWideUnsupported = model == CFG_MODEL_2DS;
@@ -1079,19 +1287,16 @@ void gfxb_init(void) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
     {
         // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
-        // 2 2x, as settings.txt has it). The same for 16-bit buffers: off unless DKR_FB16=1.
+        // 2 2x, as settings.txt has it). An fb16 line left in settings.txt by an older build is ignored.
         const char *aa = plat_getenv("DKR_AA");
-        const char *fb16 = plat_getenv("DKR_FB16");
         sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }
-        sDefaultFb16 = settings_get("fb16", fb16 != NULL && atoi(fb16) != 0) != 0;
         sWantedAa = sDefaultAa;
-        sWantedFb16 = sDefaultFb16;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
-        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1, sDefaultFb16);
+        create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
             s800 = 0;
@@ -1100,8 +1305,7 @@ void gfxb_init(void) {
             gfxSetWide(true);
         }
         link_target();
-        plat_status("Graphics started (anti-aliasing %s, %s buffers%s)", aa_name(plat_antialias()),
-                    sTargetFb16 ? "16-bit" : "32-bit", s800 ? ", 800 pixels" : "");
+        plat_status("Graphics started (anti-aliasing %s%s)", aa_name(plat_antialias()), s800 ? ", 800 pixels" : "");
     }
     sMipmapSetting = settings_get("mipmaps", 1);
     // 2, "Show" (each level tinted), is a debug build's view.
@@ -1743,19 +1947,10 @@ static void capture_pending_frame(void) {
                                 GX_BUFFER_DIM(TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX), pixels,
                                 GX_BUFFER_DIM(w, h),
                                 GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                    GX_TRANSFER_IN_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_OUT_FORMAT(sTargetFb16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                     GX_TRANSFER_SCALING(halve ? GX_TRANSFER_SCALE_X : GX_TRANSFER_SCALE_NO));
         GSPGPU_InvalidateDataCache(pixels, w * h * 4);
-        if (sTargetFb16) {
-            // The transfer can't widen pixels (see DISPLAY_TRANSFER_FLAGS): RGB565 to RGBA8 here, from the end back.
-            const u16 *in = (const u16 *) pixels;
-            u32 i;
-            for (i = w * h; i-- > 0;) {
-                u32 p = in[i], r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
-                pixels[i] = ((r << 3 | r >> 2) << 24) | ((g << 2 | g >> 4) << 16) | ((b << 3 | b >> 2) << 8) | 0xFF;
-            }
-        }
         file = fopen(sCapturePath, "wb");
         if (file != NULL) {
             fwrite(&w, 4, 1, file);
@@ -1945,6 +2140,7 @@ typedef struct FrameSlot {
     u32 *eyeCmd;         // EYE_CMD_WORDS: the two eyes' short command lists of a stereo frame made once
     void **meshFrees;    // Meshes freed while the frame was built (gfxb_mesh_free)
     int numMeshFrees, meshFreesCapacity;
+    int adaptAa;         // Adaptive anti-aliasing: 0 not in use, 1 drawn anti-aliased, 2 at the low resolution
 } FrameSlot;
 static FrameSlot sSlots[2];
 static int sNumSlots = 1; // 2 unless the second slot didn't fit
@@ -2289,6 +2485,85 @@ static int overlap_setting(void) {
     return sSetting && sNumSlots == 2;
 }
 
+/* Renderer thread, after apply_screen_mode: the target for the frame about to be built (see sAdaptive). */
+static void adaptive_pick(void) {
+    if (!sAdaptive || sAdaptHold <= 0 || sRenderScale != 2 || sStereo || sSnapshotPending || sTarget == NULL) {
+        return;
+    }
+    if (sLowTarget == NULL) {
+        if (sLowFailed) {
+            return;
+        }
+        sLowTarget = new_target(TOP_HEIGHT, TOP_WIDTH * (s800 ? 2 : 1));
+        if (sLowTarget == NULL) {
+            sLowFailed = 1; // Until the screen mode changes.
+            plat_log("adaptive anti-aliasing: no VRAM for the low resolution target");
+            return;
+        }
+        sLowFresh = 1;
+    }
+    sMainTarget = sTarget;
+    sMainScale = sRenderScale;
+    sMainScaleX = sScaleX;
+    sTarget = sLowTarget;
+    sRenderScale = 1;
+    sScaleX = s800 ? 2 : 1;
+    sLowActive = 1;
+    if (sLowFresh) {
+        sLowFresh = 0;
+        sFrameStarted = 0; // Cleared like a new target.
+    }
+}
+
+/* Just before a frame is handed over, inside citro3d's frame: the screen shows the frame's target. */
+static void adaptive_link(FrameSlot *slot) {
+    slot->adaptAa = !sAdaptive ? 0 : sLowActive ? 2 : (sRenderScale == 2 && !sStereo) ? 1 : 0;
+    if (sLinked != sTarget) {
+        link_target();
+    }
+}
+
+/* Once the GPU has drawn a frame: how long it took (ms) decides the next frames' resolution (see sAdaptive). */
+static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
+    float budget;
+    if (slot->frame == sAdaptLastFrame) {
+        return; // Already seen (wait_for_gpu again with nothing new handed over).
+    }
+    sAdaptLastFrame = slot->frame;
+    if (!sAdaptive) {
+        sAdaptHold = 0;
+        sAdaptHoldLen = ADAPT_HOLD;
+        sAdaptProbe = 0;
+        return;
+    }
+    if (slot->adaptAa == 0) {
+        return;
+    }
+    budget = 1000.0f / 60.0f * (float) plat_frame_retraces();
+    sAdaptSeen++;
+    if (slot->adaptAa == 2) {
+        sAdaptLow++;
+        if (sAdaptHold > 0 && --sAdaptHold == 0) {
+            sAdaptProbe = ADAPT_PROBE;
+        }
+    } else if (gpuMs > budget * 0.92f || sAdaptive == 2) {
+        sAdaptSlow++;
+        if (sAdaptProbe > 0 && sAdaptHoldLen < ADAPT_HOLD_MAX) {
+            sAdaptHoldLen *= 2; // Slow again straight after a hold: hold longer.
+        }
+        sAdaptProbe = 0;
+        sAdaptHold = sAdaptHoldLen;
+    } else if (sAdaptProbe > 0 && --sAdaptProbe == 0) {
+        sAdaptHoldLen = ADAPT_HOLD; // Anti-aliased frames are fast enough again.
+    }
+    if (sAdaptSeen >= 600) {
+        plat_log("adaptive anti-aliasing: %d of the last %d frames at the low resolution, %d slow anti-aliased "
+                 "frames, hold %d frames",
+                 sAdaptLow, sAdaptSeen, sAdaptSlow, sAdaptHoldLen);
+        sAdaptSeen = sAdaptLow = sAdaptSlow = 0;
+    }
+}
+
 /*
  * Waits for the GPU to finish the frame it was given last, and begins a citro3d frame (which sets citro3d's own
  * command buffer: the caller sets the slot's). Then that frame's freed textures are deleted.
@@ -2318,6 +2593,7 @@ static void wait_for_gpu(int measure) {
     }
     if (sOnGpu >= 0) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
+        adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
     if (measure && prof_enabled()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
@@ -2612,10 +2888,11 @@ static void read_switches(void) {
     sDrawLean = plat_switch("DKR_DRAW_LEAN", plat_old_3ds()) != 0;
     // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
     sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
-    // GPU vertex maths (P30) and stereo frames made once (P33): off everywhere until the Old 3DS bench says otherwise.
-    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", GFX_SURVEY_DEFAULT) != 0;
+    // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
-    sStereoOnce = plat_switch("DKR_STEREO_ONCE", GFX_SURVEY_DEFAULT) != 0;
+    sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -2635,11 +2912,12 @@ static void read_switches(void) {
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
              plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
              sDrawParts ? "on" : "off");
-    plat_log("switches: top screen buffers %d", sTripleWanted ? 3 : 2);
     plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
+    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s", sAdaptive ? "on" : "off",
+             sTripleWanted ? 3 : 2, plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads");
 }
 
 void gfxb_start_frame(void) {
@@ -2647,6 +2925,7 @@ void gfxb_start_frame(void) {
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
+    adaptive_pick();
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
@@ -2702,9 +2981,10 @@ void gfxb_start_frame(void) {
     set_frame_band();
     promote_textures();
     forget_gpu_state();
-    sMipmapsUsed = sMipmapSetting != 0;
-    sMipmapsShown = sMipmapSetting == 2;
-    sColourBoost = sColourSetting;
+    // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
+    sMipmapsUsed = plat_switch("BENCH_MIPMAPS", sMipmapSetting) != 0;
+    sMipmapsShown = plat_switch("BENCH_MIPMAPS", sMipmapSetting) == 2;
+    sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
     sFrameFirstDraw = 1;
     sDepthFillPending = 0;
     if (sFrameStarted < 0) {
@@ -2867,6 +3147,7 @@ void gfxb_end_frame(void) {
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
             }
         }
+        adaptive_link(slot);
         sTarget->used = true;
         if (sStereo) {
             sTargetRight->used = true;
@@ -4307,7 +4588,7 @@ int plat_3ds_guard_band_setting(void) {
     if (__builtin_expect(sGuardBand < 0, 0)) {
         read_guard_band_setting();
     }
-    return sGuardBand;
+    return plat_switch("BENCH_GUARD_BAND", sGuardBand);
 }
 
 /*
@@ -4638,6 +4919,10 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     if (timed) {
         t0 = draw_reading(0, -1, 0);
     }
+    if (sStereo && !flat && sTuning[STEREO_AUTO]) {
+        // The draw's own vertices: the clip below adds corners on the near plane, nearer than anything really is.
+        near_depth_note(verts, numVerts);
+    }
     clip_to_guard_band(&verts, &numVerts, &indices, &numTriangles);
     if (timed) {
         t1 = draw_reading(t0, DRAW_PART_CLIP, 1);
@@ -4824,8 +5109,9 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
+    // In 3D with auto convergence the full draw notes each draw's nearest vertices first (near_depth_note).
     if (!sDrawLean || sVfmtOld || !indexed_enabled() || !plat_3ds_guard_band_setting() ||
-        numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
+        (sStereo && sTuning[STEREO_AUTO]) || numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
         // Room for the most that cutting can add (the full draw checks what it really needs, and may still draw).
         sVboUsed + 15 + (numVerts + numTriangles * 15) * stride > VBO_BYTES ||
         sIboUsed + numTriangles * 15 > IBO_BYTES / (int) sizeof(u16) ||

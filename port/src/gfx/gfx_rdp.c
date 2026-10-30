@@ -1347,9 +1347,9 @@ static void read_switches(void) {
     // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
     // that cost the walk a few milliseconds a frame.
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
-    // The GPU vertex maths' meshes (P31 track, P34 models): off everywhere until the Old 3DS bench says otherwise.
-    sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", GFX_SURVEY_DEFAULT) != 0;
-    sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", GFX_SURVEY_DEFAULT) != 0;
+    // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
+    sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
+    sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the

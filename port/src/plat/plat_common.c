@@ -354,11 +354,6 @@ const char *plat_version(void) {
 static volatile int sRenderAhead = -1;
 
 int plat_render_ahead(void) {
-    // The switch bench pins it for its races (DKR_RENDER_AHEAD_PIN), whatever the menu says.
-    int pinned = plat_switch("DKR_RENDER_AHEAD_PIN", 0);
-    if (pinned == 1 || pinned == 2) {
-        return pinned;
-    }
     if (sRenderAhead < 0) {
         const char *env = plat_getenv("DKR_RENDER_AHEAD");
         // An Old 3DS renders ahead by 2: its renderer and game take turns on one core, and the extra frame slot
@@ -367,7 +362,7 @@ int plat_render_ahead(void) {
         sRenderAhead = frames == 2 ? 2 : 1;
         plat_log("render ahead: %d frame%s", sRenderAhead, sRenderAhead == 1 ? "" : "s");
     }
-    return sRenderAhead;
+    return plat_switch("BENCH_RENDER_AHEAD", sRenderAhead); // The switch bench may set its own
 }
 
 static volatile int sFrameStep;
@@ -383,6 +378,33 @@ int plat_frame_step(void) {
 void plat_set_render_ahead(int frames) {
     sRenderAhead = frames == 2 ? 2 : 1;
     settings_set("renderahead", sRenderAhead);
+}
+
+/* The other ports survey's switches (see plat.h): -1 until first read. */
+static volatile int sGpuMaths = -1, sStereoOnce = -1;
+
+int plat_gpu_maths_setting(void) {
+    if (sGpuMaths < 0) {
+        sGpuMaths = settings_get("gpumaths", GFX_SURVEY_DEFAULT ? 3 : 0) & 3;
+    }
+    return sGpuMaths;
+}
+
+void plat_set_gpu_maths_setting(int level) {
+    sGpuMaths = level & 3;
+    settings_set("gpumaths", sGpuMaths);
+}
+
+int plat_stereo_once_setting(void) {
+    if (sStereoOnce < 0) {
+        sStereoOnce = settings_get("stereoonce", GFX_SURVEY_DEFAULT) != 0;
+    }
+    return sStereoOnce;
+}
+
+void plat_set_stereo_once_setting(int on) {
+    sStereoOnce = on != 0;
+    settings_set("stereoonce", sStereoOnce);
 }
 
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
@@ -455,5 +477,5 @@ void plat_set_60fps_setting(int on) {
 }
 
 float plat_camera_near(void) {
-    return (plat_aspect_scale() > 1.0f && !plat_fb16()) ? 2.5f : 10.0f;
+    return plat_aspect_scale() > 1.0f ? 2.5f : 10.0f;
 }
