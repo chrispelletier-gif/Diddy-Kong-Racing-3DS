@@ -332,9 +332,11 @@ s32 fb_update(s32 mesg) {
     // The frame rate cap (port Settings): the scheduler holds back a finished frame until the cap's retraces have
     // passed, but with frames rendered ahead the game doesn't wait for that one, so at 20 fps (3 retraces) it still
     // ran frames 2 retraces apart and jumped between 30 and 20 (switch bench #255: 60% of frames at 30). Only the
-    // 20 fps cap is held here; 30 and 60 run as they always did. (Until 2026-10-30 this sat in the N64 branch below and
-    // never ran: switch bench #263 raced 93% of its frames at 30 under the 20 cap.)
-    if (plat_frame_retraces() >= 3 && gVideoDeltaTime < plat_frame_retraces()) {
+    // 20 fps cap is held here, and on an Old 3DS the 30 fps one too: with the two-core renderer the frames reach the
+    // screen from the other core, and switch bench #265 ran 12-14% of its frames at 60 under the 30 cap. (Until
+    // 2026-10-30 this sat in the N64 branch below and never ran: #263 raced 93% of its frames at 30 under the 20 cap.)
+    if ((plat_frame_retraces() >= 3 || (plat_frame_retraces() == 2 && plat_old_3ds())) &&
+        gVideoDeltaTime < plat_frame_retraces()) {
         gVideoDeltaTime = plat_frame_retraces();
     }
 #else
