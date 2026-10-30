@@ -410,8 +410,8 @@ void plat_set_stereo_once_setting(int on) {
 
 /* The 60 fps setting (see plat_frame_retraces): -1 until first read. sFps60 is what frames use now. sFps20 is the
  * steady 20 fps cap (settings.txt "fps20", else DKR_20FPS) for an Old 3DS that can't keep 30: every frame then takes
- * three retraces instead of jumping between two and three; 60 fps wins over it. It is an Old 3DS's default: switch
- * bench #251 had the same or a better frame rate with it, and far fewer frames slower than 20 fps. */
+ * three retraces instead of jumping between two and three; 60 fps wins over it. It was an Old 3DS's default until the
+ * two-core renderer (P21, switch bench #263: 29 fps, 93% of frames at 30) made 30 the Old 3DS's target. */
 static volatile int sFps60Setting = -1, sFps60, sFps20;
 
 static void read_60fps_setting(void) {
@@ -420,7 +420,7 @@ static void read_60fps_setting(void) {
         const char *env20 = plat_getenv("DKR_20FPS");
         sFps60Setting = settings_get("fps60", env != NULL && atoi(env) != 0) != 0;
         sFps60 = sFps60Setting;
-        sFps20 = settings_get("fps20", env20 != NULL ? atoi(env20) != 0 : plat_old_3ds()) != 0;
+        sFps20 = settings_get("fps20", env20 != NULL && atoi(env20) != 0) != 0;
         plat_log("frame rate cap: %d fps", sFps60 ? 60 : sFps20 ? 20 : 30);
     }
 }

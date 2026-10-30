@@ -168,6 +168,9 @@ typedef struct BenchSwitch {
  * still raced, as the bench needs one row),
  * the 20 fps cap stays (30 reached 30 on only 11% of frames), and the GPU route gained nothing there either (P31 equal,
  * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
+ * Bench #263 (v24, System 80%): the two-core renderer (P21) ran 29 fps against 20-21, with 93% of frames at 30, and
+ * showed the 20 fps cap had never held on the port (its code sat in the N64 branch of src/video.c). So 30 is the Old
+ * 3DS's cap and the bench races at 30 there; P21 is still raced while its best renderer core is found.
  * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
  * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
  * The list ends with an empty entry, so it may be otherwise empty. */
@@ -199,7 +202,7 @@ static void apply_config(s32 config) {
     if (sMode == MODE_SWITCH) {
         // The menus' settings have no say in the bench's races (user rule, 2026-10-29): every race draws with the
         // bench's own render settings: anti-aliasing 2x, 60 fps, Balanced widescreen and render ahead 1 on a New 3DS;
-        // anti-aliasing off, 20 fps, the N64's 4:3 and render ahead 2 on an Old 3DS (being made to run well at that
+        // anti-aliasing off, 30 fps, the N64's 4:3 and render ahead 2 on an Old 3DS (being made to run well at that
         // size first); 400 pixels, no 3D, mipmaps on, no colour boost, edge trimming on, GPU vertex maths off. Only
         // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
         // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
@@ -216,7 +219,7 @@ static void apply_config(s32 config) {
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
-        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 20 : 60);
+        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
         plat_override_switch("BENCH_RENDER_AHEAD", plat_old_3ds() ? 2 : 1);
         plat_override_switch("BENCH_WIDESCREEN", plat_old_3ds() ? 0 : 2);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
