@@ -155,9 +155,9 @@ typedef struct BenchSwitch {
  * and cache flushes by system call won together (#241), so all three are on by default on an Old 3DS; redrawing the
  * bottom screen's race HUD less often gained nothing (#241). Rendering ahead by 2 frames won on both of its renderer
  * cores (#244, #245), so it is the Old 3DS default and the bench pins it there. In #251 a steady 20 fps cap matched
- * or beat 30 with far fewer slower frames, and the New 3DS's third top screen buffer (P35) was a little ahead, so
- * both are Old 3DS defaults now and the bench races at 20 there. The frame pacer (gfx_c3d.c) still cost frames on two
- * tracks of three, so it is raced off against on.
+ * or beat 30 with far fewer slower frames, so it is the Old 3DS default and the bench races at 20 there. The New
+ * 3DS's third top screen buffer (P35) was at most 1 fps ahead but took memory textures needed (#252), so it stays
+ * off there. The frame pacer (gfx_c3d.c) still cost frames on two tracks of three, so it is raced off against on.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },

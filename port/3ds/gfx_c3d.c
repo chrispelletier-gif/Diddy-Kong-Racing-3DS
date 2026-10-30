@@ -1154,8 +1154,8 @@ static volatile unsigned int sSwapCount, sSwapReplaced, sSwapGapUs;
 static u64 sLastSwapTick;
 /*
  * A third top screen buffer (DKR_TRIPLE_BUFFER, roadmap P35, on by default since switch bench #246: 48 to 60 fps
- * on Crescent Island and Haunted Woods with the same GPU time; on an Old 3DS, #251 had it 0.7 to 1.1 fps ahead).
- * libctru has two, so a frame finished before the last one reached the screen waits for it
+ * on Crescent Island and Haunted Woods with the same GPU time; off on an Old 3DS, where #251 had it at most 1 fps
+ * ahead but its memory left textures without a GPU copy, #252). libctru has two, so a frame finished before the last one reached the screen waits for it
  * (wait_for_present). With three, of our own in linear memory, it is copied into one that is neither on screen nor
  * waiting to be, and carries on. citro3d copies a frame into what gfxGetFramebuffer returns and shows it with
  * gfxScreenSwapBuffers, both wrapped (-Wl,--wrap=...) to use ours: the first while sTripleGet is set (only around
@@ -1168,6 +1168,7 @@ static u64 sLastSwapTick;
  * kept while frames go to libctru's buffers, as one of ours may still be on screen then.
  */
 #define TRIPLE_BYTES (GSP_SCREEN_WIDTH * GSP_SCREEN_HEIGHT_TOP_2X * 3) // 800 pixels across or two eyes, 24-bit
+#define TRIPLE_TEXTURE_RESERVE (8 * 1024 * 1024) // Linear memory that must stay free for textures (Old 3DS)
 static int sTripleWanted;
 static volatile int sTripleFrame, sTripleGet;
 static volatile unsigned int sTripleQueued, sTripleSwaps;
@@ -1274,6 +1275,14 @@ static int triple_choose(void) {
         return 0;
     }
     if (sTriple[0] == NULL) {
+        // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here left
+        // 35 textures without a GPU copy (bug report #252).
+        if (plat_old_3ds() && linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
+            plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
+                     (unsigned long) (linearSpaceFree() / 1024));
+            sTripleFail = 1;
+            return 0;
+        }
         for (i = 0; i < 3; i++) {
             sTriple[i] = linearAlloc(TRIPLE_BYTES);
             if (sTriple[i] == NULL) {
@@ -2289,7 +2298,7 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
-    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", 1) != 0;
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
