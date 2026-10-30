@@ -174,15 +174,17 @@ typedef struct BenchSwitch {
  * The two-core renderer is now the Old 3DS default, raced off; with the GPU mostly idle (7-9 ms of a 33 ms frame) the
  * looks an Old 3DS has off for speed are raced on one at a time (anti-aliasing 2x, Balanced widescreen, colour boost),
  * and render ahead 1, as the split already keeps two frames in flight.
+ * Bench #266 (v27, Jungle Falls): the two-core renderer off fell to 21 fps, so it is out of the bench; anti-aliasing 2x,
+ * Balanced widescreen and render ahead 1 each kept 97-98% of frames at 30, so an Old 3DS now races with them as the
+ * New 3DS does, and each is raced back to the old setting on the heavier tracks. Colour boost cost nothing (a look,
+ * left to the player).
  * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
  * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "two-core renderer off (P21)", { "DKR_SPLIT_RENDER", NULL }, 1, 0 },
-    { "render ahead 1, not 2", { "BENCH_RENDER_AHEAD", NULL }, 2, 1 },
-    { "anti-aliasing 2x", { "BENCH_AA", NULL }, PLAT_AA_OFF, PLAT_AA_2X },
-    { "Balanced widescreen", { "BENCH_WIDESCREEN", NULL }, 0, 2 },
-    { "colour boost on", { "BENCH_COLOUR", NULL }, 0, 1 },
+    { "render ahead 2", { "BENCH_RENDER_AHEAD", NULL }, 1, 2 },
+    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_2X, PLAT_AA_OFF },
+    { "the N64's 4:3", { "BENCH_WIDESCREEN", NULL }, 2, 0 },
     { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
@@ -209,8 +211,8 @@ static void apply_config(s32 config) {
     if (sMode == MODE_SWITCH) {
         // The menus' settings have no say in the bench's races (user rule, 2026-10-29): every race draws with the
         // bench's own render settings: anti-aliasing 2x, 60 fps, Balanced widescreen and render ahead 1 on a New 3DS;
-        // anti-aliasing off, 30 fps, the N64's 4:3 and render ahead 2 on an Old 3DS (being made to run well at that
-        // size first); 400 pixels, no 3D, mipmaps on, no colour boost, edge trimming on, GPU vertex maths off. Only
+        // anti-aliasing 2x, 30 fps, Balanced widescreen and render ahead 1 on an Old 3DS;
+        // 400 pixels, no 3D, mipmaps on, no colour boost, edge trimming on, GPU vertex maths off. Only
         // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
         // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
         // variable several switches share (the GPU route's rows) keeps the race's test setting.
@@ -226,9 +228,9 @@ static void apply_config(s32 config) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
-        plat_override_switch("BENCH_RENDER_AHEAD", plat_old_3ds() ? 2 : 1);
-        plat_override_switch("BENCH_WIDESCREEN", plat_old_3ds() ? 0 : 2);
-        plat_override_switch("BENCH_AA", plat_old_3ds() ? PLAT_AA_OFF : PLAT_AA_2X);
+        plat_override_switch("BENCH_RENDER_AHEAD", 1);
+        plat_override_switch("BENCH_WIDESCREEN", 2);
+        plat_override_switch("BENCH_AA", PLAT_AA_2X);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);

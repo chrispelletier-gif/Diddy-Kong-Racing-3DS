@@ -1258,9 +1258,10 @@ static void apply_screen_mode(void) {
 
 static void alloc_frame_slots(void);
 
-/* An Old 3DS (roadmap O8): its one core already runs the renderer at under 20 fps, so the defaults it starts with
- * (until the player picks in Settings) leave out what costs CPU or GPU time: anti-aliasing, 800 pixels, stereo 3D
- * (which draws everything twice) and widescreen (which shows more of the track). The player's choice always wins. */
+/* An Old 3DS (roadmap O8): the defaults it starts with (until the player picks in Settings) leave out 800 pixels and
+ * stereo 3D (which draws everything twice). With the two-core renderer its GPU is mostly idle, and switch bench #266
+ * (Jungle Falls) kept 97-98% of frames at 30 with anti-aliasing 2x or Balanced widescreen, so those are its defaults
+ * now, as on a New 3DS (whose anti-aliasing default is 4x). The player's choice always wins. */
 static int is_old_3ds(void) {
     bool isNew3DS = false;
     APT_CheckNew3DS(&isNew3DS);
@@ -1272,7 +1273,7 @@ PLAT_COLD static void read_screen_settings(void) {
     u8 model = 0;
     int old3ds = is_old_3ds();
     // An Old 3DS starts with the N64's own 4:3 picture: it is being made to run well at that size first (O8).
-    sWideSetting = settings_get("widescreen", old3ds ? 0 : 2);
+    sWideSetting = settings_get("widescreen", 2);
     sWideSetting = sWideSetting < 0 || sWideSetting > 3 ? 2 : sWideSetting;
     s800Setting = settings_get("wide800", !old3ds) != 0;
     sStereoSetting = settings_get("stereo3d", !old3ds) != 0;
@@ -1304,7 +1305,7 @@ void gfxb_init(void) {
         // Anti-aliasing is the Settings menu's choice; until one is made, 4x unless DKR_AA says otherwise (0 off, 1 4x,
         // 2 2x, as settings.txt has it). An fb16 line left in settings.txt by an older build is ignored.
         const char *aa = plat_getenv("DKR_AA");
-        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_OFF : PLAT_AA_4X);
+        sDefaultAa = settings_get("aa", aa != NULL ? atoi(aa) : is_old_3ds() ? PLAT_AA_2X : PLAT_AA_4X);
         if (sDefaultAa < PLAT_AA_OFF || sDefaultAa > PLAT_AA_2X) {
             sDefaultAa = PLAT_AA_4X;
         }
