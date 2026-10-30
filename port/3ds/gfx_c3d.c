@@ -155,6 +155,10 @@ static int sMipmapsUsed = 1, sMipmapsShown, sColourBoost;
 static volatile int sWideSetting = 1, s800Setting = 1, sStereoSetting = 1;
 static int sWide;               // This frame is drawn wide
 static float sScale3D = NARROW; // Clip x of 3D draws: NARROW, or 1 for widescreen
+/* Edge trimming as this frame draws it (plat_3ds_guard_band_setting, read once a frame: the per-draw path stays off
+ * the switch lookup, a string search that costs an Old 3DS instruction-cache refills). */
+static int sGuardBandFrame = 1;
+int plat_3ds_guard_band_setting(void);
 static int sStereo;             // This frame is drawn twice, once for each eye
 static int s800;                // The screen shows 800 pixels across
 static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
@@ -928,14 +932,23 @@ static int wide_setting(void) {
     return plat_switch("BENCH_WIDESCREEN", sWideSetting);
 }
 
+/* The widescreen style as frames use it: read once a frame (apply_screen_mode), as the renderer asks for it at every
+ * billboard load and the switch lookup is a string search; -1 until the first frame. */
+static volatile int sWideStyleFrame = -1;
+
+static int wide_style(void) {
+    int style = sWideStyleFrame;
+    return style >= 0 ? style : wide_setting();
+}
+
 float plat_aspect_scale(void) {
-    return wide_setting() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
+    return wide_style() ? (float) TOP_WIDTH / GFX_SCREEN_WIDTH : 1.0f;
 }
 
 float plat_fov_tan_scale(void) {
     // Wide 1, Balanced 1 / sqrt(1.25), Zoomed 1 / 1.25 (the 4:3 picture's sides).
     static const float sTanScale[4] = { 1.0f, 1.0f, 0.894427f, 0.8f };
-    int style = wide_setting();
+    int style = wide_style();
     return style >= 0 && style <= 3 ? sTanScale[style] : 1.0f;
 }
 
@@ -1178,11 +1191,12 @@ static void apply_screen_mode(void) {
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
 
-    if ((wide_setting() != 0) != sWide && sTarget != NULL) {
+    sWideStyleFrame = wide_setting();
+    if ((sWideStyleFrame != 0) != sWide && sTarget != NULL) {
         // The game only clears its 4:3 part of the screen: clear the sides of the last wide picture.
         sFrameStarted = 0;
     }
-    sWide = wide_setting() != 0;
+    sWide = sWideStyleFrame != 0;
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
@@ -2982,6 +2996,7 @@ void gfxb_start_frame(void) {
     promote_textures();
     forget_gpu_state();
     // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
+    sGuardBandFrame = plat_3ds_guard_band_setting();
     sMipmapsUsed = plat_switch("BENCH_MIPMAPS", sMipmapSetting) != 0;
     sMipmapsShown = plat_switch("BENCH_MIPMAPS", sMipmapSetting) == 2;
     sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
@@ -4701,7 +4716,7 @@ static void clip_to_guard_band(const GfxVertex **verts, int *numVerts, const u16
     const GfxVertex *in = *verts;
     int i, any = 0;
 
-    if (!plat_3ds_guard_band_setting() || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
+    if (!sGuardBandFrame || !grow((void **) &sClipOutside, &sClipOutsideCapacity, *numVerts, 1)) {
         return;
     }
     // Clip x runs along the target's height (the screen's 400 or 800 pixels across), clip y along its width.
@@ -5110,7 +5125,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
     // In 3D with auto convergence the full draw notes each draw's nearest vertices first (near_depth_note).
-    if (!sDrawLean || sVfmtOld || !indexed_enabled() || !plat_3ds_guard_band_setting() ||
+    if (!sDrawLean || sVfmtOld || !indexed_enabled() || !sGuardBandFrame ||
         (sStereo && sTuning[STEREO_AUTO]) || numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
         // Room for the most that cutting can add (the full draw checks what it really needs, and may still draw).
         sVboUsed + 15 + (numVerts + numTriangles * 15) * stride > VBO_BYTES ||
@@ -5231,7 +5246,7 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
     if (!sTransformOn) {
         return GFX_MODEL_CPU;
     }
-    if (!plat_3ds_guard_band_setting()) {
+    if (!sGuardBandFrame) {
         return GFX_MODEL_GPU;
     }
     sBandX = band_for(sTarget->frameBuf.height);
