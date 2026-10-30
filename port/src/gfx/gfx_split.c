@@ -273,6 +273,8 @@ int gfx_split_frame_start(int direct) {
     }
     if (!sActive) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
+    } else {
+        plat_split_render_cores(TRUE); // Follows a change of the system core's share (the switch bench's)
     }
     sActive = TRUE;
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;

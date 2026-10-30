@@ -182,13 +182,12 @@ typedef struct BenchSwitch {
  * a system call on both cores); raced against waking it every time.
  * Back faces culled in the walk (P40, DKR_CPU_CULL, on by default on an Old 3DS) is raced off against on: it stops
  * a command's double sided triangles splitting its draw from the one sided ones (about one draw in eight).
+ * Bench #274 (v30, Old 3DS, all three tracks at 28.5-29.7 fps): render ahead 2, anti-aliasing off, 4:3, P40 off and
+ * waking the backend for every draw gained nothing over the defaults, so those rows are gone. The two-core renderer's
+ * backend was busy 20-28 ms of its 80% share in crowded moments, so the system core's largest share is raced.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    { "backend woken for every draw (P21)", { "DKR_SPLIT_WAKE_KB", NULL }, 16, 0 },
-    { "render ahead 2", { "BENCH_RENDER_AHEAD", NULL }, 1, 2 },
-    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_2X, PLAT_AA_OFF },
-    { "the N64's 4:3", { "BENCH_WIDESCREEN", NULL }, 2, 0 },
-    { "back faces culled by the GPU, not the walk (P40 off)", { "DKR_CPU_CULL", NULL }, 1, 0 },
+    { "system core share 89%, not 80% (P21)", { "DKR_SPLIT_SHARE", NULL }, 80, 89 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

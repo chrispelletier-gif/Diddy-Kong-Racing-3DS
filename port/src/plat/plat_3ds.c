@@ -183,9 +183,19 @@ void plat_split_render_cores(int on) {
     if (sRcpCore != 0) {
         return;
     }
-    if (on && !sRaised) {
-        const char *env = plat_getenv("DKR_SPLIT_SHARE");
-        int share = env != NULL ? atoi(env) : 80;
+    if (on && sRaised) {
+        // Called every frame while split: the switch bench changes the share between races (DKR_SPLIT_SHARE).
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
+        if (share != sSyscoreShare && share >= 5 && share <= 89) {
+            Result res = APT_SetAppCpuTimeLimit(share);
+            plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
+                     R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+            if (R_SUCCEEDED(res)) {
+                sSyscoreShare = share;
+            }
+        }
+    } else if (on) {
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
         Result res;
         if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
             sBefore = 0;
