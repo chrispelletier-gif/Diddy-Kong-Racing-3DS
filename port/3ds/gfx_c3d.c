@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "gfx/gfx_split.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "plat/settings.h"
@@ -2875,8 +2876,19 @@ static void transform_frame_drawn(int frame) {
     }
 }
 
+/*
+ * Whether the walk may drop back faces itself (P40). Not in 3D, where each eye's offset can turn a nearly edge-on
+ * triangle round, and not with DKR_NO_CULL. With the two-core renderer sStereo is the backend's, up to two frames
+ * behind, so the slider is read here too: while split, a raised slider stops the walk culling before the backend
+ * turns 3D on.
+ */
 int gfxb_cpu_cull_ok(void) {
-    return !sStereo;
+    static int noCull = -1;
+
+    if (noCull < 0) {
+        noCull = plat_getenv("DKR_NO_CULL") != NULL;
+    }
+    return !noCull && !sStereo && (!gfx_split_active() || osGet3DSliderState() <= 0.0f);
 }
 
 int gfxb_gpu_transform(void) {
