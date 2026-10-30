@@ -158,17 +158,14 @@ typedef struct BenchSwitch {
  * or beat 30 with far fewer slower frames, so it is the Old 3DS default and the bench races at 20 there. The New
  * 3DS's third top screen buffer (P35) was at most 1 fps ahead but took memory textures needed (#252), so it stays
  * off there. The frame pacer (gfx_c3d.c) still cost frames on two tracks of three, so it is raced off against on.
+ * The Old 3DS renderer cuts (P38) each won in #255 (Jungle Falls 24.7 fps with all of them, 20.4 to 22.4 with one
+ * off) and the walk and draw breakdowns cost 2.5 to 4 fps there, so those rows are gone. The 20 fps cap now holds
+ * (src/video.c; #255 ran 60% of its frames at 30 under it), so 30 is raced against it. This list is the Old 3DS's:
+ * its usual 20 fps would pin a New 3DS to 20 too.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
-    // The Old 3DS renderer cuts (roadmap P38, on by default there): each raced off, to measure what it is worth.
-    { "texture lookup memo off (P38)", { "DKR_TEX_MEMO", NULL }, 1, 0 },
-    { "lean display list walk off (P38)", { "DKR_WALK_LEAN", NULL }, 1, 0 },
-    { "lean draw path off (P38)", { "DKR_DRAW_LEAN", NULL }, 1, 0 },
-    // The profiler's breakdowns (off by default on an Old 3DS, where their clock reads are system calls): each raced
-    // on, to measure what the breakdown costs the frame there.
-    { "walk breakdown on (P38)", { "DKR_WALK_PARTS", NULL }, 0, 1 },
-    { "draw breakdown on (P38)", { "DKR_DRAW_PARTS", NULL }, 0, 1 },
+    { "30 fps cap, not 20", { "DKR_FPS_PIN", NULL }, 20, 30 },
     { NULL, { NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

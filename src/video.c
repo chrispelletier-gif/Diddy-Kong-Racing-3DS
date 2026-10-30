@@ -2,6 +2,9 @@
 #include "memory.h"
 #include "PRinternal/viint.h"
 #include "types.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#endif
 
 /************ .data ************/
 
@@ -340,6 +343,13 @@ s32 fb_update(s32 mesg) {
         if ((gVideoDeltaTime < tempUpdateRate) && (D_801262E4 >= tempUpdateRate)) {
             gVideoDeltaTime = tempUpdateRate;
         }
+    }
+    // The frame rate cap (port Settings): the scheduler holds back a finished frame until the cap's retraces have
+    // passed, but with frames rendered ahead the game doesn't wait for that one, so at 20 fps (3 retraces) it still
+    // ran frames 2 retraces apart and jumped between 30 and 20 (switch bench #255: 60% of frames at 30). Only the
+    // 20 fps cap (an Old 3DS's default) is held here; 30 and 60 run as they always did.
+    if (plat_frame_retraces() >= 3 && gVideoDeltaTime < plat_frame_retraces()) {
+        gVideoDeltaTime = plat_frame_retraces();
     }
 #endif
     while (tempUpdateRate < gVideoDeltaTime) {
