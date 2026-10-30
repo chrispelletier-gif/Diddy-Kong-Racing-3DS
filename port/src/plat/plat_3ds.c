@@ -114,10 +114,13 @@ void plat_init(void) {
     // The system's own services, the GPU's among them, run there too: at the renderer's priority the sound held
     // them up and frame times doubled (bug report #78), so there it runs below them (DKR_SYSCORE_PRIO).
     // With the renderer on the system core the sound stays on the game's core (the DSP voices barely use it).
+    // On an Old 3DS the renderer and the game share core 0, so there the setting also moves the game's audio manager
+    // (the N64 sequencer and synth driver, n64thread4) to the system core, as the F-Zero X 3DS port does with its
+    // sound; at a 50% share by default (F-Zero settled on 60% for a heavier software mixer).
     sAudioCore = sRcpCore == 1 ? 0 : sRcpCore;
     if (sRcpCore != 1 && settings_get("sound_core", 0) && plat_getenv("DKR_SINGLE_CORE") == NULL) {
         const char *env = plat_getenv("DKR_SYSCORE_LIMIT");
-        int limit = env != NULL ? atoi(env) : 80;
+        int limit = env != NULL ? atoi(env) : isNew3DS ? 80 : 50;
         Result res = APT_SetAppCpuTimeLimit(limit);
         if (R_SUCCEEDED(res)) {
             sAudioCore = 1;
@@ -331,6 +334,11 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
+            if (sAudioCore == 1 && sRcpCore == 0 && strcmp(name, "n64thread4") == 0) {
+                // The audio manager (see plat_init): below the system's own services there, as the audio task is.
+                core = 1;
+                prio = PRIO_SYSCORE_AUDIO;
+            }
             break;
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);

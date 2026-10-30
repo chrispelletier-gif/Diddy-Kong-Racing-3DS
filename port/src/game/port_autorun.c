@@ -163,13 +163,14 @@ typedef struct BenchSwitch {
  * after #237 where it gained nothing on a GPU-bound frame): GPU vertex maths (P30) by itself, then with the track's
  * geometry kept on the GPU (P31), then with models recorded the first time they are drawn too (P34); off by default
  * until this bench says otherwise on an Old 3DS.
+ * Bench #258/#259 (v21/v22, Old 3DS) settled the rest: the frame pacer stays on (off had more frames slower than 20 fps;
+ * still raced, as the bench needs one row),
+ * the 20 fps cap stays (30 reached 30 on only 11% of frames), and the GPU route gained nothing there either (P31 equal,
+ * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
+    // Kept so the bench has a race against the usual settings: an empty bench doesn't race at all.
     { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
-    { "30 fps cap, not 20", { "DKR_FPS_PIN", NULL }, 20, 30 },
-    { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL, NULL }, 0, 1 },
-    { "P30 + track on the GPU (P31)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", NULL }, 0, 1 },
-    { "P30 + P31 + models recorded (P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
