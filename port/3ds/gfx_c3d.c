@@ -5148,6 +5148,17 @@ void gfxb_mesh_free(void *mesh) {
 static void delete_mesh(void *mesh) {
     C3DMesh *m = mesh;
     arena_free(m->base, m->numVerts);
+    if (sArenaFreeRuns == 1 && sArenaFree[0].count == MESH_ARENA_VERTS) {
+        // The last mesh is gone (meshes turned off, or a level left): the arena's megabyte goes back to the linear
+        // heap, which an Old 3DS needs for textures. Every frame that drew from it is done, as frees wait for that.
+        linearFree(sMeshArena);
+        sMeshArena = NULL;
+        sArenaFreeRuns = 0;
+        if (sBufMesh != NULL) {
+            sBufMesh = NULL; // The vertex buffer setting pointed into it: the next mesh draw points it again
+        }
+        plat_log("meshes: arena freed");
+    }
     free(m->indices);
     free(m);
 }

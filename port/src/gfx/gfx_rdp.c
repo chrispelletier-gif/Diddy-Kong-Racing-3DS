@@ -1822,6 +1822,17 @@ static void mesh_drop(MeshEntry *e) {
     __builtin_memset(e, 0, sizeof(*e));
 }
 
+/* Drops every mesh at once: with meshes off their memory is better left to textures (the switch bench turns them off
+ * between races, and an Old 3DS has little linear memory to spare). */
+static COLD void mesh_drop_all(void) {
+    u32 i;
+    for (i = 0; i < MESH_TABLE_SIZE; i++) {
+        if (sMeshes[i].used) {
+            mesh_drop(&sMeshes[i]);
+        }
+    }
+}
+
 /* Frees the meshes of commands not drawn for a while (a level left, an object gone), a part of the table a frame. */
 static void mesh_age(void) {
     static u32 sNext;
@@ -3140,7 +3151,11 @@ void port_gfx_run_task(void *taskPtr) {
     sGpuTransform = gfxb_gpu_transform();
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
-    if (sGpuTransform) {
+    if (!sTrackMesh && !sModelMesh) {
+        if (sMeshBytes > 0) {
+            mesh_drop_all();
+        }
+    } else {
         mesh_age();
         if (sFrameCount % 600 == 0) {
             plat_log("meshes: %u KB, %u draws, %u made, %u not recorded, %u data changes", (unsigned) (sMeshBytes / 1024),
