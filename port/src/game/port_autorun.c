@@ -185,9 +185,13 @@ typedef struct BenchSwitch {
  * Bench #274 (v30, Old 3DS, all three tracks at 28.5-29.7 fps): render ahead 2, anti-aliasing off, 4:3, P40 off and
  * waking the backend for every draw gained nothing over the defaults, so those rows are gone. The two-core renderer's
  * backend was busy 20-28 ms of its 80% share in crowded moments, so the system core's largest share is raced.
+ * The Jungle Falls tunnel cuts out on an Old 3DS in 4:3 and Wide, not in Balanced or 3D, and not on a PC: the Old 3DS
+ * races at 4:3 for now, with edge trimming and the lean draw path (which 3D doesn't use) each raced off, to find it.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "system core share 89%, not 80% (P21)", { "DKR_SPLIT_SHARE", NULL }, 80, 89 },
+    { "edge trimming off", { "BENCH_GUARD_BAND", NULL }, 1, 0 },
+    { "lean draw path off (P38)", { "DKR_DRAW_LEAN", NULL }, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
@@ -231,7 +235,7 @@ static void apply_config(s32 config) {
         }
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
-        plat_override_switch("BENCH_WIDESCREEN", 2);
+        plat_override_switch("BENCH_WIDESCREEN", plat_old_3ds() ? 0 : 2); // Old 3DS: 4:3 while the tunnel is hunted
         plat_override_switch("BENCH_AA", PLAT_AA_2X);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
