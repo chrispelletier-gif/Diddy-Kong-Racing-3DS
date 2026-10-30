@@ -417,6 +417,28 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
+            if (frames > 0) {
+                // What the draws are for (the game's tags, port_drawtag.h): where crowded moments cost the renderer.
+                static const char *const sKinds[4] = { "other", "track", "racers", "objects" };
+                unsigned long mix[4][3];
+                char line[256];
+                int k, at = 0;
+                gfx_draw_mix_take(mix);
+                for (k = 0; k < 4; k++) {
+                    at += plat_snprintf(line + at, sizeof(line) - at, "%s%s %lu draws %lu tris %lu verts", k ? ", " : "",
+                                        sKinds[k], mix[k][0] / frames, mix[k][1] / frames, mix[k][2] / frames);
+                }
+                port_log("draw mix a frame: %s", line);
+                if (gfx_split_active()) {
+                    unsigned long long walkWait, busy;
+                    unsigned int backendFrames, wakes;
+                    gfx_split_take_times(&walkWait, &busy, &backendFrames, &wakes);
+                    port_log("two-core renderer: backend busy %.2f ms a frame, woken %.1f times a frame; the walk "
+                             "waited %.2f ms a frame for it",
+                             backendFrames ? busy / 1e6 / backendFrames : 0.0,
+                             backendFrames ? (double) wakes / backendFrames : 0.0, walkWait / 1e6 / frames);
+                }
+            }
             // The frame end's waits are shown apart from its work.
             perFrame[PROF_PART_WALK_FRAMEEND] -=
                 perFrame[PROF_PART_END_GPU_WAIT] + perFrame[PROF_PART_PRESENT_WAIT];

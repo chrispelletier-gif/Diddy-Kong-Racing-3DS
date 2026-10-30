@@ -152,4 +152,7 @@ void prof_set_status(const char *text);
 }
 #endif
 
+/* The renderer's draw mix since the last call (gfx_rdp.c): per kind (port_drawtag.h) draws, triangles, vertices. */
+void gfx_draw_mix_take(unsigned long out[4][3]);
+
 #endif

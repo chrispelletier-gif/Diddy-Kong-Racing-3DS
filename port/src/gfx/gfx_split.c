@@ -65,7 +65,14 @@ static PlatSem *sSpace;                     // The backend thread moved on while
 static PlatSem *sFrameSlots;                // Frames the walk may still start ahead of the backend
 static volatile int sWalkWaiting;           // The walk waits on sSpace for room (or for the ring to empty)
 static volatile int sStarted, sActive;      // The backend thread exists; this frame's calls are queued
+static volatile int sBackendIdle;           // The backend thread caught up and waits (or is about to) on sData
+static unsigned int sWakeBytes;             // Queued bytes that wake an idle backend thread (DKR_SPLIT_WAKE_KB)
 static int sFailed;
+
+/* The profiler's view (gfx_split_take_times): the walk's waits for the backend, the backend's busy time (frame start
+ * to frame end, less its waits) and how often it was woken. Clocks are read only around waits, which block anyway. */
+static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBackendWaitNs;
+static unsigned int sBackendFrames, sBackendWakes;
 
 static void backend_thread(void *arg);
 
@@ -83,7 +90,11 @@ static void wait_for_room(unsigned int bytes) {
             break;
         }
         plat_sem_post(sData); // Makes sure the backend thread looks at the flag after this
-        plat_sem_wait(sSpace);
+        {
+            unsigned long long start = plat_time_ns();
+            plat_sem_wait(sSpace);
+            sWalkWaitNs += plat_time_ns() - start;
+        }
     }
 }
 
@@ -109,18 +120,36 @@ static void *reserve(unsigned int op, unsigned int payload) {
     return rec + 1;
 }
 
-/* Hands the record reserve gave over to the backend thread. */
+/*
+ * Hands the record reserve gave over to the backend thread. Waking the backend is a system call on both cores, and
+ * the backend, being quicker, would sleep and be woken for nearly every draw; so an idle backend is woken only once
+ * sWakeBytes are queued, or at the frame's end (DKR_SPLIT_WAKE_KB=0 = every record, as before). The head is moved
+ * before the flag is read, and the backend sets the flag before it looks at the head, so one of them sees the other.
+ */
 static void commit(void *payload) {
     SplitRecord *rec = (SplitRecord *) payload - 1;
+    unsigned int op = rec->op;
     __sync_synchronize(); // The record is written before the head moves past it.
     sHead += rec->bytes;
-    plat_sem_post(sData);
+    __sync_synchronize();
+    if (sBackendIdle && (op == OP_END || sHead - sTail >= sWakeBytes)) {
+        sBackendIdle = 0;
+        plat_sem_post(sData);
+    }
 }
 
 static void backend_thread(void *arg) {
     (void) arg;
     for (;;) {
-        plat_sem_wait(sData);
+        sBackendIdle = 1;
+        __sync_synchronize(); // The flag is set before the head is looked at (see commit).
+        if (sTail == sHead) {
+            unsigned long long start = plat_time_ns();
+            plat_sem_wait(sData);
+            sBackendWaitNs += plat_time_ns() - start;
+            sBackendWakes++;
+        }
+        sBackendIdle = 0;
         while (sTail != sHead) {
             SplitRecord *rec;
             unsigned int op, bytes;
@@ -132,12 +161,19 @@ static void backend_thread(void *arg) {
             p = rec + 1;
             switch (op) {
                 case OP_START:
+                    sBackendFrameStart = plat_time_ns();
+                    sBackendWaitNs = 0;
                     gfxb_start_frame();
                     break;
-                case OP_END:
+                case OP_END: {
+                    unsigned long long now;
                     plat_set_frame_step(*(int *) p);
                     gfxb_end_frame();
+                    now = plat_time_ns();
+                    sBackendBusyNs += now - sBackendFrameStart - sBackendWaitNs;
+                    sBackendFrames++;
                     break;
+                }
                 case OP_CLEAR_COLOR: {
                     SplitClear *c = p;
                     gfxb_clear_color(c->rect, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
@@ -239,7 +275,12 @@ int gfx_split_frame_start(int direct) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
     }
     sActive = TRUE;
-    plat_sem_wait(sFrameSlots);
+    sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
+    if (!plat_sem_try_wait(sFrameSlots)) {
+        unsigned long long start = plat_time_ns();
+        plat_sem_wait(sFrameSlots);
+        sWalkWaitNs += plat_time_ns() - start;
+    }
     commit(reserve(OP_START, 0));
     return TRUE;
 }
@@ -257,6 +298,16 @@ void gfx_split_frame_end(void) {
 
 int gfx_split_active(void) {
     return sActive;
+}
+
+void gfx_split_take_times(unsigned long long *walkWaitNs, unsigned long long *backendBusyNs,
+                          unsigned int *backendFrames, unsigned int *backendWakes) {
+    *walkWaitNs = sWalkWaitNs;
+    *backendBusyNs = sBackendBusyNs;
+    *backendFrames = sBackendFrames;
+    *backendWakes = sBackendWakes;
+    sWalkWaitNs = sBackendBusyNs = 0; // Read without a lock: a frame caught mid-update is off by a little
+    sBackendFrames = sBackendWakes = 0;
 }
 
 void gfx_split_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {

@@ -14,6 +14,7 @@
 #include "plat/profile.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "port_drawtag.h"
 
 #define MAX_VERTICES 64
 #define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
@@ -1179,6 +1180,16 @@ static COLD void trace_batch(void) {
 static COLD void flush_model_batch(void);
 static COLD void flush_mesh_batch(void);
 
+/* The draw mix (profiler "draw mix" line): what the draws are for, from the game's tags (port_drawtag.h), and per kind
+ * the draws, triangles and vertices since the profiler last took them. Plain counters: the walk's thread writes them. */
+static u8 sDrawKind;
+static unsigned long sDrawMix[4][3];
+
+void gfx_draw_mix_take(unsigned long out[4][3]) {
+    __builtin_memcpy(out, sDrawMix, sizeof(sDrawMix));
+    __builtin_memset(sDrawMix, 0, sizeof(sDrawMix));
+}
+
 /* Draws the batch of transformed triangles. */
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
@@ -1190,6 +1201,8 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
+        sDrawMix[sDrawKind][0]++;
+        sDrawMix[sDrawKind][1] += sBatchCount;
         REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
         walk_switch(part);
         sBatchCount = 0;
@@ -2661,8 +2674,12 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         }
 
         switch (op) {
-            case OP(G_SPNOOP):
             case OP(G_NOOP):
+                if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
+                    sDrawKind = w1 & 3;
+                }
+                break;
+            case OP(G_SPNOOP):
             case OP(G_RDPLOADSYNC):
             case OP(G_RDPPIPESYNC):
             case OP(G_RDPTILESYNC):
@@ -2701,6 +2718,7 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 }
                 load_vertices((const Vertex *) seg_addr(w1), count, g.vertexIndex);
                 g.vertexIndex += count;
+                sDrawMix[sDrawKind][2] += count;
                 break;
             }
 
@@ -3160,6 +3178,7 @@ void port_gfx_run_task(void *taskPtr) {
     int snapshot;
     port_gfx_init();
     sFrameCount++;
+    sDrawKind = PORT_DRAW_OTHER;
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
