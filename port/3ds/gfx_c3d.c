@@ -2742,11 +2742,11 @@ static void set_unif(int u, float x, float y, float z, float w) {
  * the reference renderer drawing them from the same draw. So the changed uniforms are written now and once more with
  * the draw, as write_settings_twice does for the other settings. DKR_UNIF_TWICE=0 writes them once.
  */
-static void unif_write_twice(void) {
+static void PLAT_COLD unif_write_twice_now(void) {
     unsigned changed = sUnifChanged;
     int u;
     sUnifChanged = 0;
-    if (!sUnifTwice || changed == 0) {
+    if (!sUnifTwice) {
         return;
     }
     C3Di_UpdateContext();
@@ -2757,11 +2757,16 @@ static void unif_write_twice(void) {
     }
 }
 
-/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
-static void set_cpu_uniforms(void) {
-    if (!sTransformOn || (sUnifKnown && !sUnifModel)) {
-        return;
+/* Only GPU vertex maths (P30) changes uniforms between draws: the test stays in the draws, the work out of their way
+ * (it would put the per-draw code past the Old 3DS's instruction cache). */
+static inline void unif_write_twice(void) {
+    if (__builtin_expect(sUnifChanged != 0, 0)) {
+        unif_write_twice_now();
     }
+}
+
+/* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
+static void PLAT_COLD set_cpu_uniforms_now(void) {
     set_unif(UNIF_MTX + 0, 1.0f, 0.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 1, 0.0f, 1.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 2, 0.0f, 0.0f, 1.0f, 0.0f);
@@ -2773,6 +2778,12 @@ static void set_cpu_uniforms(void) {
     set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
     sUnifKnown = 1;
     sUnifModel = 0;
+}
+
+static inline void set_cpu_uniforms(void) {
+    if (__builtin_expect(sTransformOn && !(sUnifKnown && !sUnifModel), 0)) {
+        set_cpu_uniforms_now();
+    }
 }
 
 /*

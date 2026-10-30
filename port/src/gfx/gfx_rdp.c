@@ -1176,8 +1176,8 @@ static COLD void trace_batch(void) {
     plat_log("    u %.3f..%.3f v %.3f..%.3f w %.1f..%.1f", minU, maxU, minV, maxV, minW, maxW);
 }
 
-static void flush_model_batch(void);
-static void flush_mesh_batch(void);
+static COLD void flush_model_batch(void);
+static COLD void flush_mesh_batch(void);
 
 /* Draws the batch of transformed triangles. */
 static NOINLINE HOT void flush_cpu_batch(void) {
@@ -1497,7 +1497,7 @@ static u8 sSlotLoad[MAX_VERTICES]; // The load each slot waits for, or NO_LOAD
 static s32 sAnyPending;
 
 /* Transforms the slots still waiting for load l (as load_vertices did when it came), in runs of neighbours. */
-static void resolve_load(u32 l) {
+static COLD void resolve_load(u32 l) {
     PendingLoad *pl = &sLoads[l];
     s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
     s32 i = pl->dest, end = pl->dest + pl->count;
@@ -1675,7 +1675,7 @@ void refb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
                      const unsigned short *indices, int numTriangles);
 #endif
 
-static void flush_model_batch(void) {
+static COLD void flush_model_batch(void) {
     u32 part;
     if (sModelCount == 0) {
         return;
@@ -1916,7 +1916,7 @@ static s32 mesh_build(const Triangle *tris, s32 count, const PendingLoad *pl, Me
 static GfxMeshPart sMeshParts[GFX_MAX_MESH_PARTS];
 static s32 sMeshTriangles;
 
-static void flush_mesh_batch(void) {
+static COLD void flush_mesh_batch(void) {
     u32 part;
     if (sMeshPartCount == 0) {
         return;
@@ -2058,7 +2058,7 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
  * backend takes the load's box (else returns FALSE, for the CPU path). Returns TRUE when it is done: drawn, or wholly
  * outside the guard band, which the CPU path would have dropped too.
  */
-static s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
+static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     GfxModelParams params;
     Viewport vp;
