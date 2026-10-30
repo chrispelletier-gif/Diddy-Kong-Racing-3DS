@@ -1705,7 +1705,7 @@ static COLD void flush_model_batch(void) {
         plat_log("    model batch, %d vertices", (int) sModelVertices);
     }
     part = walk_switch(WALK_DRAWS);
-    gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
+    gfx_split_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
     prof_count(PROF_DRAWS, 1);
     REF_CALL(refb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount));
@@ -1837,7 +1837,7 @@ static u32 mesh_hash(const Triangle *tris, s32 numTris, const Vertex *src, s32 n
 static void mesh_drop(MeshEntry *e) {
     if (e->mesh != NULL) {
         flush_mesh_batch(); // Its parts may be waiting to be drawn
-        gfxb_mesh_free(e->mesh);
+        gfx_split_mesh_free(e->mesh);
         sMeshBytes -= e->bytes;
     }
     __builtin_memset(e, 0, sizeof(*e));
@@ -1946,7 +1946,7 @@ static COLD void flush_mesh_batch(void) {
         plat_log("    mesh batch, %d parts", (int) sMeshPartCount);
     }
     part = walk_switch(WALK_DRAWS);
-    gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
+    gfx_split_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
     prof_count(PROF_DRAWS, 1);
     walk_switch(part);
@@ -2038,7 +2038,7 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
         if (e->mesh != NULL) {
             sMeshStats[3]++;
             flush_mesh_batch();
-            gfxb_mesh_free(e->mesh);
+            gfx_split_mesh_free(e->mesh);
             sMeshBytes -= e->bytes;
             e->mesh = NULL;
             if (++e->changes >= MESH_DYNAMIC_AFTER) {
@@ -3182,11 +3182,9 @@ void port_gfx_run_task(void *taskPtr) {
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
-    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly;
-    // so are frames with GPU vertex maths, whose walk asks the backend about each model (gfxb_model_check).
+    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly.
     snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
-    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
-                          plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1));
+    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame);
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(snapshot)) {
         start_snapshot();
@@ -3197,7 +3195,7 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = !gfx_split_active() && gfxb_gpu_transform();
+    sGpuTransform = gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;

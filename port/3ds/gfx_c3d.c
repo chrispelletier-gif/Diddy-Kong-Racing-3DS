@@ -4547,6 +4547,7 @@ PLAT_HOT static void write_settings_twice(const GfxDrawState *state, float *su0,
 
 static volatile int sGuardBand = -1; // Settings > Screen > Edge trimming (settings.txt "guardband"), else DKR_GUARD_BAND
 static float sBandX = GUARD_BAND, sBandY = GUARD_BAND; // The band in clip space: |x| <= sBandX * w, |y| <= sBandY * w
+static volatile float sCheckBandX = GUARD_BAND, sCheckBandY = GUARD_BAND; // The frame's band for gfxb_model_check
 static GfxVertex *sClipVerts;
 static u16 *sClipIndices;
 static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
@@ -4564,6 +4565,8 @@ static float band_for(int pixels) {
 static void set_frame_band(void) {
     sBandX = band_for(sTarget->frameBuf.height);
     sBandY = band_for(sTarget->frameBuf.width);
+    sCheckBandX = sBandX;
+    sCheckBandY = sBandY;
 }
 
 /* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
@@ -5274,18 +5277,18 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
  * GPU vertex maths (P30): whether a model draw can go to the GPU. The CPU path trims triangles to the guard band
  * (clip_to_guard_band), which needs their positions; here only the corners of the vertices' box are transformed. A box
  * wholly beyond one side of the band is drawn by neither path; one reaching past the band, or behind the camera, is
- * left to the CPU path.
+ * left to the CPU path. With the two-core renderer the walk calls this ahead of the backend, so it reads only what
+ * the backend's last frame left (the band, the settings), never the state of the draw being built.
  */
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
     int all = ~0, any = 0, i;
+    float bandX = sCheckBandX, bandY = sCheckBandY;
     if (!sTransformOn) {
         return GFX_MODEL_CPU;
     }
     if (!sGuardBandFrame) {
         return GFX_MODEL_GPU;
     }
-    sBandX = band_for(sTarget->frameBuf.height);
-    sBandY = band_for(sTarget->frameBuf.width);
     for (i = 0; i < 8; i++) {
         float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
         GfxVertex c;
@@ -5293,11 +5296,37 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
         c.x = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
         c.y = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
         c.w = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
-        out = outside_band(&c);
+        out = outside_band_of(&c, bandX, bandY);
         all &= out;
         any |= out;
     }
     return (all & OUTSIDE_PLANES) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
+}
+
+/*
+ * A model draw that reaches a frame without GPU vertex maths: with the two-core renderer the walk decides on a frame's
+ * model draws from the backend's last frame, so the frame GPU vertex maths turns off (the setting, or a hang) may
+ * still get some. They are transformed here the way the CPU path would have (indices less base: a mesh's are into
+ * the arena).
+ */
+static GfxVertex *sModelCpuVerts;
+static u16 *sModelCpuIndices;
+static int sModelCpuVertCapacity, sModelCpuIndexCapacity;
+
+static void model_draw_on_cpu(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
+                              int numVerts, const unsigned short *indices, int numTriangles, u32 base) {
+    int i;
+    if (!grow((void **) &sModelCpuVerts, &sModelCpuVertCapacity, numVerts, sizeof(GfxVertex)) ||
+        !grow((void **) &sModelCpuIndices, &sModelCpuIndexCapacity, numTriangles * 3, sizeof(u16))) {
+        return;
+    }
+    for (i = 0; i < numVerts; i++) {
+        gfx_model_to_vertex(&sModelCpuVerts[i], &verts[i], params);
+    }
+    for (i = 0; i < numTriangles * 3; i++) {
+        sModelCpuIndices[i] = (u16) (indices[i] - base);
+    }
+    gfxb_draw_indexed(state, sModelCpuVerts, numVerts, sModelCpuIndices, numTriangles);
 }
 
 /* What a model or mesh draw does before its vertices: room, hang report, settings, uniforms. Returns FALSE if the draw
@@ -5335,6 +5364,10 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
     u16 *ibo;
 
+    if (__builtin_expect(!sTransformOn, 0)) {
+        model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
+        return;
+    }
     if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
         return;
     }
@@ -5376,6 +5409,8 @@ typedef struct C3DMesh {
 } C3DMesh;
 
 static GfxModelVertex *sMeshArena;
+static LightLock sArenaLock; // With the two-core renderer the walk creates meshes while the backend deletes them
+static int sArenaLockMade;
 static struct {
     u32 start, count;
 } sArenaFree[MESH_FREE_RUNS];
@@ -5442,24 +5477,37 @@ static void arena_free(u32 start, u32 count) {
     sArenaFreeRuns++;
 }
 
+static void arena_lock(void) {
+    if (!sArenaLockMade) {
+        LightLock_Init(&sArenaLock); // First made on the walk's thread, before the backend has a mesh to delete
+        sArenaLockMade = 1;
+    }
+    LightLock_Lock(&sArenaLock);
+}
+
 void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
     C3DMesh *m = malloc(sizeof(C3DMesh));
-    int i;
+    GfxModelVertex *arena;
+    int i, ok;
     if (m == NULL || (m->indices = malloc(numIndices * sizeof(u16))) == NULL) {
         free(m);
         return NULL;
     }
-    if (!arena_alloc(numVerts, &m->base)) {
+    arena_lock();
+    ok = arena_alloc(numVerts, &m->base);
+    arena = sMeshArena; // Stays while this mesh is in it, whatever the backend frees meanwhile
+    LightLock_Unlock(&sArenaLock);
+    if (!ok) {
         free(m->indices);
         free(m);
         return NULL;
     }
     m->numVerts = numVerts;
-    memcpy(&sMeshArena[m->base], verts, numVerts * sizeof(GfxModelVertex));
+    memcpy(&arena[m->base], verts, numVerts * sizeof(GfxModelVertex));
     for (i = 0; i < numIndices; i++) {
         m->indices[i] = (u16) (m->base + indices[i]);
     }
-    gpu_flush(&sMeshArena[m->base], numVerts * sizeof(GfxModelVertex));
+    gpu_flush(&arena[m->base], numVerts * sizeof(GfxModelVertex));
     return m;
 }
 
@@ -5483,6 +5531,7 @@ void gfxb_mesh_free(void *mesh) {
 
 static void delete_mesh(void *mesh) {
     C3DMesh *m = mesh;
+    arena_lock();
     arena_free(m->base, m->numVerts);
     if (sArenaFreeRuns == 1 && sArenaFree[0].count == MESH_ARENA_VERTS) {
         // The last mesh is gone (meshes turned off, or a level left): the arena's megabyte goes back to the linear
@@ -5495,6 +5544,7 @@ static void delete_mesh(void *mesh) {
         }
         plat_log("meshes: arena freed");
     }
+    LightLock_Unlock(&sArenaLock);
     free(m->indices);
     free(m);
 }
@@ -5506,6 +5556,14 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
     int i, count = 0;
     u16 *ibo;
 
+    if (__builtin_expect(!sTransformOn, 0)) {
+        for (i = 0; i < numParts; i++) {
+            const C3DMesh *m = parts[i].mesh;
+            model_draw_on_cpu(state, params, &sMeshArena[m->base], m->numVerts, m->indices + parts[i].firstIndex,
+                              parts[i].numTriangles, m->base);
+        }
+        return;
+    }
     for (i = 0; i < numParts; i++) {
         count += parts[i].numTriangles * 3;
     }
