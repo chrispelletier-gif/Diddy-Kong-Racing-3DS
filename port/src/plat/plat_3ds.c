@@ -205,9 +205,9 @@ static volatile int sRendererPaused;
  */
 void plat_3ds_quit_point(int parkedState) {
     if (parkedState == PLAT_3DS_PARKED_GPU_IDLE && sPauseRequested && !sQuitting) {
-        // A renderer on an Old 3DS's system core gives its share of that core back while the game is away: the share
+        // A renderer (or half of one) on an Old 3DS's system core gives its share of that core back while the game is away: the share
         // holds even while the renderer waits, and slowed the HOME menu, whose services run there.
-        int lent = sRcpCore == 1 && sSyscoreShare > 0;
+        int lent = sSyscoreShare > 0; // The renderer's, or the two-core renderer's second half's
         if (lent) {
             Result res = APT_SetAppCpuTimeLimit(5);
             plat_log("system core time limit 5%% while away: %s (0x%08lX)", R_SUCCEEDED(res) ? "ok" : "failed",
@@ -331,6 +331,29 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             }
             stackSize = 64 * 1024;
             break;
+        case PLAT_THREAD_RCP2:
+            // The other core from the walk's: the system core when the renderer is on the game's (its share raised
+            // to DKR_SPLIT_SHARE, 80% by default, unless the sound already holds one), else the game's core, where
+            // it goes above the game as the renderer does.
+            stackSize = 64 * 1024;
+            if (sRcpCore == 1) {
+                core = 0;
+                prio = PRIO_RCP;
+            } else {
+                const char *env = plat_getenv("DKR_SPLIT_SHARE");
+                int share = env != NULL ? atoi(env) : 80;
+                core = 1;
+                prio = PRIO_SYSCORE_RCP;
+                if (sAudioCore != 1 || share > 50) {
+                    Result res = APT_SetAppCpuTimeLimit(share);
+                    plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
+                             R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+                    if (R_SUCCEEDED(res)) {
+                        sSyscoreShare = share;
+                    }
+                }
+            }
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
@@ -352,6 +375,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         if (kind == PLAT_THREAD_RCP) {
             sRcpCore = 0;
             sSyscoreShare = 0;
+            prio = PRIO_RCP;
+        }
+        if (kind == PLAT_THREAD_RCP2) {
             prio = PRIO_RCP;
         }
         core = 0;

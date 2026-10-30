@@ -13,6 +13,7 @@
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "gfx_backend.h"
+#include "gfx_split.h"
 
 #define MAX_VERTICES 64
 #define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
@@ -472,10 +473,10 @@ static void tex_memo_forget(void);
 /* Frees a cache entry's textures. */
 static void free_entry(TexCacheEntry *e) {
     if (e->hasOtherFilter) {
-        gfxb_texture_free(&e->otherFilter);
+        gfx_split_texture_free(&e->otherFilter);
         e->hasOtherFilter = FALSE;
     }
-    gfxb_texture_free(&e->tex);
+    gfx_split_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
     e->used = FALSE;
     e->gen++;
@@ -495,7 +496,7 @@ __attribute__((noinline)) static GfxTexture *share_other_filter(TexCacheEntry *e
     e->otherFilter = e->tex;
     e->otherFilter.filter = filter;
     e->otherFilter.backendData = NULL;
-    gfxb_texture_share(&e->otherFilter, &e->tex);
+    gfx_split_texture_share(&e->otherFilter, &e->tex);
     e->hasOtherFilter = TRUE;
     return &e->otherFilter;
 }
@@ -756,7 +757,7 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     e->tex.wrapS = wrapS;
     e->tex.wrapT = wrapT;
     e->tex.backendData = NULL;
-    gfxb_texture_upload(&e->tex);
+    gfx_split_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
     walk_switch(WALK_TEXTURES);
     if (!sPrewarming) {
@@ -1186,7 +1187,7 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             trace_batch();
         }
         part = walk_switch(WALK_DRAWS);
-        gfxb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
+        gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
         REF_CALL(refb_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount));
@@ -2497,11 +2498,11 @@ static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
         flush_batch();
         part = walk_switch(WALK_DRAWS);
         if (g.colorImage == g.depthImage) {
-            gfxb_clear_depth(rect);
+            gfx_split_clear_depth(rect);
             REF_CALL(refb_clear_depth(rect));
         } else {
             u32 c = rgba5551_to_8888(g.fillColor >> 16);
-            gfxb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
+            gfx_split_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
             REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
         walk_switch(part);
@@ -3137,7 +3138,10 @@ void port_gfx_run_task(void *taskPtr) {
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
-    gfxb_start_frame();
+    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly;
+    // so are frames with GPU vertex maths, whose walk asks the backend about each model (gfxb_model_check).
+    gfx_split_frame_start(REF_ACTIVE() || gPlatSnapshotRequested || sFrameCount == sTraceFrame ||
+                          plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1));
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(gPlatSnapshotRequested)) {
         start_snapshot();
@@ -3148,7 +3152,7 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = gfxb_gpu_transform();
+    sGpuTransform = !gfx_split_active() && gfxb_gpu_transform();
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
     if (!sTrackMesh && !sModelMesh) {
@@ -3176,7 +3180,7 @@ void port_gfx_run_task(void *taskPtr) {
     flush_batch();
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
-    gfxb_end_frame();
+    gfx_split_frame_end();
     walk_end();
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(sRefActive)) {

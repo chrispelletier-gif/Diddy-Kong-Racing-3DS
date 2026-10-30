@@ -84,6 +84,7 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "gfx/gfx_split.h"
 #include <string.h>
 
 #define MAX_RACES 1024
@@ -169,8 +170,7 @@ typedef struct BenchSwitch {
  * P34 6.7 ms more renderer time, P30 tunnel walls missing as on the New 3DS, #234), so it is off and out of the bench.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
-    // Kept so the bench has a race against the usual settings: an empty bench doesn't race at all.
-    { "frame pacing off", { "DKR_FRAME_PACE", NULL }, 1, 0 },
+    { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
@@ -593,6 +593,10 @@ static const char *graphics_setup(void) {
     if (share > 0) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/sys%d", (int) share);
+    }
+    if (gfx_split_active()) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/split");
     }
     return text;
 }

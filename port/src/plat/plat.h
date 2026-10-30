@@ -52,6 +52,7 @@ enum PlatThreadKind {
     PLAT_THREAD_HARDWARE, /* Emulated hardware (VI retrace, PI). Always above every game thread. */
     PLAT_THREAD_RCP,      /* Emulated RDP (graphics). May run on a different core. */
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
+    PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
 };
 
 void plat_init(void);

@@ -1610,7 +1610,10 @@ static void wait_for_present(void) {
  * it. The wait never makes the gap longer than the last one: the game measures its steps from how long its own
  * frames took, and a frame held back holds the game back too (it waits for a free frame slot), so waiting for whole
  * steps fed on itself and pulled the frame rate down (switch bench #247: 15.0 fps, 17.9 without pacing).
- * DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only.
+ * DKR_FRAME_PACE=0 = old; on by default on an Old 3DS only, and there only while the frames are handed over from the
+ * game's core: on the system core (Renderer System 80%, or the two-core renderer's second half there) its short sleeps
+ * wait for the core's next time slice, and bench #261 (Crescent Island, System 80%) ran 15.0 fps with it and 21.1
+ * without.
  */
 static u32 sPaceShown;    // The retrace the last frame was handed over for.
 static int sPaceInterval; // Retraces between the last two hand-overs.
@@ -1632,7 +1635,7 @@ static void pace_frame(void) {
     u32 now = gPlatCounters[PLAT_COUNTER_VI];
     int step = plat_frame_step();
     s32 ahead;
-    if (!plat_switch("DKR_FRAME_PACE", plat_old_3ds()) || step < 1 || step > 6) {
+    if (!plat_switch("DKR_FRAME_PACE", plat_old_3ds() && svcGetProcessorID() == 0) || step < 1 || step > 6) {
         sPaceInterval = (int) (now - sPaceShown);
         sPaceShown = now;
         return;
