@@ -197,8 +197,15 @@ typedef struct BenchSwitch {
  * (2, which loses their mipmaps in that race), to see what it could gain.
  * Bench run 15 (v35, Jungle Falls): GPU vertex maths cost the GPU 5 ms and the renderer 3 ms (29.0 and 28.7 fps
  * against 29.6), and the atlas 2 ms of each (29.3 and 29.4) whichever textures it took, so all four are off and out.
+ * Quick test run 4 (v36): every race is game-core bound, the worst in crowded moments (Whale Bay 84-89% of frames at
+ * 30, EverFrost Peak 90%), where the walk carries every kart. The game already swaps other karts to lower detail
+ * models by distance, sooner with more players on screen (objects.c); DKR_RACER_LOD=n uses the distances of n + 1
+ * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitchesOld3ds[] = {
+    { "other karts' low detail at 2-player distances", { "DKR_RACER_LOD", NULL }, 0, 1 },
+    { "other karts' low detail at 3-player distances", { "DKR_RACER_LOD", NULL }, 0, 2 },
+    { "other karts' low detail at 4-player distances", { "DKR_RACER_LOD", NULL }, 0, 3 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it

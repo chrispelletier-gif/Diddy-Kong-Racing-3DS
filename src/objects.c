@@ -43,6 +43,7 @@
 #include "weather.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
 #endif
 #include "port_step.h"
 
@@ -3814,7 +3815,23 @@ void set_temp_model_transforms(Object *obj) {
                     }
                     bossAsset = (u8 *) get_misc_asset(batchNum + VEHICLE_BOSSES); // 40 bytes of data u8[8][5]?
                     batchNum = 0;
+#ifdef TARGET_PORT
+                    {
+                        // Old 3DS work (DKR_RACER_LOD=n): the other racers switch to their lower detail models at
+                        // the distances the game uses with n + 1 players on screen. The player's own kart keeps
+                        // its own distances.
+                        s32 lodLayout = cam_get_viewport_layout();
+                        if (get_current_viewport() != objRacer->playerIndex) {
+                            s32 bias = plat_switch("DKR_RACER_LOD", 0);
+                            if (bias > lodLayout && bias <= 3) {
+                                lodLayout = bias;
+                            }
+                        }
+                        bossAsset += lodLayout * 10;
+                    }
+#else
                     bossAsset += cam_get_viewport_layout() * 10;
+#endif
                     if (get_current_viewport() != objRacer->playerIndex) {
                         bossAsset += 5;
                     }
