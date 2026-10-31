@@ -211,7 +211,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Quick test #304 (v40, the monitor): the walk costs some 50-70 us a command, and 30-85% of the sky's, track's
     // and effects' triangles are off the screen. DKR_WALK_REJECT drops a command wholly past one edge before its
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
-    { "off-screen commands dropped early (DKR_WALK_REJECT)", { "DKR_WALK_REJECT", NULL }, 0, 1 },
+    // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
+    // 30), so it is the Old 3DS default and out of the list.
+    // The Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames, also seen on a New 3DS) is
+    // raced with the New 3DS head flicker's suspects (#299: the GPU leaves out draws the walk sent). Watch the tunnel.
+    { "every GPU setting sent for every draw", { "DKR_STATE_CACHE", "DKR_FAST_STATE", NULL }, 1, 0, 0 },
+    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 0 },
+    { "shared vertices off", { "DKR_INDEXED", NULL }, 1, 0, 0 },
+    { "index buffer aligned", { "DKR_IBO_ALIGN", NULL }, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -221,15 +228,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * tries the GPU savers: adaptive anti-aliasing (P37, drops to one sample only on frames that would miss 60; it never
  * switched at #246's 400 pixels), anti-aliasing off, and textures in VRAM (P17, nothing in #176 at 400 pixels). */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "adaptive anti-aliasing (P37)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 0 },
-    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 0 },
-    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1, 0 },
-    // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
-    // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
-    { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
-    { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
-    { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
-    { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
+    // Diddy's head flicker hunt (#290/#299/#303: the GPU leaves out head draws the CPU reference draws). Watch Diddy
+    // at each race start; the race whose head stays solid names the cause.
+    { "every GPU setting sent for every draw", { "DKR_STATE_CACHE", "DKR_FAST_STATE", NULL }, 1, 0, 0 },
+    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 0 },
+    { "shared vertices off", { "DKR_INDEXED", NULL }, 1, 0, 0 },
+    { "index buffer aligned", { "DKR_IBO_ALIGN", NULL }, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
@@ -556,8 +560,7 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
-    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_CRESCENTISLAND, ASSET_LEVEL_DARKMOONCAVERNS,
-                                              ASSET_LEVEL_FROSTYVILLAGE };
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_JUNGLEFALLS }; // head flicker
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {

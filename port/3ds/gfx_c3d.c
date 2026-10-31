@@ -189,13 +189,24 @@ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
  * (roadmap item P12). Instead each texture is flushed when it is uploaded and the vertex buffer only from where the
  * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
  */
+static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first use
+static int sIndexed = -1;    // DKR_INDEXED, read on first use
+static int sFull = -1; // DKR_FULL_FLUSH, re-read when the switches change (switch bench)
+static int sIboAlign;   // DKR_IBO_ALIGN: each draw's indices start on an 8-index (16-byte) boundary
+
 static int full_flush(void) {
-    static int sFull = -1;
     if (sFull < 0) {
-        sFull = plat_getenv("DKR_FULL_FLUSH") != NULL;
+        sFull = plat_switch("DKR_FULL_FLUSH", 0) != 0;
         plat_log("GPU cache flush: %s", sFull ? "whole linear heap" : "written ranges only");
     }
     return sFull;
+}
+
+// DKR_IBO_ALIGN (head flicker bench): pads the index buffer so a draw's indices start 16-byte aligned.
+static inline void ibo_align(void) {
+    if (sIboAlign) {
+        sIboUsed = (sIboUsed + 7) & ~7;
+    }
 }
 
 /*
@@ -3244,6 +3255,11 @@ static void read_switches(void) {
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    // Re-read on their next use (the head flicker bench switches them between races).
+    sFull = -1;
+    sStateCache = -1;
+    sIndexed = -1;
+    sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
     // The lean draw (gfxb_draw_indexed): on by default on an Old 3DS only, until a New 3DS bench has measured it.
@@ -4790,11 +4806,8 @@ static inline int same_but_textures(const GfxDrawState *a, const GfxDrawState *b
            wa[offsetof(GfxDrawState, scissor) / 4 + 1] == wb[offsetof(GfxDrawState, scissor) / 4 + 1];
 }
 
-static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first call
-
 static void __attribute__((noinline, cold)) read_state_cache_setting(void) {
-    const char *env = plat_getenv("DKR_STATE_CACHE");
-    sStateCache = env != NULL ? atoi(env) : 1;
+    sStateCache = plat_switch("DKR_STATE_CACHE", 1);
     plat_log("GPU settings: %s", sStateCache == 0   ? "all set for every draw"
                                  : sStateCache == 2 ? "only changes are set"
                                                     : "only changes are set, all draw settings with a new texture");
@@ -5155,11 +5168,8 @@ static void hand_over_draw_parts(void) {
  * Indexed drawing (roadmap item P16): the frontend hands each vertex over once, however many triangles share it, so
  * it is converted and the GPU transforms it once. DKR_INDEXED=0 writes the triangles' corners one by one as before.
  */
-static int sIndexed = -1;
-
 static void __attribute__((noinline, cold)) read_indexed_setting(void) {
-    const char *env = plat_getenv("DKR_INDEXED");
-    sIndexed = env == NULL || atoi(env) != 0;
+    sIndexed = plat_switch("DKR_INDEXED", 1) != 0;
     plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
 }
 
@@ -5231,7 +5241,7 @@ static void __attribute__((noinline, cold)) log_draw_left_out(int vertBytes, int
         plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
                  sFrameCount,
                  sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
-                 : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
+                 : indexed && sIboUsed + count > (IBO_BYTES / (int) sizeof(u16) - 8) ? "index buffer"
                                                                                    : "command list",
                  sVboUsed, sIboUsed, (unsigned long) cmd_position());
     }
@@ -5310,7 +5320,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     written = indexed ? numVerts : count; // Vertices written to the buffer
     vertBytes = written * sVfmtStride[fmt];
 
-    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16)) ||
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > (IBO_BYTES / (int) sizeof(u16) - 8)) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
@@ -5356,6 +5366,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
     if (indexed) {
         int i;
+        ibo_align();
         ibo = sIbo + sIboUsed;
         for (i = 0; i < count; i++) {
             ibo[i] = (u16) (vertex + indices[i]);
@@ -5485,7 +5496,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
         (sStereo && sTuning[STEREO_AUTO]) || numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
         // Room for the most that cutting can add (the full draw checks what it really needs, and may still draw).
         sVboUsed + 15 + (numVerts + numTriangles * 15) * stride > VBO_BYTES ||
-        sIboUsed + numTriangles * 15 > IBO_BYTES / (int) sizeof(u16) ||
+        sIboUsed + numTriangles * 15 > (IBO_BYTES / (int) sizeof(u16) - 8) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         draw_indexed_full(state, verts, numVerts, indices, numTriangles);
         return;
@@ -5557,6 +5568,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
         vertex = restart_vertex_buffer(fmt, out, written * stride);
     }
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0; i < count; i++) {
         ibo[i] = (u16) (vertex + indices[i]);
@@ -5657,7 +5669,7 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
                             int numTriangles, HangDraw **hangDraw) {
     float su0, sv0, su1, sv1;
     int first;
-    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > IBO_BYTES / (int) sizeof(u16) ||
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > (IBO_BYTES / (int) sizeof(u16) - 8) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         if (sDrawsLeftOut++ < 5) {
             plat_log("frame %d: buffers full (%d bytes of vertices, %d indices, %lu command words), model triangles "
@@ -5699,6 +5711,7 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
         vertex = use_vertex_format(VFMT_MODEL);
     }
     memcpy(sVbo + sVboUsed, verts, vertBytes);
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0; i < count; i++) {
         ibo[i] = (u16) (vertex + indices[i]);
@@ -5904,6 +5917,7 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         sBufMesh = sMeshArena;
         sVfmtBound = -1;
     }
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0, count = 0; i < numParts; i++) {
         const C3DMesh *m = parts[i].mesh;

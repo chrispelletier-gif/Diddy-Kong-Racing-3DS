@@ -1703,7 +1703,7 @@ static void read_switches(void) {
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
     // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
     sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
-    sWalkReject = plat_switch("DKR_WALK_REJECT", 0) != 0;
+    sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
