@@ -213,13 +213,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
-    // Run 18 (v42) and 19 (v43): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames)
-    // came and went whatever the cache flush did. Run 20 (v44): the usual settings' race, always the first, was clean
-    // again and the next ones weren't. So these rows change nothing (DKR_BENCH_SAME is read by nobody): if the
-    // second race on glitches anyway, something builds up from race to race; if not, switching settings does it.
-    { "usual settings again (2nd race)", { "DKR_BENCH_SAME", NULL }, 0, 1, 1 },
-    { "usual settings again (3rd race)", { "DKR_BENCH_SAME", NULL }, 0, 2, 1 },
-    { "usual settings again (4th race)", { "DKR_BENCH_SAME", NULL }, 0, 3, 1 },
+    // Runs 18-20 (v42-v44): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames) came
+    // and went from race to race whatever was switched (usual settings, edge trimming off and the off-screen drop off
+    // had clean races; the cache flush, VFP maths, lean draw and fast clip didn't), so one race says little. Now the
+    // frame history counts the flashes itself (flashes column) and Jungle Falls is raced twice for each row.
+    { "edge trimming off", { "BENCH_GUARD_BAND", NULL }, 1, 0, 1 },
+    { "off-screen command drop off", { "DKR_WALK_REJECT", NULL }, 1, 0, 1 },
+    { "back faces culled by the GPU", { "DKR_CPU_CULL", NULL }, 1, 0, 1 },
+    { "VFP vector maths off", { "DKR_VFP_VECTORS", NULL }, 1, 0, 1 },
+    { "lean draw off", { "DKR_DRAW_LEAN", NULL }, 1, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -408,7 +410,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
-static u32 sAudioGapsStart, sAudioDropsStart;
+static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -562,7 +564,7 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_JUNGLEFALLS }; // head flicker
-    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS }; // the tunnel dropout (#306)
+    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS, ASSET_LEVEL_JUNGLEFALLS }; // tunnel (#306), twice
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
@@ -1032,7 +1034,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
-                  "paced_20fps_pct,paced_slower_pct\n",
+                  "paced_20fps_pct,paced_slower_pct,flashes\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1072,12 +1074,13 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // After the mode's own column, so the columns before keep their places in older results files.
     // Then the frame pacing: the 1% low, and the share of game frames that took one retrace, two, three or more (measured
     // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d\n",
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
-                  (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames));
+                  (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
@@ -1459,7 +1462,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 10)
+#define MAX_FIELDS (COL_COUNT + 11)
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -1472,10 +1475,21 @@ typedef struct BenchGroup {
     s32 worstFrame, worstGpu;
     s32 pacedRaces; // Races with the frame pacing columns (results written before they were added have none).
     double low1, paced[4];
+    s32 flashes, flashRaces; // Picture flashes (the frame history's watch), in races whose results have the column
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
 static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+
+/* The switch bench's flashes cell: picture flashes in how many races ("-" for results without the column). */
+static const char *flash_cell(const BenchGroup *g) {
+    static char cell[32];
+    if (g->flashRaces == 0) {
+        return "-";
+    }
+    plat_snprintf(cell, sizeof(cell), "%d in %d", (int) g->flashes, (int) g->flashRaces);
+    return cell;
+}
 
 static double bench_avg(double sum, s32 count) {
     return count ? sum / count : 0.0;
@@ -1617,6 +1631,10 @@ static void bench_summary(char *out, s32 size) {
                 g->paced[i] += parse_decimal(fields[gapsColumn + 5 + i]);
             }
         }
+        if (numFields > gapsColumn + 9) {
+            g->flashRaces++;
+            g->flashes += port_atoi(fields[gapsColumn + 9]);
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -1656,8 +1674,8 @@ static void bench_summary(char *out, s32 size) {
                                "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
-                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
+                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit | flashes |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -1690,14 +1708,14 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
-                        (int) g->worstGpu, (int) g->worstFrame, sLimitNames[limit]);
+                        (int) g->worstGpu, (int) g->worstFrame, sLimitNames[limit], flash_cell(g));
                     continue;
                 }
                 length += plat_snprintf(
@@ -2099,6 +2117,7 @@ void port_autorun_frame(s32 updateRate) {
                 prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
+                sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
                 set_phase(PHASE_RACING);
             } else if (plat_time_ns() - sPhaseStartNs > 120000000000ULL) {
                 // The game left the level, or never started the race (a boss's speech is far shorter than this).

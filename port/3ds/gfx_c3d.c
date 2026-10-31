@@ -2026,6 +2026,8 @@ static int *history_buffer_frame(const u8 *buffer, int add) {
     return &sHistoryBuf[0].frame;
 }
 
+static void flash_watch(void);
+
 /* Called with sRecentScreen found for this frame, before its picture is copied in. */
 static void history_sample(void) {
     const int rows = sRecentScreenRows, bpp = sRecentScreenBpp, step = rows >= 2 * TOP_WIDTH ? 4 : 2;
@@ -2084,6 +2086,7 @@ static void history_sample(void) {
     }
     sHistoryFrame[sHistoryNext] = *frame;
     sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
+    flash_watch();
     sHistoryNs += plat_time_ns() - start;
     if (++sHistorySampled == 600) {
         plat_log("frame history: %llu us a frame (%llu of it cache invalidate)", sHistoryNs / 1000 / 600,
@@ -2123,6 +2126,67 @@ static int history_flash_pixels(const u16 *a, const u16 *b, const u16 *c) {
         }
     }
     return count;
+}
+
+/*
+ * The flash watch (Old 3DS tunnel dropout, #306): as each picture comes in, the one FLASH_LAG pictures back is
+ * scored against those 1, 2 and 4 before and after it (when they are all the frames after one another), on one pixel
+ * in four. A score over FLASH_SHARE of the pixels counts as a flash; a run of flashed pictures counts once
+ * (PLAT_COUNTER_FLASHES, the switch bench's flashes column) and is logged. DKR_FLASH_WATCH=0 turns it off.
+ */
+#define FLASH_LAG 4
+#define FLASH_SHARE 8 // per cent
+static int sFlashWatch = -1, sFlashRun;
+
+static int flash_pixels_sparse(const u16 *a, const u16 *b, const u16 *c) {
+    int x, y, count = 0;
+    for (x = 0; x < HISTORY_W; x += 2) {
+        for (y = 0; y < HISTORY_H; y += 2) {
+            int i = x * HISTORY_H + y;
+            int la = history_luma(a[i]), lb = history_luma(b[i]), lc = history_luma(c[i]);
+            int da = abs(lb - la), dc = abs(lb - lc), d = da < dc ? da : dc;
+            if (d - abs(la - lc) > 40) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+static void flash_watch(void) {
+    static const int gaps[3] = { 1, 2, 4 };
+    const int sampled = (HISTORY_W / 2) * (HISTORY_H / 2);
+    int mid, g, best = 0, newest;
+    if (sFlashWatch < 0) {
+        sFlashWatch = plat_switch("DKR_FLASH_WATCH", 1) != 0;
+    }
+    if (!sFlashWatch || sHistorySlots < 2 * FLASH_LAG + 1) {
+        return;
+    }
+    newest = (sHistoryNext + sHistorySlots - 1) % sHistorySlots;
+    mid = (newest + sHistorySlots - FLASH_LAG) % sHistorySlots;
+    for (g = 0; g < 3; g++) {
+        int a = (mid + sHistorySlots - gaps[g]) % sHistorySlots, c = (mid + gaps[g]) % sHistorySlots, sc;
+        if (sHistoryFrame[a] < 0 || sHistoryFrame[c] < 0 || sHistoryFrame[mid] < 0 ||
+            sHistoryFrame[mid] - sHistoryFrame[a] != gaps[g] || sHistoryFrame[c] - sHistoryFrame[mid] != gaps[g]) {
+            continue;
+        }
+        sc = flash_pixels_sparse(sHistory + a * HISTORY_PIXELS, sHistory + mid * HISTORY_PIXELS,
+                                 sHistory + c * HISTORY_PIXELS);
+        if (sc > best) {
+            best = sc;
+        }
+    }
+    if (best * 100 > sampled * FLASH_SHARE) {
+        if (!sFlashRun) {
+            gPlatCounters[PLAT_COUNTER_FLASHES]++;
+            plat_log("picture flash: frame %d, %d%% of the picture unlike the frames around it", sHistoryFrame[mid],
+                     best * 100 / sampled);
+        }
+        sFlashRun = 1;
+    } else {
+        sFlashRun = 0;
+    }
 }
 
 /*
