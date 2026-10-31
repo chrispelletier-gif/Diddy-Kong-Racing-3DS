@@ -213,14 +213,17 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
-    // Run 18 (v42): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames, also seen on
-    // a New 3DS) didn't show with the whole-memory cache flush (user). These rows find which part of it matters, and
-    // what it costs ("whole-heap cache flush" log line): the GSP service's flushes instead of the system call's, the
-    // whole heap flushed before the hand-over, and only the flush's time waited.
-    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 1 },
-    { "cache flushes by the GSP service", { "DKR_SVC_FLUSH", NULL }, 1, 0, 1 },
-    { "whole heap flushed before the hand-over", { "DKR_FLUSH_TEST", NULL }, 0, 1, 1 },
-    { "only the flush's time waited", { "DKR_FLUSH_TEST", NULL }, 0, 2, 1 },
+    // Run 18 (v42) and 19 (v43): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames)
+    // came and went whatever the cache flush did, so it is random, about 4 races in 5. The PC never shows it with the
+    // same walk switches, so the suspects are the 3DS-only parts: the VFP vector maths (asm), the lean draw, and
+    // the guard band clipping (edge trimming, fast clip). Jungle Falls only; watch the tunnel.
+    { "VFP vector maths off", { "DKR_VFP_VECTORS", NULL }, 1, 0, 1 },
+    { "lean draw off", { "DKR_DRAW_LEAN", NULL }, 1, 0, 1 },
+    { "edge trimming off", { "BENCH_GUARD_BAND", NULL }, 1, 0, 1 },
+    { "triangles beyond the band clipped, not dropped", { "DKR_FAST_CLIP", NULL }, 1, 0, 1 },
+    { "off-screen command drop off", { "DKR_WALK_REJECT", NULL }, 1, 0, 1 },
+    // Never seen in 3D, which turns the CPU's back-face culling off.
+    { "back faces culled by the GPU", { "DKR_CPU_CULL", NULL }, 1, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -563,6 +566,7 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_JUNGLEFALLS }; // head flicker
+    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS }; // the tunnel dropout (#306)
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
@@ -572,10 +576,16 @@ static void build_short_list(void) {
     s32 quick = sMode == MODE_QUICK, boss = sMode == MODE_BOSS;
     s32 numBenchConfigs = config_count();
     s32 newSwitch = sMode == MODE_SWITCH && !plat_old_3ds();
-    const s8 *defaultTracks = boss ? sBossTracks : quick ? sQuickTracks : newSwitch ? sSwitchTracksNew3ds : sBenchTracks;
+    s32 oldSwitch = sMode == MODE_SWITCH && plat_old_3ds();
+    const s8 *defaultTracks = boss        ? sBossTracks
+                              : quick     ? sQuickTracks
+                              : newSwitch ? sSwitchTracksNew3ds
+                              : oldSwitch ? sSwitchTracksOld3ds
+                                          : sBenchTracks;
     s32 numDefault = boss        ? (s32) ARRAY_COUNT(sBossTracks)
                      : quick     ? (s32) ARRAY_COUNT(sQuickTracks)
                      : newSwitch ? (s32) ARRAY_COUNT(sSwitchTracksNew3ds)
+                     : oldSwitch ? (s32) ARRAY_COUNT(sSwitchTracksOld3ds)
                                  : (s32) ARRAY_COUNT(sBenchTracks);
     const char *prefix = boss                    ? "DKR_AUTORUN_BOSS"
                          : quick                 ? "DKR_AUTORUN_QUICK"
