@@ -63,6 +63,24 @@
  *   DKR_AUTORUN_BOSS_PASSES=n         Races per boss (1).
  * Its files are boss_test_state.txt and boss_test_results.csv (with a "build" column).
  *
+ * The whole game run covers as much of the game as can be played without a person: a pass through the menus (title,
+ * options, character select, the adventure and tracks menus), every race track with every vehicle it allows (the
+ * characters taking turns), each race again in its adventure form with its silver coins, the four battle arenas, the ten
+ * boss fights, and a tour of every hub of the overworld, where the kart is put in each part (segment) of the map in turn
+ * and turned all the way round, as no AI course runs there. The adventure levels play with an everything-unlocked
+ * progress in memory (the save files are never written, and the progress is put back when the run ends). Each part ends
+ * with a progress report: the run's issue is made after the first part and each later part adds a comment with its
+ * table (fps, 1% low, what limits it, hitches), so a run of several hours can be followed as it goes; no race starts
+ * while a report is going out. The short variant (about an hour, for gathering profile-guided compiling data) races one
+ * lap of each track with its usual vehicle, two silver coin races, one boss and one hub. It is started with the "Whole
+ * game" or "Whole game (short)" row of the Test run menu, or always runs with:
+ *   DKR_AUTORUN_WHOLE=1|2             Turns it on (2: the short variant).
+ *   DKR_AUTORUN_WHOLE_PARTS=mrcabh    Only these parts: menus, races, coins, arenas, bosses, hubs (default all).
+ *   DKR_AUTORUN_WHOLE_LEVELS=id,...   Only the stops in these levels (the menus are level 21, the front end).
+ *   DKR_AUTORUN_REPORT_MINUTES=n      A progress report at least this often too (default 30; 0 only after each part).
+ * Its files are wholegame_state.txt and wholegame_results.csv (with "stop", "part" and "build" columns); the issue's
+ * number is kept in test_run_issue.txt. port_autorun_section_done (weak, empty) is called as each part ends.
+ *
  * The order is character by character, each over every track, so stopping early still covers every track.
  * Progress is saved before each race (autorun_state.txt), so after a crash or a hang the next launch resumes with the
  * race after the one that failed, and records that race's failure. Each race adds a line to autorun_results.csv,
@@ -110,15 +128,33 @@
 #define BOSS_PASSES 1
 #define SWITCH_STATE_FILE "switch_bench_state.txt"
 #define SWITCH_RESULTS_FILE "switch_bench_results.csv"
+#define WHOLE_STATE_FILE "wholegame_state.txt"
+#define WHOLE_RESULTS_FILE "wholegame_results.csv"
+#define RUN_ISSUE_FILE "test_run_issue.txt" // The whole game run's issue number (written by the bug report sender)
+#define TOUR_SECONDS 4      // A hub tour's time in each segment, turning the kart once round (short run: 2)
+#define ARENA_SECONDS 150   // A battle arena is played this long unless it ends first (short run: 60)
+#define MENU_STEP_TIMEOUT 20 // Seconds the menu pass waits for a menu before giving up on that step
+#define MENU_PASS_SECONDS 300 // The whole menu pass, after which it goes back to the title screen however it can
+#define REPORT_WAIT_SECONDS 300 // The longest the run waits for a progress report to go out before going on
 
 /* Which run: the full test run, the GPU benchmark, the quick test, the boss fights or the switch bench. */
-enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_SWITCH, MODE_COUNT };
+enum Mode { MODE_FULL, MODE_BENCH, MODE_QUICK, MODE_BOSS, MODE_SWITCH, MODE_WHOLE, MODE_COUNT };
+
+/* What a stop of the whole game run is; each kind is one part of the run, in this order. Every other run's races are
+ * STOP_RACE. */
+enum StopKind { STOP_MENUS, STOP_RACE, STOP_COINS, STOP_ARENA, STOP_BOSS, STOP_HUB, STOP_KINDS };
+static const char *const sStopKindNames[STOP_KINDS] = { "menus", "race", "coins", "arena", "boss", "hub" };
+static const char *const sPartNames[STOP_KINDS] = { "Menus", "Races", "Silver coin races", "Battle arenas",
+                                                    "Boss fights", "Hub tours" };
+static const char sPartLetters[STOP_KINDS] = { 'm', 'r', 'c', 'a', 'b', 'h' };
 
 typedef struct Race {
     s8 track;
     s8 character;
     s8 vehicle;
     s8 config; // The settings for the race (an index into sBenchConfigs, or the switch bench's set), or -1 to leave them.
+    s8 kind;   // enum StopKind
+    s8 laps;   // Laps to race instead of the track's own, or 0
 } Race;
 
 /* The GPU benchmark's render settings. The first is the default ones, which the others are compared with. */
@@ -206,18 +242,32 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * 3.7-4.3 ms, Haunted Woods' 1% low 30 to 58 fps); the P38 cuts, the P40 cull and texture hashes kept 8 frames were
  * within noise. At the player's 800 pixels and 4x anti-aliasing the GPU is the limit instead (#289, #291: 15-16 ms of
  * a 16.7 ms frame, Crescent Island down to 45 fps), so the New 3DS races at those settings (sBenchRenderNew3ds) and
- * tries the GPU savers: adaptive anti-aliasing (P37, drops to one sample only on frames that would miss 60; it never
- * switched at #246's 400 pixels), anti-aliasing off, and textures in VRAM (P17, nothing in #176 at 400 pixels). */
+ * measures the GPU there. Bench #309 made adaptive anti-aliasing (P37) the player's default, but the usual race keeps
+ * it off so the GPU's full cost stays measurable; its row shows what a player gets. Textures in VRAM (P17, 0.1-0.2 ms
+ * in #309) left the list. The fixed cost (about 9-10 ms with nothing drawn) is split by the colour boost and
+ * 400-pixel rows, and the sky (P41) and depth format (P42) rows try to cut the sky's and the track's fill. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "adaptive anti-aliasing (P37)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 0 },
-    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 0 },
-    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1, 0 },
+    { "adaptive anti-aliasing (P37, the player's default)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 1 },
+    { "cost: anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 1 },
+    { "cost: colour boost off", { "BENCH_COLOUR", NULL }, 1, 0, 1 },
+    { "cost: 400 pixels, not 800", { "BENCH_WIDE800", NULL }, 1, 0, 1 },
+    // GPU savers for the track and sky (2026-10-31): the sky drawn last, only where the track left gaps (P41), and
+    // a depth buffer without the unused stencil (P42).
+    { "sky drawn last (P41)", { "DKR_SKY_LAST", NULL }, 0, 1, 0 },
+    { "depth buffer without stencil (P42)", { "DKR_DEPTH24", NULL }, 0, 1, 0 },
     // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
     // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
     { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
     { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
     { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
     { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
+    // Diddy's head flicker hunt (#290/#299/#303: the GPU leaves out head draws the CPU reference draws). Watch Diddy
+    // at each race start; the race whose head stays solid names the cause.
+    // Each on its own (not in the all-switches race, which tries P41 + P42 together).
+    { "every GPU setting sent for every draw", { "DKR_STATE_CACHE", "DKR_FAST_STATE", NULL }, 1, 0, 1 },
+    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 1 },
+    { "shared vertices off", { "DKR_INDEXED", NULL }, 1, 0, 1 },
+    { "index buffer aligned", { "DKR_IBO_ALIGN", NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
@@ -322,7 +372,10 @@ static const char *const sCharacterNames[NUMBER_OF_CHARACTERS] = {
 };
 static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
-enum Request { REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH };
+enum Request {
+    REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
+    REQUEST_WHOLE, REQUEST_WHOLE_SHORT
+};
 
 typedef struct ModeInfo {
     const char *name;        // For the bottom screen and the results.
@@ -338,6 +391,7 @@ static const ModeInfo sModes[MODE_COUNT] = {
     { "Quick test", QUICK_STATE_FILE, QUICK_RESULTS_FILE, "build", "DKR_AUTORUN_QUICK" },
     { "Boss fights", BOSS_STATE_FILE, BOSS_RESULTS_FILE, "build", "DKR_AUTORUN_BOSS" },
     { "Switch bench", SWITCH_STATE_FILE, SWITCH_RESULTS_FILE, "config,pct_60fps", "DKR_AUTORUN_SWITCH" },
+    { "Whole game", WHOLE_STATE_FILE, WHOLE_RESULTS_FILE, "stop,part,build", "DKR_AUTORUN_WHOLE" },
 };
 
 /* The benchmarks: their races each have a config (an index into sBenchConfigs, or a switch set). */
@@ -360,6 +414,13 @@ static const char *config_name(s32 config) {
 }
 
 static s32 sEnabled = -1;
+static s32 sShort;          // The whole game run's short variant
+static s32 sReportedAt = -1; // The whole game run: the stop before which the last progress report went out
+static unsigned long long sLastReportNs;
+static unsigned long long sReportWaitNs; // When the run started waiting for a report to go out, or 0
+static s32 sTourSegment;    // A hub tour's segment
+static s32 sTourRetraces;   // Game time in it
+static s32 sTourSegments;   // Segments toured so far
 static s32 sInitialised;
 static volatile s32 sRequest;
 static s32 sQuitPending;
@@ -544,8 +605,8 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
-    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_CRESCENTISLAND, ASSET_LEVEL_DARKMOONCAVERNS,
-                                              ASSET_LEVEL_FROSTYVILLAGE };
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_CRESCENTISLAND, ASSET_LEVEL_HAUNTEDWOODS,
+                                              ASSET_LEVEL_JUNGLEFALLS }; // GPU heaviest + head flicker
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
@@ -603,8 +664,79 @@ static void build_short_list(void) {
             sRaces[sNumRaces].character = character[0];
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
             sRaces[sNumRaces].config = (quick || boss) ? -1 : configs[pass];
+            sRaces[sNumRaces].kind = STOP_RACE;
+            sRaces[sNumRaces].laps = 0;
             sNumRaces++;
         }
+    }
+}
+
+/* Adds a stop to the whole game run, if DKR_AUTORUN_WHOLE_PARTS and _LEVELS let it. */
+static void add_stop(s32 kind, s32 level, s32 character, s32 vehicle, s32 laps) {
+    const char *parts = plat_getenv("DKR_AUTORUN_WHOLE_PARTS");
+    s8 levels[MAX_TRACKS];
+    s32 numLevels = parse_list(plat_getenv("DKR_AUTORUN_WHOLE_LEVELS"), levels, MAX_TRACKS), i;
+    if (sNumRaces >= MAX_RACES || (parts != NULL && strchr(parts, sPartLetters[kind]) == NULL)) {
+        return;
+    }
+    for (i = 0; i < numLevels && levels[i] != level; i++) {}
+    if (numLevels >= 0 && i == numLevels) {
+        return;
+    }
+    sRaces[sNumRaces].track = level;
+    sRaces[sNumRaces].character = character;
+    sRaces[sNumRaces].vehicle = vehicle;
+    sRaces[sNumRaces].config = -1;
+    sRaces[sNumRaces].kind = kind;
+    sRaces[sNumRaces].laps = laps;
+    sNumRaces++;
+}
+
+/*
+ * The whole game run: the menus, every race track with every vehicle it allows, the races again with their silver
+ * coins (adventure), the battle arenas, the boss fights and the hub tours. The characters take turns (not Drumstick or
+ * T.T., who need unlocking), so each is raced and drawn somewhere. The short variant keeps every part but plays less of
+ * each: one lap of each track with its usual vehicle, two silver coin races, one boss and one hub.
+ */
+static void build_whole_list(void) {
+    static const s8 sBosses[] = {
+        ASSET_LEVEL_TRICKYTOPS1, ASSET_LEVEL_BLUEY1, ASSET_LEVEL_BUBBLER1, ASSET_LEVEL_SMOKEY1, ASSET_LEVEL_WIZPIG1,
+        ASSET_LEVEL_TRICKYTOPS2, ASSET_LEVEL_BLUEY2, ASSET_LEVEL_BUBBLER2, ASSET_LEVEL_SMOKEY2, ASSET_LEVEL_WIZPIG2,
+    };
+    static const s8 sArenas[] = { ASSET_LEVEL_FIREMOUNTAIN, ASSET_LEVEL_ICICLEPYRAMID, ASSET_LEVEL_DARKWATERBEACH,
+                                  ASSET_LEVEL_SMOKEYCASTLE };
+    static const s8 sHubs[] = { ASSET_LEVEL_CENTRALAREAHUB,       ASSET_LEVEL_DINODOMAINHUB,
+                                ASSET_LEVEL_SHERBETISLANDHUB,     ASSET_LEVEL_SNOWFLAKEMOUNTAINHUB,
+                                ASSET_LEVEL_DRAGONFORESTHUB,      ASSET_LEVEL_FUTUREFUNLANDHUB };
+    static const s8 sCast[] = { 1, 0, 2, 3, 4, 5, 7, 9 }; // Bumper first, then the rest without Drumstick and T.T.
+    s8 *ids = (s8 *) get_misc_asset(ASSET_MISC_MAIN_TRACKS_IDS);
+    s32 numTracks, t, i, v, usable, turn = 0;
+
+    for (numTracks = 0; ids[numTracks] != -1 && numTracks < MAX_TRACKS; numTracks++) {}
+    sNumRaces = 0;
+    add_stop(STOP_MENUS, ASSET_LEVEL_FRONTEND, 1, 0, 0);
+    for (t = 0; t < numTracks; t++) {
+        usable = leveltable_vehicle_usable(ids[t]);
+        for (i = 0; i < 3; i++) {
+            v = (i == 0) ? leveltable_vehicle_default(ids[t]) : i - (i <= leveltable_vehicle_default(ids[t]));
+            if (i > 0 && (sShort || !(usable & (1 << v)))) {
+                continue;
+            }
+            add_stop(STOP_RACE, ids[t], sCast[turn++ % ARRAY_COUNT(sCast)], v, sShort ? 1 : 0);
+        }
+    }
+    // The four worlds' tracks have silver coins (Future Fun Land's are last in the list).
+    for (t = 0; t < numTracks && t < 16; t += sShort ? 9 : 1) {
+        add_stop(STOP_COINS, ids[t], sCast[turn++ % ARRAY_COUNT(sCast)], leveltable_vehicle_default(ids[t]), 0);
+    }
+    for (t = 0; t < (s32) ARRAY_COUNT(sArenas); t++) {
+        add_stop(STOP_ARENA, sArenas[t], sCast[turn++ % ARRAY_COUNT(sCast)], leveltable_vehicle_default(sArenas[t]), 0);
+    }
+    for (t = 0; t < (sShort ? 1 : (s32) ARRAY_COUNT(sBosses)); t++) {
+        add_stop(STOP_BOSS, sBosses[t], 1, leveltable_vehicle_default(sBosses[t]), 0); // Bumper, as the boss test
+    }
+    for (t = 0; t < (sShort ? 1 : (s32) ARRAY_COUNT(sHubs)); t++) {
+        add_stop(STOP_HUB, sHubs[t], sCast[turn++ % ARRAY_COUNT(sCast)], VEHICLE_CAR, 0);
     }
 }
 
@@ -614,6 +746,10 @@ static void build_race_list(void) {
     s32 numLevels, numWorlds;
     s32 allVehicles = plat_getenv("DKR_AUTORUN_VEHICLES") != NULL && plat_getenv("DKR_AUTORUN_VEHICLES")[0] == 'a';
 
+    if (sMode == MODE_WHOLE) {
+        build_whole_list();
+        return;
+    }
     if (sMode != MODE_FULL) {
         build_short_list();
         return;
@@ -654,6 +790,8 @@ static void build_race_list(void) {
                     sRaces[sNumRaces].character = characters[c];
                     sRaces[sNumRaces].vehicle = v;
                     sRaces[sNumRaces].config = -1;
+                    sRaces[sNumRaces].kind = STOP_RACE;
+                    sRaces[sNumRaces].laps = 0;
                     sNumRaces++;
                 }
             }
@@ -663,11 +801,12 @@ static void build_race_list(void) {
 
 /* running: the race under way (-1: none). recorded: its result is already in the results file. */
 static void save_state_recorded(s32 running, s32 recorded) {
-    char text[176];
+    char text[200];
     plat_snprintf(text, sizeof(text),
-                  "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n",
+                  "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n"
+                  "short=%d\nreported=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
-                  (int) recorded, (int) sFinished, (int) sProblems);
+                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt);
     io_queue(state_file(), text, NULL, FALSE);
 }
 
@@ -705,11 +844,27 @@ static const char *track_name(s32 track) {
     return (name != NULL) ? name : "?";
 }
 
+/* The stop's name for the results: the level's, or what is done there. */
+static const char *stop_name(const Race *race) {
+    static char text[2][48];
+    static s32 which;
+    if (race->kind == STOP_MENUS) {
+        return "Menus";
+    }
+    if (race->kind == STOP_HUB || race->kind == STOP_COINS) {
+        which ^= 1;
+        plat_snprintf(text[which], sizeof(text[which]), "%s %s", track_name(race->track),
+                      race->kind == STOP_HUB ? "tour" : "coins");
+        return text[which];
+    }
+    return track_name(race->track);
+}
+
 static void record_problem(const char *what) {
     char text[256];
     Race *race = &sRaces[sNext];
     plat_snprintf(text, sizeof(text), "run %d race %d/%d: %s, %s, %s: %s\n", (int) sRun, (int) sNext + 1,
-                  (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
+                  (int) sNumRaces, stop_name(race), sCharacterNames[(s32) race->character],
                   sVehicleNames[(s32) race->vehicle], what);
     append_file(PROBLEMS_FILE, text, NULL);
     port_log("autorun: %s", text);
@@ -776,7 +931,7 @@ static void record_hitches(const char *outcome) {
 
     bzero(counts, sizeof(counts));
     length = plat_snprintf(text, sizeof(text), "\n## run %d race %d/%d: %s, %s, %s, %s", (int) sRun, (int) sNext + 1,
-                           (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
+                           (int) sNumRaces, stop_name(race), sCharacterNames[(s32) race->character],
                            sVehicleNames[(s32) race->vehicle], graphics_setup());
     if (is_bench()) {
         length += plat_snprintf(text + length, sizeof(text) - length, ", config %d", (int) race->config);
@@ -810,7 +965,7 @@ static void record_hitches(const char *outcome) {
         if (i < WORST_HITCHES) {
             sWorstHitches[i].periodUs = h->periodUs;
             plat_snprintf(sWorstHitches[i].text, sizeof(sWorstHitches[i].text), "race %d (%s): %.150s", (int) sNext + 1,
-                          track_name(race->track), h->text);
+                          stop_name(race), h->text);
             if (sWorstHitchCount < WORST_HITCHES) {
                 sWorstHitchCount++;
             }
@@ -854,7 +1009,7 @@ static void record_draw_mix(const char *outcome) {
     gameTimed = mix.gameTimedFrames ? (double) mix.gameTimedFrames : 1.0;
     audited = mix.auditedFrames ? (double) mix.auditedFrames : 1.0;
     plat_snprintf(prefix, sizeof(prefix), "%d,%d,%s,%s,%s,%s,%d,%s", (int) sRun, (int) sNext + 1,
-                  track_name(race->track), sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle],
+                  stop_name(race), sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle],
                   graphics_setup(), is_bench() ? (int) race->config : -1, outcome);
     for (k = 0; k < PORT_DRAW_KINDS; k++) {
         const ProfKindStats *st = &mix.kinds[k];
@@ -994,6 +1149,11 @@ static s32 hitch_summary(char *out, s32 size) {
     return length < size ? length : size - 1;
 }
 
+/* Whether a stop ended as it should: a race finished, a battle arena played for its time, a hub toured. */
+static s32 outcome_ok(const char *outcome) {
+    return str_equal(outcome, "finished") || str_equal(outcome, "played") || str_equal(outcome, "toured");
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
     char header[640];
@@ -1022,7 +1182,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         line, sizeof(line),
         "%d,%d,%d,%s,%s,%s,%s,%.1f,%d,%.1f,%u,%.2f,%d,%d,%d,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,"
         "%u,%u,%d,%s,%d,%s",
-        (int) sRun, (int) sNext + 1, (int) race->track, track_name(race->track),
+        (int) sRun, (int) sNext + 1, (int) race->track, stop_name(race),
         sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle], outcome, sRaceRetraces / 60.0,
         (int) position, sLoadNs / 1e9, stats->gameFrames,
         stats->elapsedNs ? stats->gameFrames * 1e9 / stats->elapsedNs : 0.0,
@@ -1044,6 +1204,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                       (int) pct(stats->rateFrames[1], stats->gameFrames));
     } else if (sMode == MODE_QUICK || sMode == MODE_BOSS) {
         plat_snprintf(line + length, sizeof(line) - length, ",%s", plat_build_version());
+    } else if (sMode == MODE_WHOLE) {
+        plat_snprintf(line + length, sizeof(line) - length, ",%s,%s,%s", sStopKindNames[(s32) race->kind],
+                      sPartNames[(s32) race->kind], plat_build_version());
     }
     length = strlen(line);
     // After the mode's own column, so the columns before keep their places in older results files.
@@ -1057,7 +1220,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
-    if (str_equal(outcome, "finished")) {
+    if (outcome_ok(outcome)) {
         sFinished++;
     } else {
         sProblems++;
@@ -1083,6 +1246,7 @@ s32 port_autorun_enabled(void) {
             const char *env = plat_getenv(sModes[mode].env);
             if (env != NULL && env[0] != '0') {
                 sMode = mode;
+                sShort = mode == MODE_WHOLE && env[0] == '2';
             }
         }
         for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
@@ -1092,6 +1256,7 @@ s32 port_autorun_enabled(void) {
                 text[length] = '\0';
                 if (state_value(text, "active", 0) != 0) {
                     sMode = mode;
+                    sShort = state_value(text, "short", 0);
                 }
             }
         }
@@ -1145,6 +1310,10 @@ static void init(void) {
         for (i = 0; i < (s32) ARRAY_COUNT(bossNames); i++) {
             hash_text(plat_getenv(bossNames[i]));
         }
+    } else if (sMode == MODE_WHOLE) {
+        hash_text(sShort ? "whole game short" : "whole game");
+        hash_text(plat_getenv("DKR_AUTORUN_WHOLE_PARTS"));
+        hash_text(plat_getenv("DKR_AUTORUN_WHOLE_LEVELS"));
     } else {
         for (i = 0; i < (s32) ARRAY_COUNT(names); i++) {
             hash_text(plat_getenv(names[i]));
@@ -1158,6 +1327,9 @@ static void init(void) {
     sProblems = 0;
     sFpsSum = 0.0;
     sFpsCount = 0;
+    sReportedAt = -1;
+    sReportWaitNs = 0;
+    sLastReportNs = plat_time_ns();
 
     io_flush(); // A run that just ended may still be writing its state.
     make_path(path, sizeof(path), state_file());
@@ -1173,6 +1345,7 @@ static void init(void) {
             sNext = state_value(text, "next", 0);
             sFinished = state_value(text, "finished", 0);
             sProblems = state_value(text, "problems", 0);
+            sReportedAt = state_value(text, "reported", -1);
             if (running >= 0 && running < sNumRaces && state_value(text, "recorded", 0)) {
                 // The last launch stopped after the race's result was written (the results screen): carry on after it.
                 make_path(path, sizeof(path), HANG_FILE);
@@ -1234,6 +1407,7 @@ static void init(void) {
     if (sNext == 0) {
         io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
         io_queue(DRAWMIX_FILE, "", NULL, FALSE);
+        io_queue(RUN_ISSUE_FILE, "", NULL, FALSE); // Its progress reports make a new issue.
     }
     set_phase(PHASE_TITLE);
     if (sNumRaces == 0) {
@@ -1261,10 +1435,13 @@ s32 port_autorun_switch_count(void) {
 
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
- * boss fights (4) or the switch bench (5), or stop whichever is going (0), at the next game frame.
+ * boss fights (4), the switch bench (5) or the whole game run (6, or 7 for its short variant), or stop whichever is
+ * going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 5   ? REQUEST_SWITCH
+    sRequest = start == 7   ? REQUEST_WHOLE_SHORT
+               : start == 6 ? REQUEST_WHOLE
+               : start == 5 ? REQUEST_SWITCH
                : start == 4 ? REQUEST_BOSS
                : start == 3 ? REQUEST_QUICK
                : start == 2 ? REQUEST_BENCH
@@ -1276,6 +1453,319 @@ static void set_phase(s32 phase) {
     sPhase = phase;
     sPhaseStartNs = plat_time_ns();
 }
+
+/*
+ * The whole game run's adventure levels need progress: the hub doors open, the bosses beaten (a race has its silver
+ * coins once its world's boss is beaten and the race won, objects.c), the story's cutscenes seen. It is given in memory
+ * only (a test run never writes the save files) and put back before any other stop and when the run ends.
+ */
+#define PROGRESS_LEVELS 128
+#define PROGRESS_WORLDS 16
+static s32 sProgressSaved;
+static Settings sSavedSettings;
+static s16 sSavedBalloons[PROGRESS_WORLDS];
+static s32 sSavedCourseFlags[PROGRESS_LEVELS];
+
+static void give_progress(void) {
+    Settings *settings = get_settings();
+    s32 numLevels, numWorlds, i;
+    level_count(&numLevels, &numWorlds);
+    numLevels = numLevels < PROGRESS_LEVELS ? numLevels : PROGRESS_LEVELS;
+    numWorlds = numWorlds < PROGRESS_WORLDS ? numWorlds : PROGRESS_WORLDS;
+    if (!sProgressSaved) {
+        sSavedSettings = *settings;
+        bcopy(settings->balloonsPtr, sSavedBalloons, numWorlds * sizeof(s16));
+        bcopy(settings->courseFlagsPtr, sSavedCourseFlags, numLevels * sizeof(s32));
+        sProgressSaved = TRUE;
+    }
+    settings->balloonsPtr[0] = 47;
+    for (i = 1; i < numWorlds; i++) {
+        settings->balloonsPtr[i] = 8;
+    }
+    for (i = 0; i < numLevels; i++) {
+        // Visited and won, every hub door open, the silver coins still to collect.
+        settings->courseFlagsPtr[i] = (settings->courseFlagsPtr[i] | 0xFFFF0003) & ~RACE_CLEARED_SILVER_COINS;
+    }
+    settings->keys = 0x1E;
+    settings->bosses = 0x07BF;
+    settings->trophies = 0x03FF;
+    settings->cutsceneFlags |= 0x3FFFB; // Every cutscene seen but 0x4 (Adventure Two).
+    settings->tajFlags = 0x3F;
+    settings->ttAmulet = 4;
+    settings->wizpigAmulet = 4;
+    settings->newGame = FALSE;
+}
+
+static void put_back_progress(void) {
+    Settings *settings = get_settings();
+    s32 numLevels, numWorlds;
+    if (!sProgressSaved) {
+        return;
+    }
+    level_count(&numLevels, &numWorlds);
+    numLevels = numLevels < PROGRESS_LEVELS ? numLevels : PROGRESS_LEVELS;
+    numWorlds = numWorlds < PROGRESS_WORLDS ? numWorlds : PROGRESS_WORLDS;
+    bcopy(sSavedBalloons, sSavedSettings.balloonsPtr, numWorlds * sizeof(s16));
+    bcopy(sSavedCourseFlags, sSavedSettings.courseFlagsPtr, numLevels * sizeof(s32));
+    *settings = sSavedSettings;
+    sProgressSaved = FALSE;
+}
+
+/*
+ * The hub tour: no AI course runs through a hub, so the kart is put in each segment of the level's model in turn (on
+ * the vertex nearest the middle of the segment's bounds, where the floor usually is, and left to fall onto it) and
+ * turned once all the way round there, so the camera behind it looks every way. The kart doesn't drive meanwhile.
+ */
+extern LevelModel *gCurrentLevelModel;
+static f32 sTourX, sTourZ;
+static s32 sTourYaw;
+
+static void place_kart(Object *obj, Object_Racer *racer, f32 x, f32 y, f32 z, s32 yaw) {
+    Camera *camera;
+    s32 i;
+    obj->trans.x_position = x;
+    obj->trans.y_position = y;
+    obj->trans.z_position = z;
+    obj->segmentID = get_level_segment_index_from_position(x, y, z);
+    racer->prev_x_position = x;
+    racer->prev_y_position = y;
+    racer->prev_z_position = z;
+    racer->steerVisualRotation = yaw;
+    obj->trans.rotation.y_rotation = yaw;
+    obj->trans.rotation.x_rotation = 0;
+    obj->trans.rotation.z_rotation = 0;
+    for (i = 0; i < 4; i++) {
+        racer->unkD8[i * 3 + 0] = x;
+        racer->unkD8[i * 3 + 1] = y;
+        racer->unkD8[i * 3 + 2] = z;
+    }
+    if (obj->interactObj != NULL) {
+        obj->interactObj->x_position = x;
+        obj->interactObj->y_position = y;
+        obj->interactObj->z_position = z;
+    }
+    racer->velocity = 0.0f;
+    racer->lateral_velocity = 0.0f;
+    racer->y_rotation_vel = 0;
+    racer->x_rotation_vel = 0;
+    racer->z_rotation_vel = 0;
+    obj->x_velocity = 0.0f;
+    obj->y_velocity = 0.0f;
+    obj->z_velocity = 0.0f;
+    set_active_camera(racer->playerIndex);
+    camera = cam_get_active_camera_no_cutscenes();
+    camera->trans.x_position = x;
+    camera->trans.y_position = y;
+    camera->trans.z_position = z;
+}
+
+/* Moves the tour on to the next segment with something in it. Returns FALSE when every segment has been seen. */
+static s32 tour_next_segment(Object *obj, Object_Racer *racer) {
+    LevelModel *model = gCurrentLevelModel;
+    while (model != NULL && ++sTourSegment < model->numberOfSegments) {
+        LevelModelSegment *segment = &model->segments[sTourSegment];
+        LevelModelSegmentBoundingBox *box = &model->segmentsBoundingBoxes[sTourSegment];
+        f32 midX = (box->x1 + box->x2) * 0.5f, midZ = (box->z1 + box->z2) * 0.5f;
+        f32 best = 1e30f;
+        s32 i, pick = -1;
+        for (i = 0; i < segment->numberOfVertices; i++) {
+            f32 dx = segment->vertices[i].x - midX, dz = segment->vertices[i].z - midZ;
+            if (dx * dx + dz * dz < best) {
+                best = dx * dx + dz * dz;
+                pick = i;
+            }
+        }
+        if (pick < 0) {
+            continue;
+        }
+        sTourX = segment->vertices[pick].x;
+        sTourZ = segment->vertices[pick].z;
+        sTourYaw = obj->trans.rotation.y_rotation;
+        place_kart(obj, racer, sTourX, segment->vertices[pick].y + 20.0f, sTourZ, sTourYaw);
+        sTourSegments++;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* Returns the outcome when the tour is over, else NULL. */
+static const char *hub_tour_frame(Object *obj, Object_Racer *racer, s32 updateRate) {
+    s32 stopRetraces = (sShort ? TOUR_SECONDS / 2 : TOUR_SECONDS) * 60;
+    s32 yaw;
+    if (!sDriving) {
+        sDriving = TRUE;
+        sRaceLevel = level_id();
+        sTourSegment = -1;
+        sTourSegments = 0;
+        sTourRetraces = stopRetraces;
+    }
+    sTourRetraces += updateRate;
+    if (sTourRetraces >= stopRetraces) {
+        sTourRetraces = 0;
+        if (!tour_next_segment(obj, racer)) {
+            return "toured";
+        }
+    }
+    // Held where it was put (it may still fall), turning once round in the time.
+    yaw = sTourYaw + (s32) ((sTourRetraces * 0x10000LL) / stopRetraces);
+    obj->trans.x_position = sTourX;
+    obj->trans.z_position = sTourZ;
+    obj->x_velocity = 0.0f;
+    obj->z_velocity = 0.0f;
+    racer->velocity = 0.0f;
+    racer->lateral_velocity = 0.0f;
+    racer->steerVisualRotation = (s16) yaw;
+    obj->trans.rotation.y_rotation = (s16) yaw;
+    return NULL;
+}
+
+/*
+ * The menu pass: the buttons a player would press through the title screen, the options and their pages, character
+ * select (every character), the adventure's file select and the tracks menu (every world and track), pressed when the
+ * menu they are for is up, then B until the title screen is back. The menus' input comes from here meanwhile
+ * (port_autorun_input). A step whose menu doesn't come up within MENU_STEP_TIMEOUT is skipped (and noted).
+ */
+enum { MENU_KEY_NONE, MENU_KEY_A, MENU_KEY_B, MENU_KEY_START, MENU_KEY_UP, MENU_KEY_DOWN, MENU_KEY_LEFT,
+       MENU_KEY_RIGHT, MENU_KEY_REVEAL /* A, only while the title screen's intro scenes play (it shows the menu) */ };
+
+typedef struct MenuStep {
+    s8 menu;   // MENU_* the step is for
+    s8 key;    // MENU_KEY_*
+    u8 count;  // Presses
+    u8 gap;    // Tenths of a second after each press
+} MenuStep;
+
+static const MenuStep sMenuSteps[] = {
+    { MENU_TITLE, MENU_KEY_NONE, 1, 50 },     // The title screen's intro scenes, a moment
+    { MENU_TITLE, MENU_KEY_REVEAL, 1, 40 },   // Then its menu
+    { MENU_TITLE, MENU_KEY_DOWN, 1, 6 },      // OPTIONS
+    { MENU_TITLE, MENU_KEY_A, 1, 25 },
+    { MENU_OPTIONS, MENU_KEY_DOWN, 8, 6 },    // Down every row
+    { MENU_OPTIONS, MENU_KEY_UP, 8, 4 },
+    { MENU_OPTIONS, MENU_KEY_B, 1, 25 },      // Back to the title screen
+    { MENU_TITLE, MENU_KEY_UP, 1, 6 },        // START
+    { MENU_TITLE, MENU_KEY_A, 1, 30 },
+    { MENU_CHARACTER_SELECT, MENU_KEY_RIGHT, 9, 12 }, // Every character
+    { MENU_CHARACTER_SELECT, MENU_KEY_A, 1, 15 },
+    { MENU_CHARACTER_SELECT, MENU_KEY_A, 1, 30 },     // OK
+    { MENU_GAME_SELECT, MENU_KEY_A, 1, 30 },          // Adventure
+    { MENU_FILE_SELECT, MENU_KEY_RIGHT, 2, 10 },      // The three files
+    { MENU_FILE_SELECT, MENU_KEY_B, 1, 30 },
+    { MENU_GAME_SELECT, MENU_KEY_DOWN, 1, 6 },        // Tracks
+    { MENU_GAME_SELECT, MENU_KEY_A, 1, 40 },
+    { MENU_TRACK_SELECT, MENU_KEY_DOWN, 3, 20 },      // The tracks of the first world
+    { MENU_TRACK_SELECT, MENU_KEY_RIGHT, 4, 25 },     // The other worlds
+    { MENU_TRACK_SELECT, MENU_KEY_UP, 3, 20 },
+    { MENU_TRACK_SELECT, MENU_KEY_LEFT, 4, 15 },
+};
+#define MENU_STEPS ((s32) ARRAY_COUNT(sMenuSteps))
+#define MENU_HOLD_RETRACES 5
+
+extern s32 gCurrentMenuId;
+extern s32 gTitleRevealTimer;
+static s32 sMenuStep, sMenuPresses, sMenuTimer, sMenuHold, sMenuWait;
+static volatile u16 sMenuButtons;
+static volatile s8 sMenuStickX, sMenuStickY;
+
+static void menu_press(s32 key) {
+    static const u16 sButtons[] = { 0, 0x8000, 0x4000, 0x1000, 0, 0, 0, 0, 0x8000 };
+    sMenuButtons = sButtons[key];
+    sMenuStickX = key == MENU_KEY_LEFT ? -80 : key == MENU_KEY_RIGHT ? 80 : 0;
+    sMenuStickY = key == MENU_KEY_DOWN ? -80 : key == MENU_KEY_UP ? 80 : 0;
+    sMenuHold = MENU_HOLD_RETRACES;
+}
+
+static void menu_release(void) {
+    sMenuButtons = 0;
+    sMenuStickX = 0;
+    sMenuStickY = 0;
+}
+
+static void start_menu_pass(void) {
+    sMenuStep = 0;
+    sMenuPresses = 0;
+    sMenuTimer = 0;
+    sMenuHold = 0;
+    sMenuWait = 0;
+    menu_release();
+    sDriving = TRUE;
+    sRaceLevel = level_id();
+    prof_window_start(PROF_WINDOW_SESSION);
+    prof_draw_mix_window(NULL, NULL, TRUE);
+    sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
+    sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
+    set_phase(PHASE_RACING);
+}
+
+/* Returns the outcome when the pass is over, else NULL. */
+static const char *menu_pass_frame(s32 updateRate) {
+    const MenuStep *step;
+    if (sMenuHold > 0) {
+        sMenuHold -= updateRate;
+        if (sMenuHold <= 0) {
+            menu_release();
+        }
+    }
+    if (sMenuTimer > 0) {
+        sMenuTimer -= updateRate;
+        return NULL;
+    }
+    if (sMenuStep >= MENU_STEPS || sRaceRetraces >= MENU_PASS_SECONDS * 60) {
+        // Back to the title screen: B once a second until it is up.
+        if (gCurrentMenuId == MENU_TITLE && get_game_mode() == GAMEMODE_MENU) {
+            return sRaceRetraces >= MENU_PASS_SECONDS * 60 ? "menus_timeout" : "finished";
+        }
+        if (sRaceRetraces >= (MENU_PASS_SECONDS + 60) * 60) {
+            return "menus_stuck";
+        }
+        menu_press(MENU_KEY_B);
+        sMenuTimer = 60;
+        return NULL;
+    }
+    step = &sMenuSteps[sMenuStep];
+    if (gCurrentMenuId != step->menu || get_game_mode() != GAMEMODE_MENU) {
+        sMenuWait += updateRate;
+        if (sMenuWait >= MENU_STEP_TIMEOUT * 60) {
+            char what[96];
+            plat_snprintf(what, sizeof(what), "note: menu pass step %d waited for menu %d, menu %d is up",
+                          (int) sMenuStep + 1, (int) step->menu, (int) gCurrentMenuId);
+            record_problem(what);
+            sMenuStep++;
+            sMenuPresses = 0;
+            sMenuWait = 0;
+        }
+        return NULL;
+    }
+    sMenuWait = 0;
+    if (step->key != MENU_KEY_REVEAL || gTitleRevealTimer == 0) {
+        menu_press(step->key);
+    }
+    sMenuTimer = step->gap * 6;
+    if (++sMenuPresses >= step->count) {
+        sMenuStep++;
+        sMenuPresses = 0;
+    }
+    return NULL;
+}
+
+/* plat_input_script: the menu pass's buttons replace the player's while it runs. */
+int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY) {
+    if (sEnabled <= 0 || sMode != MODE_WHOLE || sPhase != PHASE_RACING || sNext >= sNumRaces ||
+        sRaces[sNext].kind != STOP_MENUS) {
+        return 0;
+    }
+    *buttons = sMenuButtons;
+    *stickX = sMenuStickX;
+    *stickY = sMenuStickY;
+    return 1;
+}
+
+/* An instrumented build (profile-guided compiling) saves its counters here; nothing otherwise. */
+__attribute__((weak)) void port_autorun_section_done(const char *section) {
+    (void) section;
+}
+
+static s32 whole_ready(void);
 
 static void show_status(void) {
     char text[200];
@@ -1301,7 +1791,11 @@ static void show_status(void) {
             break;
         case PHASE_RACING:
             what = lap;
-            if (obj != NULL && header != NULL) {
+            if (race->kind == STOP_MENUS) {
+                plat_snprintf(lap, sizeof(lap), "step %d/%d", (int) sMenuStep + 1, (int) MENU_STEPS);
+            } else if (race->kind == STOP_HUB) {
+                plat_snprintf(lap, sizeof(lap), "segment %d", (int) sTourSegment + 1);
+            } else if (obj != NULL && header != NULL) {
                 plat_snprintf(lap, sizeof(lap), "lap %d/%d %d:%02d", obj->racer->lap + 1, header->laps,
                               (int) (sRaceRetraces / 3600), (int) (sRaceRetraces / 60 % 60));
             }
@@ -1318,15 +1812,16 @@ static void show_status(void) {
                   : sMode == MODE_SWITCH ? "SWITCH BENCH"
                   : sMode == MODE_QUICK  ? "QUICK TEST"
                   : sMode == MODE_BOSS  ? "BOSS FIGHTS"
+                  : sMode == MODE_WHOLE ? (sShort ? "WHOLE GAME (SHORT)" : "WHOLE GAME")
                                         : "TEST RUN",
                   (int) sRun,
                   (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
     if (is_bench()) {
-        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", track_name(race->track), config_name(race->config),
+        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", stop_name(race), config_name(race->config),
                       what);
     } else {
         plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
-                      track_name(race->track), sVehicleNames[(s32) race->vehicle], what);
+                      stop_name(race), sVehicleNames[(s32) race->vehicle], what);
     }
     // The progress bar: green for the races done, grey for the rest, with the percentage after it.
     filled = sNext * 32 / sNumRaces;
@@ -1362,9 +1857,13 @@ s32 port_autorun_title(void) {
     if (++sTitleFrames < 30) {
         return 0;
     }
+    if (sMode == MODE_WHOLE && !whole_ready()) {
+        sTitleFrames = 30; // A progress report is going out: no race until it is.
+        return 0;
+    }
     sTitleFrames = 0;
     race = &sRaces[sNext];
-    port_log("autorun: race %d/%d: %s, %s, %s", (int) sNext + 1, (int) sNumRaces, track_name(race->track),
+    port_log("autorun: race %d/%d: %s, %s, %s", (int) sNext + 1, (int) sNumRaces, stop_name(race),
              sCharacterNames[(s32) race->character], sVehicleNames[(s32) race->vehicle]);
     save_state(sNext);
     if (race->config >= 0) {
@@ -1379,6 +1878,16 @@ s32 port_autorun_title(void) {
     sUnstuckAt[0] = '\0';
     sLingerRetraces = 0;
     show_status();
+    if (race->kind == STOP_MENUS) {
+        give_progress(); // So the tracks menu shows every track's preview.
+        start_menu_pass();
+        return 0; // The title screen stays; the menu pass presses its buttons.
+    }
+    if (race->kind == STOP_COINS || race->kind == STOP_ARENA || race->kind == STOP_HUB) {
+        give_progress();
+        return port_autorun_setup_adventure(race->track, race->character, race->vehicle);
+    }
+    put_back_progress();
     return port_autorun_setup_race(race->track, race->character, race->vehicle);
 }
 
@@ -1390,7 +1899,9 @@ s32 port_autorun_time_trial(void) {
 
 /* Nonzero while the player's kart is driven by the AI. */
 s32 port_autorun_drives(void) {
-    return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED;
+    // Not in the menus, nor on a hub tour, where the kart is put in each place and turned round instead.
+    return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED &&
+           (sNext >= sNumRaces || (sRaces[sNext].kind != STOP_HUB && sRaces[sNext].kind != STOP_MENUS));
 }
 
 /* A plain decimal number ("27.86"), as the results file has them. */
@@ -1436,7 +1947,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 10)
+#define MAX_FIELDS (COL_COUNT + 12) // The whole game run has three columns of its own
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -1781,6 +2292,237 @@ static void boss_summary(char *out, s32 size) {
     plat_free(text);
 }
 
+/* The whole game run's own columns, after the common ones, then the sound's, the graphics and the frame pacing's. */
+enum WholeColumn {
+    WCOL_STOP = COL_EXTRA,
+    WCOL_PART,
+    WCOL_BUILD,
+    WCOL_GAPS,
+    WCOL_DROPS,
+    WCOL_SOUND,
+    WCOL_GRAPHICS,
+    WCOL_LOW1,
+    WCOL_PACED60,
+    WCOL_PACED30,
+    WCOL_PACED20,
+    WCOL_PACED_SLOWER,
+    WCOL_COUNT
+};
+
+/* This run's results file, as text to split (plat_free it), or NULL. */
+static char *load_results(void) {
+    char path[256];
+    char *data, *text;
+    unsigned int dataSize;
+    io_flush();
+    make_path(path, sizeof(path), results_file());
+    data = plat_load_file(path, &dataSize);
+    if (data == NULL) {
+        return NULL;
+    }
+    text = plat_malloc(dataSize + 1);
+    if (text != NULL) {
+        bcopy(data, text, dataSize);
+        text[dataSize] = '\0';
+    }
+    plat_free(data);
+    return text;
+}
+
+/* The next line of this run with its fields, or FALSE at the end. *cursor walks the text. */
+static s32 next_run_line(char **cursor, const char **fields) {
+    while (*cursor != NULL && **cursor) {
+        char *line = *cursor;
+        char *next = strchr(line, '\n');
+        if (next != NULL) {
+            *next++ = '\0';
+        }
+        *cursor = next;
+        if (split_fields(line, fields) >= WCOL_COUNT && port_atoi(fields[COL_RUN]) == sRun) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* The stops from..to-1 of this run, one row each, as Markdown. Returns the length written. */
+static s32 whole_table(char *out, s32 size, s32 from, s32 to) {
+    const char *fields[MAX_FIELDS];
+    char *text = load_results(), *cursor = text;
+    s32 length, number;
+    if (text == NULL) {
+        return 0;
+    }
+    length = plat_snprintf(out, size,
+                           "| # | stop | character, vehicle | outcome | s | fps | 1%% low | frames 60/30/20/slower %% "
+                           "| limit | worst ms | hitches |\n|--:|---|---|---|--:|--:|--:|---|---|--:|--:|\n");
+    while (length < size && next_run_line(&cursor, fields)) {
+        number = port_atoi(fields[1]);
+        if (number <= from || number > to) {
+            continue;
+        }
+        length += plat_snprintf(out + length, size - length,
+                                "| %d | %s | %s, %s | %s | %s | %s | %s | %s/%s/%s/%s | %s | %s | %s |\n", (int) number,
+                                fields[COL_TRACK], fields[COL_CHARACTER], fields[5], fields[COL_OUTCOME],
+                                fields[COL_RACE_S], fields[COL_FPS], fields[WCOL_LOW1], fields[WCOL_PACED60],
+                                fields[WCOL_PACED30], fields[WCOL_PACED20], fields[WCOL_PACED_SLOWER], fields[COL_LIMIT],
+                                fields[COL_WORST_FRAME], fields[16]);
+    }
+    plat_free(text);
+    return length < size ? length : size - 1;
+}
+
+/* Every part of this run so far: stops, how many went wrong, the average fps, the lowest 1% low and where, and the
+ * stops with the lowest 1% lows. Returns the length written. */
+#define WHOLE_WORST 10
+static s32 whole_parts(char *out, s32 size) {
+    const char *fields[MAX_FIELDS];
+    char *text = load_results(), *cursor = text;
+    struct {
+        s32 stops, bad, timed;
+        double fps, low;
+        char lowStop[48];
+    } parts[STOP_KINDS];
+    struct {
+        double low;
+        char text[96];
+    } worst[WHOLE_WORST];
+    s32 numWorst = 0, length, k, i;
+    if (text == NULL) {
+        return 0;
+    }
+    bzero(parts, sizeof(parts));
+    while (next_run_line(&cursor, fields)) {
+        double fps = parse_decimal(fields[COL_FPS]), low = parse_decimal(fields[WCOL_LOW1]);
+        for (k = 0; k < STOP_KINDS && !str_equal(fields[WCOL_STOP], sStopKindNames[k]); k++) {}
+        if (k == STOP_KINDS) {
+            continue;
+        }
+        parts[k].stops++;
+        parts[k].bad += !outcome_ok(fields[COL_OUTCOME]);
+        if (fps <= 0.0) {
+            continue;
+        }
+        parts[k].timed++;
+        parts[k].fps += fps;
+        if (low > 0.0 && (parts[k].low == 0.0 || low < parts[k].low)) {
+            parts[k].low = low;
+            plat_snprintf(parts[k].lowStop, sizeof(parts[k].lowStop), "%s", fields[COL_TRACK]);
+        }
+        if (low > 0.0) {
+            for (i = numWorst; i > 0 && worst[i - 1].low > low; i--) {
+                if (i < WHOLE_WORST) {
+                    worst[i] = worst[i - 1];
+                }
+            }
+            if (i < WHOLE_WORST) {
+                worst[i].low = low;
+                plat_snprintf(worst[i].text, sizeof(worst[i].text), "%s (%s, %s): %.1f fps, limit %s", fields[COL_TRACK],
+                              fields[COL_CHARACTER], fields[5], fps, fields[COL_LIMIT]);
+                if (numWorst < WHOLE_WORST) {
+                    numWorst++;
+                }
+            }
+        }
+    }
+    plat_free(text);
+    length = plat_snprintf(out, size, "| part | stops | problems | average fps | lowest 1%% low |\n|---|--:|--:|--:|---|\n");
+    for (k = 0; k < STOP_KINDS && length < size; k++) {
+        if (parts[k].stops == 0) {
+            continue;
+        }
+        length += plat_snprintf(out + length, size - length, "| %s | %d | %d | %.1f | %.1f %s |\n", sPartNames[k],
+                                (int) parts[k].stops, (int) parts[k].bad,
+                                parts[k].timed ? parts[k].fps / parts[k].timed : 0.0, parts[k].low, parts[k].lowStop);
+    }
+    if (numWorst > 0 && length < size) {
+        length += plat_snprintf(out + length, size - length, "\nLowest 1%% lows so far:\n\n");
+        for (i = 0; i < numWorst && length < size; i++) {
+            length += plat_snprintf(out + length, size - length, "%d. **%.1f** %s\n", (int) i + 1, worst[i].low,
+                                    worst[i].text);
+        }
+    }
+    return length < size ? length : size - 1;
+}
+
+static const char *whole_title(void) {
+    return sShort ? "whole game (short)" : "whole game";
+}
+
+/* A progress report of the whole game run: the stops from..to-1, under heading, and the run so far. */
+static void send_progress(s32 from, s32 to, const char *heading) {
+    char title[128];
+    static char summary[8192];
+    s32 length;
+    plat_snprintf(title, sizeof(title), "[3DS test run] %s run %d: %d of %d stops, %d problems (in progress)",
+                  whole_title(), (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces, (int) sProblems);
+    length = plat_snprintf(summary, sizeof(summary),
+                           "Whole game run %d%s in progress: %d of %d stops done, %d fine, %d with problems. "
+                           "Next: %s.\n\n### %s (stops %d to %d)\n\n",
+                           (int) sRun, sShort ? " (short)" : "", (int) (sFinished + sProblems), (int) sNumRaces,
+                           (int) sFinished, (int) sProblems, to < sNumRaces ? sPartNames[(s32) sRaces[to].kind] : "the end",
+                           heading, (int) from + 1, (int) to);
+    length += whole_table(summary + length, 4096, from, to);
+    if (length < (s32) sizeof(summary) - 1500) {
+        length += plat_snprintf(summary + length, sizeof(summary) - length, "\n### The run so far\n\n");
+        length += whole_parts(summary + length, 1400);
+    }
+    if (length < (s32) sizeof(summary) - 1200) {
+        length += hitch_summary(summary + length, 1200);
+    }
+    if (length < (s32) sizeof(summary) - 512) {
+        draw_mix_summary(summary + length, sizeof(summary) - length);
+    }
+    port_log("autorun: progress report after stop %d", (int) to);
+    plat_status("%s: report after %d of %d stops", port_text(sModes[sMode].name), (int) to, (int) sNumRaces);
+    plat_send_test_update(title, summary, PLAT_RESULTS_PROGRESS);
+}
+
+/*
+ * The whole game run, at the title screen before each stop: as a part ends (and at least every
+ * DKR_AUTORUN_REPORT_MINUTES), the part's hook runs and its progress report goes out; the next stop waits until the
+ * report is out (or REPORT_WAIT_SECONDS), so no race is measured while the network is busy. Returns TRUE when the next
+ * stop may start.
+ */
+static s32 whole_ready(void) {
+    unsigned long long now = plat_time_ns();
+    const char *env;
+    s32 minutes, partEnd, timed, from, start;
+    if (sReportWaitNs != 0) {
+        if (plat_test_results_busy() && now - sReportWaitNs < REPORT_WAIT_SECONDS * 1000000000ULL) {
+            return FALSE;
+        }
+        sReportWaitNs = 0;
+        return TRUE;
+    }
+    if (sNext == 0 || sNext >= sNumRaces || sReportedAt == sNext) {
+        return TRUE;
+    }
+    env = plat_getenv("DKR_AUTORUN_REPORT_MINUTES");
+    minutes = env != NULL ? port_atoi(env) : 30;
+    partEnd = sRaces[sNext].kind != sRaces[sNext - 1].kind;
+    timed = minutes > 0 && now - sLastReportNs >= (unsigned long long) minutes * 60 * 1000000000ULL;
+    if (!partEnd && !timed) {
+        return TRUE;
+    }
+    for (start = sNext - 1; start > 0 && sRaces[start - 1].kind == sRaces[sNext - 1].kind; start--) {}
+    from = (!partEnd && sReportedAt > start) ? sReportedAt : start;
+    if (partEnd) {
+        port_autorun_section_done(sPartNames[(s32) sRaces[sNext - 1].kind]);
+    }
+    {
+        char heading[64];
+        plat_snprintf(heading, sizeof(heading), "%s%s", sPartNames[(s32) sRaces[sNext - 1].kind],
+                      partEnd ? "" : " so far");
+        send_progress(from, sNext, heading);
+    }
+    sReportedAt = sNext;
+    sLastReportNs = now;
+    sReportWaitNs = now;
+    save_state(-1);
+    return FALSE;
+}
+
 /* Sends the results so far as a GitHub issue (when bug reports are set up), and says so on the bottom screen. */
 static void send_results(const char *why) {
     char title[128];
@@ -1792,6 +2534,7 @@ static void send_results(const char *why) {
                   : sMode == MODE_SWITCH ? "switch bench "
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
+                  : sMode == MODE_WHOLE ? (sShort ? "whole game (short) " : "whole game ")
                                         : "",
                   (int) sRun, (int) (sFinished + sProblems), (int) sNumRaces,
                   (int) sProblems, why);
@@ -1802,6 +2545,7 @@ static void send_results(const char *why) {
                            : sMode == MODE_SWITCH ? "Switch bench run"
                            : sMode == MODE_QUICK  ? "Quick test run"
                            : sMode == MODE_BOSS  ? "Boss fights run"
+                           : sMode == MODE_WHOLE ? "Whole game run"
                                                  : "Run",
                            (int) sRun, why,
                            (int) (sFinished + sProblems), (int) sNumRaces, (int) sFinished, (int) sProblems,
@@ -1817,7 +2561,19 @@ static void send_results(const char *why) {
         // Kept to 2 KB, so the mode's own tables below still fit.
         length += hitch_summary(summary + length, 2048);
     }
-    if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
+    if (sMode == MODE_WHOLE && length > 0 && length < (s32) sizeof(summary)) {
+        length += plat_snprintf(summary + length, sizeof(summary) - length, "\n### Every part\n\n");
+        if (sReportedAt < sNext && sNext > 0 && length < (s32) sizeof(summary) - 3000) {
+            // The stops since the last progress report, which no report has listed yet.
+            s32 from = sReportedAt > 0 ? sReportedAt : 0, to = sNext < sNumRaces ? sNext + 1 : sNumRaces;
+            length += whole_parts(summary + length, 1600);
+            length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                    "\n### Since the last report (stops %d to %d)\n\n", (int) from + 1, (int) to);
+            whole_table(summary + length, sizeof(summary) - length - 512, from, to);
+        } else {
+            whole_parts(summary + length, sizeof(summary) - length);
+        }
+    } else if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
@@ -1827,11 +2583,18 @@ static void send_results(const char *why) {
         draw_mix_summary(summary + length, sizeof(summary) - length);
     }
     plat_status("%s %s: %d races, %d problems", port_text(sModes[sMode].name), port_text(why), (int) (sFinished + sProblems), (int) sProblems);
-    plat_send_test_results(title, summary);
+    plat_send_test_update(title, summary, sMode == MODE_WHOLE ? PLAT_RESULTS_FINAL : PLAT_RESULTS_NEW);
 }
 
 /* Ends the test run: saves are written again and the profiler goes away (unless DKR_PROFILE or its button is on). */
 static void turn_off(const char *why) {
+    if (sMode == MODE_WHOLE) {
+        put_back_progress();
+        menu_release();
+        if (sNext > 0 && sNext <= sNumRaces) {
+            port_autorun_section_done(sPartNames[(s32) sRaces[sNext - 1].kind]);
+        }
+    }
     send_results(why);
     sEnabled = 0;
     sInitialised = FALSE;
@@ -1880,7 +2643,7 @@ static void end_race(const char *outcome, s32 position) {
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
     record_hitches(outcome);
     record_draw_mix(outcome);
-    if (str_equal(outcome, "finished")) {
+    if (outcome_ok(outcome)) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
             sFpsCount++;
@@ -1902,13 +2665,15 @@ static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
-         request == REQUEST_SWITCH) &&
+         request == REQUEST_SWITCH || request == REQUEST_WHOLE || request == REQUEST_WHOLE_SHORT) &&
         !port_autorun_active()) {
         if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1) {
             plat_status("Switch bench: no switches to test right now");
             return;
         }
-        sMode = request == REQUEST_SWITCH  ? MODE_SWITCH
+        sShort = request == REQUEST_WHOLE_SHORT;
+        sMode = (request == REQUEST_WHOLE || request == REQUEST_WHOLE_SHORT) ? MODE_WHOLE
+                : request == REQUEST_SWITCH  ? MODE_SWITCH
                 : request == REQUEST_BENCH ? MODE_BENCH
                 : request == REQUEST_QUICK ? MODE_QUICK
                 : request == REQUEST_BOSS  ? MODE_BOSS
@@ -2061,6 +2826,19 @@ void port_autorun_frame(s32 updateRate) {
     if (!port_autorun_active()) {
         return;
     }
+    if (sPhase == PHASE_RACING && sNext < sNumRaces && sRaces[sNext].kind == STOP_MENUS) {
+        const char *outcome;
+        sRaceRetraces += updateRate;
+        outcome = menu_pass_frame(updateRate);
+        if (outcome != NULL) {
+            menu_release();
+            end_race(outcome, 0);
+        }
+        if (sStatusCounter++ % 30 == 0) {
+            show_status();
+        }
+        return;
+    }
     switch (sPhase) {
         case PHASE_LOADING:
             if (racer != NULL) {
@@ -2072,6 +2850,9 @@ void port_autorun_frame(s32 updateRate) {
             break;
         case PHASE_COUNTDOWN:
             if (racer != NULL && get_race_countdown() == 0) {
+                if (sRaces[sNext].laps > 0 && level_header() != NULL) {
+                    level_header()->laps = sRaces[sNext].laps; // The short whole game run: one lap
+                }
                 prof_window_start(PROF_WINDOW_SESSION);
                 prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
@@ -2088,6 +2869,36 @@ void port_autorun_frame(s32 updateRate) {
                 break;
             }
             sRaceRetraces += updateRate;
+            if (sRaces[sNext].kind == STOP_HUB) {
+                const char *outcome;
+                if (sDriving && level_id() != sRaceLevel) {
+                    char what[96];
+                    plat_snprintf(what, sizeof(what), "note: the hub tour left for level %d at segment %d",
+                                  (int) level_id(), (int) sTourSegment);
+                    record_problem(what);
+                    end_race("left_level", 0);
+                    break;
+                }
+                outcome = hub_tour_frame(obj, racer, updateRate);
+                if (outcome != NULL) {
+                    end_race(outcome, 0);
+                }
+                break;
+            }
+            if (sRaces[sNext].kind == STOP_ARENA) {
+                // No course to make progress along: played until it ends (it may go back to the hub) or time is up.
+                if (!sDriving) {
+                    sDriving = TRUE;
+                    sRaceLevel = level_id();
+                }
+                if (racer->raceFinished) {
+                    end_race("finished", racer->finishPosition);
+                } else if (level_id() != sRaceLevel ||
+                           sRaceRetraces >= (sShort ? ARENA_SECONDS * 2 / 5 : ARENA_SECONDS) * 60) {
+                    end_race("played", racer->racePosition);
+                }
+                break;
+            }
             if (sDriving && level_id() != sRaceLevel) {
                 // The game took the player out of the race without finishing it (falling off a boss's course sends
                 // them to the hub). Boss races start in another level, for the boss's speech, so the race's level is

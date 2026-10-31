@@ -6,6 +6,8 @@
  */
 #include "plat.h"
 
+int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY);
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +29,10 @@ int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, si
     char best[64] = "";
     char *tok;
 
+    // The whole game test run's menu pass (port_autorun.c) presses its own buttons.
+    if (port_autorun_input(buttons, stickX, stickY)) {
+        return 1;
+    }
     if (script == NULL) {
         return 0;
     }

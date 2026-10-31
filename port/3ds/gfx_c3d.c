@@ -189,13 +189,24 @@ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
  * (roadmap item P12). Instead each texture is flushed when it is uploaded and the vertex buffer only from where the
  * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
  */
+static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first use
+static int sIndexed = -1;    // DKR_INDEXED, read on first use
+static int sFull = -1; // DKR_FULL_FLUSH, re-read when the switches change (switch bench)
+static int sIboAlign;   // DKR_IBO_ALIGN: each draw's indices start on an 8-index (16-byte) boundary
+
 static int full_flush(void) {
-    static int sFull = -1;
     if (sFull < 0) {
-        sFull = plat_getenv("DKR_FULL_FLUSH") != NULL;
+        sFull = plat_switch("DKR_FULL_FLUSH", 0) != 0;
         plat_log("GPU cache flush: %s", sFull ? "whole linear heap" : "written ranges only");
     }
     return sFull;
+}
+
+// DKR_IBO_ALIGN (head flicker bench): pads the index buffer so a draw's indices start 16-byte aligned.
+static inline void ibo_align(void) {
+    if (sIboAlign) {
+        sIboUsed = (sIboUsed + 7) & ~7;
+    }
 }
 
 /*
@@ -786,7 +797,16 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target: RGBA8 colour, 24-bit depth and stencil. */
+/*
+ * The depth buffer's format (DKR_DEPTH24, roadmap P42): 24-bit depth with 8 bits of stencil (4 bytes a pixel, the
+ * default), or 24-bit depth alone (3 bytes). Nothing uses the stencil, and the track's pixels read and write depth:
+ * the switch bench's cost rows put a pixel of track (depth read, depth write, colour write) at about twice the sky's
+ * (colour write only), so if filling pixels is limited by memory traffic, a quarter less depth traffic shows.
+ * Every target is made again when it changes (apply_screen_mode).
+ */
+static int sDepth24;
+
+/* A render target: RGBA8 colour, 24-bit depth and stencil (or 24-bit depth alone, sDepth24). */
 static C3D_RenderTarget *new_target(int width, int height) {
     C3D_RenderTarget *target = NULL;
     int tries;
@@ -795,7 +815,8 @@ static C3D_RenderTarget *new_target(int width, int height) {
         if (tries == 1 && evict_vram_textures() == 0) {
             break;
         }
-        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8,
+                                        sDepth24 ? GPU_RB_DEPTH24 : GPU_RB_DEPTH24_STENCIL8);
     }
     return target;
 }
@@ -841,7 +862,9 @@ static void link_target(void) {
 }
 
 /*
- * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off; shelved after switch bench #246, where it never switched): with anti-aliasing on, a frame the GPU took nearly a whole
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, on by default on a New 3DS since switch bench #309 (2026-10-31): at 800
+ * pixels with 4x anti-aliasing it held 100% of frames at 60 against 93-96%; off on an Old 3DS, which races without
+ * anti-aliasing; #246 at 400 pixels never switched): with anti-aliasing on, a frame the GPU took nearly a whole
  * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
  * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
  * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
@@ -1209,6 +1232,7 @@ static void apply_screen_mode(void) {
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
     int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    int depth24 = plat_switch("DKR_DEPTH24", 0) != 0;
     int aa = stereo ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
@@ -1223,7 +1247,7 @@ static void apply_screen_mode(void) {
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && depth24 == sDepth24)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -1232,7 +1256,8 @@ static void apply_screen_mode(void) {
     }
     C3D_FrameEnd(0);
     adaptive_delete_low();
-    newTarget = scale != sRenderScale || across != sScaleX;
+    newTarget = scale != sRenderScale || across != sScaleX || depth24 != sDepth24;
+    sDepth24 = depth24;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
@@ -1334,6 +1359,7 @@ void gfxb_init(void) {
         sWantedAa = sDefaultAa;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
+        sDepth24 = plat_switch("DKR_DEPTH24", 0) != 0;
         create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
@@ -3244,6 +3270,11 @@ static void read_switches(void) {
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    // Re-read on their next use (the head flicker bench switches them between races).
+    sFull = -1;
+    sStateCache = -1;
+    sIndexed = -1;
+    sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
     // The lean draw (gfxb_draw_indexed): on by default on an Old 3DS only, until a New 3DS bench has measured it.
@@ -3254,7 +3285,7 @@ static void read_switches(void) {
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
-    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -3278,8 +3309,11 @@ static void read_switches(void) {
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
-    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s", sAdaptive ? "on" : "off",
-             sTripleWanted ? 3 : 2, plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads");
+    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s, depth %s, sky %s",
+             sAdaptive ? "on" : "off", sTripleWanted ? 3 : 2,
+             plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads",
+             plat_switch("DKR_DEPTH24", 0) ? "24-bit" : "24-bit + stencil",
+             plat_switch("DKR_SKY_LAST", 0) ? "drawn last" : "drawn first");
 }
 
 void gfxb_start_frame(void) {
@@ -4730,7 +4764,9 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
     if (!sGpu.known || state->decal != sGpu.decal) {
         // Widescreen's camera cuts 4 times closer (plat_camera_near), which spreads depth 4 times as far: decals are
         // pulled a quarter as much to stay as close to their surfaces.
-        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
+        // GFX_DEPTH_FAR: depth 0 everywhere, the farthest (and the depth buffer's clear value).
+        C3D_DepthMap(true, state->decal == GFX_DEPTH_FAR ? 0.0f : -1.0f,
+                     state->decal == 1 ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
         sGpu.decal = state->decal;
     }
     if (__builtin_expect(sNoCull < 0, 0)) {
@@ -4790,11 +4826,8 @@ static inline int same_but_textures(const GfxDrawState *a, const GfxDrawState *b
            wa[offsetof(GfxDrawState, scissor) / 4 + 1] == wb[offsetof(GfxDrawState, scissor) / 4 + 1];
 }
 
-static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first call
-
 static void __attribute__((noinline, cold)) read_state_cache_setting(void) {
-    const char *env = plat_getenv("DKR_STATE_CACHE");
-    sStateCache = env != NULL ? atoi(env) : 1;
+    sStateCache = plat_switch("DKR_STATE_CACHE", 1);
     plat_log("GPU settings: %s", sStateCache == 0   ? "all set for every draw"
                                  : sStateCache == 2 ? "only changes are set"
                                                     : "only changes are set, all draw settings with a new texture");
@@ -5152,11 +5185,8 @@ static void hand_over_draw_parts(void) {
  * Indexed drawing (roadmap item P16): the frontend hands each vertex over once, however many triangles share it, so
  * it is converted and the GPU transforms it once. DKR_INDEXED=0 writes the triangles' corners one by one as before.
  */
-static int sIndexed = -1;
-
 static void __attribute__((noinline, cold)) read_indexed_setting(void) {
-    const char *env = plat_getenv("DKR_INDEXED");
-    sIndexed = env == NULL || atoi(env) != 0;
+    sIndexed = plat_switch("DKR_INDEXED", 1) != 0;
     plat_log("vertices: %s", sIndexed ? "shared, drawn by index" : "one for each triangle corner (DKR_INDEXED=0)");
 }
 
@@ -5228,7 +5258,7 @@ static void __attribute__((noinline, cold)) log_draw_left_out(int vertBytes, int
         plat_log("frame %d: %s full (%d bytes of vertices, %d indices, %lu command words), triangles left out",
                  sFrameCount,
                  sVboUsed + 15 + vertBytes > VBO_BYTES ? "vertex buffer"
-                 : indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16) ? "index buffer"
+                 : indexed && sIboUsed + count > (IBO_BYTES / (int) sizeof(u16) - 8) ? "index buffer"
                                                                                    : "command list",
                  sVboUsed, sIboUsed, (unsigned long) cmd_position());
     }
@@ -5307,7 +5337,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     written = indexed ? numVerts : count; // Vertices written to the buffer
     vertBytes = written * sVfmtStride[fmt];
 
-    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > IBO_BYTES / (int) sizeof(u16)) ||
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || (indexed && sIboUsed + count > (IBO_BYTES / (int) sizeof(u16) - 8)) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         // Out of room in the frame's vertex buffer or command list (a full command list stops the program, and
         // nothing of the frame reaches the GPU before it ends, so splitting it would not make room): leave the rest
@@ -5353,6 +5383,7 @@ static void __attribute__((noinline)) draw_indexed_full(const GfxDrawState *stat
     write_vertices(fmt, sVbo + sVboUsed, verts, written, indexed ? NULL : indices, flat, su0, sv0, su1, sv1);
     if (indexed) {
         int i;
+        ibo_align();
         ibo = sIbo + sIboUsed;
         for (i = 0; i < count; i++) {
             ibo[i] = (u16) (vertex + indices[i]);
@@ -5482,7 +5513,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
         (sStereo && sTuning[STEREO_AUTO]) || numVerts > GFX_MAX_BATCH_VERTICES || numTriangles > GFX_MAX_BATCH_TRIANGLES ||
         // Room for the most that cutting can add (the full draw checks what it really needs, and may still draw).
         sVboUsed + 15 + (numVerts + numTriangles * 15) * stride > VBO_BYTES ||
-        sIboUsed + numTriangles * 15 > IBO_BYTES / (int) sizeof(u16) ||
+        sIboUsed + numTriangles * 15 > (IBO_BYTES / (int) sizeof(u16) - 8) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         draw_indexed_full(state, verts, numVerts, indices, numTriangles);
         return;
@@ -5554,6 +5585,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
         vertex = restart_vertex_buffer(fmt, out, written * stride);
     }
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0; i < count; i++) {
         ibo[i] = (u16) (vertex + indices[i]);
@@ -5628,7 +5660,7 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
                             int numTriangles, HangDraw **hangDraw) {
     float su0, sv0, su1, sv1;
     int first;
-    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > IBO_BYTES / (int) sizeof(u16) ||
+    if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > (IBO_BYTES / (int) sizeof(u16) - 8) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         if (sDrawsLeftOut++ < 5) {
             plat_log("frame %d: buffers full (%d bytes of vertices, %d indices, %lu command words), model triangles "
@@ -5666,6 +5698,7 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
         vertex = use_vertex_format(VFMT_MODEL);
     }
     memcpy(sVbo + sVboUsed, verts, vertBytes);
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0; i < count; i++) {
         ibo[i] = (u16) (vertex + indices[i]);
@@ -5846,6 +5879,7 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         sBufMesh = sMeshArena;
         sVfmtBound = -1;
     }
+    ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0, count = 0; i < numParts; i++) {
         const C3DMesh *m = parts[i].mesh;

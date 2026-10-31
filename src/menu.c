@@ -3884,6 +3884,20 @@ s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle) {
     music_change_on();
     return gNumberOfActivePlayers;
 }
+
+/**
+ * The whole game test run (port_autorun.c): leaves the title screen for a level in its adventure form (a hub, a
+ * battle arena, a race with its silver coins), as entering it from the overworld would. The caller has already given
+ * the game's settings the progress the level needs. Otherwise as port_autorun_setup_race.
+ */
+s32 port_autorun_setup_adventure(s32 levelId, s32 character, s32 vehicle) {
+    s32 result = port_autorun_setup_race(levelId, character, vehicle);
+    gIsInTracksMode = FALSE;
+    gIsInAdventureTwo = FALSE;
+    set_time_trial_enabled(FALSE);
+    init_racer_headers();
+    return result;
+}
 #endif
 
 #ifdef TARGET_PORT

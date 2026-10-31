@@ -169,6 +169,33 @@ static s32 sMeshPartCount;
 static u32 sBatchGeneration;
 
 /*
+ * The sky drawn last (DKR_SKY_LAST, roadmap P41). DKR draws its sky dome first, over the whole screen with no depth
+ * test, and the track and racers then cover most of it again: at 800 pixels with anti-aliasing that is about 1.9 ms
+ * of a New 3DS's GPU time (switch bench #309), mostly for pixels nobody sees. Instead the sky's batches are kept
+ * (sSky) and drawn once the opaque, depth-writing draws that follow are done, at the farthest depth (GFX_DEPTH_FAR:
+ * the vertices stay as they were, so they are clipped as before) with the depth test on and depth writes off, so
+ * they fill only the pixels nothing nearer has covered. Only a sky drawn before anything wrote depth since the last depth clear is held back (so it
+ * can't end up behind something it was meant to cover), and the held batches are drawn before the first draw that
+ * doesn't write depth or isn't opaque (anything blended must land on the sky), before a clear and at the end of the
+ * frame.
+ */
+#define SKY_BATCHES 16
+#define SKY_VERTICES 1024
+#define SKY_TRIANGLES 768
+typedef struct SkyBatch {
+    GfxDrawState state;
+    u16 firstVertex, numVertices, firstIndex, numTriangles;
+} SkyBatch;
+static struct {
+    SkyBatch batches[SKY_BATCHES];
+    GfxVertex verts[SKY_VERTICES];
+    u16 indices[SKY_TRIANGLES * 3];
+    s32 numBatches, numVertices, numTriangles;
+} sSky;
+static s32 sSkyLast;     // DKR_SKY_LAST (read_switches)
+static s32 sDepthDrawn;  // Something wrote depth since the last depth clear (so a sky now must be drawn in order)
+
+/*
  * The draw state of the last triangle command. Between two triangle commands DKR usually only loads vertices or
  * matrices, so the next one can reuse it instead of building it (and looking up its textures) again. Any command that
  * can change the draw state clears sTriStateValid (see sOpInfo).
@@ -466,6 +493,13 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
     if ((sModelCount > 0 || sMeshPartCount > 0) && (&e->tex == sModelState.textures[0] || &e->tex == sModelState.textures[1] ||
                             other == sModelState.textures[0] || other == sModelState.textures[1])) {
         return TRUE;
+    }
+    for (s32 i = 0; i < sSky.numBatches; i++) {
+        const GfxDrawState *st = &sSky.batches[i].state;
+        if (&e->tex == st->textures[0] || &e->tex == st->textures[1] || other == st->textures[0] ||
+            other == st->textures[1]) {
+            return TRUE;
+        }
     }
     return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1] ||
                                other == sBatchState.textures[0] || other == sBatchState.textures[1]);
@@ -1250,8 +1284,13 @@ static COLD void kind_switch_timed(void) {
 }
 
 /* A tag's low 4 bits are the kind, bits 4-11 the object kind plus one (port_drawtag.h). */
+static void sky_kind_boundary(void);
 static inline void kind_switch(u32 tag) {
     u32 obj = ((tag >> 4) & 0xFF) - 1; // No object (0) wraps round to a big number
+    // A batch carries on across a kind's tag; with the sky drawn last (sSky) its batches must end at the sky's edges.
+    if (UNLIKELY(sSkyLast) && (sDrawKind == PORT_DRAW_SKY) != ((tag & (PROF_KINDS - 1)) == PORT_DRAW_SKY)) {
+        sky_kind_boundary();
+    }
     if (UNLIKELY(sKindTimed)) {
         kind_switch_timed();
     }
@@ -1285,10 +1324,86 @@ static void kind_frame_end(void) {
     }
 }
 
+
+/* Draws the sky batches held back by sky_hold (see sSky), at the farthest depth behind what has been drawn. */
+static COLD NOINLINE void sky_draw_held(void) {
+    s32 i;
+    for (i = 0; i < sSky.numBatches; i++) {
+        const SkyBatch *b = &sSky.batches[i];
+        gfx_split_draw_indexed(&b->state, &sSky.verts[b->firstVertex], b->numVertices, &sSky.indices[b->firstIndex],
+                               b->numTriangles);
+        prof_count(PROF_TRIANGLES, b->numTriangles);
+        prof_count(PROF_DRAWS, 1);
+        sMix.kinds[PORT_DRAW_SKY].draws++;
+        sMix.kinds[PORT_DRAW_SKY].tris += b->numTriangles;
+        REF_CALL(refb_draw_indexed(&b->state, &sSky.verts[b->firstVertex], b->numVertices, &sSky.indices[b->firstIndex],
+                                   b->numTriangles));
+    }
+    sSky.numBatches = sSky.numVertices = sSky.numTriangles = 0;
+}
+
+static inline void sky_draw_if_held(void) {
+    if (UNLIKELY(sSky.numBatches > 0)) {
+        sky_draw_held();
+    }
+}
+
+/* A depth clear: the held sky goes first, and the depth buffer is fresh again. */
+static inline void sky_depth_cleared(void) {
+    sky_draw_if_held();
+    sDepthDrawn = FALSE;
+}
+
+/*
+ * Before the batch is drawn (DKR_SKY_LAST): whether it is a sky batch kept for later (TRUE: it is copied to sSky with
+ * the depth test on and its depth at the far plane), and otherwise draws the held sky first if this batch could
+ * show it or be covered by it wrongly.
+ */
+static COLD NOINLINE s32 sky_hold(void) {
+    const GfxDrawState *st = &sBatchState;
+    s32 opaqueDepth = st->depthTest && st->depthWrite && !st->flat &&
+                      (st->blend == GFX_BLEND_OPAQUE || st->blend == GFX_BLEND_ALPHA_CVG);
+    if (sDrawKind == PORT_DRAW_SKY && !sDepthDrawn && st->blend == GFX_BLEND_OPAQUE && !st->depthTest &&
+        !st->depthWrite && !st->flat && !sTracing && sSky.numBatches < SKY_BATCHES &&
+        sSky.numVertices + sBatchVertices <= SKY_VERTICES && sSky.numTriangles + sBatchCount <= SKY_TRIANGLES) {
+        SkyBatch *b = &sSky.batches[sSky.numBatches++];
+        s32 i;
+        b->state = *st;
+        b->state.depthTest = 1;
+        b->state.decal = GFX_DEPTH_FAR;
+        b->firstVertex = sSky.numVertices;
+        b->numVertices = sBatchVertices;
+        b->firstIndex = sSky.numTriangles * 3;
+        b->numTriangles = sBatchCount;
+        for (i = 0; i < sBatchVertices; i++) {
+            sSky.verts[sSky.numVertices + i] = sBatchVerts[i];
+        }
+        for (i = 0; i < sBatchCount * 3; i++) {
+            sSky.indices[b->firstIndex + i] = sBatchIndices[i];
+        }
+        sSky.numVertices += sBatchVertices;
+        sSky.numTriangles += sBatchCount;
+        return TRUE;
+    }
+    if (!opaqueDepth) {
+        sky_draw_if_held();
+    }
+    if (st->depthWrite) {
+        sDepthDrawn = TRUE;
+    }
+    return FALSE;
+}
+
 /* Draws the batch of transformed triangles. */
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
+        if (UNLIKELY(sSkyLast) && sky_hold()) {
+            sBatchCount = 0;
+            sBatchVertices = 0;
+            sBatchGeneration++;
+            return;
+        }
         if (UNLIKELY(sTracing)) {
             trace_batch();
         }
@@ -1315,6 +1430,10 @@ static inline void flush_batch(void) {
         flush_model_batch();
     }
     flush_cpu_batch();
+}
+
+static COLD NOINLINE void sky_kind_boundary(void) {
+    flush_batch();
 }
 
 /* Whether the batch has room for one more triangle with up to three new vertices. */
@@ -1469,6 +1588,7 @@ static void read_switches(void) {
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
     // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
     sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
+    sSkyLast = plat_switch("DKR_SKY_LAST", 0) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1900,6 +2020,8 @@ static COLD void flush_model_batch(void) {
         plat_log("    model batch, %d vertices", (int) sModelVertices);
     }
     part = walk_switch(WALK_DRAWS);
+    sky_draw_if_held(); // (DKR_SKY_LAST) Model draws are rare enough to just draw the held sky first
+    sDepthDrawn |= sModelState.depthWrite;
     gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
     prof_count(PROF_DRAWS, 1);
@@ -2143,6 +2265,8 @@ static COLD void flush_mesh_batch(void) {
         plat_log("    mesh batch, %d parts", (int) sMeshPartCount);
     }
     part = walk_switch(WALK_DRAWS);
+    sky_draw_if_held();
+    sDepthDrawn |= sModelState.depthWrite;
     gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
     prof_count(PROF_DRAWS, 1);
@@ -2741,10 +2865,17 @@ static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
         flush_batch();
         part = walk_switch(WALK_DRAWS);
         if (g.colorImage == g.depthImage) {
+            sky_depth_cleared();
+            if (UNLIKELY(sSkyLast) && rect[1] <= 0 && rect[3] >= GFX_SCREEN_HEIGHT - 1) {
+                // The game's clear stops a row short (its scissor ends at 239); a sky drawn last would find the old
+                // depth there. (The 3DS's memory fill clears the whole buffer anyway, see gfxb_clear_depth.)
+                rect[3] = GFX_SCREEN_HEIGHT;
+            }
             gfx_split_clear_depth(rect);
             REF_CALL(refb_clear_depth(rect));
         } else {
             u32 c = rgba5551_to_8888(g.fillColor >> 16);
+            sky_draw_if_held();
             gfx_split_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
             REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
@@ -3490,6 +3621,8 @@ void port_gfx_run_task(void *taskPtr) {
     walk_begin();
     run_dl((const Gfx *) task->t.data_ptr, -1);
     flush_batch();
+    sky_draw_if_held();
+    sDepthDrawn = FALSE;
     kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);

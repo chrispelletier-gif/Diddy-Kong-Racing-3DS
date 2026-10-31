@@ -113,8 +113,8 @@ debug or performance row must be added to the hidden lists in `3ds/menu_3ds.c` a
   `DKR_RENDER_AHEAD=2` in `env.txt` tries it without the menu; it also works on the host build.
 - **Edge trimming**: clip triangles to the GPU's guard band (on by default).
 - **Profiler**: frame times on the bottom screen (see Profiler).
-- **Test run**: start a full test, a quick test, the boss fights, the GPU bench or the switch bench, or stop the one
-  running.
+- **Test run**: start a full test, a quick test, the boss fights, the GPU bench, the switch bench or the whole game run
+  (full or short), or stop the one running.
 - **Sound** (roadmap Phase 7; the player build keeps only Smooth resampling):
   - *Sound engine*: DSP voices (default) plays every voice of the game's music and sound effects on one of the 3DS
     DSP's 24 channels, which decode, resample, envelope and mix it; the CPU only runs the game's sequencer and the
@@ -382,7 +382,7 @@ times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
 are system calls, times one frame in 8); the waste on one frame in 8. The log gets the same as `draw mix a frame` and
 `objects a frame` lines every few seconds. The GPU can't time its draws one by one, so the switch bench has four
 cost rows that leave a kind undrawn (`DKR_SKIP_KINDS`, a bit per kind): the GPU ms they save is what that kind costs
-it.
+it. On a New 3DS more cost rows split the rest: anti-aliasing off, colour boost off and 400 pixels instead of 800.
 
 ## Unattended test run (debug build only)
 
@@ -438,6 +438,25 @@ fight with its outcome, time, place, frame rate and how often the kart had to be
 through the ground shows up as unsticks or as a race that never finishes. The races are in `boss_test_results.csv`
 (the test run's columns plus `build`). `DKR_AUTORUN_BOSS=1` runs it at every start; `DKR_AUTORUN_BOSS_TRACKS`,
 `DKR_AUTORUN_BOSS_CHARACTER` and `DKR_AUTORUN_BOSS_PASSES` change the levels, the character and the races per boss.
+
+### Whole game
+
+Tap Settings, Test run, then Whole game (about 5 hours) or Whole game (short) (about an hour). It plays as much of the
+game as works without a person, in six parts: a pass through the menus (title screen, options, character select, the
+adventure's file select and the tracks menu, pressing the buttons a player would), every race track with every vehicle
+it allows (the characters taking turns), each track's silver coin race in its adventure form, the four battle arenas
+(played for 2.5 minutes or until they end), the ten boss fights, and a tour of each hub of the overworld: no AI course
+runs there, so the kart is put in every segment of the hub's map in turn and turned once round, so everything is drawn
+from everywhere. The adventure levels play with every door, boss and cutscene done, in memory only (the saves are never
+written and the progress is put back afterwards). The short run plays every part with less of each (one lap of each
+track with its usual vehicle, two silver coin races, one boss, one hub); it is also the run that gathers data for
+profile-guided compiling. With bug reports set up, the run's issue ("[3DS test run] whole game ...") is made after the
+first part, and each later part (and every 30 minutes, `DKR_AUTORUN_REPORT_MINUTES`) adds a comment with that part's
+stops (frame rate, 1% low, frames at 60/30/20/slower, what limited it, worst frame, hitches), the run so far and its
+lowest 1% lows; the next stop waits until the comment is out, so the network never runs during a measurement. The last
+comment brings the files. Results are in `wholegame_results.csv` (the test run's columns plus `stop`, `part` and
+`build`). `DKR_AUTORUN_WHOLE=1` (or `2` for the short run) runs it at every start; `DKR_AUTORUN_WHOLE_PARTS` (letters
+`mrcabh`) and `DKR_AUTORUN_WHOLE_LEVELS` keep only some of it.
 
 ### GPU benchmark
 
