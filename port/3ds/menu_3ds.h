@@ -4,7 +4,7 @@
 /* The Settings menu on the bottom screen (menu_3ds.c). */
 
 /* What the panel (update_3ds.c) should do after a tap on the menu. */
-enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT };
+enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT, MENU_RESEND_RESULTS };
 
 /*
  * Adds a page, a tab of the menu called title. count() is its number of rows; label(i) and

@@ -99,6 +99,7 @@ enum {
     MAIN_PROFILER,
     MAIN_UPDATES,
     MAIN_BUGREPORT,
+    MAIN_RESEND_RESULTS,
     MAIN_O3DS_RENDER
 };
 
@@ -147,6 +148,8 @@ static const char *row_label(int i) {
         return "Check for updates";
     } else if (i == MAIN_O3DS_RENDER) {
         return "Renderer (restart)";
+    } else if (i == MAIN_RESEND_RESULTS) {
+        return "Send test results again";
     }
     return "Send a bug report";
 }
@@ -200,6 +203,8 @@ static const char *row_hint(int i) {
         return "Install a newer build from GitHub";
     } else if (i == MAIN_O3DS_RENDER) {
         return "Old 3DS: lend it the system core";
+    } else if (i == MAIN_RESEND_RESULTS) {
+        return "The last run's results, from the SD card";
     }
     return "Log and snapshot (also SELECT+touch)";
 }
@@ -234,6 +239,8 @@ static void row_change(int i, int step) {
         sResult = MENU_UPDATES;
     } else if (i == MAIN_O3DS_RENDER) {
         settings_set("o3ds_render", ((settings_get("o3ds_render", 0) & 3) + step + 4) % 4);
+    } else if (i == MAIN_RESEND_RESULTS) {
+        sResult = MENU_RESEND_RESULTS;
     } else {
         sResult = MENU_BUGREPORT;
     }
@@ -274,10 +281,10 @@ static void picture_change(int i, int step) {
 static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, picture_value,
                                        picture_change, picture_hint, NULL };
 
-/* The Tools page (a debug build's only): the profiler, updates and bug reports, and on an Old 3DS where its renderer
- * runs. */
+/* The Tools page (a debug build's only): the profiler, updates, bug reports and sending test results again, and on an
+ * Old 3DS where its renderer runs. */
 static int tools_count(void) {
-    return is_old_3ds() ? 4 : 3;
+    return is_old_3ds() ? 5 : 4;
 }
 
 static const char *tools_label(int i) {

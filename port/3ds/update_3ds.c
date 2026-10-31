@@ -46,6 +46,7 @@ void plat_3ds_set_buttons(const char *const *labels, int count);
 void plat_3ds_panel_text(const char *text);
 void bugreport_watch_thread(const char *name);
 void bugreport_request(void);
+void bugreport_resend_results(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 
@@ -860,6 +861,8 @@ static void update_thread(void *arg) {
                 sState = STATE_IDLE;
                 if (result == MENU_BUGREPORT) {
                     bugreport_request();
+                } else if (result == MENU_RESEND_RESULTS) {
+                    bugreport_resend_results();
                 } else if (result == MENU_UPDATES && check_updates()) {
                     break;
                 }
