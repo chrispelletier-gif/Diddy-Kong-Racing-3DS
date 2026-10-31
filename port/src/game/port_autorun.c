@@ -264,13 +264,12 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
     { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
     { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
-    // Diddy's head flicker hunt (#290/#299/#303: the GPU leaves out head draws the CPU reference draws). Watch Diddy
-    // at each race start; the race whose head stays solid names the cause.
-    // Each on its own (not in the all-switches race, which tries P41 + P42 together).
-    { "every GPU setting sent for every draw", { "DKR_STATE_CACHE", "DKR_FAST_STATE", NULL }, 1, 0, 1 },
-    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 1 },
-    { "shared vertices off", { "DKR_INDEXED", NULL }, 1, 0, 1 },
-    { "index buffer aligned", { "DKR_IBO_ALIGN", NULL }, 0, 1, 1 },
+    // Diddy's head flicker hunt (#290/#299/#303/#320). The state cache, cache flush, shared vertices and index
+    // alignment rows all still flickered; an Old 3DS (which culls back faces in the walk) never does. So: back faces
+    // culled by the walk instead of the GPU, no culling at all, and fog from the vertices instead of the depth.
+    { "head: back faces culled by the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1, 1 },
+    { "head: no back-face culling", { "DKR_NO_CULL", NULL }, 0, 1, 1 },
+    { "head: fog from vertices, not depth", { "DKR_VERTEX_FOG", NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
@@ -612,8 +611,7 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
-    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_CRESCENTISLAND, ASSET_LEVEL_HAUNTEDWOODS,
-                                              ASSET_LEVEL_JUNGLEFALLS }; // GPU heaviest + head flicker
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND }; // head flicker
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {

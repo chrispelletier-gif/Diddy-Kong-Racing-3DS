@@ -189,6 +189,8 @@ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
  * (roadmap item P12). Instead each texture is flushed when it is uploaded and the vertex buffer only from where the
  * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
  */
+static int sNoCull = -1;  // DKR_NO_CULL, read on set_draw_state's first use
+static int sFogMode = -1; // DKR_NO_FOG / DKR_VERTEX_FOG, read on first use
 static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first use
 static int sIndexed = -1;    // DKR_INDEXED, read on first use
 static int sFull = -1; // DKR_FULL_FLUSH, re-read when the switches change (switch bench)
@@ -3274,6 +3276,8 @@ static void read_switches(void) {
     sFull = -1;
     sStateCache = -1;
     sIndexed = -1;
+    sNoCull = -1;  // DKR_NO_CULL and the fog mode too (head flicker bench)
+    sFogMode = -1;
     sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
     sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
@@ -4157,10 +4161,8 @@ static void init_stage(TevStage *st) {
  */
 enum { FOG_PIXEL, FOG_VERTEX, FOG_OFF };
 
-static int sFogMode = -1;
-
 static void __attribute__((noinline, cold)) read_fog_mode(void) {
-    sFogMode = plat_getenv("DKR_NO_FOG") != NULL ? FOG_OFF : plat_getenv("DKR_VERTEX_FOG") != NULL ? FOG_VERTEX : FOG_PIXEL;
+    sFogMode = plat_switch("DKR_NO_FOG", 0) != 0 ? FOG_OFF : plat_switch("DKR_VERTEX_FOG", 0) != 0 ? FOG_VERTEX : FOG_PIXEL;
 }
 
 static inline int fog_mode(void) {
@@ -4701,10 +4703,8 @@ static int __attribute__((noinline, cold)) apply_alpha_diagnostic(const GfxDrawS
     return 1;
 }
 
-static int sNoCull = -1; // DKR_NO_CULL, read on set_draw_state's first call
-
 static void __attribute__((noinline, cold)) read_cull_setting(void) {
-    sNoCull = plat_getenv("DKR_NO_CULL") != NULL;
+    sNoCull = plat_switch("DKR_NO_CULL", 0) != 0;
 }
 
 PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
