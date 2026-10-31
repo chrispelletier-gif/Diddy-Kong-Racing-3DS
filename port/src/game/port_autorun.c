@@ -213,15 +213,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
-    // Runs 18-20 (v42-v44): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames) came
-    // and went from race to race whatever was switched (usual settings, edge trimming off and the off-screen drop off
-    // had clean races; the cache flush, VFP maths, lean draw and fast clip didn't), so one race says little. Now the
-    // frame history counts the flashes itself (flashes column) and Jungle Falls is raced twice for each row.
-    { "edge trimming off", { "BENCH_GUARD_BAND", NULL }, 1, 0, 1 },
-    { "off-screen command drop off", { "DKR_WALK_REJECT", NULL }, 1, 0, 1 },
-    { "back faces culled by the GPU", { "DKR_CPU_CULL", NULL }, 1, 0, 1 },
-    { "VFP vector maths off", { "DKR_VFP_VECTORS", NULL }, 1, 0, 1 },
-    { "lean draw off", { "DKR_DRAW_LEAN", NULL }, 1, 0, 1 },
+    // Runs 18-21 (v42-v45): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames) never
+    // showed in the usual settings' race and did in most others, whatever they switched; every other row made the
+    // frame slower (renderer and GPU 2-3 ms more). #306's flight recorder: the walk sent as many triangles as ever
+    // through the flash, but one GPU frame took 37 ms (11 usually). So: a race between the frame's hand-over and a
+    // busy system core? Rows: the usual settings (twice, as Jungle Falls is raced twice), the same with the backend's
+    // core kept 4 ms busier, and the hand-over changed (depth clear drawn, no frame built while the GPU draws).
+    { "system core 4 ms busier a frame", { "DKR_BACKEND_LOAD", NULL }, 0, 4, 1 },
+    { "depth clear drawn, not a memory fill", { "DKR_DEPTH_FILL", NULL }, 1, 0, 1 },
+    { "frames not overlapped with the GPU", { "DKR_OVERLAP", NULL }, 1, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to

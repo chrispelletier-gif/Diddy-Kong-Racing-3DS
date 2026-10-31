@@ -2130,18 +2130,18 @@ static int history_flash_pixels(const u16 *a, const u16 *b, const u16 *c) {
 
 /*
  * The flash watch (Old 3DS tunnel dropout, #306): as each picture comes in, the one FLASH_LAG pictures back is
- * scored against those 1, 2 and 4 before and after it (when they are all the frames after one another), on one pixel
- * in four. A score over FLASH_SHARE of the pixels counts as a flash; a run of flashed pictures counts once
+ * scored against those 1 and 2 before and after it (when they are all the frames after one another), on one pixel
+ * in sixteen (v45's one in four and gap 4 cost the Old 3DS's system core some 5 ms a frame). A score over FLASH_SHARE of the pixels counts as a flash; a run of flashed pictures counts once
  * (PLAT_COUNTER_FLASHES, the switch bench's flashes column) and is logged. DKR_FLASH_WATCH=0 turns it off.
  */
 #define FLASH_LAG 4
-#define FLASH_SHARE 8 // per cent
+#define FLASH_SHARE 20 // per cent (#306's tunnel: 32%; 8% caught some 25 a race of other things in v45)
 static int sFlashWatch = -1, sFlashRun;
 
 static int flash_pixels_sparse(const u16 *a, const u16 *b, const u16 *c) {
     int x, y, count = 0;
-    for (x = 0; x < HISTORY_W; x += 2) {
-        for (y = 0; y < HISTORY_H; y += 2) {
+    for (x = 0; x < HISTORY_W; x += 4) {
+        for (y = 0; y < HISTORY_H; y += 4) {
             int i = x * HISTORY_H + y;
             int la = history_luma(a[i]), lb = history_luma(b[i]), lc = history_luma(c[i]);
             int da = abs(lb - la), dc = abs(lb - lc), d = da < dc ? da : dc;
@@ -2154,8 +2154,8 @@ static int flash_pixels_sparse(const u16 *a, const u16 *b, const u16 *c) {
 }
 
 static void flash_watch(void) {
-    static const int gaps[3] = { 1, 2, 4 };
-    const int sampled = (HISTORY_W / 2) * (HISTORY_H / 2);
+    static const int gaps[2] = { 1, 2 };
+    const int sampled = (HISTORY_W / 4) * (HISTORY_H / 4);
     int mid, g, best = 0, newest;
     if (sFlashWatch < 0) {
         sFlashWatch = plat_switch("DKR_FLASH_WATCH", 1) != 0;
@@ -2165,7 +2165,7 @@ static void flash_watch(void) {
     }
     newest = (sHistoryNext + sHistorySlots - 1) % sHistorySlots;
     mid = (newest + sHistorySlots - FLASH_LAG) % sHistorySlots;
-    for (g = 0; g < 3; g++) {
+    for (g = 0; g < 2; g++) {
         int a = (mid + sHistorySlots - gaps[g]) % sHistorySlots, c = (mid + gaps[g]) % sHistorySlots, sc;
         if (sHistoryFrame[a] < 0 || sHistoryFrame[c] < 0 || sHistoryFrame[mid] < 0 ||
             sHistoryFrame[mid] - sHistoryFrame[a] != gaps[g] || sHistoryFrame[c] - sHistoryFrame[mid] != gaps[g]) {
@@ -2908,12 +2908,16 @@ static void process_pending_frees(FrameSlot *slot) {
 }
 
 static int overlap_setting(void) {
-    static int sSetting = -1;
-    if (sSetting < 0) {
-        const char *env = plat_getenv("DKR_OVERLAP");
-        sSetting = env == NULL || atoi(env) != 0;
-        plat_log("frames built while the GPU draws the last one: %s",
-                 !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
+    // Re-read when the switches change (the Old 3DS tunnel bench turns it off for a race).
+    static int sSetting = -1, sEpoch = -1;
+    if (sEpoch != gPlatSwitchEpoch) {
+        int setting = plat_switch("DKR_OVERLAP", 1) != 0;
+        sEpoch = gPlatSwitchEpoch;
+        if (setting != sSetting) {
+            sSetting = setting;
+            plat_log("frames built while the GPU draws the last one: %s",
+                     !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
+        }
     }
     return sSetting && sNumSlots == 2;
 }
@@ -3325,6 +3329,7 @@ static int sDrawLean; // DKR_DRAW_LEAN: the one-pass draw, see gfxb_draw_indexed
 static void set_frame_band(void);
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
 static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
+static int sBackendLoadMs; // DKR_BACKEND_LOAD: milliseconds of busy waiting at each frame end (tunnel bench)
 static int sDrawParts;     // DKR_DRAW_PARTS: time each draw's parts while the profiler is on (gfxb_draw_indexed)
 
 static void read_switches(void) {
@@ -3340,6 +3345,7 @@ static void read_switches(void) {
     // flushes are slow there). The New 3DS's #176 showed no difference.
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
     sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
+    sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
@@ -3536,6 +3542,12 @@ PLAT_COLD static void draw_test_pattern(void) {
 }
 
 void gfxb_end_frame(void) {
+    if (sBackendLoadMs > 0) {
+        // DKR_BACKEND_LOAD (tunnel bench): this core kept busy that long, as a heavier frame would.
+        unsigned long long until = plat_time_ns() + (unsigned long long) sBackendLoadMs * 1000000ULL;
+        while (plat_time_ns() < until) {
+        }
+    }
     {
         static int sTest = -1;
         if (sTest < 0) {
