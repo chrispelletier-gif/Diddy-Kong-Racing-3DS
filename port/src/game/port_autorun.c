@@ -214,16 +214,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
     // Run 18 (v42) and 19 (v43): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames)
-    // came and went whatever the cache flush did, so it is random, about 4 races in 5. The PC never shows it with the
-    // same walk switches, so the suspects are the 3DS-only parts: the VFP vector maths (asm), the lean draw, and
-    // the guard band clipping (edge trimming, fast clip). Jungle Falls only; watch the tunnel.
-    { "VFP vector maths off", { "DKR_VFP_VECTORS", NULL }, 1, 0, 1 },
-    { "lean draw off", { "DKR_DRAW_LEAN", NULL }, 1, 0, 1 },
-    { "edge trimming off", { "BENCH_GUARD_BAND", NULL }, 1, 0, 1 },
-    { "triangles beyond the band clipped, not dropped", { "DKR_FAST_CLIP", NULL }, 1, 0, 1 },
-    { "off-screen command drop off", { "DKR_WALK_REJECT", NULL }, 1, 0, 1 },
-    // Never seen in 3D, which turns the CPU's back-face culling off.
-    { "back faces culled by the GPU", { "DKR_CPU_CULL", NULL }, 1, 0, 1 },
+    // came and went whatever the cache flush did. Run 20 (v44): the usual settings' race, always the first, was clean
+    // again and the next ones weren't. So these rows change nothing (DKR_BENCH_SAME is read by nobody): if the
+    // second race on glitches anyway, something builds up from race to race; if not, switching settings does it.
+    { "usual settings again (2nd race)", { "DKR_BENCH_SAME", NULL }, 0, 1, 1 },
+    { "usual settings again (3rd race)", { "DKR_BENCH_SAME", NULL }, 0, 2, 1 },
+    { "usual settings again (4th race)", { "DKR_BENCH_SAME", NULL }, 0, 3, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
