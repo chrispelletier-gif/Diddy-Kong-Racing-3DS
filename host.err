@@ -1,0 +1,18 @@
+../src/waves.c: In function 'obj_wave_init.part.0':
+../src/waves.c:2199:42: warning: writing 1 byte into a region of size 0 [-Wstringop-overflow=]
+ 2199 |                     object->unkE[var_a1] >>= var_v1;
+      |                                          ^
+../include/structs.h:1484:19: note: at offset 2 into destination object 'unkE' of size 2
+ 1484 |     /* 0x0E */ s8 unkE[2];
+      |                   ^
+In function 'func_800BBF78',
+    inlined from 'func_800BBDDC' at ../src/waves.c:1317:5,
+    inlined from 'waves_init' at ../src/waves.c:252:5,
+    inlined from 'init_track' at ../src/tracks.c:242:9:
+../src/waves.c:1437:29: warning: writing 1 byte into a region of size 0 [-Wstringop-overflow=]
+ 1437 |         D_800E3184->unk0[i] = 0xFF;
+      |                             ^
+../src/waves.h: In function 'init_track':
+../src/waves.h:48:8: note: at offset 8 into destination object 'unk0' of size 8
+   48 |     u8 unk0[8];
+      |        ^

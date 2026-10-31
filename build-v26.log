@@ -1,0 +1,9 @@
+make: Entering directory '/src/port'
+CC ../src/video.c
+CC src/game/port_autorun.c
+CC src/plat/plat_common.c
+CC 3ds/bugreport_3ds.c
+CC 3ds/update_3ds.c
+LD build/3ds/dkr.elf
+3DSX build/3ds/dkr.3dsx
+make: Leaving directory '/src/port'

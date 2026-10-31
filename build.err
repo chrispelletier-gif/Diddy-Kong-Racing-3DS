@@ -1,0 +1,8 @@
+In file included from src/game/asset_swap.c:16:
+../src/audio_vehicle.h:89:5: warning: conflicting types for built-in function 'log'; expected 'double(double)' [-Wbuiltin-declaration-mismatch]
+   89 | f32 log(f32 x);
+      |     ^~~
+../src/audio_vehicle.h:7:1: note: 'log' is declared in header '<math.h>'
+    6 | #include "camera.h"
+  +++ |+#include <math.h>
+    7 | 

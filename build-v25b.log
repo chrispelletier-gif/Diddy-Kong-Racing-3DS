@@ -1,0 +1,4 @@
+make: Entering directory '/src/port'
+LD build/3ds/dkr.elf
+3DSX build/3ds/dkr.3dsx
+make: Leaving directory '/src/port'
