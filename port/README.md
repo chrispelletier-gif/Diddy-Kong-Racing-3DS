@@ -382,7 +382,7 @@ times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
 are system calls, times one frame in 8); the waste on one frame in 8. The log gets the same as `draw mix a frame` and
 `objects a frame` lines every few seconds. The GPU can't time its draws one by one, so the switch bench has four
 cost rows that leave a kind undrawn (`DKR_SKIP_KINDS`, a bit per kind): the GPU ms they save is what that kind costs
-it.
+it. On a New 3DS more cost rows split the rest: anti-aliasing off, colour boost off and 400 pixels instead of 800.
 
 ## Unattended test run (debug build only)
 

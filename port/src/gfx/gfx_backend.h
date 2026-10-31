@@ -61,6 +61,9 @@ enum GfxBlendMode {
     GFX_BLEND_ALPHA_CVG /* opaque, alpha tested (cutout) */
 };
 
+/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn (the sky drawn last, DKR_SKY_LAST). */
+#define GFX_DEPTH_FAR 2
+
 enum GfxTextureFilter { GFX_FILTER_POINT, GFX_FILTER_BILINEAR };
 enum GfxTextureWrap { GFX_WRAP_REPEAT, GFX_WRAP_MIRROR, GFX_WRAP_CLAMP };
 
@@ -104,7 +107,7 @@ typedef struct GfxDrawState {
     unsigned char alphaRef;
     unsigned char depthTest;
     unsigned char depthWrite;
-    unsigned char decal;            /* Pull towards the camera to win depth fights (ZMODE_DEC) */
+    unsigned char decal;            /* Pull towards the camera to win depth fights (ZMODE_DEC), or GFX_DEPTH_FAR */
     unsigned char fogEnabled;       /* Blend towards fog colour using vertex alpha */
     short fogMul, fogOffset;        /* Fog factor = clamp(z / w * fogMul + fogOffset, 0, 255), for per pixel fog */
     unsigned char cullMode;         /* 0 none, 1 back faces, 2 front faces (in screen space, CCW front) */

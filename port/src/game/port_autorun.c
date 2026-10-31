@@ -206,12 +206,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * 3.7-4.3 ms, Haunted Woods' 1% low 30 to 58 fps); the P38 cuts, the P40 cull and texture hashes kept 8 frames were
  * within noise. At the player's 800 pixels and 4x anti-aliasing the GPU is the limit instead (#289, #291: 15-16 ms of
  * a 16.7 ms frame, Crescent Island down to 45 fps), so the New 3DS races at those settings (sBenchRenderNew3ds) and
- * tries the GPU savers: adaptive anti-aliasing (P37, drops to one sample only on frames that would miss 60; it never
- * switched at #246's 400 pixels), anti-aliasing off, and textures in VRAM (P17, nothing in #176 at 400 pixels). */
+ * measures the GPU there. Bench #309 made adaptive anti-aliasing (P37) the player's default, but the usual race keeps
+ * it off so the GPU's full cost stays measurable; its row shows what a player gets. Textures in VRAM (P17, 0.1-0.2 ms
+ * in #309) left the list. The fixed cost (about 9-10 ms with nothing drawn) is split by the colour boost and
+ * 400-pixel rows, and the sky (P41) and depth format (P42) rows try to cut the sky's and the track's fill. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "adaptive anti-aliasing (P37)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 0 },
-    { "anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 0 },
-    { "textures in VRAM (P17)", { "DKR_TEX_VRAM", NULL }, 0, 1, 0 },
+    { "adaptive anti-aliasing (P37, the player's default)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 1 },
+    { "cost: anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 1 },
+    { "cost: colour boost off", { "BENCH_COLOUR", NULL }, 1, 0, 1 },
+    { "cost: 400 pixels, not 800", { "BENCH_WIDE800", NULL }, 1, 0, 1 },
+    // GPU savers for the track and sky (2026-10-31): the sky drawn last, only where the track left gaps (P41), and
+    // a depth buffer without the unused stencil (P42).
+    { "sky drawn last (P41)", { "DKR_SKY_LAST", NULL }, 0, 1, 0 },
+    { "depth buffer without stencil (P42)", { "DKR_DEPTH24", NULL }, 0, 1, 0 },
     // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
     // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
     { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },

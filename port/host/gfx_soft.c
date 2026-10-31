@@ -635,18 +635,21 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 continue;
             }
             z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
-            zf = st->decal ? z - 0.0005f : z;
+            if (st->decal == GFX_DEPTH_FAR) {
+                z = 1.0f; // The far plane (the depth buffer's clear value), behind everything drawn
+            }
+            zf = st->decal == 1 ? z - 0.0005f : z;
             passF = !(st->depthTest && zf > sDepthF[y * W + x]);
             if (sDepthBits) {
                 // As the 3DS: depth 1 - z (vertex z pinned at the far plane), plus the decal offset, in fixed point,
                 // nearer or equal passes. Kept negated so that the test below stays the same.
-                float d = w0 * v0->zd + w1 * v1->zd + w2 * v2->zd;
-                if (st->decal) {
+                float d = st->decal == GFX_DEPTH_FAR ? 0.0f : w0 * v0->zd + w1 * v1->zd + w2 * v2->zd;
+                if (st->decal == 1) {
                     d += 0.0002f * plat_camera_near() / 10.0f;
                 }
                 d = d < 0.0f ? 0.0f : (d > 1.0f ? 1.0f : d);
                 z = -floorf(d * sDepthScale);
-            } else if (st->decal) {
+            } else if (st->decal == 1) {
                 z -= 0.0005f;
             }
             if (sDepthBits) {

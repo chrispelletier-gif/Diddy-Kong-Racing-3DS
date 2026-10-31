@@ -786,7 +786,16 @@ static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
 
-/* A render target: RGBA8 colour, 24-bit depth and stencil. */
+/*
+ * The depth buffer's format (DKR_DEPTH24, roadmap P42): 24-bit depth with 8 bits of stencil (4 bytes a pixel, the
+ * default), or 24-bit depth alone (3 bytes). Nothing uses the stencil, and the track's pixels read and write depth:
+ * the switch bench's cost rows put a pixel of track (depth read, depth write, colour write) at about twice the sky's
+ * (colour write only), so if filling pixels is limited by memory traffic, a quarter less depth traffic shows.
+ * Every target is made again when it changes (apply_screen_mode).
+ */
+static int sDepth24;
+
+/* A render target: RGBA8 colour, 24-bit depth and stencil (or 24-bit depth alone, sDepth24). */
 static C3D_RenderTarget *new_target(int width, int height) {
     C3D_RenderTarget *target = NULL;
     int tries;
@@ -795,7 +804,8 @@ static C3D_RenderTarget *new_target(int width, int height) {
         if (tries == 1 && evict_vram_textures() == 0) {
             break;
         }
-        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        target = C3D_RenderTargetCreate(width, height, GPU_RB_RGBA8,
+                                        sDepth24 ? GPU_RB_DEPTH24 : GPU_RB_DEPTH24_STENCIL8);
     }
     return target;
 }
@@ -841,7 +851,9 @@ static void link_target(void) {
 }
 
 /*
- * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, default off; shelved after switch bench #246, where it never switched): with anti-aliasing on, a frame the GPU took nearly a whole
+ * Adaptive anti-aliasing (DKR_ADAPTIVE_AA, on by default on a New 3DS since switch bench #309 (2026-10-31): at 800
+ * pixels with 4x anti-aliasing it held 100% of frames at 60 against 93-96%; off on an Old 3DS, which races without
+ * anti-aliasing; #246 at 400 pixels never switched): with anti-aliasing on, a frame the GPU took nearly a whole
  * frame's time to draw (over 92% of it, see adaptive_observe) sends the next ones to a target at the screen's own
  * resolution (sLowTarget, made when first needed) for sAdaptHoldLen frames; the first anti-aliased frame after that
  * is a probe, and if it is slow again the hold doubles (up to ADAPT_HOLD_MAX), so a heavy stretch of track stays at
@@ -1209,6 +1221,7 @@ static void apply_screen_mode(void) {
     int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
                  __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
     int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    int depth24 = plat_switch("DKR_DEPTH24", 0) != 0;
     int aa = stereo ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
@@ -1223,7 +1236,7 @@ static void apply_screen_mode(void) {
     sScale3D = sWide ? 1.0f : NARROW;
     apply_stereo_tuning(stereo, slider);
     if (sTarget == NULL ||
-        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX)) {
+        (stereo == sStereo && wide800 == s800 && scale == sRenderScale && across == sScaleX && depth24 == sDepth24)) {
         return;
     }
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
@@ -1232,7 +1245,8 @@ static void apply_screen_mode(void) {
     }
     C3D_FrameEnd(0);
     adaptive_delete_low();
-    newTarget = scale != sRenderScale || across != sScaleX;
+    newTarget = scale != sRenderScale || across != sScaleX || depth24 != sDepth24;
+    sDepth24 = depth24;
     if (newTarget) {
         C3D_RenderTargetDelete(sTarget); // Waits for the empty frame.
         if (sTargetRight != NULL) {
@@ -1334,6 +1348,7 @@ void gfxb_init(void) {
         sWantedAa = sDefaultAa;
         read_screen_settings();
         s800 = s800Setting && !sWideUnsupported;
+        sDepth24 = plat_switch("DKR_DEPTH24", 0) != 0;
         create_target(sDefaultAa != PLAT_AA_OFF ? 2 : 1, (sDefaultAa == PLAT_AA_4X || s800) ? 2 : 1);
         if (s800 && sScaleX != 2) {
             sWideUnsupported = 1; // No VRAM for the wide target.
@@ -3254,7 +3269,7 @@ static void read_switches(void) {
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
-    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -3278,8 +3293,11 @@ static void read_switches(void) {
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
-    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s", sAdaptive ? "on" : "off",
-             sTripleWanted ? 3 : 2, plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads");
+    plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s, depth %s, sky %s",
+             sAdaptive ? "on" : "off", sTripleWanted ? 3 : 2,
+             plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads",
+             plat_switch("DKR_DEPTH24", 0) ? "24-bit" : "24-bit + stencil",
+             plat_switch("DKR_SKY_LAST", 0) ? "drawn last" : "drawn first");
 }
 
 void gfxb_start_frame(void) {
@@ -4730,7 +4748,9 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
     if (!sGpu.known || state->decal != sGpu.decal) {
         // Widescreen's camera cuts 4 times closer (plat_camera_near), which spreads depth 4 times as far: decals are
         // pulled a quarter as much to stay as close to their surfaces.
-        C3D_DepthMap(true, -1.0f, state->decal ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
+        // GFX_DEPTH_FAR: depth 0 everywhere, the farthest (and the depth buffer's clear value).
+        C3D_DepthMap(true, state->decal == GFX_DEPTH_FAR ? 0.0f : -1.0f,
+                     state->decal == 1 ? 0.0002f * plat_camera_near() / 10.0f : 0.0f);
         sGpu.decal = state->decal;
     }
     if (__builtin_expect(sNoCull < 0, 0)) {
