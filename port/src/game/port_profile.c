@@ -814,6 +814,14 @@ static void show_overlay(void) {
                 prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
                 port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
                 {
+                    unsigned long rejected, rejectedTris;
+                    gfx_walk_reject_take(&rejected, &rejectedTris);
+                    if (rejected > 0) {
+                        port_log("walk: %lu commands (%lu triangles) a frame dropped wholly off the screen",
+                                 rejected / frames, rejectedTris / frames);
+                    }
+                }
+                {
                     unsigned long atlas[3];
                     if (gfx_atlas_take(atlas)) {
                         port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "

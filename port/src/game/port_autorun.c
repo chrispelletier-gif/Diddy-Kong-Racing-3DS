@@ -208,11 +208,10 @@ typedef struct BenchSwitch {
 static const BenchSwitch sSwitchesOld3ds[] = {
     // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
     // at 30 against 96/92/94%), so DKR_RACER_LOD=2 is the Old 3DS default (src/objects.c) and its rows are gone.
-    // v40: only the cost rows, to see what each kind of thing costs the walk on the game core (the limit).
-    { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
-    { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
-    { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
-    { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
+    // Quick test #304 (v40, the monitor): the walk costs some 50-70 us a command, and 30-85% of the sky's, track's
+    // and effects' triangles are off the screen. DKR_WALK_REJECT drops a command wholly past one edge before its
+    // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
+    { "off-screen commands dropped early (DKR_WALK_REJECT)", { "DKR_WALK_REJECT", NULL }, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to

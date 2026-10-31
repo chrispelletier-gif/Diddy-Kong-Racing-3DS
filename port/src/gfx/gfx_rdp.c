@@ -1654,6 +1654,8 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
+static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
+static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
 /* Back faces culled here rather than by the GPU (DKR_CPU_CULL, on by default on an Old 3DS only), this frame: a
@@ -1701,6 +1703,7 @@ static void read_switches(void) {
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
     // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
     sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
+    sWalkReject = plat_switch("DKR_WALK_REJECT", 0) != 0;
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -2647,6 +2650,59 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     return TRUE;
 }
 
+/*
+ * DKR_WALK_REJECT (Old 3DS work): the profiler's monitor found 30-85% of the sky's, the track's and the effects'
+ * triangles off the screen, and the walk's cost to be mostly per command (some 50-70 us each on an Old 3DS), not per
+ * triangle. A command whose corners all lie past the same edge of the screen (or behind the camera) draws nothing,
+ * so it is dropped here, before the draw state, texture coordinates and shared vertices are set up for it. The test
+ * is audit_triangle's. Only for the 3D world's vertices: flat ones (the HUD, sprites) are placed on the screen.
+ */
+static NOINLINE HOT s32 command_off_screen(const Triangle *tris, s32 count) {
+    Viewport vp;
+    u32 all = 0x1F;
+    s32 i, k;
+    viewport_init(&vp);
+    for (i = 0; i < count && all != 0; i++) {
+        const u8 *idx = &tris[i].verticesArray[1];
+        for (k = 0; k < 3; k++) {
+            const RspVertex *v;
+            float x, y, w;
+            u32 out = 0;
+            if (idx[k] >= MAX_VERTICES) {
+                return FALSE;
+            }
+            v = &g.verts[idx[k]];
+            w = v->w;
+            x = v->x * vp.scaleX + w * vp.transX;
+            y = v->y * vp.scaleY + w * vp.transY;
+            out |= (x > w) ? 1 : 0;
+            out |= (x < -w) ? 2 : 0;
+            out |= (y > w) ? 4 : 0;
+            out |= (y < -w) ? 8 : 0;
+            out |= (w <= 1e-3f) ? 16 : 0;
+            all &= out;
+        }
+    }
+    if (all == 0 || count <= 0) {
+        return FALSE;
+    }
+    sWalkRejected++;
+    sWalkRejectedTris += (u32) count;
+    if (UNLIKELY(sAuditFrame)) {
+        sMix.kinds[sDrawKind].audited += (unsigned long) count;
+        sMix.kinds[sDrawKind].offscreen += (unsigned long) count;
+    }
+    return TRUE;
+}
+
+/* The commands and triangles DKR_WALK_REJECT dropped since the last call (profiler). */
+void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris) {
+    *commands = sWalkRejected;
+    *tris = sWalkRejectedTris;
+    sWalkRejected = 0;
+    sWalkRejectedTris = 0;
+}
+
 static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -2679,6 +2735,9 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
                 resolve_load(sSlotLoad[t->vi2]);
             }
         }
+    }
+    if (sWalkReject && g.flatVerts == 0 && command_off_screen(tris, count)) {
+        return;
     }
     if (!sTriStateValid) {
         build_draw_state(&sTriState, FALSE);
