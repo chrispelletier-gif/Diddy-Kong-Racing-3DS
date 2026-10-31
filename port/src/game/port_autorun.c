@@ -213,15 +213,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
-    // Runs 18-21 (v42-v45): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames) never
-    // showed in the usual settings' race and did in most others, whatever they switched; every other row made the
-    // frame slower (renderer and GPU 2-3 ms more). #306's flight recorder: the walk sent as many triangles as ever
-    // through the flash, but one GPU frame took 37 ms (11 usually). So: a race between the frame's hand-over and a
-    // busy system core? Rows: the usual settings (twice, as Jungle Falls is raced twice), the same with the backend's
-    // core kept 4 ms busier, and the hand-over changed (depth clear drawn, no frame built while the GPU draws).
-    { "system core 4 ms busier a frame", { "DKR_BACKEND_LOAD", NULL }, 0, 4, 1 },
-    { "depth clear drawn, not a memory fill", { "DKR_DEPTH_FILL", NULL }, 1, 0, 1 },
-    { "frames not overlapped with the GPU", { "DKR_OVERLAP", NULL }, 1, 0, 1 },
+    // Runs 18-21 (v42-v45): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a frame or two)
+    // came and went whatever was switched; the frame history now counts big flashes (flashes column). Run 22 (v46),
+    // two races a row: usual 5 flashes, system core 4 ms busier 10, no overlap 11, depth clear drawn 0. So the depth
+    // clear is drawn by default on an Old 3DS now (DKR_DEPTH_FILL=0, gfx_c3d.c); this row puts the memory fill back to
+    // confirm it, over three races each.
+    { "depth clear by memory fill (the old way)", { "DKR_DEPTH_FILL", NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -564,7 +561,8 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_JUNGLEFALLS }; // head flicker
-    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS, ASSET_LEVEL_JUNGLEFALLS }; // tunnel (#306), twice
+    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS, ASSET_LEVEL_JUNGLEFALLS,
+                                            ASSET_LEVEL_JUNGLEFALLS }; // tunnel (#306), three times
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {

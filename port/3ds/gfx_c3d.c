@@ -3319,7 +3319,7 @@ int gfxb_gpu_transform(void) {
  * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
  * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
  * diagnostics, P28), DKR_EARLY_DEPTH (the early depth test, P20), DKR_SVC_FLUSH (cache flushes as a system call,
- * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default, see
+ * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default on a New 3DS, see
  * gfxb_clear_depth). DKR_TEX_VRAM (P17) is read when a texture is made instead, as the switch bench sets it while a
  * level loads its textures.
  */
@@ -3344,7 +3344,9 @@ static void read_switches(void) {
     // On by default on an Old 3DS only (switch bench #241: with the renderer on the system core the GPU service's
     // flushes are slow there). The New 3DS's #176 showed no difference.
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
-    sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
+    // Off on an Old 3DS: switch bench run 22 (v46) counted no Jungle Falls tunnel flashes in two races with the depth
+    // clear drawn, 5-11 in every other pair (#306: walls and ceiling missing for a frame or two).
+    sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     // Re-read on their next use (the head flicker bench switches them between races).
