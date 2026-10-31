@@ -195,12 +195,10 @@ typedef struct BenchSwitch {
  * The texture atlas (DKR_TEX_ATLAS) batches commands with different small textures: alone it catches only a few
  * commands a frame (most small textures in a race have mipmaps), so it is also raced with mipmapped textures put in
  * (2, which loses their mipmaps in that race), to see what it could gain.
+ * Bench run 15 (v35, Jungle Falls): GPU vertex maths cost the GPU 5 ms and the renderer 3 ms (29.0 and 28.7 fps
+ * against 29.6), and the atlas 2 ms of each (29.3 and 29.4) whichever textures it took, so all four are off and out.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL }, 0, 1 },
-    { "GPU vertex maths with meshes (P30, P31, P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
-    { "texture atlas", { "DKR_TEX_ATLAS", NULL }, 0, 1 },
-    { "texture atlas with mipmapped textures (no mipmaps for them)", { "DKR_TEX_ATLAS", NULL }, 0, 2 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it
