@@ -84,6 +84,7 @@ typedef struct GfxTexture {
     unsigned char filter;
     unsigned char wrapS, wrapT;
     void *backendData; /* Owned by the backend. */
+    unsigned char atlas; /* A page of small textures (gfx_rdp.c's texture atlas): never given mipmaps */
 } GfxTexture;
 
 typedef struct GfxVertex {
@@ -298,7 +299,7 @@ static inline unsigned int gfx_texel_bytes(int format) {
  */
 static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
     unsigned int i, n = tex->width * tex->height;
-    if (tex->filter == GFX_FILTER_POINT || tex->width < 16 || tex->height < 16) {
+    if (tex->filter == GFX_FILTER_POINT || tex->width < 16 || tex->height < 16 || tex->atlas) {
         return 0;
     }
     if (tex->wrapS != GFX_WRAP_CLAMP && tex->wrapT != GFX_WRAP_CLAMP) {

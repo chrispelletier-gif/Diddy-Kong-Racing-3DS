@@ -190,10 +190,15 @@ typedef struct BenchSwitch {
  * GPU vertex maths (P30) and the track and model meshes (P31, P34) now work with the two-core renderer: shelved on a
  * New 3DS, whose renderer had time to spare, they are raced on an Old 3DS, whose walk is full: alone, then with the
  * meshes.
+ * The texture atlas (DKR_TEX_ATLAS) batches commands with different small textures: alone it catches only a few
+ * commands a frame (most small textures in a race have mipmaps), so it is also raced with mipmapped textures put in
+ * (2, which loses their mipmaps in that race), to see what it could gain.
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitches[] = {
     { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL }, 0, 1 },
     { "GPU vertex maths with meshes (P30, P31, P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
+    { "texture atlas", { "DKR_TEX_ATLAS", NULL }, 0, 1 },
+    { "texture atlas with mipmapped textures (no mipmaps for them)", { "DKR_TEX_ATLAS", NULL }, 0, 2 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped

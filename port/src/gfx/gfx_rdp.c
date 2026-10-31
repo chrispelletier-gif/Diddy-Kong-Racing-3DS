@@ -307,6 +307,8 @@ typedef struct TexCacheEntry {
     GfxTexture tex;
     GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
     u8 hasOtherFilter;
+    u8 atlasState[2];       // For each filter: ATLAS_UNKNOWN, ATLAS_NEVER, ATLAS_UNPLACED or ATLAS_PAGE0 + a page
+    u8 atlasX[2], atlasY[2]; // For each filter: where the texture's first texel sits in its page
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
@@ -479,6 +481,7 @@ static void free_entry(TexCacheEntry *e) {
     }
     gfx_split_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
+    e->atlasState[0] = e->atlasState[1] = 0; // Its place in a page is not given out again (see atlas_place)
     e->used = FALSE;
     e->gen++;
     if (e->gen == 0) {
@@ -758,6 +761,8 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     e->tex.wrapS = wrapS;
     e->tex.wrapT = wrapT;
     e->tex.backendData = NULL;
+    e->tex.atlas = 0;
+    e->atlasState[0] = e->atlasState[1] = 0;
     gfx_split_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
     walk_switch(WALK_TEXTURES);
@@ -942,6 +947,219 @@ static inline float tex_axis_coord(const TexAxis *a, s32 coord) {
         c /= a->size;
     }
     return c;
+}
+
+/*
+ * The texture atlas (Old 3DS work, DKR_TEX_ATLAS). A draw costs both renderer halves far more than its triangles, and
+ * a third to a half of the walk's draws end only because the next command has another texture. Small textures (up to
+ * ATLAS_MAX_TEX texels a side, a power of two, without mipmaps, so the picture is the same) are also copied into
+ * pages of ATLAS_SIZE texels a side, one set for each texture format and filter, and a command whose texture
+ * coordinates stay inside its texture is drawn from the page instead, with its coordinates moved there: commands with
+ * different small textures then batch together. Each texture gets a border of one texel, filled the way its wrap
+ * mode reads past the edge, so bilinear filtering at the edges reads what it would have from the texture itself.
+ * Pages are packed in shelves and never reuse a place (draws still queued may read it), so when a set fills up it is
+ * freed and started again (at most every ATLAS_RESET_FRAMES frames). A page is uploaded again before a draw from it
+ * when textures were added to it since.
+ * Most small textures drawn in a race have mipmaps, which pages can't keep (a level would mix neighbours): only 2-3
+ * commands a frame qualify on a PC run of Jungle Falls and Whale Bay, against 19-40 with them. DKR_TEX_ATLAS=2 puts
+ * them in too, losing their mipmaps, to measure what the atlas could gain before making pages that keep them.
+ * Switching it between frames is safe once the batch is drawn: textures already placed stay placed.
+ */
+#define ATLAS_SIZE 256
+#define ATLAS_MAX_TEX 64
+#define ATLAS_PAGES_PER_KIND 2
+#define ATLAS_KINDS 8 // Texture format (4) x filter (2)
+#define ATLAS_RESET_FRAMES 120
+enum { ATLAS_UNKNOWN, ATLAS_NEVER, ATLAS_UNPLACED, ATLAS_PAGE0 };
+
+typedef struct AtlasPage {
+    GfxTexture tex;
+    unsigned int *pixels;
+    u16 shelfX, shelfY, shelfH; // The shelf being filled: its next free x, its top and its height
+    u8 dirty, used;
+} AtlasPage;
+
+static AtlasPage sAtlas[ATLAS_KINDS * ATLAS_PAGES_PER_KIND];
+static s32 sAtlasLastReset[ATLAS_KINDS];
+static s32 sAtlasOn;
+static unsigned long sAtlasStats[3]; // Commands drawn from a page, textures placed, sets reset (the profiler's log)
+
+int gfx_atlas_take(unsigned long out[3]) {
+    __builtin_memcpy(out, sAtlasStats, sizeof(sAtlasStats));
+    __builtin_memset(sAtlasStats, 0, sizeof(sAtlasStats));
+    return sAtlasOn;
+}
+
+static inline TexCacheEntry *atlas_entry_of(const GfxTexture *tex) {
+    uintptr_t at = (uintptr_t) tex - (uintptr_t) sTexCache;
+    if (at >= sizeof(sTexCache)) {
+        return NULL;
+    }
+    return &sTexCache[at / sizeof(TexCacheEntry)];
+}
+
+/* Whether a texture can go in a page at all (worked out once for each texture and filter). */
+static s32 atlas_eligible(const GfxTexture *tex) {
+    return tex->width <= ATLAS_MAX_TEX && tex->height <= ATLAS_MAX_TEX && (tex->width & (tex->width - 1)) == 0 &&
+           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn == 2 || !gfx_wants_mipmaps(tex));
+}
+
+static inline u32 atlas_wrap(s32 i, u32 size, u8 wrap) {
+    if (i >= 0 && i < (s32) size) {
+        return (u32) i;
+    }
+    if (wrap == GFX_WRAP_REPEAT) {
+        return (u32) (i + (s32) size) % size;
+    }
+    return i < 0 ? 0 : size - 1; // Clamp, and mirror (which repeats the edge texel)
+}
+
+static void flush_batch_for_atlas(void);
+
+/* Frees a set of pages: every texture in them is placed afresh when next drawn. */
+static void atlas_reset_kind(s32 kind) {
+    s32 i, p;
+    flush_batch_for_atlas(); // The batch may draw from them
+    for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
+        AtlasPage *page = &sAtlas[p];
+        if (page->used) {
+            gfx_split_texture_free(&page->tex);
+            page->tex.backendData = NULL;
+            __builtin_memset(page->pixels, 0, ATLAS_SIZE * ATLAS_SIZE * 4);
+            page->used = FALSE;
+        }
+        page->shelfX = page->shelfY = page->shelfH = 0;
+        page->dirty = FALSE;
+    }
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        TexCacheEntry *e = &sTexCache[i];
+        for (p = 0; p < 2; p++) {
+            if (e->atlasState[p] >= ATLAS_PAGE0 && (e->atlasState[p] - ATLAS_PAGE0) / ATLAS_PAGES_PER_KIND == kind) {
+                e->atlasState[p] = ATLAS_UNPLACED;
+            }
+        }
+    }
+    sAtlasLastReset[kind] = sFrameCount;
+    sAtlasStats[2]++;
+}
+
+/* Starts every page set again and forgets which textures may go in (after DKR_TEX_ATLAS changes). */
+static void atlas_forget_all(void) {
+    s32 kind, i;
+    for (kind = 0; kind < ATLAS_KINDS; kind++) {
+        atlas_reset_kind(kind);
+        sAtlasLastReset[kind] = -ATLAS_RESET_FRAMES;
+    }
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        sTexCache[i].atlasState[0] = sTexCache[i].atlasState[1] = ATLAS_UNKNOWN;
+    }
+}
+
+/* Copies the texture (with its border) into a page of its kind; FALSE if there's no room or memory. */
+static NOINLINE s32 atlas_place(TexCacheEntry *e, const GfxTexture *tex, s32 f) {
+    s32 kind = tex->format * 2 + tex->filter, p, attempt;
+    u32 w = tex->width + 2, h = tex->height + 2, x, y;
+    for (attempt = 0; attempt < 2; attempt++) {
+        for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
+            AtlasPage *page = &sAtlas[p];
+            if (page->pixels == NULL) {
+                page->pixels = plat_malloc(ATLAS_SIZE * ATLAS_SIZE * 4);
+                if (page->pixels == NULL) {
+                    return FALSE;
+                }
+                __builtin_memset(page->pixels, 0, ATLAS_SIZE * ATLAS_SIZE * 4);
+            }
+            if (page->shelfX + w > ATLAS_SIZE) {
+                page->shelfY += page->shelfH; // A new shelf
+                page->shelfX = page->shelfH = 0;
+            }
+            if (page->shelfY + h > ATLAS_SIZE) {
+                continue;
+            }
+            for (y = 0; y < h; y++) {
+                u32 sy = atlas_wrap((s32) y - 1, tex->height, tex->wrapT);
+                unsigned int *out = &page->pixels[(page->shelfY + y) * ATLAS_SIZE + page->shelfX];
+                for (x = 0; x < w; x++) {
+                    out[x] = tex->pixels[sy * tex->width + atlas_wrap((s32) x - 1, tex->width, tex->wrapS)];
+                }
+            }
+            e->atlasX[f] = (u8) (page->shelfX + 1);
+            e->atlasY[f] = (u8) (page->shelfY + 1);
+            e->atlasState[f] = (u8) (ATLAS_PAGE0 + p);
+            page->shelfX += w;
+            if (h > page->shelfH) {
+                page->shelfH = h;
+            }
+            if (!page->used) {
+                page->tex.width = ATLAS_SIZE;
+                page->tex.height = ATLAS_SIZE;
+                page->tex.pixels = page->pixels;
+                page->tex.format = tex->format;
+                page->tex.filter = tex->filter;
+                page->tex.wrapS = page->tex.wrapT = GFX_WRAP_CLAMP;
+                page->tex.atlas = 1;
+                page->tex.backendData = NULL;
+                page->used = TRUE;
+            }
+            page->dirty = TRUE;
+            sAtlasStats[1]++;
+            return TRUE;
+        }
+        if (attempt > 0 || sFrameCount - sAtlasLastReset[kind] < ATLAS_RESET_FRAMES) {
+            return FALSE;
+        }
+        atlas_reset_kind(kind);
+    }
+    return FALSE;
+}
+
+/* The page a command's texture can be drawn from, moving its coordinate axes there; NULL to draw it as it is. The
+ * command's texture coordinates, minU..maxU and minV..maxV, must stay inside the texture. */
+static NOINLINE GfxTexture *atlas_page_for(const GfxTexture *tex, TexAxis *u, TexAxis *v, s32 minU, s32 maxU,
+                                          s32 minV, s32 maxV) {
+    TexCacheEntry *e = atlas_entry_of(tex);
+    s32 f;
+    float k, du, dv;
+    if (e == NULL) {
+        return NULL;
+    }
+    f = tex == &e->tex ? 0 : 1;
+    if (e->atlasState[f] == ATLAS_UNKNOWN) {
+        e->atlasState[f] = atlas_eligible(tex) ? ATLAS_UNPLACED : ATLAS_NEVER;
+    }
+    if (e->atlasState[f] == ATLAS_NEVER) {
+        return NULL;
+    }
+    // Filtering reads at most half a texel past c * size - 1/2 (bilinear) or floor(c * size) (point), so with the
+    // border coordinates up to half a texel outside the texture read only it and the border.
+    du = 0.5f / tex->width;
+    dv = 0.5f / tex->height;
+    if (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du || tex_axis_coord(v, minV) < -dv ||
+        tex_axis_coord(v, maxV) > 1.0f + dv) {
+        return NULL;
+    }
+    if (e->atlasState[f] == ATLAS_UNPLACED && !atlas_place(e, tex, f)) {
+        return NULL;
+    }
+    // c' = (c * size + at) / ATLAS_SIZE, all powers of two: exact.
+    k = (float) tex->width / ATLAS_SIZE;
+    u->scale *= k;
+    u->offset = u->offset * k - (float) e->atlasX[f] / ATLAS_SIZE;
+    k = (float) tex->height / ATLAS_SIZE;
+    v->scale *= k;
+    v->offset = v->offset * k - (float) e->atlasY[f] / ATLAS_SIZE;
+    u->size = v->size = ATLAS_SIZE;
+    sAtlasStats[0]++;
+    return &sAtlas[e->atlasState[f] - ATLAS_PAGE0].tex;
+}
+
+/* Before a draw from a page: its GPU copy has every texture placed in it so far. */
+static inline void atlas_upload(GfxTexture *tex) {
+    AtlasPage *page = (AtlasPage *) tex; // tex is a page's first member
+    if (page->dirty) {
+        page->dirty = FALSE;
+        gfx_split_texture_upload(tex);
+    }
 }
 
 /******************************** Combiner and blender ********************************/
@@ -1198,6 +1416,9 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             trace_batch();
         }
         part = walk_switch(WALK_DRAWS);
+        if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
+            atlas_upload(sBatchState.textures[0]);
+        }
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
@@ -1220,6 +1441,10 @@ static inline void flush_batch(void) {
         flush_model_batch();
     }
     flush_cpu_batch();
+}
+
+static void flush_batch_for_atlas(void) {
+    flush_batch();
 }
 
 /* Whether the batch has room for one more triangle with up to three new vertices. */
@@ -1360,6 +1585,13 @@ static void read_switches(void) {
     // Remembers what each tile's texture lookup resolved to (tex_memo_check). Stale entries are checked, so it can
     // be switched either way between frames.
     sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
+    {
+        s32 atlas = plat_switch("DKR_TEX_ATLAS", 0);
+        if (atlas != sAtlasOn) {
+            atlas_forget_all();
+            sAtlasOn = atlas;
+        }
+    }
     // Old 3DS work (roadmap O9): the walk skips what it can show it doesn't need (draw_dkr_triangles): the per
     // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
     // that have none. The frames are the same either way.
@@ -2278,6 +2510,22 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         float shift = texel_centre_shift(tex);
         tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+        s32 minU = 0x7FFF, maxU = -0x8000, minV = 0x7FFF, maxV = -0x8000;
+        GfxTexture *page;
+        for (i = 0; i < count; i++) {
+            const TexCoords *c = &tris[i].uv0;
+            for (k = 0; k < 3; k++) {
+                minU = c[k].u < minU ? c[k].u : minU;
+                maxU = c[k].u > maxU ? c[k].u : maxU;
+                minV = c[k].v < minV ? c[k].v : minV;
+                maxV = c[k].v > maxV ? c[k].v : maxV;
+            }
+        }
+        page = atlas_page_for(state.textures[0], &u0, &v0, minU, maxU, minV, maxV);
+        if (page != NULL) {
+            state.textures[0] = page;
+        }
     }
     // While no loaded vertex is flat (the 3D world) no triangle is, so DKR_WALK_LEAN skips the checks per triangle.
     anyFlat = !sWalkLean || g.flatVerts != 0;

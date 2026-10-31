@@ -429,6 +429,13 @@ static void show_overlay(void) {
                                         sKinds[k], mix[k][0] / frames, mix[k][1] / frames, mix[k][2] / frames);
                 }
                 port_log("draw mix a frame: %s", line);
+                {
+                    unsigned long atlas[3];
+                    if (gfx_atlas_take(atlas)) {
+                        port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
+                                 "%lu page sets started again", atlas[0] / frames, atlas[1], atlas[2]);
+                    }
+                }
                 if (gfx_split_active()) {
                     unsigned long long walkWait, busy;
                     unsigned int backendFrames, wakes;
