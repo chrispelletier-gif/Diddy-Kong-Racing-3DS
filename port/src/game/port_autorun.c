@@ -213,12 +213,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
     // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
     // 30), so it is the Old 3DS default and out of the list.
-    // The Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames, also seen on a New 3DS) is
-    // raced with the New 3DS head flicker's suspects (#299: the GPU leaves out draws the walk sent). Watch the tunnel.
-    { "every GPU setting sent for every draw", { "DKR_STATE_CACHE", "DKR_FAST_STATE", NULL }, 1, 0, 0 },
-    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 0 },
-    { "shared vertices off", { "DKR_INDEXED", NULL }, 1, 0, 0 },
-    { "index buffer aligned", { "DKR_IBO_ALIGN", NULL }, 0, 1, 0 },
+    // Run 18 (v42): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a few frames, also seen on
+    // a New 3DS) didn't show with the whole-memory cache flush (user). These rows find which part of it matters, and
+    // what it costs ("whole-heap cache flush" log line): the GSP service's flushes instead of the system call's, the
+    // whole heap flushed before the hand-over, and only the flush's time waited.
+    { "whole-memory cache flush", { "DKR_FULL_FLUSH", NULL }, 0, 1, 1 },
+    { "cache flushes by the GSP service", { "DKR_SVC_FLUSH", NULL }, 1, 0, 1 },
+    { "whole heap flushed before the hand-over", { "DKR_FLUSH_TEST", NULL }, 0, 1, 1 },
+    { "only the flush's time waited", { "DKR_FLUSH_TEST", NULL }, 0, 2, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to

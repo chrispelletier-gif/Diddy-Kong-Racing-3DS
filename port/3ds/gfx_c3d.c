@@ -194,12 +194,34 @@ static int sIndexed = -1;    // DKR_INDEXED, read on first use
 static int sFull = -1; // DKR_FULL_FLUSH, re-read when the switches change (switch bench)
 static int sIboAlign;   // DKR_IBO_ALIGN: each draw's indices start on an 8-index (16-byte) boundary
 
+/* DKR_FLUSH_TEST (Old 3DS tunnel dropout bench, #306: the whole-memory flush row had no dropout): 1 = the whole
+ * linear heap flushed before the frame is handed over, the written ranges as usual; 2 = no extra flush, but the frame
+ * end waits as long as a whole-heap flush takes (only its timing). Read with sFull. */
+static int sFlushTest;
+static unsigned long long sHeapFlushNs, sHeapFlushTotalNs;
+static unsigned int sHeapFlushes;
+
 static int full_flush(void) {
     if (sFull < 0) {
         sFull = plat_switch("DKR_FULL_FLUSH", 0) != 0;
-        plat_log("GPU cache flush: %s", sFull ? "whole linear heap" : "written ranges only");
+        sFlushTest = plat_switch("DKR_FLUSH_TEST", 0);
+        plat_log("GPU cache flush: %s%s", sFull ? "whole linear heap" : "written ranges only",
+                 sFlushTest == 1 ? ", whole heap before the hand-over" : sFlushTest == 2 ? ", heap flush's time waited" : "");
     }
     return sFull;
+}
+
+/* The whole linear heap through the GSP service, as C3D_FrameEnd(0) does, timed (logged every 600 frames). */
+static void heap_flush(void) {
+    unsigned long long start = plat_time_ns();
+    GSPGPU_FlushDataCache((const void *) __ctru_linear_heap, __ctru_linear_heap_size);
+    sHeapFlushNs = plat_time_ns() - start;
+    sHeapFlushTotalNs += sHeapFlushNs;
+    if (++sHeapFlushes % 600 == 0) {
+        plat_log("whole-heap cache flush: %.2f ms on average (%lu KB)", sHeapFlushTotalNs / 600 / 1e6,
+                 (unsigned long) (__ctru_linear_heap_size / 1024));
+        sHeapFlushTotalNs = 0;
+    }
 }
 
 // DKR_IBO_ALIGN (head flicker bench): pads the index buffer so a draw's indices start 16-byte aligned.
@@ -3518,6 +3540,9 @@ void gfxb_end_frame(void) {
                 C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_DEPTH, 0, 0);
             }
         }
+        if (!sFull && sFlushTest == 1) {
+            heap_flush();
+        }
         for (i = 0; i < slot->numParts; i++) {
             if (sSvcFlush) {
                 gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
@@ -3547,7 +3572,15 @@ void gfxb_end_frame(void) {
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         if (full_flush()) {
-            C3D_FrameEnd(0); // Also flushes the whole linear heap.
+            heap_flush(); // What C3D_FrameEnd(0) would do, timed
+            C3D_FrameEnd(GX_CMDLIST_FLUSH);
+        } else if (sFlushTest == 2) {
+            if (sHeapFlushNs == 0) {
+                heap_flush(); // Once, for its time
+            } else {
+                svcSleepThread(sHeapFlushNs);
+            }
+            C3D_FrameEnd(GX_CMDLIST_FLUSH);
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
