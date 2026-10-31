@@ -203,9 +203,8 @@ typedef struct BenchSwitch {
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    { "other karts' low detail at 2-player distances", { "DKR_RACER_LOD", NULL }, 0, 1 },
-    { "other karts' low detail at 3-player distances", { "DKR_RACER_LOD", NULL }, 0, 2 },
-    { "other karts' low detail at 4-player distances", { "DKR_RACER_LOD", NULL }, 0, 3 },
+    // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
+    // at 30 against 96/92/94%), so DKR_RACER_LOD=2 is the Old 3DS default (src/objects.c) and its rows are gone.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it

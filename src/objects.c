@@ -3822,7 +3822,7 @@ void set_temp_model_transforms(Object *obj) {
                         // its own distances.
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
-                            s32 bias = plat_switch("DKR_RACER_LOD", 0);
+                            s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }
