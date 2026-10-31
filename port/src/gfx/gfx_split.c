@@ -23,7 +23,7 @@
 #include "gfx_backend.h"
 #include "gfx_split.h"
 
-#define SPLIT_RING_BYTES (2u * 1024u * 1024u)
+#define SPLIT_RING_BYTES (1024u * 1024u) // A crowded Old 3DS frame queues about 200 KB; the heap there is tight
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {

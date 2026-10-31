@@ -1962,8 +1962,8 @@ static void history_start(void) {
     sHistoryTest = sHistoryOn == 2;
 #endif
     if (sHistoryOn) {
-        // An Old 3DS has half the memory: a second.
-        int slots = is_old_3ds() ? HISTORY_FRAMES / 3 : HISTORY_FRAMES;
+        // An Old 3DS keeps 1 s at its 30 fps: its heap was down to 1 MB with 2 s (v35), and bug reports failed to send.
+        int slots = is_old_3ds() ? HISTORY_FRAMES / 6 : HISTORY_FRAMES;
         while (slots >= 30 && (sHistory = malloc((size_t) slots * HISTORY_PIXELS * 2)) == NULL) {
             slots /= 2;
         }
