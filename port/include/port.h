@@ -209,6 +209,13 @@ s32 port_autorun_switch_count(void);
 void port_autorun_frame(s32 updateRate);
 /* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
 s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
+/* The same for a level in its adventure form: a hub, a battle arena, a race with silver coins (menu.c). */
+s32 port_autorun_setup_adventure(s32 levelId, s32 character, s32 vehicle);
+/* The whole game test run's menu pass presses the buttons (plat_input_script asks it first). */
+int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY);
+/* Called as each part of the whole game test run ends (races, bosses, hubs...), before the next one loads: an
+ * instrumented (profile-guided) build saves its counters here. Does nothing by default. */
+void port_autorun_section_done(const char *section);
 /* What the menu has highlighted, for the bottom screen (menu.c). */
 enum { PORT_MENU_FOCUS_NONE, PORT_MENU_FOCUS_FILE, PORT_MENU_FOCUS_TRACK };
 struct Settings;

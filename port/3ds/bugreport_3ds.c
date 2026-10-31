@@ -437,7 +437,8 @@ static void show_progress(const char *text) {
 }
 
 /* Sets up the network, sends, and takes it down again. Returns 0 on success; result has the issue or the error. */
-static int send_report(const ReportConfig *config, Report *report, char *result, size_t resultSize) {
+static int send_report_to(const ReportConfig *config, const char *issue, Report *report, char *result,
+                          size_t resultSize) {
     BugReportConfig send;
     int status;
 
@@ -452,10 +453,14 @@ static int send_report(const ReportConfig *config, Report *report, char *result,
     send.caPem = net_3ds_ca_pem();
     send.caFile = net_3ds_ca_file();
     send.userAgent = "dkr-3ds/" PORT_BUILD_VERSION;
-    status = bugreport_send(&send, report->title, report->body, report->files, report->fileCount,
-                            MAX_ATTACHMENT_BYTES, show_progress, result, resultSize);
+    status = bugreport_send_to(&send, issue, report->title, report->body, report->files, report->fileCount,
+                               MAX_ATTACHMENT_BYTES, show_progress, result, resultSize);
     net_3ds_end();
     return status;
+}
+
+static int send_report(const ReportConfig *config, Report *report, char *result, size_t resultSize) {
+    return send_report_to(config, NULL, report, result, resultSize);
 }
 
 /* Keeps a report that could not be sent, so it is not lost. */
@@ -467,15 +472,15 @@ static void save_unsent(const Report *report) {
     }
 }
 
-static int send_and_show(const ReportConfig *config, Report *report) {
-    char result[300];
+static int send_and_show_to(const ReportConfig *config, const char *issue, Report *report, char *result,
+                            size_t resultSize) {
     int status;
 
     if (report->body == NULL) {
         sShow("Bug report: out of memory");
         return -1;
     }
-    status = send_report(config, report, result, sizeof(result));
+    status = send_report_to(config, issue, report, result, resultSize);
     if (status == 0) {
         char line[360];
         const char *number = strrchr(result, '/');
@@ -496,6 +501,11 @@ static int send_and_show(const ReportConfig *config, Report *report) {
     return status;
 }
 
+static int send_and_show(const ReportConfig *config, Report *report) {
+    char result[300];
+    return send_and_show_to(config, NULL, report, result, sizeof(result));
+}
+
 /* The start of the program: the previous run's files, and the offer to report it. */
 
 void plat_3ds_console_line(const char *text);
@@ -510,7 +520,8 @@ static void show_console(const char *text) {
  */
 static int test_run_active(void) {
     static const char *const sStateFiles[] = { "autorun_state.txt", "gpu_bench_state.txt", "quick_test_state.txt",
-                                               "boss_test_state.txt", "switch_bench_state.txt" };
+                                               "boss_test_state.txt", "switch_bench_state.txt",
+                                               "wholegame_state.txt" };
     char text[200], path[96];
     unsigned int i;
     for (i = 0; i < sizeof(sStateFiles) / sizeof(sStateFiles[0]); i++) {
@@ -810,6 +821,8 @@ static void report_now(void) {
 
 static volatile int sReportRequested;
 static volatile int sResultsRequested;
+static volatile int sResultsSending;
+static int sResultsKind; // PLAT_RESULTS_*
 static char sResultsTitle[160];
 static char sResultsSummary[8192];
 
@@ -820,6 +833,15 @@ void bugreport_request(void) {
 
 /* Called by the test run when it ends; the report is sent from the button thread. */
 void plat_send_test_results(const char *title, const char *summary) {
+    plat_send_test_update(title, summary, PLAT_RESULTS_NEW);
+}
+
+/* Whether test results are waiting to go or going. */
+int plat_test_results_busy(void) {
+    return sResultsRequested || sResultsSending;
+}
+
+void plat_send_test_update(const char *title, const char *summary, int kind) {
     if (sResultsRequested) {
         // An earlier one hasn't started sending yet: this one replaces it.
         plat_log("bug report: test results replaced before they were sent: %s", sResultsTitle);
@@ -828,8 +850,34 @@ void plat_send_test_results(const char *title, const char *summary) {
     __sync_synchronize();
     snprintf(sResultsTitle, sizeof(sResultsTitle), "%s", title);
     snprintf(sResultsSummary, sizeof(sResultsSummary), "%s", summary);
+    sResultsKind = kind;
     __sync_synchronize();
     sResultsRequested = 1;
+}
+
+/* The issue a long test run reports to as it goes (PLAT_RESULTS_PROGRESS / _FINAL): its number, or "" for none yet.
+ * The test run empties the file as a new run starts. */
+#define RUN_ISSUE_PATH DATA_DIR "/test_run_issue.txt"
+
+static void load_run_issue(char *number, size_t size) {
+    int length = plat_load_file_start(RUN_ISSUE_PATH, number, size - 1);
+    int i;
+    number[length > 0 ? length : 0] = '\0';
+    for (i = 0; number[i] >= '0' && number[i] <= '9'; i++) {}
+    number[i] = '\0';
+}
+
+static void save_run_issue(const char *url) {
+    const char *number = strrchr(url, '/');
+    FILE *file;
+    if (number == NULL || number[1] < '0' || number[1] > '9') {
+        return;
+    }
+    file = fopen(RUN_ISSUE_PATH, "w");
+    if (file != NULL) {
+        fputs(number + 1, file);
+        fclose(file);
+    }
 }
 
 /* Sends the requested results. They are copied first, so a run that ends while they are sent asks for its own. */
@@ -839,24 +887,45 @@ static void send_test_results(void) {
     static char recent[16 * 1024];
     static char sTitle[sizeof(sResultsTitle)], sSummary[sizeof(sResultsSummary)];
 
+    char issue[24], result[300];
+    int kind = sResultsKind;
+
+    sResultsSending = 1;
     memcpy(sTitle, sResultsTitle, sizeof(sTitle));
     memcpy(sSummary, sResultsSummary, sizeof(sSummary));
     __sync_synchronize();
     sResultsRequested = 0;
+    issue[0] = '\0';
+    if (kind != PLAT_RESULTS_NEW) {
+        load_run_issue(issue, sizeof(issue));
+    }
 
     if (!load_config(&config)) {
         show_status("Test run results: no token in bugreport.txt, so they stay on the SD card");
+        sResultsSending = 0;
         return;
     }
     memset(&report, 0, sizeof(report));
     report.kind = REPORT_TEST_RUN;
     report.extra = sSummary;
     snprintf(report.title, sizeof(report.title), "%s", sTitle);
+    if (kind == PLAT_RESULTS_PROGRESS) {
+        // A progress report: the summary alone (the files go with the last one), as a comment once the issue exists.
+        build_body(&report, NULL, NULL);
+        sShow = show_status;
+        if (send_and_show_to(&config, issue, &report, result, sizeof(result)) == 0 && issue[0] == '\0') {
+            save_run_issue(result);
+        }
+        free_report(&report);
+        sResultsSending = 0;
+        return;
+    }
     add_file(&report, "autorun_results.csv");
     add_file(&report, "gpu_bench_results.csv");
     add_file(&report, "quick_test_results.csv");
     add_file(&report, "boss_test_results.csv");
     add_file(&report, "switch_bench_results.csv");
+    add_file(&report, "wholegame_results.csv");
     add_file(&report, "autorun_problems.txt");
     add_file(&report, "env.txt");
     add_file(&report, "settings.txt");
@@ -871,8 +940,9 @@ static void send_test_results(void) {
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);
     sShow = show_status;
-    send_and_show(&config, &report);
+    send_and_show_to(&config, issue, &report, result, sizeof(result));
     free_report(&report);
+    sResultsSending = 0;
 }
 
 static void button_thread(void *arg) {
@@ -917,6 +987,16 @@ void bugreport_request(void) {
 void plat_send_test_results(const char *title, const char *summary) {
     (void) title;
     (void) summary;
+}
+
+void plat_send_test_update(const char *title, const char *summary, int kind) {
+    (void) title;
+    (void) summary;
+    (void) kind;
+}
+
+int plat_test_results_busy(void) {
+    return 0;
 }
 
 void bugreport_start(void) {

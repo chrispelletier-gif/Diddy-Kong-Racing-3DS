@@ -296,6 +296,8 @@ s32 osContStartReadData(OSMesgQueue *mq) {
             sControllers[i].stickX = 0;
             sControllers[i].stickY = 0;
         }
+        // Except the whole game run's menu pass, which presses its own buttons.
+        port_autorun_input(&sControllers[0].buttons, &sControllers[0].stickX, &sControllers[0].stickY);
     }
     flush_saves(FALSE);
     port_post_mesg(mq, NULL);

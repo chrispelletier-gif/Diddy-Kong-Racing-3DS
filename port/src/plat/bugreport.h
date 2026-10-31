@@ -37,4 +37,12 @@ int bugreport_send(const BugReportConfig *config, const char *title, const char 
                    int fileCount, unsigned int maxAttachmentBytes, BugReportProgress progress, char *result,
                    size_t resultSize);
 
+/*
+ * The same, but with issue set (its number, as text) the body is posted as a comment on that issue instead, the title
+ * (if not NULL) replaces the issue's, and the files follow as comments. issue NULL or empty: as bugreport_send.
+ */
+int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
+                      const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
+                      BugReportProgress progress, char *result, size_t resultSize);
+
 #endif

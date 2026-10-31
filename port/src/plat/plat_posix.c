@@ -184,6 +184,15 @@ void plat_send_test_results(const char *title, const char *summary) {
     fprintf(stderr, "test results: %s\n%s\n", title, summary);
 }
 
+void plat_send_test_update(const char *title, const char *summary, int kind) {
+    fprintf(stderr, "test results (%s): %s\n%s\n",
+            kind == PLAT_RESULTS_PROGRESS ? "progress" : kind == PLAT_RESULTS_FINAL ? "final" : "new", title, summary);
+}
+
+int plat_test_results_busy(void) {
+    return 0;
+}
+
 static int sAntialias = PLAT_AA_4X;
 
 void plat_set_gpu_config(int aa) {
