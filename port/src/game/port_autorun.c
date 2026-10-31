@@ -245,16 +245,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * measures the GPU there. Bench #309 made adaptive anti-aliasing (P37) the player's default, but the usual race keeps
  * it off so the GPU's full cost stays measurable; its row shows what a player gets. Textures in VRAM (P17, 0.1-0.2 ms
  * in #309) left the list. The fixed cost (about 9-10 ms with nothing drawn) is split by the colour boost and
- * 400-pixel rows, and the sky (P41) and depth format (P42) rows try to cut the sky's and the track's fill. */
+ * 400-pixel rows. Bench #320: the sky drawn last (P41) and a depth buffer without stencil (P42) saved nothing (left
+ * off, rows dropped); the untextured track row looks for what makes a track pixel cost. */
 static const BenchSwitch sSwitchesNew3ds[] = {
     { "adaptive anti-aliasing (P37, the player's default)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 1 },
     { "cost: anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 1 },
     { "cost: colour boost off", { "BENCH_COLOUR", NULL }, 1, 0, 1 },
-    { "cost: 400 pixels, not 800", { "BENCH_WIDE800", NULL }, 1, 0, 1 },
-    // GPU savers for the track and sky (2026-10-31): the sky drawn last, only where the track left gaps (P41), and
-    // a depth buffer without the unused stencil (P42).
-    { "sky drawn last (P41)", { "DKR_SKY_LAST", NULL }, 0, 1, 0 },
-    { "depth buffer without stencil (P42)", { "DKR_DEPTH24", NULL }, 0, 1, 0 },
+    // Half the pixels: 400 pixels with 2x anti-aliasing (400x480), not 800 (800x480). 400 pixels with the 4x setting
+    // draws as many pixels as 800 (bench #320's row measured nothing), so BENCH_400 sets both (apply_config).
+    { "cost: 400 pixels, half the pixels", { "BENCH_400", NULL }, 0, 1, 1 },
+    // A track pixel costs about 2.5 times a sky pixel (#320), and neither the depth traffic (P42) nor pixels hidden by
+    // the depth test (P41 sky drawn last) made a difference: the track drawn with its shade colour only, no textures
+    // (DKR_NOTEX_KINDS, a bit per kind), shows whether its texture reads are the cost.
+    { "cost: track without textures", { "DKR_NOTEX_KINDS", NULL }, 0, 1 << 1, 1 },
     // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
     // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
     { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
@@ -346,6 +349,10 @@ static void apply_config(s32 config) {
                     plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
                 }
             }
+        }
+        if (plat_switch("BENCH_400", 0)) {
+            plat_override_switch("BENCH_WIDE800", 0);
+            plat_override_switch("BENCH_AA", PLAT_AA_2X);
         }
         plat_set_gpu_config(plat_switch("BENCH_AA", PLAT_AA_OFF)); // The bench's anti-aliasing, or a row's
         return;
