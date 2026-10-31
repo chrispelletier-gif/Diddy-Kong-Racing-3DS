@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "plat.h"
+#include "recorder.h"
 #include "settings.h"
 
 #define MAX_SETTINGS 64
@@ -104,11 +105,39 @@ int settings_get(const char *key, int fallback) {
     return value;
 }
 
-void settings_set(const char *key, int value) {
-    Setting *setting;
+static int sDeferred;       // Writes held back (settings_defer): the first-run setup changes several settings a move.
+static int sDeferredDirty;  // Something changed while they were held back.
+
+/* Writes the file from the table; the caller holds the lock. */
+static void write_file(void) {
     static char text[MAX_SETTINGS * 48];
     char path[256];
     int length, i;
+
+    length = snprintf(text, sizeof(text), "# Written by the Settings menus (the game's Options and pause menus, the 3DS bottom screen).\n");
+    for (i = 0; i < sCount; i++) {
+        length += snprintf(text + length, sizeof(text) - length, "%s=%d\n", sSettings[i].key, sSettings[i].value);
+    }
+    file_path(path, sizeof(path));
+    if (!plat_save_file(path, text, length)) {
+        plat_log("settings: could not write %s", path);
+    }
+}
+
+/* While on, settings_set only changes the table; turning it off writes the file once if anything changed. Every write
+ * is a temporary file, a remove and a rename on the SD card, a noticeable hitch on the game's thread. */
+void settings_defer(int on) {
+    lock();
+    sDeferred = on;
+    if (!on && sDeferredDirty) {
+        sDeferredDirty = 0;
+        write_file();
+    }
+    unlock();
+}
+
+void settings_set(const char *key, int value) {
+    Setting *setting;
 
     lock();
     setting = find(key);
@@ -119,15 +148,37 @@ void settings_set(const char *key, int value) {
         }
         setting = &sSettings[sCount++];
         snprintf(setting->key, sizeof(setting->key), "%s", key);
+        rec_event("setting %s = %d (new)", key, value);
+    } else if (setting->value == value) {
+        unlock(); // Nothing to write.
+        return;
+    } else {
+        rec_event("setting %s = %d (was %d)", key, value, setting->value);
     }
     setting->value = value;
-    length = snprintf(text, sizeof(text), "# Written by the Settings menus (the game's Options and pause menus, the 3DS bottom screen).\n");
-    for (i = 0; i < sCount; i++) {
-        length += snprintf(text + length, sizeof(text) - length, "%s=%d\n", sSettings[i].key, sSettings[i].value);
+    if (sDeferred) {
+        sDeferredDirty = 1;
+    } else {
+        write_file();
     }
-    file_path(path, sizeof(path));
-    if (!plat_save_file(path, text, length)) {
-        plat_log("settings: could not write %s", path);
+    unlock();
+}
+
+void settings_describe(char *out, int size) {
+    int i, length = 0;
+    if (size <= 0) {
+        return;
+    }
+    out[0] = '\0';
+    lock();
+    if (sCount < 0) {
+        unlock();
+        settings_get("", 0); // Loads the file.
+        lock();
+    }
+    for (i = 0; i < sCount && length < size - 1; i++) {
+        length += snprintf(out + length, size - length, "%s%s=%d", i > 0 ? ", " : "", sSettings[i].key,
+                           sSettings[i].value);
     }
     unlock();
 }

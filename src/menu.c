@@ -770,8 +770,9 @@ u8 gTitleCinematicTextColours[] = {
 UNUSED u8 unused_800DFA0C[] = { 0, 0, 15, 120 };
 
 #ifdef TARGET_PORT
-// The port's OPTIONS_GENERAL rows the Options menu has room for.
-#define PORT_OPT_GENERAL_ROWS 3
+// The port's OPTIONS_GENERAL rows the Options menu has room for: one, so the menu keeps its 11 rows at 16 pixels (the
+// first-run setup's row is on the Settings > Start-up page only).
+#define PORT_OPT_GENERAL_ROWS 1
 // Room for a row per port setting the Options menu shows (port_options_menu_strings): ENGLISH and SUBTITLES, the
 // general rows, AUDIO OPTIONS, the categories, SAVE OPTIONS, MAGIC CODES, RETURN and the closing NULL.
 char *gOptionMenuStrings[2 + PORT_OPT_GENERAL_ROWS + 1 + OPTIONS_CATEGORY_COUNT + 3 + 1] = { NULL };
@@ -866,6 +867,12 @@ MenuElement gControllerPakMenuElement[7] = {
 };
 
 s32 gShowControllerPakMenu = FALSE;
+#ifdef TARGET_PORT
+// The 3DS port never asks the player to insert a Rumble Pak or a Controller Pak.
+#define SAVEMENU_RUMBLE_NAG_PENDING() 0
+#else
+#define SAVEMENU_RUMBLE_NAG_PENDING() (gSaveMenuRumbleNag != gSaveMenuRumbleConnected)
+#endif
 
 s32 gActiveMagicCodes = 0;
 s32 gUnlockedMagicCodes = 0;
@@ -1759,6 +1766,11 @@ s16 gCreditsControlData[] = {
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     82, 83,
     CREDITS_NEXT_LEVEL,
+#ifdef TARGET_PORT
+    CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
+    87, 88, // "Nintendo 3DS Port", the port's author
+    CREDITS_NEXT_LEVEL,
+#endif
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     84, // "THE END"
     CREDITS_NEW_TITLE(CREDITS_MAGIC_CODE_TIME),
@@ -1782,8 +1794,22 @@ s16 gCreditsControlData[] = {
     CREDITS_END
 };
 
+// Where the developer times' CREDITS_END is in gCreditsControlData (the port's page adds four entries before it).
+#ifdef TARGET_PORT
+#define CREDITS_TIMES_INDEX 134
+#else
+#define CREDITS_TIMES_INDEX 130
+#endif
+
+// The credits' strings; the port adds two more (a page for the 3DS port) after the game's.
+#ifdef TARGET_PORT
+#define CREDITS_STRING_COUNT 89
+#else
+#define CREDITS_STRING_COUNT 87
+#endif
+
 // List of amazing people.
-char *gCreditsArray[87] = { 
+char *gCreditsArray[CREDITS_STRING_COUNT] = { 
     "CREDITS",
     "Software Director",
     "R.Harrison",
@@ -1844,7 +1870,13 @@ char *gCreditsArray[87] = {
     "T.Stamper",
     NULL,
     NULL,
-    NULL };
+    NULL
+#ifdef TARGET_PORT
+    ,
+    "Nintendo 3DS Port",
+    "ChrisAP"
+#endif
+};
 
 
 // clang-format off
@@ -3440,6 +3472,68 @@ void func_80083098(f32 updateRateF) {
 #endif
 }
 
+#ifdef TARGET_PORT
+static char sSetupCaptionLines[3][64];
+static char sSetupCaptionName[32], sSetupCaptionTag[32];
+
+/*
+ * The first-run setup's box on the title screen (port_setup.c), in place of START and OPTIONS: the name of the choice
+ * lit on the bottom screen, its tag, and what it does, wrapped to the box in the small font.
+ */
+static void port_setup_render_caption(void) {
+    const char *name, *tag, *about;
+    s32 lines = 0, top, i;
+
+    if (!port_setup_caption(&name, &tag, &about)) {
+        return;
+    }
+    sprintf(sSetupCaptionName, "%.31s", name);
+    sprintf(sSetupCaptionTag, "%.31s", tag);
+    while (*about != '\0' && lines < 3) {
+        s32 length = 0, cut;
+        while (about[length] != '\0') {
+            length++;
+        }
+        cut = length;
+        if (length > 48) {
+            for (cut = 48; cut > 0 && about[cut] != ' '; cut--) {}
+            if (cut == 0) {
+                cut = 48;
+            }
+        }
+        sprintf(sSetupCaptionLines[lines++], "%.*s", (int) cut, about);
+        about += cut;
+        while (*about == ' ') {
+            about++;
+        }
+    }
+    top = (osTvType == OS_TV_TYPE_PAL ? SCREEN_HEIGHT : SCREEN_HEIGHT - 12) - 30 - lines * 12;
+    clear_dialogue_box_open_flag(7);
+    dialogue_clear(7);
+    set_current_dialogue_box_coords(7, 16, top, SCREEN_WIDTH - 16, top + 28 + lines * 12);
+    set_current_dialogue_background_colour(7, 0, 8, 48, 190);
+    set_current_text_background_colour(7, 0, 0, 0, 0);
+    set_dialogue_font(7, ASSET_FONTS_FUNFONT);
+    set_current_text_colour(7, 255, 255, 255, 0, 255);
+    render_dialogue_text(7, 10, 12, sSetupCaptionName, 1, ALIGN_MIDDLE_LEFT);
+    set_dialogue_font(7, ASSET_FONTS_SMALLFONT);
+    if (sSetupCaptionTag[0] != '\0') {
+        set_current_text_colour(7, 150, 200, 255, 0, 255);
+        render_dialogue_text(7, SCREEN_WIDTH - 32 - 10, 12, sSetupCaptionTag, 1, ALIGN_MIDDLE_RIGHT);
+    }
+    set_current_text_colour(7, 255, 255, 255, 0, 255);
+    for (i = 0; i < lines; i++) {
+        render_dialogue_text(7, 10, 30 + i * 12, sSetupCaptionLines[i], 1, ALIGN_MIDDLE_LEFT);
+    }
+    open_dialogue_box(7);
+}
+
+static void port_setup_close_caption(void) {
+    dialogue_close(7);
+    dialogue_clear(7);
+}
+#endif
+
 /**
  * Initialise the title screen menu.
  * Load the title textures and reset player allocation.
@@ -3466,6 +3560,11 @@ void menu_title_screen_init(void) {
         gTitleRevealTimer = 1;
     }
     gTitleAudioCounter = 0;
+#ifdef TARGET_PORT
+    if (port_setup_active()) {
+        gTitleRevealTimer = 1; // The first-run setup waits under the logo: no intro scenes first.
+    }
+#endif
     gMenuStage = TITLESCREEN_START;
     menu_assetgroup_load(sGameTitleTileTextures);
     for (i = 0; i < ARRAY_COUNT(sGameTitleTileOffsets) - 1; i++) {
@@ -3527,6 +3626,11 @@ void render_title_screen(UNUSED s32 updateRate, f32 updateRateF) {
         } else {
             texrect_draw(&sMenuCurrDisplayList, sGameTitleTileOffsets, SCREEN_WIDTH_HALF, 52, 255, 255, 255, 255);
         }
+#ifdef TARGET_PORT
+        if (port_setup_active()) {
+            port_setup_render_caption();
+        } else
+#endif
         if (!is_controller_missing()) {
             i = 0;
             posY = (osTvType == OS_TV_TYPE_PAL) ? SCREEN_HEIGHT - 22 : SCREEN_HEIGHT - 48;
@@ -3682,6 +3786,17 @@ s32 menu_title_screen_loop(s32 updateRate) {
 #endif
         }
     }
+#ifdef TARGET_PORT
+    if (gTitleRevealTimer >= 32 && gMenuDelay == 0 && port_setup_active()) {
+        // The first-run setup has the controls until it is done (the title's own come back from the next frame).
+        port_setup_update(gMenuButtons[PLAYER_MENU], gMenuStickX[PLAYER_MENU], gMenuStickY[PLAYER_MENU]);
+        if (!port_setup_active()) {
+            port_setup_close_caption();
+        }
+    } else if (port_setup_active()) {
+        // The logo is still coming in.
+    } else
+#endif
     if (gTitleRevealTimer == 0) {
         if (gMenuButtons[PLAYER_MENU] & (A_BUTTON | START_BUTTON)) {
             gTitleRevealTimer = 1;
@@ -4449,7 +4564,15 @@ void optionscreen_free(void) {
  * Gets global audio volume and checks if the jukebox cheat is active to set the lower Y bounds.
  */
 void menu_audio_options_init(void) {
+#ifdef TARGET_PORT
+    // The STEREO / MONO / HEADPHONES row is not offered (the 3DS has its own sound settings): the screen starts on
+    // SFX VOLUME and the sound is always stereo.
+    gOptionsMenuItemIndex = 1;
+    gAudioOutputType = STEREO;
+    set_stereo_pan_mode(STEREO);
+#else
     gOptionsMenuItemIndex = 0;
+#endif
     gOptionBlinkTimer = 0;
     gMenuDelay = 0;
     gSoundOptionMask = NULL;
@@ -4517,7 +4640,11 @@ void func_80084854(UNUSED s32 updateRate) {
     if (temp >= 256) {
         temp = 511 - temp;
     }
+#ifdef TARGET_PORT
+    gAudioMenuStrings[0].text = "";
+#else
     gAudioMenuStrings[0].text = gAudioOutputStrings[gAudioOutputType];
+#endif
     mtx_ortho(&sMenuCurrDisplayList, &sMenuCurrHudMat);
 
     if (osTvType == OS_TV_TYPE_PAL) {
@@ -4677,7 +4804,11 @@ s32 menu_audio_options_loop(s32 updateRate) {
             } else if (contY < 0 && gOptionsMenuItemIndex < gMenuStage - 1) {
                 gOptionsMenuItemIndex++;
                 playSound = 1;
+#ifdef TARGET_PORT
+            } else if (contY > 0 && gOptionsMenuItemIndex > 1) {
+#else
             } else if (contY > 0 && gOptionsMenuItemIndex > 0) {
+#endif
                 gOptionsMenuItemIndex--;
                 playSound = 1;
             } else if (gOptionsMenuItemIndex == 0 && contX != 0) {
@@ -4791,7 +4922,7 @@ void soundoptions_free(void) {
 #ifdef TARGET_PORT
 /*
  * The port's SAVE OPTIONS screen. The N64's shows every save as a card in a row that scrolls sideways, then a second
- * row of where it can go. This one sorts them into tabs (GAME PAK, CONTROLLER PAK and BACKUPS, the port's copies of
+ * row of where it can go. This one sorts them into tabs (SAVES, GHOSTS and BACKUPS, the port's copies of
  * the saves on the SD card) with a list on the left and a card on the right that shows the chosen save and then what
  * can be done with it. The game's own steps still do the work (savemenu_load_sources, savemenu_load_destinations,
  * savemenu_write and the Controller Pak messages); only how they are shown and chosen is new.
@@ -4830,7 +4961,7 @@ static const char *sPortSaveMessage; // What the last action did, shown on the c
 static s32 sPortSaveQuitTimer;
 static const char *sPortSaveDoneMessage; // Shown once the write the game is doing finishes.
 
-static const char *const sPortSaveTabNames[PORT_SAVE_TABS] = { "GAME PAK", "CONTROLLER PAK", "BACKUPS" };
+static const char *const sPortSaveTabNames[PORT_SAVE_TABS] = { "SAVES", "GHOSTS", "BACKUPS" };
 static const char sPortSaveSlotNames[NUMBER_OF_SAVE_FILES][7] = { "SLOT A", "SLOT B", "SLOT C" };
 
 /* Each tab's rows from the files the game found (and the backups' folders). */
@@ -4977,9 +5108,9 @@ static char *port_savemenu_action_name(SaveFileData *dest, char *buffer) {
             buffer[i] = '\0';
             return buffer;
         case SAVE_FILE_TYPE_CART_TIMES:
-            return (char *) port_text("COPY TO GAME PAK");
+            return (char *) port_text("COPY TO SAVES");
         case SAVE_FILE_TYPE_CPAK_EMPTY:
-            return (char *) port_text("COPY TO PAK");
+            return (char *) port_text("COPY TO GHOSTS");
         case SAVE_FILE_TYPE_UNK9:
             return gMenuText[ASSET_MENU_TEXT_VIEWGHOSTS];
         default:
@@ -5121,8 +5252,8 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
     adventureTwo = FALSE;
     if (row == NULL) {
         icon = gDrawTexContPakIcon;
-        title = (char *) port_text("CONTROLLER PAK");
-        line1 = (char *) port_text("HAS NO SAVES");
+        title = (char *) port_text("GHOSTS");
+        line1 = (char *) port_text("NOTHING SAVED YET");
     } else if (row->kind == PORT_SAVE_ROW_EMPTY_SLOT) {
         icon = gDrawTexN64Icon;
         title = (char *) port_text(sPortSaveSlotNames[row->index]);
@@ -5136,8 +5267,8 @@ static s32 port_savemenu_render_card_head(PortSaveRow *row) {
         icon = gDrawTexFileIcon;
         title = save_backups_is_undo(&sPortSaveBackups, row->index) ? (char *) port_text("BEFORE A RESTORE")
                                                                     : (char *) port_text("BACKUP");
-        line1 = (char *) port_text("GAME PAK");
-        line2 = (char *) port_text("AND CONTROLLER PAK");
+        line1 = (char *) port_text("SAVES");
+        line2 = (char *) port_text("AND GHOSTS");
     } else {
         file = &gSaveMenuFilesSource[row->index];
         title = port_savemenu_file_name(file, buffer);
@@ -5328,7 +5459,7 @@ s32 port_savemenu_input_source(s32 buttonsPressed, s32 xAxis, s32 yAxis) {
     }
     if (buttonsPressed & B_BUTTON) {
         gMenuStage = SAVEMENU_ENTER;
-        if (gSaveMenuRumbleNag != gSaveMenuRumbleConnected) {
+        if (SAVEMENU_RUMBLE_NAG_PENDING()) {
             savemenu_render_error(CONTROLLER_PAK_SWITCH_TO_RUMBLE);
             return 0;
         }
@@ -6331,7 +6462,7 @@ s32 savemenu_input_source(s32 buttonsPressed, s32 direction) {
     ret = 0;
     if (buttonsPressed & B_BUTTON) {
         gMenuStage = SAVEMENU_ENTER;
-        if (gSaveMenuRumbleNag != gSaveMenuRumbleConnected) {
+        if (SAVEMENU_RUMBLE_NAG_PENDING()) {
             savemenu_render_error(CONTROLLER_PAK_SWITCH_TO_RUMBLE);
         } else {
             sound_play(SOUND_MENU_BACK3, NULL);
@@ -6808,6 +6939,10 @@ SIDeviceStatus func_80087F14(s32 *controllerIndex, s32 xAxisDirection) {
 PakError check_for_controller_pak_errors(void) {
     s32 errorFound;
     s32 i;
+#ifdef TARGET_PORT
+    sControllerPakError = PAK_ERROR_NONE;
+    return sControllerPakError;
+#endif
 
     errorFound = FALSE;
     sControllerPakError = PAK_ERROR_NONE;
@@ -8585,7 +8720,12 @@ s32 menu_character_select_loop(s32 updateRate) {
             if (confirmOffset >= gNumberOfActivePlayers) {
                 music_change_off();
                 load_level_for_menu(ASSET_LEVEL_OPTIONSBACKGROUND, -1, 0);
+#ifdef TARGET_PORT
+                // The Rumble Pak caution screen is skipped on the 3DS port.
+                if (FALSE) {
+#else
                 if (gNumberOfActivePlayers == 1 && !gPlayerHasSeenCautionMenu) {
+#endif
                     menu_init(MENU_CAUTION);
                 } else {
                     menu_init(MENU_GAME_SELECT);
@@ -12308,6 +12448,12 @@ void postrace_viewport(UNUSED s32 updateRate) {
  * This tells the player they can insert their rumble pak if they wish.
  */
 void postrace_message(SIDeviceStatus status) {
+#ifdef TARGET_PORT
+    // No Controller Pak or Rumble Pak messages on the 3DS port.
+    (void) status;
+    gPostRaceMessage = NULL;
+    return;
+#endif
     // status may contain controllerIndex in it's upper bits
     // so grab the lower bits for the SIDeviceStatus
 
@@ -14509,7 +14655,7 @@ void menu_credits_init(void) {
     load_font(ASSET_FONTS_BIGFONT);
 #endif
     music_voicelimit_set(24);
-    gCreditsControlData[130] = CREDITS_END; // DONT show developer times
+    gCreditsControlData[CREDITS_TIMES_INDEX] = CREDITS_END; // DONT show developer times
     if (gViewingCreditsFromCheat) {
         music_play(SEQUENCE_DARKMOON_CAVERNS);
         gCreditsArray[84] = gCreditsLastMessageArray[2]; // "THE END"
@@ -14520,7 +14666,7 @@ void menu_credits_init(void) {
         if (settings->bosses & 0x20) { // WIZPIG 2
             music_play(SEQUENCE_CRESCENT_ISLAND);
             gCreditsArray[84] = gCreditsLastMessageArray[1];                                  // "TO BE CONTINUED ..."
-            gCreditsControlData[130] = CREDITS_BEST_RACE_TIMES(CREDITS_BEST_RACE_TIMES_TIME); // Show developer times.
+            gCreditsControlData[CREDITS_TIMES_INDEX] = CREDITS_BEST_RACE_TIMES(CREDITS_BEST_RACE_TIMES_TIME); // Show developer times.
             D_80126BCC = 9;
         } else {
             music_play(SEQUENCE_DARKMOON_CAVERNS);

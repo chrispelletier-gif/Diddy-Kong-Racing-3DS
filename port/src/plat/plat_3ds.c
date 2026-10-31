@@ -1,6 +1,8 @@
 /* Nintendo 3DS (libctru) implementation of the platform layer. */
 #include "plat.h"
+#include "recorder.h"
 #include "bottom_screen.h"
+#include "setup_screen.h"
 #include "settings.h"
 
 #include <3ds.h>
@@ -10,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void plat_log_drain(void);
 extern u32 __ctru_heap_size;
 extern void (*__system_retAddr)(void);
 
@@ -47,6 +50,7 @@ static int sRcpCore;
 static int sAudioCore;
 static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
+static int sNew3DS;
 
 static void watchdog_start(void);
 
@@ -84,6 +88,7 @@ void plat_init(void) {
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
     // DKR_SINGLE_CORE=1 keeps everything on the application core, as on an Old 3DS.
     APT_CheckNew3DS(&isNew3DS);
+    sNew3DS = isNew3DS;
     if (isNew3DS) {
         osSetSpeedupEnable(true);
     }
@@ -309,6 +314,7 @@ void plat_3ds_exit(void) {
     unsigned long long start = plat_time_ns();
 
     sQuitting = 1;
+    plat_log_drain();
     while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
         svcSleepThread(1000000);
     }
@@ -380,7 +386,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             // to DKR_SPLIT_SHARE, 80% by default, unless the sound already holds one), else the game's core, where
             // it goes above the game as the renderer does.
             stackSize = 64 * 1024;
-            if (sRcpCore == 1) {
+            if (sRcpCore == 1 || sRcpCore == 2) {
+                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle (#168: 80%), so the
+                // backend goes there, above the game, rather than onto the system core's limited share.
                 core = 0;
                 prio = PRIO_RCP;
             } else {
@@ -539,6 +547,10 @@ const char *plat_data_dir(void) {
 static LightLock sLogLock;
 static int sLogLines;
 static int sLogDebug;
+static int sLogLockReady;
+static int sLockReady_hook(void) {
+    return sLogLockReady;
+}
 static FILE *sLogCopy;
 
 /* Every line also goes into a ring buffer, for bug reports: the file stops after the start-up lines. */
@@ -583,6 +595,193 @@ int plat_log_recent(char *out, int size) {
     return strlen(out);
 }
 
+
+/*
+ * Log lines past the start-up ones (a snapshot's file with a line for every draw, or log.txt once "debug" exists)
+ * and the snapshot's other files are written by a thread of their own at the lowest priority, so the renderer that
+ * produces them never waits for the SD card. Lines collect in chunks; a full chunk becomes a job. Jobs run in order.
+ * At most WRITE_PENDING_MAX bytes wait; past that the producer waits for the writer to catch up.
+ */
+#define LOG_CHUNK_SIZE (16 * 1024)
+#define WRITE_PENDING_MAX (2 * 1024 * 1024)
+#define LOG_CHUNK_MAX_AGE_NS 1000000000ULL
+
+enum { JOB_WRITE, JOB_CLOSE, JOB_SAVE };
+
+typedef struct WriteJob {
+    struct WriteJob *next;
+    int kind;
+    FILE *file;
+    char *data; /* Owned. */
+    unsigned int size;
+    char path[256];
+} WriteJob;
+
+typedef struct LogChunk {
+    FILE *file;
+    char *data;
+    unsigned int length;
+    unsigned long long started;
+} LogChunk;
+
+static LightLock sJobLock;
+static LightSemaphore sJobSemaphore;
+static WriteJob *sJobHead, *sJobTail;
+static volatile unsigned int sJobsPending;  /* Queued or running. */
+static volatile unsigned int sBytesPending;
+static int sWriterState; /* 0 not started, 1 running, -1 could not start. */
+static LogChunk sLogChunk, sCopyChunk;
+
+static void run_job(WriteJob *job) {
+    switch (job->kind) {
+        case JOB_WRITE:
+            if (job->file != NULL) {
+                fwrite(job->data, 1, job->size, job->file);
+                fflush(job->file);
+            }
+            break;
+        case JOB_CLOSE:
+            if (job->file != NULL) {
+                fclose(job->file);
+            }
+            break;
+        case JOB_SAVE:
+            plat_save_file(job->path, job->data, job->size);
+            break;
+    }
+    free(job->data);
+    __sync_fetch_and_sub(&sBytesPending, job->size);
+    __sync_fetch_and_sub(&sJobsPending, 1);
+}
+
+static void writer_thread(void *arg) {
+    (void) arg;
+    for (;;) {
+        WriteJob *job;
+        LightSemaphore_Acquire(&sJobSemaphore, 1);
+        LightLock_Lock(&sJobLock);
+        job = sJobHead;
+        sJobHead = job->next;
+        if (sJobHead == NULL) {
+            sJobTail = NULL;
+        }
+        LightLock_Unlock(&sJobLock);
+        run_job(job);
+        free(job);
+    }
+}
+
+/* Queues a job (taking its data). Without a writer thread, or without memory for the job, it is run here. */
+static void queue_job(int kind, FILE *file, char *data, unsigned int size, const char *path) {
+    WriteJob *job;
+    static int sInit;
+
+    if (!sInit) {
+        sInit = 1;
+        LightLock_Init(&sJobLock);
+        LightSemaphore_Init(&sJobSemaphore, 0, 0x7FFF);
+    }
+    if (sWriterState == 0) {
+        // Below every game thread, on the game's core (the renderer has its own on a New 3DS).
+        sWriterState = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true) != NULL ? 1 : -1;
+    }
+    while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
+        svcSleepThread(2000000);
+    }
+    job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        WriteJob here = { 0 };
+        here.kind = kind;
+        here.file = file;
+        here.data = data;
+        here.size = size;
+        if (path != NULL) {
+            snprintf(here.path, sizeof(here.path), "%s", path);
+        }
+        __sync_fetch_and_add(&sBytesPending, size);
+        __sync_fetch_and_add(&sJobsPending, 1);
+        run_job(&here);
+        return;
+    }
+    job->kind = kind;
+    job->file = file;
+    job->data = data;
+    job->size = size;
+    if (path != NULL) {
+        snprintf(job->path, sizeof(job->path), "%s", path);
+    }
+    __sync_fetch_and_add(&sBytesPending, size);
+    __sync_fetch_and_add(&sJobsPending, 1);
+    if (sWriterState < 0) {
+        run_job(job);
+        free(job);
+        return;
+    }
+    LightLock_Lock(&sJobLock);
+    if (sJobTail != NULL) {
+        sJobTail->next = job;
+    } else {
+        sJobHead = job;
+    }
+    sJobTail = job;
+    LightLock_Unlock(&sJobLock);
+    LightSemaphore_Release(&sJobSemaphore, 1);
+}
+
+static void chunk_flush(LogChunk *chunk) {
+    if (chunk->data != NULL && chunk->length > 0) {
+        queue_job(JOB_WRITE, chunk->file, chunk->data, chunk->length, NULL);
+        chunk->data = NULL;
+        chunk->length = 0;
+    }
+}
+
+/* Adds a line to the chunk for file (flushing it when it is full or old). With the lock held. */
+static void chunk_add(LogChunk *chunk, FILE *file, const char *line, int length) {
+    unsigned long long now = plat_time_ns();
+    if (chunk->file != file) {
+        chunk_flush(chunk);
+        chunk->file = file;
+    }
+    if (chunk->data != NULL && chunk->length + length > LOG_CHUNK_SIZE) {
+        chunk_flush(chunk);
+    }
+    if (chunk->data == NULL) {
+        chunk->data = malloc(LOG_CHUNK_SIZE);
+        chunk->length = 0;
+        chunk->started = now;
+        if (chunk->data == NULL) {
+            return; /* The line is in the ring buffer all the same. */
+        }
+    }
+    if (length > LOG_CHUNK_SIZE) {
+        length = LOG_CHUNK_SIZE;
+    }
+    memcpy(chunk->data + chunk->length, line, length);
+    chunk->length += length;
+    if (now - chunk->started > LOG_CHUNK_MAX_AGE_NS) {
+        chunk_flush(chunk);
+    }
+}
+
+/* Waits until everything queued so far is on the SD card (a snapshot's log is complete only then). */
+void plat_log_drain(void) {
+    if (sLockReady_hook()) {
+        LightLock_Lock(&sLogLock);
+        chunk_flush(&sLogChunk);
+        chunk_flush(&sCopyChunk);
+        LightLock_Unlock(&sLogLock);
+    }
+    while (sJobsPending > 0 && sWriterState > 0) {
+        svcSleepThread(5000000);
+    }
+}
+
+/* Saves a file on the writer thread; data comes from malloc and is freed there. */
+void plat_save_file_later(const char *path, void *data, unsigned int size) {
+    queue_job(JOB_SAVE, NULL, data, size, path);
+}
+
 static FILE *log_file(void) {
     static int sChecked;
     static FILE *sFile;
@@ -609,12 +808,11 @@ static FILE *log_file(void) {
 }
 
 static void log_line(const char *prefix, const char *text) {
-    static int sLockReady;
     FILE *file;
-    if (!sLockReady) {
+    if (!sLogLockReady) {
         // The first line is logged from the main thread before any other thread exists.
         LightLock_Init(&sLogLock);
-        sLockReady = 1;
+        sLogLockReady = 1;
     }
     LightLock_Lock(&sLogLock);
     {
@@ -622,14 +820,33 @@ static void log_line(const char *prefix, const char *text) {
         int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
         ring_add(line, length < (int) sizeof(line) ? length : (int) sizeof(line) - 1);
     }
+    if (sLogCopy == NULL) {
+        // The flight recorder's timeline too, but not a snapshot's draws (those have their own file).
+        rec_log_line(prefix, text);
+    }
     file = log_file();
     if (file != NULL) {
-        fprintf(file, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
-        fflush(file);
+        char line[600];
+        int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        if (length >= (int) sizeof(line)) {
+            length = sizeof(line) - 1;
+        }
+        if (sLogLines < LOG_BOOT_LINES) {
+            // The start-up lines go to the card at once: they are what is left if the game never gets going.
+            fwrite(line, 1, length, file);
+            fflush(file);
+        } else {
+            chunk_add(&sLogChunk, file, line, length);
+        }
         sLogLines++;
     }
     if (sLogCopy != NULL) {
-        fprintf(sLogCopy, "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        char line[600];
+        int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
+        if (length >= (int) sizeof(line)) {
+            length = sizeof(line) - 1;
+        }
+        chunk_add(&sCopyChunk, sLogCopy, line, length);
     }
     LightLock_Unlock(&sLogLock);
 }
@@ -645,11 +862,12 @@ void plat_log_copy_to(const char *path) {
     FILE *file = (path != NULL) ? fopen(path, "w") : NULL;
     FILE *old;
     LightLock_Lock(&sLogLock);
+    chunk_flush(&sCopyChunk);
     old = sLogCopy;
     sLogCopy = file;
     LightLock_Unlock(&sLogLock);
     if (old != NULL) {
-        fclose(old);
+        queue_job(JOB_CLOSE, old, NULL, 0, NULL); /* After its lines. */
     }
     if (file != NULL) {
         struct mallinfo info = mallinfo();
@@ -814,6 +1032,7 @@ void plat_3ds_console_init(void) {
 void plat_rom_loaded(void) {
     LightLock_Lock(&sConsoleLock);
     bs_load_assets();
+    bs_set_style(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
@@ -877,6 +1096,14 @@ static int same_standing(const RaceHud *a, const RaceHud *b) {
     return 1;
 }
 
+/* The bottom screen's look (Race HUD page, port_race_hud.c). */
+void plat_set_bottom_style(int style) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_style(style);
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
 void plat_set_race_hud(const RaceHud *hud) {
     static int sShown, sRacing, sEpoch = -1;
     static u64 sIntervalNs = 66000000ULL;
@@ -915,6 +1142,72 @@ void plat_set_race_hud(const RaceHud *hud) {
     }
 }
 
+/*
+ * The first-run setup (port_setup.c, setup_screen.h): the game thread's pages, drawn over the whole screen, buttons
+ * and all; while they show, every tap goes to them (plat_3ds_setup_touch), and the game thread takes it.
+ */
+static volatile int sSetupShown;
+static volatile int sSetupTap = SETUP_HIT_NONE;
+
+int plat_first_run_setup(void) {
+    return 1;
+}
+
+int plat_system_french(void) {
+    u8 language = CFG_LANGUAGE_EN;
+    if (R_SUCCEEDED(cfguInit())) {
+        CFGU_GetSystemLanguage(&language);
+        cfguExit();
+    }
+    return language == CFG_LANGUAGE_FR;
+}
+
+int plat_can_60fps(void) {
+    return sNew3DS;
+}
+
+void plat_set_setup_screen(const SetupScreen *screen) {
+    LightLock_Lock(&sConsoleLock);
+    bs_set_setup(screen);
+    sSetupShown = screen != NULL;
+    screen_changed();
+    LightLock_Unlock(&sConsoleLock);
+}
+
+int plat_take_setup_tap(void) {
+    int tap = sSetupTap;
+    sSetupTap = SETUP_HIT_NONE;
+    return tap;
+}
+
+/* Debug: the First-run setup row closes the Settings menu so that the setup has the screen (update_3ds.c). */
+static volatile int sCloseMenu;
+
+void plat_request_close_menu(void) {
+    sCloseMenu = 1;
+}
+
+int plat_3ds_take_close_menu(void) {
+    int closing = sCloseMenu;
+    sCloseMenu = 0;
+    return closing;
+}
+
+/* A touch (update_3ds_touch): nonzero if the setup is showing, which takes it. */
+int plat_3ds_setup_touch(int x, int y) {
+    int hit;
+    if (!sSetupShown) {
+        return 0;
+    }
+    LightLock_Lock(&sConsoleLock);
+    hit = bs_setup_hit(x, y);
+    LightLock_Unlock(&sConsoleLock);
+    if (hit != SETUP_HIT_NONE) {
+        sSetupTap = hit;
+    }
+    return 1;
+}
+
 /* The profiler's readout, under the messages. */
 void plat_overlay_show(const char *text) {
     LightLock_Lock(&sConsoleLock);
@@ -942,10 +1235,20 @@ void plat_status(const char *fmt, ...) {
     char buffer[256];
     va_list args;
     va_start(args, fmt);
+    va_list french;
+    va_copy(french, args);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     log_line("", buffer);
-    plat_3ds_console_line(buffer);
+    // The log stays English; the bottom screen shows the game's language (port_text).
+    if (port_text_french()) {
+        char shown[256];
+        vsnprintf(shown, sizeof(shown), port_text(fmt), french);
+        plat_3ds_console_line(port_text(shown));
+    } else {
+        plat_3ds_console_line(buffer);
+    }
+    va_end(french);
 }
 
 static void status_lines(const char *first, const char *second) {
@@ -998,6 +1301,16 @@ static void log_stall_state(int seconds, unsigned idlePct, unsigned renderIdlePc
  * to hang_log.txt, which the bug report on the next launch sends, and during the unattended test run the hang is
  * written down for the next launch to record (port_autorun.c). Both files go again if drawing resumes.
  */
+/* The flight recorder as it is, 3 and 20 seconds into a stall: a freeze that ends with the power button leaves it
+ * for the next start's report (bugreport_3ds.c). Removed if drawing resumes. */
+static void save_recording(void) {
+#if PLAT_DEBUG_TOOLS
+    char path[256];
+    snprintf(path, sizeof(path), "%s/hang_rec.bin", plat_data_dir());
+    plat_save_file(path, rec_state(), sizeof(RecState));
+#endif
+}
+
 static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, unsigned idlePct,
                            unsigned renderIdlePct) {
     static char sRecent[40 * 1024];
@@ -1005,6 +1318,11 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
     snprintf(path, sizeof(path), "%s/autorun_hang.txt", plat_data_dir());
     snprintf(logPath, sizeof(logPath), "%s/hang_log.txt", plat_data_dir());
     if (framesDrawn || sPauseRequested) {
+        if (*stalledSeconds >= 3) {
+            char recPath[256];
+            snprintf(recPath, sizeof(recPath), "%s/hang_rec.bin", plat_data_dir());
+            remove(recPath);
+        }
         *stalledSeconds = 0;
         if (*written) {
             *written = 0;
@@ -1016,6 +1334,7 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
     // Idle meters are not started here: they spin at the idle thread's priority and would starve it during start-up.
     if (++*stalledSeconds == 3) {
         log_stall_state(*stalledSeconds, idlePct, renderIdlePct);
+        save_recording();
     }
     if (*stalledSeconds == 20) {
         snprintf(text, sizeof(text), "renderer stuck while %s (gfx %u/%u, vi %u)\n",
@@ -1028,6 +1347,7 @@ static void check_for_hang(int framesDrawn, int *stalledSeconds, int *written, u
             plat_save_file(path, text, strlen(text));
         }
         plat_save_file(logPath, sRecent, plat_log_recent(sRecent, sizeof(sRecent)));
+        save_recording();
     }
 }
 
@@ -1093,6 +1413,10 @@ static void watchdog(void *arg) {
         if (seconds % 5 == 0 && seconds <= 60) {
             log_line("watchdog: ", line[0]);
             log_line("watchdog: ", line[1]);
+        } else if (seconds % 5 == 0) {
+            // After the first minute only the flight recorder's timeline gets them (the log file would grow).
+            rec_event("watchdog: %s", line[0]);
+            rec_event("watchdog: %s", line[1]);
         }
     }
 }

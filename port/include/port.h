@@ -245,6 +245,22 @@ void port_set_skip_intro(s32 on);
  * (French when it is set to FRANCAIS), or english itself when there is no translation.
  */
 const char *port_text(const char *english);
+/* The game's dialogue after it is loaded: wording that names a button the 3DS lacks is changed (port_text.c). */
+void port_fix_game_text(char *text, int size);
+
+/*
+ * The first-run setup (port/src/game/port_setup.c): language, then a play style or a page each for the picture, the
+ * screen shape, the camera and the race HUD, on the bottom screen the first time the title screen shows (setup= in
+ * settings.txt; on PC only for DKR_SETUP=1). src/menu.c keeps START and OPTIONS back while it shows, gives it the
+ * title screen's input and draws its box (port_setup_caption) under the logo.
+ */
+s32 port_setup_active(void);
+void port_setup_update(u32 buttons, s32 stickX, s32 stickY);
+s32 port_setup_caption(const char **name, const char **tag, const char **about);
+s32 port_setup_done(void);
+void port_setup_reset(void);
+/* Debug: asks for the setup again, and runs it now when the title screen is showing. */
+void port_setup_restart(void);
 
 /*
  * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the

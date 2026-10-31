@@ -84,6 +84,7 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#include "plat/recorder.h"
 #include "gfx/gfx_split.h"
 #include <string.h>
 
@@ -95,6 +96,7 @@
 #define STATE_FILE "autorun_state.txt"
 #define RESULTS_FILE "autorun_results.csv"
 #define PROBLEMS_FILE "autorun_problems.txt"
+#define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -194,14 +196,33 @@ typedef struct BenchSwitch {
  * commands a frame (most small textures in a race have mipmaps), so it is also raced with mipmapped textures put in
  * (2, which loses their mipmaps in that race), to see what it could gain.
  * The list ends with an empty entry, so it may be otherwise empty. */
-static const BenchSwitch sSwitches[] = {
+static const BenchSwitch sSwitchesOld3ds[] = {
     { "GPU vertex maths (P30)", { "DKR_GPU_TRANSFORM", NULL }, 0, 1 },
     { "GPU vertex maths with meshes (P30, P31, P34)", { "DKR_GPU_TRANSFORM", "DKR_TRACK_MESH", "DKR_MODEL_MESH" }, 0, 1 },
     { "texture atlas", { "DKR_TEX_ATLAS", NULL }, 0, 1 },
     { "texture atlas with mipmapped textures (no mipmaps for them)", { "DKR_TEX_ATLAS", NULL }, 0, 2 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-#define SWITCH_CONFIGS ((s32) ARRAY_COUNT(sSwitches)) // The usual settings, then each switch flipped
+/* The New 3DS's list: the Old 3DS work above, each turned on by itself against the New 3DS's usual settings (where it
+ * is off), to see which buys the New 3DS headroom too. The two-core renderer (P21) was shelved on the New 3DS on
+ * 2026-10-26 (#168: 59.8 fps with ~8 ms of renderer to spare at anti-aliasing off); here its backend runs on the game's
+ * core (mostly idle on a New 3DS) while the walk keeps core 2. The P38 cuts (texture lookup memo, lean walk, lean draw
+ * path) and the breakdowns' clock reads were measured on an Old 3DS only; P40 culls back faces in the walk; a
+ * texture's hash kept 8 frames is the Old 3DS's #241 setting. Not raced again: the system-call flush and the VFP
+ * vectors, which #176 showed do nothing on a New 3DS. */
+static const BenchSwitch sSwitchesNew3ds[] = {
+    { "two-core renderer (P21)", { "DKR_SPLIT_RENDER", NULL }, 0, 1 },
+    { "texture lookup memo (P38)", { "DKR_TEX_MEMO", NULL }, 0, 1 },
+    { "lean walk (P38)", { "DKR_WALK_LEAN", NULL }, 0, 1 },
+    { "lean draw path (P38)", { "DKR_DRAW_LEAN", NULL }, 0, 1 },
+    { "walk and draw breakdowns off (P38)", { "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, 1, 0 },
+    { "back faces culled in the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1 },
+    { "texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+#define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
+// The usual settings, then each switch flipped
+#define SWITCH_CONFIGS (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds) : (s32) ARRAY_COUNT(sSwitchesNew3ds))
 /* With two switches or more, a last race flips them all together: gains don't always add up. */
 #define SWITCH_ALL (SWITCH_CONFIGS > 2 ? SWITCH_CONFIGS : -1)
 #define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
@@ -372,28 +393,100 @@ static const char *results_file(void) {
     return sModes[sMode].resultsFile;
 }
 
-/* Appends text to a file in the data directory. */
-static void append_file(const char *name, const char *text) {
-    char path[256];
-    unsigned int size = 0, length = strlen(text);
-    char *old, *buffer;
+/*
+ * The results and state files are written by a thread of their own. On the 3DS every file opened, replaced or renamed
+ * on the SD card can take 100 ms and more (looking up a name reads the whole data directory, which keeps every bug
+ * report snapshot), and the results file used to be read and written whole: writing them as a race ended held the
+ * game for most of a second at the finish line (test runs #250 and #254: "long game frame: 773 / 829 ms" right after
+ * each race's results line). The writes keep their order; whatever reads the files back first waits for them
+ * (io_flush).
+ */
+#define IO_JOBS 16
 
-    make_path(path, sizeof(path), name);
-    old = plat_load_file(path, &size);
-    buffer = plat_malloc(size + length);
-    if (buffer == NULL) {
-        plat_free(old);
+typedef struct IoJob {
+    char path[256];
+    char *text;
+    char *header;       // Appends: written first if the file doesn't exist yet (or NULL).
+    s32 append;         // Added to the end of the file, else it replaces the file.
+} IoJob;
+
+static IoJob sIoJobs[IO_JOBS];
+static volatile u32 sIoQueued, sIoDone; // Jobs queued by the game thread, jobs the writer has finished.
+static PlatSem *sIoWake;
+
+static void io_thread(UNUSED void *arg) {
+    for (;;) {
+        IoJob *job;
+        unsigned long long start;
+        plat_sem_wait(sIoWake);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        job = &sIoJobs[sIoDone % IO_JOBS];
+        start = plat_time_ns();
+        if (job->append) {
+            if (job->header != NULL) {
+                char probe[1];
+                if (plat_load_file_start(job->path, probe, sizeof(probe)) < 0) {
+                    plat_append_file(job->path, job->header, strlen(job->header));
+                }
+            }
+            plat_append_file(job->path, job->text, strlen(job->text));
+        } else {
+            plat_save_file(job->path, job->text, strlen(job->text));
+        }
+        if (plat_time_ns() - start > 50000000ULL) {
+            port_log("autorun: writing %s took %d ms", job->path, (int) ((plat_time_ns() - start) / 1000000ULL));
+        }
+        plat_free(job->text);
+        plat_free(job->header);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sIoDone++;
+    }
+}
+
+/* Waits until the writer has written everything queued. */
+static void io_flush(void) {
+    while (sIoDone != sIoQueued) {
+        plat_sleep_ns(1000000);
+    }
+}
+
+/* Hands a file write to the writer thread (text is copied). */
+static void io_queue(const char *name, const char *text, const char *header, s32 append) {
+    IoJob *job;
+    char *copy, *headerCopy = NULL;
+    u32 length = strlen(text);
+    if (sIoWake == NULL) {
+        sIoWake = plat_sem_create(0);
+        // Below every game thread, on the game's core, which is idle most of each frame.
+        plat_thread_create(io_thread, NULL, 2, PLAT_THREAD_GAME, "autorun files");
+    }
+    while (sIoQueued - sIoDone >= IO_JOBS) {
+        plat_sleep_ns(1000000);
+    }
+    copy = plat_malloc(length + 1);
+    if (copy == NULL) {
         return;
     }
-    if (old != NULL) {
-        bcopy(old, buffer, size);
-        plat_free(old);
-    } else {
-        size = 0;
+    bcopy(text, copy, length + 1);
+    if (header != NULL) {
+        headerCopy = plat_malloc(strlen(header) + 1);
+        if (headerCopy != NULL) {
+            bcopy(header, headerCopy, strlen(header) + 1);
+        }
     }
-    bcopy(text, buffer + size, length);
-    plat_save_file(path, buffer, size + length);
-    plat_free(buffer);
+    job = &sIoJobs[sIoQueued % IO_JOBS];
+    make_path(job->path, sizeof(job->path), name);
+    job->text = copy;
+    job->header = headerCopy;
+    job->append = append;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    sIoQueued++;
+    plat_sem_post(sIoWake);
+}
+
+/* Appends text to a file in the data directory, first writing header (if not NULL) when the file is new. */
+static void append_file(const char *name, const char *text, const char *header) {
+    io_queue(name, text, header, TRUE);
 }
 
 static void hash_text(const char *text) {
@@ -546,13 +639,11 @@ static void build_race_list(void) {
 /* running: the race under way (-1: none). recorded: its result is already in the results file. */
 static void save_state_recorded(s32 running, s32 recorded) {
     char text[176];
-    char path[256];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
                   (int) recorded, (int) sFinished, (int) sProblems);
-    make_path(path, sizeof(path), state_file());
-    plat_save_file(path, text, strlen(text));
+    io_queue(state_file(), text, NULL, FALSE);
 }
 
 static void save_state(s32 running) {
@@ -595,7 +686,7 @@ static void record_problem(const char *what) {
     plat_snprintf(text, sizeof(text), "run %d race %d/%d: %s, %s, %s: %s\n", (int) sRun, (int) sNext + 1,
                   (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
                   sVehicleNames[(s32) race->vehicle], what);
-    append_file(PROBLEMS_FILE, text);
+    append_file(PROBLEMS_FILE, text, NULL);
     port_log("autorun: %s", text);
 }
 
@@ -630,33 +721,115 @@ static const char *graphics_setup(void) {
     return text;
 }
 
+/*
+ * The flight recorder's hitches (plat/recorder.h) since the race before ended, so the results screen, the menus and the
+ * load before this race count too, each with what took the time and what happened then: written to HITCH_FILE, and
+ * counted by cause for the run's issue, which also lists the run's worst.
+ */
+#define WORST_HITCHES 8
+static unsigned int sHitchSince;
+static unsigned int sRunHitches, sRunCauses[REC_CAUSE_COUNT];
+static struct {
+    unsigned int periodUs;
+    char text[200];
+} sWorstHitches[WORST_HITCHES];
+static s32 sWorstHitchCount;
+
+static void reset_hitches(void) {
+    sHitchSince = rec_frame_now();
+    sRunHitches = 0;
+    bzero(sRunCauses, sizeof(sRunCauses));
+    sWorstHitchCount = 0;
+}
+
+static void record_hitches(const char *outcome) {
+    static char text[6 * 1024];
+    const RecState *rec = rec_state();
+    Race *race = &sRaces[sNext];
+    unsigned int counts[REC_CAUSE_COUNT], found, n;
+    s32 length, c, i;
+
+    bzero(counts, sizeof(counts));
+    length = plat_snprintf(text, sizeof(text), "\n## run %d race %d/%d: %s, %s, %s, %s", (int) sRun, (int) sNext + 1,
+                           (int) sNumRaces, track_name(race->track), sCharacterNames[(s32) race->character],
+                           sVehicleNames[(s32) race->vehicle], graphics_setup());
+    if (is_bench()) {
+        length += plat_snprintf(text + length, sizeof(text) - length, ", config %d", (int) race->config);
+    }
+    length += plat_snprintf(text + length, sizeof(text) - length, ": %s\n\n", outcome);
+    // At most 4 KB of them a race (about 15 lines), so 200 races stay within the issue's attachment budget.
+    found = rec_hitches_since(sHitchSince, text + length, 4096, counts);
+    length = strlen(text);
+    length += plat_snprintf(text + length, sizeof(text) - length, "%u hitches since the race before ended:", found);
+    for (c = 0; c < REC_CAUSE_COUNT; c++) {
+        length += plat_snprintf(text + length, sizeof(text) - length, "%s %s %u", c > 0 ? "," : "",
+                                rec_cause_name(c), counts[c]);
+        sRunCauses[c] += counts[c];
+    }
+    plat_snprintf(text + length, sizeof(text) - length, "\n");
+    sRunHitches += found;
+    append_file(HITCH_FILE, text, "# Hitches in each race of the test runs: frames half as long again as usual, with what "
+                                  "took the time and what happened then (port/src/plat/recorder.c).\n");
+
+    // The run's worst, longest first.
+    for (n = rec->hitchCount > REC_HITCHES ? rec->hitchCount - REC_HITCHES : 0; n < rec->hitchCount; n++) {
+        const RecHitch *h = &rec->hitches[n % REC_HITCHES];
+        if (h->frame < sHitchSince) {
+            continue;
+        }
+        for (i = sWorstHitchCount; i > 0 && sWorstHitches[i - 1].periodUs < h->periodUs; i--) {
+            if (i < WORST_HITCHES) {
+                sWorstHitches[i] = sWorstHitches[i - 1];
+            }
+        }
+        if (i < WORST_HITCHES) {
+            sWorstHitches[i].periodUs = h->periodUs;
+            plat_snprintf(sWorstHitches[i].text, sizeof(sWorstHitches[i].text), "race %d (%s): %.150s", (int) sNext + 1,
+                          track_name(race->track), h->text);
+            if (sWorstHitchCount < WORST_HITCHES) {
+                sWorstHitchCount++;
+            }
+        }
+    }
+    sHitchSince = rec_frame_now();
+}
+
+/* The run's hitches for its issue: how many, by cause, and the worst. Returns the length written. */
+static s32 hitch_summary(char *out, s32 size) {
+    s32 length, c, i;
+    length = plat_snprintf(out, size, "\n### Hitches\n\n%u since this launch's first race (all of them, race by race, "
+                                      "are in `" HITCH_FILE "`):", sRunHitches);
+    for (c = 0; c < REC_CAUSE_COUNT && length < size; c++) {
+        length += plat_snprintf(out + length, size - length, "%s %s %u", c > 0 ? "," : "", rec_cause_name(c),
+                                sRunCauses[c]);
+    }
+    if (length < size) {
+        length += plat_snprintf(out + length, size - length, ".\n\n");
+    }
+    for (i = 0; i < sWorstHitchCount && length < size; i++) {
+        length += plat_snprintf(out + length, size - length, "- **%u ms** %s\n", sWorstHitches[i].periodUs / 1000,
+                                sWorstHitches[i].text);
+    }
+    return length < size ? length : size - 1;
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
-    char path[256];
+    char header[640];
     char line[640];
-    unsigned int size;
-    void *existing;
     Race *race = &sRaces[sNext];
     ProfStats empty;
     u32 slow, i;
     s32 length;
 
-    make_path(path, sizeof(path), results_file());
-    existing = plat_load_file(path, &size);
-    if (existing == NULL) {
-        char header[640];
-        plat_snprintf(header, sizeof(header),
-                      "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
-                      "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
-                      "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
-                      "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
-                      "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
-                      "paced_20fps_pct,paced_slower_pct\n",
-                      sModes[sMode].extraColumn ? "," : "",
-                      sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
-        append_file(results_file(), header);
-    }
-    plat_free(existing);
+    plat_snprintf(header, sizeof(header),
+                  "run,race,track_id,track,character,vehicle,outcome,race_s,position,load_s,frames,fps,"
+                  "pct_30fps,pct_20fps,pct_slower,worst_frame_ms,hitches,logic_ms,scene_ms,frame_wait_ms,"
+                  "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
+                  "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
+                  "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
+                  "paced_20fps_pct,paced_slower_pct\n",
+                  sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
         stats = &empty;
@@ -701,7 +874,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames));
-    append_file(results_file(), line);
+    append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (str_equal(outcome, "finished")) {
         sFinished++;
@@ -805,6 +978,7 @@ static void init(void) {
     sFpsSum = 0.0;
     sFpsCount = 0;
 
+    io_flush(); // A run that just ended may still be writing its state.
     make_path(path, sizeof(path), state_file());
     state = plat_load_file(path, &size);
     if (state != NULL && plat_getenv("DKR_AUTORUN_RESTART") == NULL) {
@@ -874,6 +1048,10 @@ static void init(void) {
     }
     plat_free(state);
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
+    reset_hitches();
+    if (sNext == 0) {
+        io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
+    }
     set_phase(PHASE_TITLE);
     if (sNumRaces == 0) {
         sPhase = PHASE_OFF;
@@ -1423,6 +1601,7 @@ static void send_results(const char *why) {
     char title[128];
     static char summary[6144];
     s32 length;
+    io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
                   sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? "switch bench "
@@ -1449,12 +1628,16 @@ static void send_results(const char *why) {
                                 aa_label(), 60 / plat_frame_retraces(),
                                 plat_render_ahead());
     }
+    if (length > 0 && length < (s32) sizeof(summary) - 2048) {
+        // Kept to 2 KB, so the mode's own tables below still fit.
+        length += hitch_summary(summary + length, 2048);
+    }
     if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
         bench_summary(summary + length, sizeof(summary) - length);
     }
-    plat_status("%s %s: %d races, %d problems", sModes[sMode].name, why, (int) (sFinished + sProblems), (int) sProblems);
+    plat_status("%s %s: %d races, %d problems", port_text(sModes[sMode].name), port_text(why), (int) (sFinished + sProblems), (int) sProblems);
     plat_send_test_results(title, summary);
 }
 
@@ -1506,6 +1689,7 @@ static void end_race(const char *outcome, s32 position) {
     prof_window_read(PROF_WINDOW_SESSION, &sRaceStats);
     sOutcome = outcome;
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
+    record_hitches(outcome);
     if (str_equal(outcome, "finished")) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
@@ -1545,7 +1729,7 @@ static void handle_request(void) {
             return; // Nothing to race.
         }
         prof_window_start(PROF_WINDOW_OVERLAY);
-        plat_status("%s started: race %d of %d", sModes[sMode].name, (int) sNext + 1,
+        plat_status("%s started: race %d of %d", port_text(sModes[sMode].name), (int) sNext + 1,
                     (int) sNumRaces);
         if (get_game_mode() == GAMEMODE_INGAME) {
             sQuitPending = TRUE; // Out of the game, to the title screen where the races start.
