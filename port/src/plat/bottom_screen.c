@@ -440,6 +440,9 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
  * layout, so taps land in the same places.
  */
 static int sStyle;
+/* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
+static const int sTabNudge[4] = { 2, 3, 1, 1 };
+static const int sButtonNudge[4] = { 2, 2, 0, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
@@ -1215,7 +1218,7 @@ static void draw_menu(const State *s) {
         upper_text(upper, sizeof(upper), m->tabs[i]);
         /* A long name (French ones) that would touch the tab's edges drops to the small font. */
         if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
-            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + (sStyle != 0 ? 1 : 0), m->tabs[i], 1);
+            heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + sTabNudge[sStyle], m->tabs[i], 1);
         } else if (font_ready(FONT_FUN)) {
             text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
                                i == m->tab ? YELLOW : WHITE, 1);
@@ -1386,9 +1389,9 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 if (iconW) {
                     int tx = x0 + (x1 - x0 - w - iconW) / 2;
                     draw_icon(t, tx + 7, cy, ink, hole);
-                    text_clipped(FONT_FUN, tx + iconW, y0 + 5, upper, ink, !grey, x1);
+                    text_clipped(FONT_FUN, tx + iconW, y0 + 5 + sButtonNudge[sStyle], upper, ink, !grey, x1);
                 } else {
-                    text_centred(FONT_FUN, x0, x1, y0 + 5, upper, ink, !grey);
+                    text_centred(FONT_FUN, x0, x1, y0 + 5 + sButtonNudge[sStyle], upper, ink, !grey);
                 }
             }
         }
@@ -1435,7 +1438,7 @@ static void draw_button_row(const char (*buttons)[40], int count) {
         if (font_ready(FONT_FUN)) {
             char upper[40];
             upper_text(upper, sizeof(upper), label + (grey || on));
-            text_centred_as_is(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6, upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
+            text_centred_as_is(FONT_FUN, x0, x1, BS_BUTTONS_Y + 6 + sButtonNudge[0], upper, grey ? (Colour){ 120, 120, 130, 255 } : WHITE,
                                !grey);
         } else {
             text_centred(FONT_SMALL, x0, x1, BS_BUTTONS_Y + 6, label + (grey || on), grey ? DIM : WHITE, !grey);
