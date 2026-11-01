@@ -270,6 +270,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "head: back faces culled by the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1, 1 },
     { "head: no back-face culling", { "DKR_NO_CULL", NULL }, 0, 1, 1 },
     { "head: fog from vertices, not depth", { "DKR_VERTEX_FOG", NULL }, 0, 1, 1 },
+    // Bench #321 (Old 3DS): the Jungle Falls tunnel dropout went away with the depth cleared by a draw; a stale depth
+    // buffer could hide the head too.
+    { "head: depth cleared by a draw, not a memory fill (P18 off)", { "DKR_DEPTH_FILL", NULL }, 1, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
