@@ -2911,6 +2911,392 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     }
 }
 
+#define OP(x) ((u8) (x))
+
+/******************************** Native model meshes (NR1) ********************************/
+
+/*
+ * Roadmap NR1 (DKR_NATIVE_MESH, port_drawtag.h): a model batch tagged PORT_NATIVE_TAG is drawn from the renderer's own
+ * tables rather than through the N64's vertex slots. The first time a batch's triangles are seen, their corners (a
+ * vertex with one set of texture coordinates) are listed once, with each triangle's three corners as numbers into
+ * that list. After that a frame transforms each of the batch's vertices once into a local array and writes each
+ * corner a triangle uses straight into the draw batch: no slot bookkeeping, no search for a vertex already written,
+ * no per triangle flatness checks. The triangles are kept with the tables and compared each frame, so a model whose
+ * triangles change (or memory reused by another) gets new tables. The result is the same draw the walk would make
+ * (the same vertices, culling and batches), so frames are identical; anything unusual leaves the tag unused.
+ */
+#define NATIVE_TABLE_SIZE 512          // Meshes remembered (a power of two); full at three quarters, then all forgotten
+#define NATIVE_POOL_BYTES (160 * 1024) // Their tables; full, all are forgotten
+#define NATIVE_MAX_CORNERS 1024
+#define NATIVE_MAX_LOADS 4
+
+typedef struct NativeMesh {
+    const Triangle *tris; // The game's triangles (the key); NULL: unused
+    Triangle *copy;       // What they held when the tables were made
+    u16 numTris, numCorners;
+    u8 maxVertex;   // The highest vertex number used
+    u8 usable;      // Fits the tables (corners)
+    s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
+    u8 *cornerVertex;
+    u32 *cornerUv;  // As TexCoords.texCoords
+    u16 *triCorners; // Three a triangle
+} NativeMesh;
+
+static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
+static u32 sNativeMeshCount;
+static u8 *sNativePool;
+static u32 sNativePoolUsed;
+static RspVertex sNativeVerts[MAX_VERTICES];
+static u16 sNativeCornerIndex[NATIVE_MAX_CORNERS];
+static u32 sNativeCornerStamp[NATIVE_MAX_CORNERS];
+static u32 sNativeStamp;
+static unsigned long sNativeDrawn, sNativeDeclined; // Batches drawn natively, tags left unused (profiler)
+
+/* The native meshes drawn and declined since the last call (profiler). */
+void gfx_native_mesh_take(unsigned long *drawn, unsigned long *declined) {
+    *drawn = sNativeDrawn;
+    *declined = sNativeDeclined;
+    sNativeDrawn = 0;
+    sNativeDeclined = 0;
+}
+
+static COLD void native_forget_all(void) {
+    __builtin_memset(sNativeMeshes, 0, sizeof(sNativeMeshes));
+    sNativeMeshCount = 0;
+    sNativePoolUsed = 0;
+}
+
+static void *native_alloc(u32 bytes) {
+    void *p;
+    bytes = (bytes + 7) & ~7u;
+    if (sNativePool == NULL) {
+        sNativePool = (u8 *) plat_malloc(NATIVE_POOL_BYTES);
+        if (sNativePool == NULL) {
+            return NULL;
+        }
+    }
+    if (sNativePoolUsed + bytes > NATIVE_POOL_BYTES) {
+        return NULL;
+    }
+    p = sNativePool + sNativePoolUsed;
+    sNativePoolUsed += bytes;
+    return p;
+}
+
+/* Lists the corners of the triangles into e (whose slot is reserved). Returns FALSE when out of room. */
+static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count) {
+    u32 i, k, n = 0;
+    u8 *cornerVertex;
+    u32 *cornerUv;
+    u16 *triCorners;
+    e->copy = (Triangle *) native_alloc(count * sizeof(Triangle));
+    cornerVertex = (u8 *) native_alloc(count * 3);
+    cornerUv = (u32 *) native_alloc(count * 3 * sizeof(u32));
+    triCorners = (u16 *) native_alloc(count * 3 * sizeof(u16));
+    if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL) {
+        return FALSE;
+    }
+    __builtin_memcpy(e->copy, tris, count * sizeof(Triangle));
+    e->minU = e->minV = 0x7FFF;
+    e->maxU = e->maxV = -0x8000;
+    e->maxVertex = 0;
+    for (i = 0; i < (u32) count; i++) {
+        const Triangle *t = &tris[i];
+        const TexCoords *c = &t->uv0;
+        for (k = 0; k < 3; k++) {
+            u8 vi = t->verticesArray[1 + k];
+            u32 uv = c[k].texCoords, q;
+            for (q = 0; q < n; q++) {
+                if (cornerVertex[q] == vi && cornerUv[q] == uv) {
+                    break;
+                }
+            }
+            if (q == n) {
+                cornerVertex[n] = vi;
+                cornerUv[n] = uv;
+                n++;
+            }
+            triCorners[i * 3 + k] = (u16) q;
+            e->maxVertex = vi > e->maxVertex ? vi : e->maxVertex;
+            e->minU = c[k].u < e->minU ? c[k].u : e->minU;
+            e->maxU = c[k].u > e->maxU ? c[k].u : e->maxU;
+            e->minV = c[k].v < e->minV ? c[k].v : e->minV;
+            e->maxV = c[k].v > e->maxV ? c[k].v : e->maxV;
+        }
+    }
+    e->cornerVertex = cornerVertex;
+    e->cornerUv = cornerUv;
+    e->triCorners = triCorners;
+    e->numTris = (u16) count;
+    e->numCorners = (u16) n;
+    e->usable = n <= NATIVE_MAX_CORNERS;
+    e->tris = tris;
+    return TRUE;
+}
+
+/* The tables of these triangles, made if need be; NULL if they can't be. */
+static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count) {
+    u32 h = (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1), probes;
+    NativeMesh *e;
+    if (count <= 0 || count > 0xFFFF) {
+        return NULL;
+    }
+    for (probes = 0; probes < NATIVE_TABLE_SIZE; probes++) {
+        e = &sNativeMeshes[(h + probes) & (NATIVE_TABLE_SIZE - 1)];
+        if (e->tris == NULL) {
+            break;
+        }
+        if (e->tris == tris && e->numTris == count) {
+            if (__builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
+                return e->usable ? e : NULL;
+            }
+            // Changed: new tables (the old ones' room is only won back when all are forgotten)
+            if (!native_build(e, tris, count)) {
+                native_forget_all();
+                return NULL;
+            }
+            return e->usable ? e : NULL;
+        }
+    }
+    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= NATIVE_TABLE_SIZE * 3 / 4) {
+        native_forget_all();
+        return NULL;
+    }
+    if (!native_build(e, tris, count)) {
+        native_forget_all();
+        return NULL;
+    }
+    sNativeMeshCount++;
+    return e->usable ? e : NULL;
+}
+
+/*
+ * The PORT_NATIVE_TAG at dl[-1]: draws the batch whose commands follow (vertex loads, matrix selects, then the
+ * triangles) and returns how many of them it used, or 0 to leave them to the walk.
+ */
+static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
+    struct {
+        const Vertex *src;
+        s32 count, dest, matrix;
+    } loads[NATIVE_MAX_LOADS];
+    s32 numLoads = 0, n, cur = g.curMatrix, next = 0, total = 0, used = 0, i, k, count = 0, textured = 0;
+    s32 fog = (g.geometryMode & G_FOG) != 0;
+    const Triangle *tris = NULL;
+    NativeMesh *mesh;
+    GfxDrawState state;
+    Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
+    TexAxis u0, v0, u1, v1;
+    Viewport vp;
+    u8 batchedKey = 0xFF;
+    u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
+    s32 tex0, tex1, zeroTex1;
+    u32 generation, stamp;
+    float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+
+    for (n = 0; n < 8 && n < remaining; n++) {
+        u32 w0 = dl[n].words.w0, w1 = dl[n].words.w1, op = w0 >> 24;
+        if (op == OP(G_VTX)) {
+            s32 c = ((w0 >> 19) & 0x1F) + 1;
+            s32 dest = (w0 & 0x00010000) ? next : 0;
+            if (numLoads == NATIVE_MAX_LOADS) {
+                break;
+            }
+            loads[numLoads].src = (const Vertex *) seg_addr(w1);
+            loads[numLoads].count = c;
+            loads[numLoads].dest = dest;
+            loads[numLoads].matrix = cur;
+            numLoads++;
+            next = dest + c;
+            total = next > total ? next : total;
+        } else if (op == OP(G_MOVEWORD) && (w0 & 0xFF) == OP(G_MW_MVPMATRIX)) {
+            cur = (w1 >> 6) & 3;
+        } else if (op == OP(G_TRIN)) {
+            tris = (const Triangle *) seg_addr(w1);
+            count = (w0 >> 4) & 0xFFF;
+            textured = (w0 >> 16) & 1;
+            used = n + 1;
+            break;
+        } else {
+            break;
+        }
+    }
+    if (used == 0 || numLoads == 0 || total > MAX_VERTICES || g.billboard || UNLIKELY(sTracing) ||
+        UNLIKELY(sAuditFrame) || UNLIKELY(gGfxSweep) || sAnyPending || UNLIKELY(sSkipKinds != 0) ||
+        (sGpuTransform && ((sGpuKinds >> sDrawKind) & 1))) {
+        sNativeDeclined++;
+        return 0;
+    }
+    for (i = 0; i < numLoads; i++) {
+        float(*m)[4] = g.matrices[loads[i].matrix];
+        if (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f) {
+            sNativeDeclined++;
+            return 0; // Flat (orthographic): the walk's flatness rules apply
+        }
+    }
+    mesh = native_find(tris, count);
+    if (mesh == NULL || mesh->maxVertex >= total) {
+        sNativeDeclined++;
+        return 0;
+    }
+
+    // The loads, as load_vertices_now makes them (only what draw_dkr_triangles then reads).
+    for (i = 0; i < numLoads; i++) {
+        RspVertex *verts = &sNativeVerts[loads[i].dest];
+        const Vertex *src = loads[i].src;
+        s32 c = loads[i].count;
+        float(*m)[4] = g.matrices[loads[i].matrix];
+#ifdef HAVE_VFP_VECTORS
+        if (sVfpVectors) {
+            transform_vertices_vfp(src, c, verts, m);
+        } else
+#endif
+        {
+            transform_vertices(src, c, verts, m);
+        }
+        for (k = 0; k < c; k++) {
+            u32 rgba;
+            __builtin_memcpy(&rgba, &src[k].r, 4);
+            if (fog) {
+                rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
+            }
+            verts[k].rgba = rgba;
+        }
+    }
+    // The state the walk would be left in.
+    g.curMatrix = cur;
+    g.vertexIndex = 0;
+    g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+    for (i = 0; i < numLoads; i++) {
+        sMix.kinds[sDrawKind].verts += (unsigned long) loads[i].count;
+    }
+    sNativeDrawn++;
+    sObjTris[sDrawObj] += count;
+
+    if (sWalkReject && g.flatVerts == 0) {
+        // command_off_screen's test on these vertices
+        u32 all = 0x1F;
+        viewport_init(&vp);
+        for (i = 0; i < count && all != 0; i++) {
+            const u16 *tc = &mesh->triCorners[i * 3];
+            for (k = 0; k < 3; k++) {
+                const RspVertex *v = &sNativeVerts[mesh->cornerVertex[tc[k]]];
+                float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
+                u32 out = 0;
+                out |= (x > w) ? 1 : 0;
+                out |= (x < -w) ? 2 : 0;
+                out |= (y > w) ? 4 : 0;
+                out |= (y < -w) ? 8 : 0;
+                out |= (w <= 1e-3f) ? 16 : 0;
+                all &= out;
+            }
+        }
+        if (all != 0 && count > 0) {
+            sWalkRejected++;
+            sWalkRejectedTris += (u32) count;
+            return used;
+        }
+    }
+    if (!sTriStateValid) {
+        build_draw_state(&sTriState, FALSE);
+        sTriStateValid = TRUE;
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    viewport_init(&vp);
+    keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
+    tex0 = state.textures[0] != NULL;
+    tex1 = state.textures[1] != NULL;
+    if (tex0) {
+        const GfxTexture *tex = state.textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+    }
+    if (tex1) {
+        const GfxTexture *tex = state.textures[1];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+        GfxTexture *page = atlas_page_for(state.textures[0], &u0, &v0, mesh->minU, mesh->maxU, mesh->minV, mesh->maxV);
+        if (page != NULL) {
+            state.textures[0] = page;
+        }
+    }
+    zeroTex1 = !tex1 && !sWalkLean;
+    state.flat = 0;
+    sBatchGeneration++;
+    generation = sBatchGeneration;
+    stamp = ++sNativeStamp;
+    for (i = 0; i < count; i++) {
+        const u16 *tc = &mesh->triCorners[i * 3];
+        u8 batchKey;
+        u16 *out;
+        state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
+        if (sCpuCull && state.cullMode != 0) {
+            const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];
+            const RspVertex *b = &sNativeVerts[mesh->cornerVertex[tc[1]]];
+            const RspVertex *c = &sNativeVerts[mesh->cornerVertex[tc[2]]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue;
+            }
+            state.cullMode = 0;
+        }
+        batchKey = state.cullMode;
+        if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
+            out = &sBatchIndices[sBatchCount++ * 3];
+        } else {
+            out = batch_triangle(&state);
+            batchedKey = batchKey;
+            if (sBatchGeneration != generation) {
+                generation = sBatchGeneration;
+                stamp = ++sNativeStamp;
+            }
+        }
+        for (k = 0; k < 3; k++) {
+            u32 cn = tc[k];
+            const RspVertex *in;
+            GfxVertex *v;
+            TexCoords uv;
+            u16 index;
+            if (sNativeCornerStamp[cn] == stamp) {
+                out[k] = sNativeCornerIndex[cn];
+                continue;
+            }
+            index = (u16) sBatchVertices++;
+            sNativeCornerStamp[cn] = stamp;
+            sNativeCornerIndex[cn] = index;
+            out[k] = index;
+            v = &sBatchVerts[index];
+            in = &sNativeVerts[mesh->cornerVertex[cn]];
+            v->x = in->x * vp.scaleX + in->w * vp.transX;
+            v->y = in->y * vp.scaleY + in->w * vp.transY;
+            v->z = in->z;
+            v->w = in->w;
+            __builtin_memcpy(&v->r, &in->rgba, 4);
+            uv.texCoords = mesh->cornerUv[cn];
+            if (tex0) {
+                v->u0 = tex_axis_coord(&u0, uv.u);
+                v->v0 = tex_axis_coord(&v0, uv.v);
+            } else {
+                v->u0 = v->v0 = 0.0f;
+            }
+            if (tex1) {
+                v->u1 = tex_axis_coord(&u1, uv.u);
+                v->v1 = tex_axis_coord(&v1, uv.v);
+            } else if (zeroTex1) {
+                v->u1 = v->v1 = 0.0f;
+            }
+        }
+    }
+    return used;
+}
+
 /******************************** RDP rectangles ********************************/
 
 static void screen_to_clip(GfxVertex *v, float sx, float sy) {
@@ -3074,7 +3460,6 @@ static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
 /******************************** Display list ********************************/
 
 /* F3D defines its immediate opcodes as negative numbers. */
-#define OP(x) ((u8) (x))
 
 static void set_other_mode(u32 *mode, u32 shift, u32 len, u32 data) {
     u32 mask = ((1u << len) - 1) << shift;
@@ -3196,6 +3581,10 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             case OP(G_NOOP):
                 if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
                     kind_switch(w1);
+                } else if (w1 == PORT_NATIVE_TAG) {
+                    s32 used = native_mesh(dl, remaining);
+                    dl += used;
+                    remaining -= used;
                 }
                 break;
             case OP(G_SPNOOP):

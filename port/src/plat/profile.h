@@ -164,6 +164,8 @@ void prof_set_status(const char *text);
 int gfx_atlas_take(unsigned long out[3]);
 /* The commands and triangles DKR_WALK_REJECT dropped since the last call (gfx_rdp.c). */
 void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris);
+/* Model batches drawn by the native mesh path (NR1) and tags it left to the walk, since the last call. */
+void gfx_native_mesh_take(unsigned long *drawn, unsigned long *declined);
 /*
  * The draw mix: per kind of thing drawn (port_drawtag.h PORT_DRAW_*), what it cost and how much of it was wasted.
  * Counts are since the last take. The renderer's and the game thread's times are only taken while the profiler is on

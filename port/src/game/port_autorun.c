@@ -262,8 +262,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (draw mix). The GPU route lost on an Old 3DS (run 15: P30 for every draw), but at 30 fps its GPU has room (11 of
     // 33 ms): only the racers' (kind bit 2) or the track's (bit 1) vertex maths on the GPU, the way a native renderer
     // would do them, before writing one (both variables take the test value: any non-zero turns P30 on).
-    { "GPU vertex maths for the racers only", { "DKR_GPU_TRANSFORM", "DKR_GPU_TRANSFORM_KINDS", NULL }, 0, 4, 1 },
-    { "GPU vertex maths for the track only", { "DKR_GPU_TRANSFORM", "DKR_GPU_TRANSFORM_KINDS", NULL }, 0, 2, 1 },
+    // Bench #367 (v51): both lost (racers: GPU +1.0 to 2.3 ms and no renderer saving; track: worse, and 1-6 s
+    // freezes on Windmill Plains), so the native renderer keeps the vertex maths on the CPU and the rows are gone.
+    // v52: the native mesh path (NR1, gfx_rdp.c native_mesh; PC frames identical on 12 levels) for the racers' models
+    // (DKR_NATIVE_MESH=1) and for every object's 3D model (3: also the windmill sails, the "hit tester" objects of
+    // #364). And, without draw distance changes (no pop-in): the other karts' simpler models at the 4-player
+    // distances (DKR_RACER_LOD=3; the default 2 is 3-player).
+    { "native meshes for the racers", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 1, 1 },
+    { "native meshes for the racers and objects", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 3, 1 },
+    { "other karts' simpler models sooner (4-player distances)", { "DKR_RACER_LOD", NULL, NULL }, 2, 3, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to

@@ -4341,6 +4341,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     dList = gObjectCurrDisplayList;
     i = startIndex;
     endLoop = FALSE;
+#ifdef TARGET_PORT
+    {
+        // Native model meshes (port_drawtag.h, DKR_NATIVE_MESH): tag each batch's vertices and triangles.
+        s32 nativeTag = obj != NULL && port_native_mesh_for(obj->behaviorId == BHV_RACER);
+#endif
     while (i < objModel->numberOfBatches && !endLoop) {
         if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
             // Hidden/Invisible geometry
@@ -4377,6 +4382,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     gDkrDmaDisplayList(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(texToSet->cmd),
                                        texToSet->numberOfCommands);
                 }
+#ifdef TARGET_PORT
+                if (nativeTag) {
+                    gDPNoOpTag(dList++, PORT_NATIVE_TAG);
+                }
+#endif
                 if (offsetStartVertex == numVertices) {
                     gSPVertexDKR(dList++, OS_K0_TO_PHYSICAL(vtx), numVertices, 0);
                 } else {
@@ -4398,6 +4408,9 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
             endLoop = TRUE;
         }
     }
+#ifdef TARGET_PORT
+    }
+#endif
     if (i >= objModel->numberOfBatches) {
         i = -1;
     }
