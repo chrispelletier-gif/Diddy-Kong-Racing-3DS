@@ -1007,7 +1007,7 @@ static void draw_messages(const State *s, int y0, int y1) {
  * names itself in the corner and lists the bug report (plat.h PLAT_DEBUG_TOOLS).
  */
 static void draw_controls(int y0, int y1) {
-    enum { MAX_ROWS = 11, BUG_ROW = 10 };
+    enum { MAX_ROWS = 10 }; // (SELECT+touch for a bug report is a debug shortcut: not listed.)
     static const struct {
         unsigned short actions; // 0: a fixed key.
         const char *key, *what;
@@ -1022,7 +1022,6 @@ static void draw_controls(int y0, int y1) {
         { CTRL_N64_CD, NULL, "Track arrows" },
         { CTRL_N64_CR, NULL, "HUD toggle" },
         { 0, "START", "Pause" },
-        { 0, "SELECT+touch", "Bug report" },
     };
     char keys[MAX_ROWS][24];
     const char *what[MAX_ROWS];
@@ -1031,9 +1030,6 @@ static void draw_controls(int y0, int y1) {
         box(4, y0, BS_WIDTH - 4, y1, BOX_FILL, BOX_EDGE);
     }
     for (i = 0; i < (int) (sizeof(sRows) / sizeof(sRows[0])); i++) {
-        if (i == BUG_ROW && !PLAT_DEBUG_TOOLS) {
-            continue; // A player's build has no bug reports.
-        }
         if (sRows[i].actions != 0) {
             controls_keys_for(sRows[i].actions, keys[count], sizeof(keys[0]));
             if (keys[count][0] == '\0') {
@@ -1092,7 +1088,11 @@ static void draw_controls(int y0, int y1) {
             }
             if (sStyle == 2) {
                 // The row's slab and the key's cap, both kept inside the line so that neighbouring lines never touch.
-                slab(x - 3, cy - half - 1, x + 142, cy + half + 1, 4, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
+                {
+                    int right = x + w + 6 + text_width(FONT_SMALL, what[i]) + 10;
+                    right = right < x + 142 ? x + 142 : right; // Long ones (SELECT+touch) get a longer slab.
+                    slab(x - 3, cy - half - 1, right, cy + half + 1, 4, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
+                }
                 slab(x, cy - half, x + w, cy + half, 4, cap, cap);
             } else {
                 smooth_box(x, cy - half, x + w, cy + half, half, cap, (Colour){ 205, 215, 245, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
@@ -3159,7 +3159,7 @@ static void menu_save_styled(const RaceHud *hud) {
         int cx = sStyle == 2 ? (i == 0 ? 8 : (i == 1 ? 128 : 222)) : 16 + i * 98;
         int cw = sStyle == 2 ? (i == 0 ? 114 : (i == 1 ? 88 : 90)) : 90;
         int value = i == 0 ? hud->balloons : (i == 1 ? hud->ttAmulet : hud->wizpigAmulet);
-        const char *name = i == 0 ? "Balloons" : (i == 1 ? "T.T. amulet" : "Wizpig");
+        const char *name = i == 0 ? "Balloons" : (i == 1 ? "T.T." : "Wizpig");
         if (sStyle == 2) {
             slab(cx, 48, cx + cw, 86, 5, slabLight, slabLight);
         } else {
@@ -3291,6 +3291,21 @@ static void ring_portrait(const RaceHudRacer *r, int x, int y, int lit) {
 
 
 /* The place, its suffix and "of n", the lap and the time, at the positions each look wants. Returns nothing. */
+/* The place and its suffix, together centred in the box x0..x1 by y0..y1 (no "of 8": the place alone says it). */
+static void place_centred(const RaceHud *hud, int x0, int y0, int x1, int y1, int suffixDy) {
+    int first, end, sfirst, send, w, h, suffix;
+    if (hud->position < 1 || hud->position > 8) {
+        return;
+    }
+    suffix = hud->position <= 3 ? hud->position - 1 : 3;
+    used_columns(&sPlaces[hud->position - 1], &first, &end);
+    used_columns(&sSuffixes[suffix], &sfirst, &send);
+    w = (end - first) + 1 + (send - sfirst);
+    h = sPlaces[hud->position - 1].height;
+    piece(&sSuffixes[suffix], piece(&sPlaces[hud->position - 1], x0 + (x1 - x0 - w) / 2, y0 + (y1 - y0 - h) / 2, 1),
+          y0 + (y1 - y0 - h) / 2 + suffixDy, 0);
+}
+
 static int place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
     if (hud->position >= 1 && hud->position <= 8) {
         int suffix = hud->position <= 3 ? hud->position - 1 : 3;
@@ -3394,8 +3409,8 @@ static void gap_text(int x, int y, int rightAligned, const RaceHudRacer *r) {
 }
 
 static void race_glass(const RaceHud *hud) {
-    int i, x, lapNumber, lapTime, best;
-    char of[16], label[24];
+    int i, lapNumber, lapTime, best;
+    char label[24];
     box(6, 6, 114, 198, BOX_FILL, BOX_EDGE);
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
         const RaceHudRacer *r = &hud->racers[i];
@@ -3416,11 +3431,7 @@ static void race_glass(const RaceHud *hud) {
     }
     // The hero card: place, lap with its segments, the time.
     box(120, 6, 314, 98, BOX_FILL, BOX_EDGE);
-    x = place_pieces(hud, 130, 12, 2);
-    if (hud->racerCount > 0) {
-        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, x, 30, of, WHITE, 1);
-    }
+    place_centred(hud, 124, 10, 196, 50, 2);
     lap_pieces(hud, 200, 14);
     lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
     fill(130, 52, 304, 53, (Colour){ 255, 255, 255, 45 });
@@ -3451,8 +3462,8 @@ static void race_glass(const RaceHud *hud) {
 
 static void race_broadcast(const RaceHud *hud) {
     static const Colour podium[3] = { { 255, 200, 40, 255 }, { 200, 210, 230, 255 }, { 220, 140, 70, 255 } };
-    int i, x, lapNumber, lapTime, best;
-    char of[16], label[24];
+    int i, lapNumber, lapTime, best;
+    char label[24];
     Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
            orange = { 255, 150, 20, 255 };
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
@@ -3482,11 +3493,7 @@ static void race_broadcast(const RaceHud *hud) {
     }
     // The place block, the lap slab and the time strip.
     slab(144, 8, 232, 64, 10, red, orange);
-    x = place_pieces(hud, 166, 12, 3);
-    if (hud->racerCount > 0) {
-        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, x, 32, of, WHITE, 1);
-    }
+    place_centred(hud, 150, 8, 224, 64, 3);
     slab(226, 8, 316, 64, 6, slabLight, slabLight);
     lap_pieces(hud, 240, 12);
     lap_segments(hud, 240, 34, 20, 3, 6, red, (Colour){ 255, 255, 255, 40 }, 1);
@@ -3517,12 +3524,8 @@ static void race_broadcast(const RaceHud *hud) {
 
 static void race_dock(const RaceHud *hud) {
     int i, me = 0, first, lapNumber, lapTime, best, x, rowY = 50;
-    char of[16], label[24];
-    place_pieces(hud, 10, 6, 2);
-    if (hud->racerCount > 0) {
-        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, 38, 26, of, LABEL_BLUE, 1);
-    }
+    char label[24];
+    place_centred(hud, 4, 4, 84, 42, 2);
     lap_pieces(hud, 92, 6);
     lap_segments(hud, 94, 25, 8, 4, 8, GOLD, (Colour){ 255, 255, 255, 50 }, 0);
     x = piece(&sTimeLabel, 176, 9, 4);
