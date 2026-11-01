@@ -442,7 +442,7 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
 static int sStyle;
 /* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
 static const int sTabNudge[4] = { 2, 2, 1, 1 };
-static const int sButtonNudge[4] = { 0, 0, 0, 0 };
+static const int sButtonNudge[4] = { 0, 0, -1, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
@@ -564,7 +564,6 @@ static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
             } else if (frame) {
                 smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 24, 44, 118, 165 },
                            (Colour){ 16, 34, 100, 170 }, (Colour){ 190, 215, 255, 80 }, 1);
-                fill(x0 + 6, y0 + 1, x1 - 6, y0 + 2, (Colour){ 255, 255, 255, 70 });
             }
             break;
         case 2: // Broadcast: flat slanted slabs, the lit one in the logo's red-to-yellow.
@@ -772,8 +771,8 @@ static void make_background(void) {
                                                    b + light < 0 ? 0 : b + light);
         }
     }
-    // A thin light line above the status strip.
-    for (x = 0; x < BS_WIDTH; x++) {
+    // A thin light line above the status strip (not Glass: there it read as a stray line under the buttons).
+    for (x = 0; sStyle != 1 && x < BS_WIDTH; x++) {
         sBackground[(BS_STATUS_Y - 1) * BS_WIDTH + x] = rgb565(60, 90, 170);
     }
     sBackgroundMade = 1;
@@ -1341,10 +1340,7 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 top = (Colour){ 130, 135, 155, 255 };
                 bottom = (Colour){ 80, 85, 105, 255 };
             }
-            smooth_box(x0 - 1, y0, x1 + 1, y1 + 1, 11, (Colour){ 0, 0, 30, 90 }, (Colour){ 0, 0, 30, 90 },
-                       (Colour){ 0, 0, 0, 0 }, 1);
             smooth_box(x0, y0, x1, y1, 11, top, bottom, (Colour){ 255, 255, 255, grey ? 80 : 150 }, 1);
-            fill(x0 + 8, y0 + 2, x1 - 8, y0 + 4, (Colour){ 255, 255, 255, 60 });
         } else if (sStyle == 2) {
             Colour top = i == 0 && !grey ? (Colour){ 235, 40, 40, 255 } : (Colour){ 52, 74, 168, 255 };
             Colour bottom = i == 0 && !grey ? (Colour){ 255, 150, 20, 255 } : (Colour){ 36, 54, 134, 255 };
