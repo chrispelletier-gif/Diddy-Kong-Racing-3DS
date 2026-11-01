@@ -254,7 +254,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Runs 18-21 (v42-v45): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a frame or two)
     // came and went whatever was switched; the frame history now counts big flashes (flashes column). Run 22 (v46),
     // two races a row: usual 5 flashes, system core 4 ms busier 10, no overlap 11, depth clear drawn 0. So the depth
-    // clear is drawn by default on an Old 3DS now (DKR_DEPTH_FILL=0, gfx_c3d.c); this row puts the memory fill back to
+    // clear is drawn by default on an Old 3DS now (DKR_DEPTH_FILL=0, gfx_c3d.c); v47 raced the memory fill back on against it.
     // The user was sure after run 22, so its confirmation row is gone. 2026-11-01 (PGO run #331 no gain): how much a
     // native track or racer renderer (drawing from our own 3DS data instead of the game's display lists) could save at
     // most, with the game not building them at all (DKR_SKIP_GAME_KINDS: track 1 << 1, racers 1 << 2), on the worst
