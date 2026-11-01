@@ -1657,6 +1657,10 @@ static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switche
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
+// DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
+// rest are transformed here as without it (Old 3DS bench 2026-11-01: the racers' or the track's maths alone on the GPU,
+// as a native renderer would do them).
+static u32 sGpuKinds = 0xFFFF;
 static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
 /* Back faces culled here rather than by the GPU (DKR_CPU_CULL, on by default on an Old 3DS only), this frame: a
  * command's double sided triangles no longer split its draw from the one sided ones (about one draw in eight), and
@@ -1698,6 +1702,7 @@ static void read_switches(void) {
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
+    sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
@@ -1918,7 +1923,8 @@ static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
         }
         forget_slots(dest, end);
     }
-    if (sGpuTransform && !g.billboard && !gGfxSweep && count > 0 && dest + count <= MAX_VERTICES &&
+    if (sGpuTransform && ((sGpuKinds >> sDrawKind) & 1) && !g.billboard && !gGfxSweep && count > 0 &&
+        dest + count <= MAX_VERTICES &&
         !(m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
         u32 l = sNextLoad++ % PENDING_LOADS, i;
         PendingLoad *pl = &sLoads[l];

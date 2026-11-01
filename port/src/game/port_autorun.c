@@ -257,9 +257,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // native track or racer renderer (drawing from our own 3DS data instead of the game's display lists) could save at
     // most, with the game not building them at all (DKR_SKIP_GAME_KINDS: track 1 << 1, racers 1 << 2), on the worst
     // tracks of the whole game baseline #326.
-    { "cost: track not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 2, 1 },
-    { "cost: racers not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 4, 1 },
-    { "cost: track and racers not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 6, 1 },
+    // v49/v50 ran three cost rows here (DKR_SKIP_GAME_KINDS 2/4/6: track, racers, both not built or drawn).
+    // Bench #355 (v49, Whale Bay): racers not built 81% -> 97% of frames at 30, and their walk alone is 2.7 ms a frame
+    // (draw mix). The GPU route lost on an Old 3DS (run 15: P30 for every draw), but at 30 fps its GPU has room (11 of
+    // 33 ms): only the racers' (kind bit 2) or the track's (bit 1) vertex maths on the GPU, the way a native renderer
+    // would do them, before writing one (both variables take the test value: any non-zero turns P30 on).
+    { "GPU vertex maths for the racers only", { "DKR_GPU_TRANSFORM", "DKR_GPU_TRANSFORM_KINDS", NULL }, 0, 4, 1 },
+    { "GPU vertex maths for the track only", { "DKR_GPU_TRANSFORM", "DKR_GPU_TRANSFORM_KINDS", NULL }, 0, 2, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
