@@ -1248,10 +1248,17 @@ static void stepper(int x0, int x1, int y, const char *value) {
 #define MENU_PANEL_X1 (BS_WIDTH - 4)
 #define MENU_TIP_Y (BS_MENU_FIRST_Y + BS_MENU_ROWS * BS_MENU_ROW_HEIGHT)
 
+static void draw_menu_strip(const State *s);
+
 static void draw_menu(const State *s) {
     const BsMenu *m = &s->menu;
     int i, tabHeight = BS_MENU_TAB_HEIGHT(m->tabCount);
     const char *tip = m->note;
+
+    if (sStyle >= 2) {
+        draw_menu_strip(s);
+        return;
+    }
 
     box(MENU_PANEL_X0, BS_MENU_TAB_Y0, MENU_PANEL_X1, BS_MENU_TAB_Y1, BOX_FILL, BOX_EDGE);
     for (i = 0; i < m->tabCount && i < BS_MENU_TABS; i++) {
@@ -1306,6 +1313,120 @@ static void draw_menu(const State *s) {
     }
     fill(MENU_PANEL_X0 + 8, MENU_TIP_Y - 1, MENU_PANEL_X1 - 6, MENU_TIP_Y, (Colour){ 140, 180, 255, 80 });
     text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 11, tip, HINT, 1, MENU_PANEL_X1 - 6);
+}
+
+/*
+ * Broadcast and Dock lay the Settings menu out as the mockups do: the pages as a strip of tabs across the top (two
+ * rows when there are more than five), the rows full width below, the tip under them. Taps use bs_menu_hit.
+ */
+#define STRIP_TAB_Y0 4
+#define STRIP_TAB_H 20
+#define STRIP_TAB_PITCH 22
+#define STRIP_ROW_Y0 50
+#define STRIP_ROW_H 21
+#define STRIP_TIP_Y (STRIP_ROW_Y0 + BS_MENU_ROWS * STRIP_ROW_H + 3)
+
+static int strip_perrow(int tabCount) {
+    return tabCount > 5 ? (tabCount + 1) / 2 : (tabCount > 0 ? tabCount : 1);
+}
+
+int bs_menu_hit(int x, int y, int tabCount, int *index, int *stepBack) {
+    *index = 0;
+    *stepBack = 0;
+    if (sStyle >= 2) {
+        int perRow = strip_perrow(tabCount), w = (BS_WIDTH - 12) / perRow;
+        if (y >= STRIP_TAB_Y0 && y < STRIP_ROW_Y0 - 2) {
+            int row = (y - STRIP_TAB_Y0) / STRIP_TAB_PITCH, col = (x - 6) / w, tab = row * perRow + col;
+            if (x >= 6 && col < perRow && tab < tabCount) {
+                *index = tab;
+                return BS_MENU_HIT_TAB;
+            }
+            return BS_MENU_HIT_NONE;
+        }
+        if (y >= STRIP_ROW_Y0 && y < STRIP_ROW_Y0 + BS_MENU_ROWS * STRIP_ROW_H) {
+            *index = (y - STRIP_ROW_Y0) / STRIP_ROW_H;
+            *stepBack = x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT;
+            return BS_MENU_HIT_ROW;
+        }
+        return BS_MENU_HIT_NONE;
+    }
+    if (x < BS_MENU_TAB_X1) {
+        int slot = (y - BS_MENU_TAB_Y0) / BS_MENU_TAB_HEIGHT(tabCount);
+        if (y >= BS_MENU_TAB_Y0 && slot < tabCount) {
+            *index = slot;
+            return BS_MENU_HIT_TAB;
+        }
+        return BS_MENU_HIT_NONE;
+    }
+    if (y >= BS_MENU_FIRST_Y) {
+        int slot = (y - BS_MENU_FIRST_Y) / BS_MENU_ROW_HEIGHT;
+        if (slot < BS_MENU_ROWS) {
+            *index = slot;
+            *stepBack = x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT;
+            return BS_MENU_HIT_ROW;
+        }
+    }
+    return BS_MENU_HIT_NONE;
+}
+
+static void upper_case(const char *in, char *out, int size);
+
+static void draw_menu_strip(const State *s) {
+    const BsMenu *m = &s->menu;
+    int i, perRow = strip_perrow(m->tabCount), w = (BS_WIDTH - 12) / perRow;
+    const char *tip = m->note;
+    Colour red = { 235, 40, 40, 255 }, orange = { 255, 150, 20, 255 };
+    for (i = 0; i < m->tabCount && i < BS_MENU_TABS; i++) {
+        int row = i / perRow, col = i % perRow, x0 = 6 + col * w, y0 = STRIP_TAB_Y0 + row * STRIP_TAB_PITCH;
+        int lit = i == m->tab;
+        char upper[40];
+        Colour ink = lit ? (sStyle == 3 ? (Colour){ 60, 30, 0, 255 } : WHITE) : (Colour){ 190, 205, 240, 255 };
+        if (sStyle == 2) {
+            if (lit) {
+                slab(x0, y0, x0 + w - 2, y0 + STRIP_TAB_H, 5, red, orange);
+            } else {
+                slab(x0, y0, x0 + w - 2, y0 + STRIP_TAB_H, 5, (Colour){ 30, 44, 110, 235 }, (Colour){ 22, 32, 92, 235 });
+            }
+        } else if (lit) {
+            smooth_box(x0, y0, x0 + w - 2, y0 + STRIP_TAB_H, 10, (Colour){ 255, 226, 90, 255 }, (Colour){ 235, 150, 10, 255 },
+                       (Colour){ 255, 255, 255, 150 }, 1);
+        }
+        upper_case(port_text(m->tabs[i]), upper, sizeof(upper));
+        text_centred_as_is(FONT_SMALL, x0, x0 + w - 2, y0 + 6, sStyle == 2 ? upper : port_text(m->tabs[i]), ink, !lit);
+    }
+    for (i = 0; i < m->rowCount && i < BS_MENU_ROWS; i++) {
+        const BsMenuRow *row = &m->rows[i];
+        int y = STRIP_ROW_Y0 + i * STRIP_ROW_H, labelEnd = BS_WIDTH - 10, hot = i == m->picked;
+        Colour ink = WHITE;
+        if (hot) {
+            if (sStyle == 2) {
+                slab(6, y, 314, y + STRIP_ROW_H - 2, 5, (Colour){ 255, 240, 220, 245 }, (Colour){ 255, 220, 170, 245 });
+                ink = (Colour){ 20, 20, 50, 255 };
+            } else {
+                smooth_box(6, y, 314, y + STRIP_ROW_H - 2, 10, (Colour){ 255, 255, 255, 40 }, (Colour){ 255, 255, 255, 40 },
+                           PICKED_EDGE, 1);
+            }
+            if (row->hint[0] != '\0') {
+                tip = row->hint;
+            }
+        } else if (sStyle == 2) {
+            slab(6, y, 314, y + STRIP_ROW_H - 2, 5, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
+        } else {
+            fill(18, y + STRIP_ROW_H - 2, 302, y + STRIP_ROW_H - 1, (Colour){ 255, 255, 255, 30 });
+        }
+        if (row->value[0] == '\0') {
+            arrow(0, 296, y + 4);
+            labelEnd = 290;
+        } else if (!draw_on_off(row->value, BS_WIDTH - 52, y)) {
+            stepper(BS_MENU_VALUE_X, BS_WIDTH - 10, y, row->value);
+        }
+        text_clipped(FONT_SMALL, 18, y + 5, row->label, ink, sStyle != 2 || !hot, labelEnd);
+    }
+    fill(10, STRIP_TIP_Y - 1, BS_WIDTH - 10, STRIP_TIP_Y, (Colour){ 255, 255, 255, 40 });
+    text_clipped(FONT_SMALL, 14, STRIP_TIP_Y + 9, tip, HINT, 1, m->pages[0] != '\0' ? BS_WIDTH - 50 : BS_WIDTH - 10);
+    if (m->pages[0] != '\0') {
+        text(FONT_SMALL, BS_WIDTH - 10 - text_width(FONT_SMALL, m->pages), STRIP_TIP_Y + 9, m->pages, HINT, 1);
+    }
 }
 
 /* Small icons for the new styles' buttons, drawn smooth in a 14 pixel square around (cx, cy). */

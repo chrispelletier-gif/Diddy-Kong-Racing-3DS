@@ -636,25 +636,23 @@ void menu_3ds_scroll(int direction) {
 
 /* A tap at (x, y) above the panel. Returns what the panel should do (MENU_*). */
 int menu_3ds_tap(int x, int y) {
-    int slot, i;
+    int slot, i, hit, stepBack;
     char value[48];
 
     if (sPage == NULL) {
         return MENU_STAY;
     }
-    if (x < BS_MENU_TAB_X1) {
-        // A tab.
-        slot = (y - BS_MENU_TAB_Y0) / BS_MENU_TAB_HEIGHT(sTabCount);
-        if (y >= BS_MENU_TAB_Y0 && slot < sTabCount && sTabs[slot] != sPage) {
+    hit = bs_menu_hit(x, y, sTabCount, &slot, &stepBack);
+    if (hit == BS_MENU_HIT_TAB) {
+        if (sTabs[slot] != sPage) {
             plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
             open_page(sTabs[slot]);
         }
         return MENU_STAY;
     }
-    if (y < BS_MENU_FIRST_Y) {
+    if (hit != BS_MENU_HIT_ROW) {
         return MENU_STAY;
     }
-    slot = (y - BS_MENU_FIRST_Y) / BS_MENU_ROW_HEIGHT;
     i = sFirst + slot;
     if (slot >= ROWS_PER_PAGE || i >= sPage->count()) {
         return MENU_STAY;
@@ -664,7 +662,7 @@ int menu_3ds_tap(int x, int y) {
     sResult = MENU_STAY;
     // A value changing, or a row that does something or opens a page.
     plat_request_ui_sound(value[0] != '\0' ? PLAT_UI_SOUND_MOVE : PLAT_UI_SOUND_SELECT);
-    sPage->change(i, value[0] != '\0' && x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT ? -1 : 1);
+    sPage->change(i, value[0] != '\0' && stepBack ? -1 : 1);
     if (sResult == MENU_STAY && sPage != NULL) {
         // Redraws the changed row (all of them, as a change can add or remove rows, and the lit row moves).
         draw();
