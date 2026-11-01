@@ -256,6 +256,7 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // The two-core renderer's second thread now runs below the game on its core (#383: above it, it held the
     // Central Area's game logic up to 12.7 ms a frame, 47-52 fps); this row races the old order.
     { "renderer's second thread above the game (old)", { "DKR_SPLIT_BELOW_GAME", NULL }, 1, 0, 1, 0 },
+    { "renderer's second thread on the system core", { "DKR_SPLIT_SYSCORE", NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*

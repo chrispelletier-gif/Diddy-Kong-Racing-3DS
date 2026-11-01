@@ -61,7 +61,11 @@ typedef struct SplitTexture {
 
 static unsigned char *sRing;
 static volatile unsigned int sHead, sTail; // Bytes written and read so far (they wrap together)
-static PlatSem *sData;                      // A record (or a wake-up) for the backend thread
+static PlatSem *sData;                      // A record (or a wake-up) for the backend thread (the owner's)
+static PlatSem *sDataSems[2];               // Each backend thread's: [0] on the game's core, [1] on the system core
+static volatile int sOwner;                 // Which backend thread takes the queue (gfx_split_frame_start)
+static volatile int sParked[2];             // That thread saw it isn't the owner and waits to be one again
+static int sMade[2];                        // That thread exists
 static PlatSem *sSpace;                     // The backend thread moved on while the walk waited for it
 static PlatSem *sFrameSlots;                // Frames the walk may still start ahead of the backend
 static volatile int sWalkWaiting;           // The walk waits on sSpace for room (or for the ring to empty)
@@ -142,13 +146,21 @@ static void commit(void *payload) {
 }
 
 static void backend_thread(void *arg) {
-    (void) arg;
+    int self = (int) (long) arg;
     for (;;) {
+        if (sOwner != self) {
+            // Another backend thread has the queue (it was handed over with the queue empty): wait to have it again.
+            sParked[self] = 1;
+            __sync_synchronize();
+            plat_sem_wait(sDataSems[self]);
+            sParked[self] = 0;
+            continue;
+        }
         sBackendIdle = 1;
         __sync_synchronize(); // The flag is set before the head is looked at (see commit).
         if (sTail == sHead) {
             unsigned long long start = plat_time_ns();
-            plat_sem_wait(sData);
+            plat_sem_wait(sDataSems[self]);
             sBackendWaitNs += plat_time_ns() - start;
             sBackendWakes++;
         }
@@ -241,12 +253,51 @@ static int start_backend(void) {
         sFailed = TRUE;
         return FALSE;
     }
-    sData = plat_sem_create(0);
+    sDataSems[0] = plat_sem_create(0);
+    sDataSems[1] = plat_sem_create(0);
+    sData = sDataSems[0];
+    sOwner = 0;
     sSpace = plat_sem_create(0);
     sFrameSlots = plat_sem_create(SPLIT_FRAMES_AHEAD);
-    plat_thread_create(backend_thread, NULL, 0, PLAT_THREAD_RCP2, "rdp2");
+    plat_thread_create(backend_thread, (void *) 0L, 0, PLAT_THREAD_RCP2, "rdp2");
+    sMade[0] = TRUE;
     sStarted = TRUE;
     return TRUE;
+}
+
+/*
+ * A New 3DS can also run the backend on the system core (DKR_SPLIT_SYSCORE=1), with its share raised, instead of on
+ * the game's core, which the game and the backend together fill in a busy race (#390: game core 2-14% idle, a 33 ms
+ * frame every 8-16). Each core has a thread of its own; the queue is handed over empty, at a frame's start.
+ */
+static void choose_backend(void) {
+    int want = plat_split_syscore_possible() && plat_switch("DKR_SPLIT_SYSCORE", 0) ? 1 : 0;
+    int old = sOwner;
+    if (want == old) {
+        return;
+    }
+    if (want == 1 && !plat_split_syscore_share(TRUE)) {
+        return;
+    }
+    gfx_split_drain();
+    sOwner = want;
+    __sync_synchronize();
+    plat_sem_post(sDataSems[old]); // So it sees it isn't the owner, if it waits for records
+    while (!sParked[old]) {
+        plat_sleep_ns(1000000ULL);
+    }
+    sData = sDataSems[want];
+    if (!sMade[want]) {
+        plat_thread_create(backend_thread, (void *) (long) want, 0, want ? PLAT_THREAD_RCP2_SYS : PLAT_THREAD_RCP2,
+                           want ? "rdp2 system core" : "rdp2");
+        sMade[want] = TRUE;
+    } else {
+        plat_sem_post(sDataSems[want]);
+    }
+    if (want == 0) {
+        plat_split_syscore_share(FALSE);
+    }
+    plat_log("two-core renderer: its second thread on the %s core", want ? "system" : "game's");
 }
 
 void gfx_split_drain(void) {
@@ -278,6 +329,7 @@ int gfx_split_frame_start(int direct) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
     }
     sActive = TRUE;
+    choose_backend();
     plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
     if (!plat_sem_try_wait(sFrameSlots)) {

@@ -53,6 +53,7 @@ enum PlatThreadKind {
     PLAT_THREAD_RCP,      /* Emulated RDP (graphics). May run on a different core. */
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
     PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
+    PLAT_THREAD_RCP2_SYS, /* The same on a New 3DS's system core (DKR_SPLIT_SYSCORE), below its services. */
 };
 
 void plat_init(void);
@@ -342,6 +343,10 @@ int plat_frame_step(void);
 void plat_split_render_cores(int on);
 /* Applies DKR_SPLIT_BELOW_GAME to the two-core renderer's second thread when it shares the game's core. */
 void plat_split_backend_priority(void);
+/* Whether the renderer's second half can go on the system core instead (a New 3DS); raising/restoring its share
+ * there (TRUE when that worked). */
+int plat_split_syscore_possible(void);
+int plat_split_syscore_share(int on);
 
 /* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
  * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with

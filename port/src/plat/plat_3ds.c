@@ -398,6 +398,13 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
                 prio = PRIO_SYSCORE_AUDIO + 1;
             }
             break;
+        case PLAT_THREAD_RCP2_SYS:
+            // On the system core with its share raised (plat_split_syscore_share), below the system's services there
+            // (the GPU's among them: above them the frame times doubled, #78).
+            stackSize = 64 * 1024;
+            core = 1;
+            prio = PRIO_SYSCORE_AUDIO + 1;
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
@@ -420,8 +427,8 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             sSyscoreShare = 0;
             prio = PRIO_RCP;
         }
-        if (kind == PLAT_THREAD_RCP2) {
-            prio = PRIO_RCP;
+        if (kind == PLAT_THREAD_RCP2 || kind == PLAT_THREAD_RCP2_SYS) {
+            prio = kind == PLAT_THREAD_RCP2_SYS ? split_backend_prio() : PRIO_RCP;
         }
         core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
@@ -440,6 +447,39 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
  */
 static int split_backend_prio(void) {
     return plat_switch("DKR_SPLIT_BELOW_GAME", 1) ? PRIO_GAME_LOWEST - 10 + 1 : PRIO_RCP;
+}
+
+int plat_split_syscore_possible(void) {
+    return sRcpCore == 2 && sAudioCore != 1;
+}
+
+/* The system core's share for the backend there (DKR_SPLIT_SHARE, 80% by default), and back as it was. */
+int plat_split_syscore_share(int on) {
+    static int sRaised;
+    static u32 sBefore;
+    if (on && !sRaised) {
+        const char *env = plat_getenv("DKR_SPLIT_SHARE");
+        int share = env != NULL ? atoi(env) : 80;
+        Result res;
+        if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
+            sBefore = 0;
+        }
+        res = APT_SetAppCpuTimeLimit(share);
+        plat_log("system core time limit %d%% for the renderer's second thread (was %lu%%): %s (0x%08lX)", share,
+                 (unsigned long) sBefore, R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        if (R_FAILED(res)) {
+            return 0;
+        }
+        sRaised = 1;
+        sSyscoreShare = share;
+    } else if (!on && sRaised) {
+        Result res = APT_SetAppCpuTimeLimit(sBefore >= 5 ? sBefore : 5);
+        plat_log("system core time limit back to %lu%%: %s (0x%08lX)", (unsigned long) (sBefore >= 5 ? sBefore : 5),
+                 R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        sRaised = 0;
+        sSyscoreShare = 0;
+    }
+    return 1;
 }
 
 void plat_split_backend_priority(void) {

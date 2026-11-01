@@ -260,6 +260,15 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+int plat_split_syscore_possible(void) {
+    return 0;
+}
+
+int plat_split_syscore_share(int on) {
+    (void) on;
+    return 0;
+}
+
 void plat_split_backend_priority(void) {
 }
 
