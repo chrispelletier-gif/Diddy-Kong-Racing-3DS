@@ -254,6 +254,8 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // every race where the usual settings flickered, so it is the New 3DS default; this row checks the flicker comes
     // back with the old setting. The racer LOD row (also clean) went: it changes how the karts look.
     { "head check: settings written twice only on blend or depth changes (old)", { "DKR_REWRITE", NULL }, 2, 1, 1, 1 },
+    // Every draw twice costs ~1.7 ms of GPU and some 33 ms frames (#360): this checks a cheaper way that may also hold.
+    { "head check: settings twice on texture changes too", { "DKR_REWRITE", NULL }, 2, 3, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*

@@ -4639,7 +4639,8 @@ static void __attribute__((noinline, cold)) read_drain_settings(void) {
     // switch bench's =2 races were clean where the usual ones flickered (2026-11-01). New 3DS default; the Old 3DS
     // never showed it and keeps =1. A switch, read again for each bench race.
     sRewrite = plat_switch("DKR_REWRITE", plat_old_3ds() ? 1 : 2);
-    plat_log("settings written twice: %s", sRewrite == 2 ? "on every draw"
+    plat_log("settings written twice: %s", sRewrite == 2   ? "on every draw"
+                                           : sRewrite == 3 ? "on every blend, depth or texture change"
                                            : sRewrite    ? "on every blend or depth change"
                                                          : "known cases only");
 }
@@ -4668,6 +4669,14 @@ PLAT_HOT static int drain_before_draw(const GfxDrawState *state, int numTriangle
         flush_new_vertices();
         split_command_list();
         sDrainSplits++;
+    }
+    if (sRewrite == 3) {
+        // DKR_REWRITE=3: also when the draw's texture changes, the cheaper middle way (bench).
+        static const GfxTexture *sLastTex;
+        if (state->textures[0] != sLastTex) {
+            sLastTex = state->textures[0];
+            first = 1;
+        }
     }
     if (sRewrite && (sFrameFirstDraw || key != sLastKey || sRewrite == 2)) {
         first = 1;
