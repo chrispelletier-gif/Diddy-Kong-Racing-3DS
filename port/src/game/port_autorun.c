@@ -248,33 +248,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * 400-pixel rows. Bench #320: the sky drawn last (P41) and a depth buffer without stencil (P42) saved nothing (left
  * off, rows dropped); the untextured track row looks for what makes a track pixel cost. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "adaptive anti-aliasing (P37, the player's default)", { "DKR_ADAPTIVE_AA", NULL }, 0, 1, 1 },
-    { "cost: anti-aliasing off", { "BENCH_AA", NULL }, PLAT_AA_4X, PLAT_AA_OFF, 1 },
-    { "cost: colour boost off", { "BENCH_COLOUR", NULL }, 1, 0, 1 },
-    // Half the pixels: 400 pixels with 2x anti-aliasing (400x480), not 800 (800x480). 400 pixels with the 4x setting
-    // draws as many pixels as 800 (bench #320's row measured nothing), so BENCH_400 sets both (apply_config).
-    { "cost: 400 pixels, half the pixels", { "BENCH_400", NULL }, 0, 1, 1 },
-    // A track pixel costs about 2.5 times a sky pixel (#320), and neither the depth traffic (P42) nor pixels hidden by
-    // the depth test (P41 sky drawn last) made a difference: the track drawn with its shade colour only, no textures
-    // (DKR_NOTEX_KINDS, a bit per kind), shows whether its texture reads are the cost.
-    { "cost: track without textures", { "DKR_NOTEX_KINDS", NULL }, 0, 1 << 1, 1 },
-    // The cost rows (the profiler's monitor, 2026-10-31): a kind of thing left undrawn (DKR_SKIP_KINDS, a bit per
-    // port_drawtag.h kind) against the usual race shows what it costs the GPU, which can't time draws one by one.
-    { "cost: track not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 1) | (1 << 5), 1 },
-    { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
-    { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
-    { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
-    // Diddy's head flicker hunt (#290/#299/#303/#320, c5fea20 bench): culling, vertex fog and the depth clear all
-    // still flickered. The Old 3DS never flickers and runs other renderer defaults, so these rows bisect them; they
-    // join the all-switches race, which runs every Old 3DS default together.
-    { "head: Old 3DS draw paths (lean draw, lean walk, VFP)", { "DKR_DRAW_LEAN", "DKR_WALK_LEAN", "DKR_VFP_VECTORS" }, 0, 1, 0 },
-    { "head: texture lookups remembered (tex memo)", { "DKR_TEX_MEMO", NULL }, 0, 1, 0 },
-    { "head: texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
-    { "head: Old 3DS flush and frame pacing", { "DKR_SVC_FLUSH", "DKR_FRAME_PACE", NULL }, 0, 1, 0 },
+    // Trimmed 2026-11-01 (user): the cost rows were measured in #320/#332, adaptive AA is the default, and every
+    // Old 3DS default the head flicker hunt bisected still flickered, as did per-queue wake-ups (now on by default).
+    // What is left is the one Old 3DS difference not yet raced: the other karts' lower detail models.
     { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1 },
-    // P32 per-queue wake-ups are the New 3DS default since they stopped the head flicker: this row checks it comes back.
-    { "head check: wake-ups for all threads (old way)", { "DKR_QUEUE_WAKE", NULL }, 1, 0, 1 },
-    { "head: no timing in parts, two top buffers", { "DKR_DRAW_PARTS", "DKR_WALK_PARTS", "DKR_TRIPLE_BUFFER" }, 1, 0, 0 },
+    // The GPU misses some settings written right after a draw (drain_before_draw); only blend and depth changes are
+    // written twice. A flicker that grows with GPU load (less with AA off, user 2026-11-01) fits a missed texture or
+    // combiner setting: this writes every draw's settings twice.
+    { "head: every draw's settings written twice", { "DKR_REWRITE", NULL }, 1, 2, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*

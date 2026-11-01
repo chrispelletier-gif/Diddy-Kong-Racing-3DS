@@ -190,6 +190,7 @@ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
  * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
  */
 static int sNoCull = -1;  // DKR_NO_CULL, read on set_draw_state's first use
+static int sFlushMode = -1; // drain_before_draw's settings, read on its first call (read_drain_settings)
 static int sFogMode = -1; // DKR_NO_FOG / DKR_VERTEX_FOG, read on first use
 static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first use
 static int sIndexed = -1;    // DKR_INDEXED, read on first use
@@ -3277,6 +3278,7 @@ static void read_switches(void) {
     sStateCache = -1;
     sIndexed = -1;
     sNoCull = -1;  // DKR_NO_CULL and the fog mode too (head flicker bench)
+    sFlushMode = -1; // drain_before_draw's settings (DKR_REWRITE, head flicker bench)
     sFogMode = -1;
     sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
@@ -4622,7 +4624,7 @@ static void __attribute__((noinline)) set_scissor(const short rect[4], int flat)
  * such draws out of about 155. DKR_REWRITE=0 writes twice only in the known cases, as before.
  */
 
-static int sFlushMode = -1, sAfterClear = -1, sRewrite = -1; // drain_before_draw's settings, read on its first call
+static int sAfterClear = -1, sRewrite = -1; // drain_before_draw's other settings, read with sFlushMode
 static unsigned int sLastKey = ~0u;
 
 static void __attribute__((noinline, cold)) read_drain_settings(void) {
@@ -4632,9 +4634,12 @@ static void __attribute__((noinline, cold)) read_drain_settings(void) {
              sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always");
     env = plat_getenv("DKR_AFTER_CLEAR");
     sAfterClear = env != NULL ? atoi(env) : 1;
-    env = plat_getenv("DKR_REWRITE");
-    sRewrite = env != NULL ? atoi(env) : 1;
-    plat_log("settings written twice: %s", sRewrite ? "on every blend or depth change" : "known cases only");
+    // DKR_REWRITE=2 (head flicker bench): every draw's settings written twice, in case the GPU also misses texture
+    // or combiner settings written right after a draw. A switch, read again for each bench race.
+    sRewrite = plat_switch("DKR_REWRITE", 1);
+    plat_log("settings written twice: %s", sRewrite == 2 ? "on every draw"
+                                           : sRewrite    ? "on every blend or depth change"
+                                                         : "known cases only");
 }
 
 /* Returns whether the draw's settings are to be written twice: a draw whose blending or depth settings differ from
@@ -4662,7 +4667,7 @@ PLAT_HOT static int drain_before_draw(const GfxDrawState *state, int numTriangle
         split_command_list();
         sDrainSplits++;
     }
-    if (sRewrite && (sFrameFirstDraw || key != sLastKey)) {
+    if (sRewrite && (sFrameFirstDraw || key != sLastKey || sRewrite == 2)) {
         first = 1;
     }
     sFrameFirstDraw = 0;
