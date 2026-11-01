@@ -52,6 +52,20 @@ typedef struct Font {
 
 enum { FONT_SMALL, FONT_BIG, FONT_FUN, FONT_MONO };
 
+/* The looks' own small fonts (Barlow Condensed for Broadcast, Outfit for Dock), rasterised by tools/ui_font. */
+typedef struct UiGlyph {
+    unsigned char advance;
+    signed char x, y;
+    unsigned char width, height;
+    unsigned short offset;
+} UiGlyph;
+typedef struct UiFont {
+    int space;
+    const UiGlyph *glyphs; /* '!' (0x21) to '~' (0x7E). */
+    const unsigned char *pixels; /* 8-bit coverage, row by row from offset. */
+} UiFont;
+#include "ui_font_data.h"
+
 static Font sFonts[3];
 static Picture sLogo, sSmallLogo; /* The title logo, and at half size for the menus' companions. */
 static Picture sArrowLeft, sArrowRight;
@@ -650,9 +664,35 @@ static int letter_kern(int font, char prev, char c) {
     return letter_gap(font) && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
 }
 
+/* The look's own font for the small text (NULL: the game's). Classic keeps the game's fonts. */
+static const UiFont *ui_font(int font) {
+    if (font != FONT_SMALL || !font_ready(FONT_SMALL)) {
+        return NULL;
+    }
+    switch (sStyle) {
+        case 2:
+            return &kBarlow;
+        case 3:
+            return &kOutfit;
+        default:
+            return NULL;
+    }
+}
+
+static int ui_advance(const UiFont *u, unsigned char c) {
+    return c <= 0x20 || c >= 0x7F ? u->space : u->glyphs[c - 0x21].advance;
+}
+
 static int text_width_as_is(int font, const char *text) {
     int width = 0;
     char prev = 0;
+    const UiFont *u = ui_font(font);
+    if (u != NULL) {
+        for (; *text != '\0'; text++) {
+            width += ui_advance(u, (unsigned char) *text);
+        }
+        return width;
+    }
     if (!font_ready(font)) {
         return (int) strlen(text) * 8;
     }
@@ -667,6 +707,40 @@ static int text_width_as_is(int font, const char *text) {
 static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
     char prev = 0;
+    const UiFont *u = ui_font(font);
+    if (u != NULL) {
+        for (; *text != '\0'; text++) {
+            unsigned char c = (unsigned char) *text;
+            int step = ui_advance(u, c), i, j;
+            if (x + step > right) {
+                break;
+            }
+            if (c > 0x20 && c < 0x7F) {
+                const UiGlyph *g = &u->glyphs[c - 0x21];
+                for (j = 0; j < g->height; j++) {
+                    for (i = 0; i < g->width; i++) {
+                        int cover = u->pixels[g->offset + j * g->width + i];
+                        if (cover == 0) {
+                            continue;
+                        }
+                        if (shadow) {
+                            plot(x + g->x + i + 1, y + g->y + j + 1, 0, 0, 0, cover * 170 / 255);
+                        }
+                    }
+                }
+                for (j = 0; j < g->height; j++) {
+                    for (i = 0; i < g->width; i++) {
+                        int cover = u->pixels[g->offset + j * g->width + i];
+                        if (cover != 0) {
+                            plot(x + g->x + i, y + g->y + j, colour.r, colour.g, colour.b, cover * colour.a / 255);
+                        }
+                    }
+                }
+            }
+            x += step;
+        }
+        return x;
+    }
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
         for (; *text != '\0' && x + 8 <= right; text++) {
