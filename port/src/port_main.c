@@ -146,6 +146,7 @@ void port_boot(void) {
         case PORT_ROM_OK:
             plat_status("ROM loaded in %.1f s", (plat_time_ns() - start) / 1e9);
             port_log("Using ROM %s", path);
+            gPortGameStage = "starting: bottom screen"; // The watchdog names the start-up step a hang is in
             plat_rom_loaded();
             break;
         case PORT_ROM_WRONG_VERSION:
@@ -168,9 +169,12 @@ void port_boot(void) {
                        port_rom_supported_release(), plat_data_dir());
             break;
     }
+    gPortGameStage = "starting: saves";
     port_si_init();
+    gPortGameStage = "starting: vi and rcp threads";
     port_vi_init();
     port_rcp_init();
+    gPortGameStage = "starting";
     plat_status("Starting the game...");
     mainproc();
 }

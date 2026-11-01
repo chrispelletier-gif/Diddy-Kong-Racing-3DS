@@ -106,10 +106,16 @@ endif
 # Profile-guided optimisation (Old 3DS game core): PGO=gen builds the training build, whose counts src/plat/pgo.c
 # writes to pgo_counts.bin during the whole game run; port/tools/pgo_unpack.py puts them next to the objects (the same
 # BUILD_DIR), and PGO=use builds with them. Build both in a BUILD_DIR of their own.
+# Only the game's code and the port code compiled like it (the walk, the game core's work) is instrumented: with the
+# platform code (threads, idle meters, bottom screen) counted too, the training build hung right after loading the ROM
+# on an Old 3DS (#325). No value profiles (indirect-call targets kept in thread-local storage): branch counts only, in
+# both builds so their counters match. The link needs libgcov (-fprofile-generate).
 ifeq ($(PGO),gen)
-  OPT_FLAGS += -fprofile-generate -fprofile-update=single -fprofile-info-section=gcov_info -DPORT_PGO_GEN=1
+  PGO_FLAGS := -fprofile-generate -fno-profile-values -fprofile-update=single -fprofile-info-section=gcov_info
+  OPT_FLAGS += -DPORT_PGO_GEN=1
+  LDFLAGS_PGO := -fprofile-generate
 else ifeq ($(PGO),use)
-  OPT_FLAGS += -fprofile-use -fprofile-partial-training -Wno-missing-profile
+  PGO_FLAGS := -fprofile-use -fno-profile-values -fprofile-partial-training -Wno-missing-profile
 endif
 HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
 # Roadmap P25: the hot files (only the renderer has floats) may reorder float maths, use reciprocals and skip NaN,
@@ -168,9 +174,9 @@ else
   EXE       := $(BUILD_DIR)/dkr
 endif
 
-GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
+GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -include port_swap.h -w -Werror=implicit-function-declaration
-PORT_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
+PORT_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -Wall -Wno-unused-function -Wno-missing-braces -Werror=implicit-function-declaration
 SYS_CFLAGS  += $(OPT_FLAGS) $(COMMON_FLAGS) $(RELEASE_DEFINES) -std=gnu99 -Wall -Wno-unused-function
 
@@ -202,7 +208,7 @@ endif
 
 $(EXE): $(ALL_OBJS)
 	@echo "LD $@"
-	@$(CC) $(LDFLAGS) $(OPT_FLAGS) $(COMMON_FLAGS) $^ $(LIBS) -o $@
+	@$(CC) $(LDFLAGS) $(OPT_FLAGS) $(LDFLAGS_PGO) $(COMMON_FLAGS) $^ $(LIBS) -o $@
 
 -include 3ds/rules.mk
 
