@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Rasterises the bottom screen's looks' fonts to port/src/plat/ui_font_data.h (8-bit coverage, ASCII 0x21..0x7E).
 
-Usage: make_ui_font.py OUT.h NAME:FONT.ttf:SIZE[:VARIATION] ...
+Usage: make_ui_font.py OUT.h NAME:FONT.ttf:SIZE:BASE:VARIATION:CHARS ...  (BASE: baseline pixels under the text's top; VARIATION or CHARS may be empty,
+CHARS: only these characters get pixels, the others are skipped)
 The fonts are Outfit (Medium) and Barlow Condensed (SemiBold), both SIL Open Font License 1.1 (see NOTICE.md).
-The baseline sits BASE pixels under the text's top, like the game's small font, so layouts need no changes.
+Small text uses BASE 10 and headings 11, like the game's small and fun fonts, so layouts need no changes.
 """
 import sys
 from PIL import ImageFont
-
-BASE = 10
 
 def main():
     out = sys.argv[1]
@@ -16,13 +15,17 @@ def main():
     names = []
     for spec in sys.argv[2:]:
         parts = spec.split(":")
-        name, path, size = parts[0], parts[1], int(parts[2])
+        name, path, size, base = parts[0], parts[1], int(parts[2]), int(parts[3])
         font = ImageFont.truetype(path, size)
-        if len(parts) > 3:
-            font.set_variation_by_name(parts[3].encode())
+        if len(parts) > 4 and parts[4]:
+            font.set_variation_by_name(parts[4].encode())
+        chars = parts[5] if len(parts) > 5 else None
         data, glyphs = [], []
         for code in range(0x21, 0x7F):
             ch = chr(code)
+            if chars is not None and ch not in chars:
+                glyphs.append((0, 0, 0, 0, 0, 0))
+                continue
             adv = int(round(font.getlength(ch)))
             mask, (x0, y0) = font.getmask2(ch, mode="L", anchor="ls")  # offset: from the baseline origin
             w, h = mask.size
@@ -30,7 +33,7 @@ def main():
             for j in range(h):
                 for i in range(w):
                     data.append(mask.getpixel((i, j)) if hasattr(mask, "getpixel") else mask[j * w + i])
-            glyphs.append((adv, x0, BASE + y0, w, h, off))
+            glyphs.append((adv, x0, base + y0, w, h, off))
         space = int(round(font.getlength(" ")))
         lines.append("static const unsigned char k%sPixels[%d] = {" % (name, len(data)))
         for i in range(0, len(data), 24):
@@ -41,9 +44,9 @@ def main():
             lines.append("    { %d, %d, %d, %d, %d, %d }," % g)
         lines.append("};")
         lines.append("")
-        names.append((name, space))
-    for name, space in names:
-        lines.append("static const UiFont k%s = { %d, k%sGlyphs, k%sPixels };" % (name, space, name, name))
+        names.append((name, space, base))
+    for name, space, base in names:
+        lines.append("static const UiFont k%s = { %d, %d, k%sGlyphs, k%sPixels };" % (name, space, base, name, name))
     open(out, "w").write("\n".join(lines) + "\n")
 
 main()

@@ -52,7 +52,7 @@ typedef struct Font {
 
 enum { FONT_SMALL, FONT_BIG, FONT_FUN, FONT_MONO };
 
-/* The looks' own small fonts (Barlow Condensed for Broadcast, Outfit for Dock), rasterised by tools/ui_font. */
+/* The looks' own fonts for small text and headings (Barlow Condensed for Broadcast, Outfit for Dock), rasterised by tools/ui_font. */
 typedef struct UiGlyph {
     unsigned char advance;
     signed char x, y;
@@ -60,7 +60,7 @@ typedef struct UiGlyph {
     unsigned short offset;
 } UiGlyph;
 typedef struct UiFont {
-    int space;
+    int space, base; /* base: pixels from the text's top to its baseline. */
     const UiGlyph *glyphs; /* '!' (0x21) to '~' (0x7E). */
     const unsigned char *pixels; /* 8-bit coverage, row by row from offset. */
 } UiFont;
@@ -664,19 +664,31 @@ static int letter_kern(int font, char prev, char c) {
     return letter_gap(font) && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
 }
 
-/* The look's own font for the small text (NULL: the game's). Classic keeps the game's fonts. */
+/* The sizes of the looks' fonts: the small text, headings, and the HUD's big, large and small numerals and labels. */
+enum { UI_BODY, UI_HEAD, UI_XL, UI_LG, UI_SM };
+
+static const UiFont *ui_font_kind(int kind) {
+    switch (sStyle) {
+        case 1:
+            return kind == UI_HEAD ? &kFredokaHead : kind == UI_XL ? &kFredokaXL : kind == UI_LG ? &kFredokaLG
+                   : kind == UI_SM ? &kFredokaSM : &kFredoka;
+        case 2:
+            return kind == UI_HEAD ? &kBarlowHead : kind == UI_XL ? &kBarlowXL : kind == UI_LG ? &kBarlowLG
+                   : kind == UI_SM ? &kBarlowSM : &kBarlow;
+        case 3:
+            return kind == UI_HEAD ? &kOutfitHead : kind == UI_XL ? &kOutfitXL : kind == UI_LG ? &kOutfitLG
+                   : kind == UI_SM ? &kOutfitSM : &kOutfit;
+        default:
+            return NULL; /* Classic keeps the game's fonts. */
+    }
+}
+
+/* The look's own font for the small text and headings (NULL: the game's). */
 static const UiFont *ui_font(int font) {
-    if (font != FONT_SMALL || !font_ready(FONT_SMALL)) {
+    if ((font != FONT_SMALL && font != FONT_FUN) || !font_ready(font)) {
         return NULL;
     }
-    switch (sStyle) {
-        case 2:
-            return &kBarlow;
-        case 3:
-            return &kOutfit;
-        default:
-            return NULL;
-    }
+    return ui_font_kind(font == FONT_FUN ? UI_HEAD : UI_BODY);
 }
 
 static int ui_advance(const UiFont *u, unsigned char c) {
@@ -703,43 +715,45 @@ static int text_width_as_is(int font, const char *text) {
     return width;
 }
 
+/* Draws text in one of the looks' fonts from x with its top at y; returns where it ended. */
+static int ui_draw(const UiFont *u, int x, int y, const char *text, Colour colour, int shadow, int right) {
+    for (; *text != '\0'; text++) {
+        unsigned char c = (unsigned char) *text;
+        int step = ui_advance(u, c), i, j;
+        if (x + step > right) {
+            break;
+        }
+        if (c > 0x20 && c < 0x7F) {
+            const UiGlyph *g = &u->glyphs[c - 0x21];
+            for (j = 0; j < g->height; j++) {
+                for (i = 0; i < g->width; i++) {
+                    int cover = u->pixels[g->offset + j * g->width + i];
+                    if (cover != 0 && shadow) {
+                        plot(x + g->x + i + 1, y + g->y + j + 1, 0, 0, 0, cover * 170 / 255);
+                    }
+                }
+            }
+            for (j = 0; j < g->height; j++) {
+                for (i = 0; i < g->width; i++) {
+                    int cover = u->pixels[g->offset + j * g->width + i];
+                    if (cover != 0) {
+                        plot(x + g->x + i, y + g->y + j, colour.r, colour.g, colour.b, cover * colour.a / 255);
+                    }
+                }
+            }
+        }
+        x += step;
+    }
+    return x;
+}
+
 /* Draws text from x (until right, if text would go further) with its top at y, as it is. Returns where it ended. */
 static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
     char prev = 0;
     const UiFont *u = ui_font(font);
     if (u != NULL) {
-        for (; *text != '\0'; text++) {
-            unsigned char c = (unsigned char) *text;
-            int step = ui_advance(u, c), i, j;
-            if (x + step > right) {
-                break;
-            }
-            if (c > 0x20 && c < 0x7F) {
-                const UiGlyph *g = &u->glyphs[c - 0x21];
-                for (j = 0; j < g->height; j++) {
-                    for (i = 0; i < g->width; i++) {
-                        int cover = u->pixels[g->offset + j * g->width + i];
-                        if (cover == 0) {
-                            continue;
-                        }
-                        if (shadow) {
-                            plot(x + g->x + i + 1, y + g->y + j + 1, 0, 0, 0, cover * 170 / 255);
-                        }
-                    }
-                }
-                for (j = 0; j < g->height; j++) {
-                    for (i = 0; i < g->width; i++) {
-                        int cover = u->pixels[g->offset + j * g->width + i];
-                        if (cover != 0) {
-                            plot(x + g->x + i, y + g->y + j, colour.r, colour.g, colour.b, cover * colour.a / 255);
-                        }
-                    }
-                }
-            }
-            x += step;
-        }
-        return x;
+        return ui_draw(u, x, y, text, colour, shadow, right);
     }
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
@@ -2058,8 +2072,93 @@ static void used_columns(const Picture *p, int *first, int *end) {
 }
 
 /* Draws a picture by its used columns from x, and returns where the next piece goes (gap pixels on). */
+/* In the Glass, Broadcast and Dock looks the HUD's sprite numerals and labels ("3RD", "LAP", "TIME", the digits) are the
+ * game's own lettering; they are set in the look's font instead, standing on the same baseline. Returns where the next
+ * piece goes, or -1 when p is not one of those sprites (or the look is Classic). */
+static int alt_piece(const Picture *p, int x, int y, int gap) {
+    char text[8] = "";
+    int kind = UI_LG, tabular = 0, i, top, bottom;
+    Colour colour = sStyle == 2 ? WHITE : GOLD;
+    const UiFont *u;
+    if (sStyle == 0 || p == NULL || p->rgba == NULL) {
+        return -1;
+    }
+    if (p >= sDigits && p < sDigits + 10) {
+        text[0] = (char) ('0' + (p - sDigits));
+        tabular = 1;
+    } else if (p >= sSmallDigits && p < sSmallDigits + 10) {
+        text[0] = (char) ('0' + (p - sSmallDigits));
+        kind = UI_HEAD;
+        tabular = 1;
+    } else if (p >= sItemCounts && p < sItemCounts + 10) {
+        // The count on a small round badge in the item's corner.
+        smooth_box(x, y + 2, x + 18, y + 20, 9, (Colour){ 0, 0, 20, 190 }, (Colour){ 0, 0, 20, 190 },
+                   (Colour){ 255, 255, 255, 120 }, 1);
+        text[0] = (char) ('0' + (p - sItemCounts) + 1);
+        u = ui_font_kind(UI_HEAD);
+        ui_draw(u, x + (18 - ui_advance(u, (unsigned char) text[0])) / 2, y + 2 + 9 - u->base + 5, text, WHITE, 0, BS_WIDTH);
+        return x + 18 + gap;
+    } else if (p >= sPlaces && p < sPlaces + 8) {
+        text[0] = (char) ('1' + (p - sPlaces));
+        kind = UI_XL;
+    } else if (p >= sSuffixes && p < sSuffixes + 4) {
+        static const char *const suffixes[4] = { "ST", "ND", "RD", "TH" };
+        snprintf(text, sizeof(text), "%s", suffixes[p - sSuffixes]);
+        kind = UI_SM;
+    } else if (p == &sColon || p == &sSmallColon) {
+        snprintf(text, sizeof(text), ":");
+        kind = p == &sColon ? UI_LG : UI_HEAD;
+    } else if (p == &sSlash) {
+        snprintf(text, sizeof(text), "/");
+    } else if (p == &sTimes) {
+        snprintf(text, sizeof(text), "x");
+        kind = UI_HEAD;
+    } else if (p == &sTimeLabel || p == &sLapLabel) {
+        snprintf(text, sizeof(text), p == &sTimeLabel ? "TIME" : "LAP");
+        kind = UI_SM;
+        colour = LABEL_BLUE;
+    } else if (p == &sFinalLabel) {
+        snprintf(text, sizeof(text), "FINAL");
+    } else if (p == &sLapSmallLabel) {
+        snprintf(text, sizeof(text), "LAP");
+    } else if (p == &sFinishLabel) {
+        snprintf(text, sizeof(text), "FINISH");
+    } else {
+        return -1;
+    }
+    u = ui_font_kind(kind);
+    // The sprite's ink rows say where its baseline is.
+    top = p->height;
+    bottom = 0;
+    for (i = 0; i < p->width * p->height; i++) {
+        if (p->rgba[i * 4 + 3] > 40) {
+            int row = i / p->width;
+            top = row < top ? row : top;
+            bottom = row + 1 > bottom ? row + 1 : bottom;
+        }
+    }
+    if (bottom == 0) {
+        bottom = p->height;
+    }
+    if (tabular) {
+        int cell = 0, c;
+        for (c = 0; c < 10; c++) {
+            int a = ui_advance(u, (unsigned char) ('0' + c));
+            cell = a > cell ? a : cell;
+        }
+        ui_draw(u, x + (cell - ui_advance(u, (unsigned char) text[0])) / 2, y + bottom - u->base, text, colour, 1, BS_WIDTH);
+        return x + cell + gap;
+    }
+    x = ui_draw(u, x, y + bottom - u->base, text, colour, 1, BS_WIDTH);
+    (void) top;
+    return x + gap;
+}
+
 static int piece(const Picture *p, int x, int y, int gap) {
-    int first, end;
+    int first, end, alt = alt_piece(p, x, y, gap);
+    if (alt >= 0) {
+        return alt;
+    }
     used_columns(p, &first, &end);
     picture_scaled(p, x - first, y, 1, 1);
     return x + end - first + gap;
@@ -3363,13 +3462,13 @@ static void menu_save_styled(const RaceHud *hud) {
             text(FONT_SMALL, 18, y + 4, sWorldShortNames[i], ink, 1);
         } else {
             text(FONT_SMALL, 18, y + 2, sWorldShortNames[i], ink, 1);
-            smooth_box(112, y + 5, 234, y + 10, 2, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 0 }, 1);
+            smooth_box(112, y + 5, 224, y + 10, 2, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 0 }, 1);
             if (balloons > 0) {
-                smooth_box(112, y + 5, 112 + 122 * balloons / 8, y + 10, 2, (Colour){ 255, 236, 110, 255 },
+                smooth_box(112, y + 5, 112 + 112 * balloons / 8, y + 10, 2, (Colour){ 255, 236, 110, 255 },
                            (Colour){ 240, 160, 20, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
             }
             snprintf(line, sizeof(line), "%d/8", balloons);
-            text(FONT_SMALL, 240, y + 2, line, ink, 1);
+            text(FONT_SMALL, 230, y + 2, line, ink, 1);
         }
         trophy_and_key(hud, i, sStyle == 2 ? 236 : 262, y + (sStyle == 2 ? 1 : -1), 16);
         if (sStyle == 2) {
@@ -3468,17 +3567,15 @@ static void ring_portrait(const RaceHudRacer *r, int x, int y, int lit) {
 /* The place, its suffix and "of n", the lap and the time, at the positions each look wants. Returns nothing. */
 /* The place and its suffix, together centred in the box x0..x1 by y0..y1 (no "of 8": the place alone says it). */
 static void place_centred(const RaceHud *hud, int x0, int y0, int x1, int y1, int suffixDy) {
-    int first, end, sfirst, send, w, h, suffix;
+    int w, h, y;
     if (hud->position < 1 || hud->position > 8) {
         return;
     }
-    suffix = hud->position <= 3 ? hud->position - 1 : 3;
-    used_columns(&sPlaces[hud->position - 1], &first, &end);
-    used_columns(&sSuffixes[suffix], &sfirst, &send);
-    w = (end - first) + 1 + (send - sfirst);
+    w = DRY(place_row(hud->position, 0, 0));
     h = sPlaces[hud->position - 1].height;
-    piece(&sSuffixes[suffix], piece(&sPlaces[hud->position - 1], x0 + (x1 - x0 - w) / 2, y0 + (y1 - y0 - h) / 2, 1),
-          y0 + (y1 - y0 - h) / 2 + suffixDy, 0);
+    y = y0 + (y1 - y0 - h) / 2;
+    (void) suffixDy;
+    place_row(hud->position, x0 + (x1 - x0 - w) / 2, y);
 }
 
 static int place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
