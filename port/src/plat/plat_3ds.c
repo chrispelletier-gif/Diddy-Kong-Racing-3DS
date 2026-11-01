@@ -804,6 +804,10 @@ void plat_log_drain(void) {
     }
 }
 
+void plat_saves_drain(void) {
+    plat_log_drain();
+}
+
 /* Saves a file on the writer thread; data comes from malloc and is freed there. */
 void plat_save_file_later(const char *path, void *data, unsigned int size) {
     queue_job(JOB_SAVE, NULL, data, size, path);

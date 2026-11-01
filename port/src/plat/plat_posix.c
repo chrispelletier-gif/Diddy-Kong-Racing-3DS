@@ -441,6 +441,15 @@ unsigned int plat_log_total(void) {
     return 0;
 }
 
+/* On PC a save is quick: written here. */
+void plat_save_file_later(const char *path, void *data, unsigned int size) {
+    plat_save_file(path, data, size);
+    free(data);
+}
+
+void plat_saves_drain(void) {
+}
+
 int plat_log_recent(char *out, int size) {
     if (size > 0) {
         out[0] = '\0';

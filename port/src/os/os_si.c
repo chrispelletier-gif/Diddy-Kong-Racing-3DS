@@ -14,6 +14,7 @@
 #include "types.h"
 #include "port.h"
 #include "plat/plat.h"
+#include <stdlib.h>
 
 #define EEPROM_SIZE PORT_EEPROM_SIZE /* 4Kbit */
 #define MEMPAK_SIZE PORT_MEMPAK_SIZE
@@ -61,6 +62,25 @@ static void save_unlock(void) {
     __atomic_store_n(&sSaveLock, 0, __ATOMIC_RELEASE);
 }
 
+/*
+ * Set while the game's own timed saves are written: those go to the SD card on the background writer, since one write
+ * can take 400 ms there (the game froze for it after every menu change that saved). The rest (HOME, exit, backups,
+ * restores) first waits for those queued writes, then writes here, so an older queued copy never lands last.
+ */
+static s32 sWriteLater;
+
+static s32 save_write(const char *name, const void *data, u32 size) {
+    if (sWriteLater) {
+        void *copy = malloc(size);
+        if (copy != NULL) {
+            bcopy(data, copy, size);
+            port_save_write_later(name, copy, size);
+            return TRUE;
+        }
+    }
+    return port_save_write(name, data, size);
+}
+
 /* Write the EEPROM and the Controller Pak, in the N64's order, as dir + dkr.eep and dir + dkr.mpk. Called locked. */
 static s32 write_eeprom(const char *dir) {
     static u8 sOut[EEPROM_SIZE];
@@ -68,7 +88,7 @@ static s32 write_eeprom(const char *dir) {
     bcopy(sEeprom, sOut, EEPROM_SIZE);
     port_eep_convert(sOut);
     plat_snprintf(name, sizeof(name), "%s%s", dir, EEPROM_FILE);
-    return port_save_write(name, sOut, EEPROM_SIZE);
+    return save_write(name, sOut, EEPROM_SIZE);
 }
 
 static s32 write_mempak(const char *dir) {
@@ -77,7 +97,7 @@ static s32 write_mempak(const char *dir) {
     bcopy(sMempak, sOut, MEMPAK_SIZE);
     port_mpk_convert(sOut, TRUE);
     plat_snprintf(name, sizeof(name), "%s%s", dir, MEMPAK_FILE);
-    return port_save_write(name, sOut, MEMPAK_SIZE);
+    return save_write(name, sOut, MEMPAK_SIZE);
 }
 
 /* Writes the saves that changed. A write that fails leaves its save marked, so it is tried again later. Locked. */
@@ -123,8 +143,13 @@ static void flush_saves(s32 force) {
         // restore the game's memory has the old progress.
         sEepromDirty = FALSE;
         sMempakDirty = FALSE;
-    } else if (force || plat_time_ns() - sLastSaveWrite >= SAVE_FLUSH_DELAY_NS) {
+    } else if (force) {
+        plat_saves_drain();
         write_dirty_saves();
+    } else if (plat_time_ns() - sLastSaveWrite >= SAVE_FLUSH_DELAY_NS) {
+        sWriteLater = plat_switch("DKR_SAVE_LATER", 1);
+        write_dirty_saves();
+        sWriteLater = FALSE;
     }
     save_unlock();
 }
@@ -153,6 +178,7 @@ static s32 run_request(const SaveRequest *request) {
     s32 ok = TRUE;
 
     save_lock();
+    plat_saves_drain();
     if (request->dir != NULL) {
         plat_snprintf(dir, sizeof(dir), "%s/", request->dir);
         ok = write_eeprom(dir) && write_mempak(dir);

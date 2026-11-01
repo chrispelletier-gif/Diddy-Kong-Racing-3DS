@@ -72,6 +72,12 @@ s32 port_save_write(const char *name, const void *data, u32 size) {
     return plat_save_file(path, data, size);
 }
 
+void port_save_write_later(const char *name, void *data, u32 size) {
+    char path[256];
+    make_path(path, sizeof(path), name);
+    plat_save_file_later(path, data, size);
+}
+
 static s32 has_rom_extension(const char *name) {
     s32 len = strlen(name);
     const char *ext;
