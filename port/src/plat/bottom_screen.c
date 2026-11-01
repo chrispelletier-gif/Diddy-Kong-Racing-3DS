@@ -1188,7 +1188,7 @@ static void stepper(int x0, int x1, int y, const char *value) {
     box(x0, y, x1, y + 20, (Colour){ 0, 0, 20, 110 }, (Colour){ 140, 180, 255, 110 });
     arrow(1, x0 + 4, arrowY);
     arrow(0, x1 - 4 - arrowWidth, arrowY);
-    text_centred(FONT_SMALL, x0 + arrowWidth + 6, x1 - arrowWidth - 6, y + 5, value, YELLOW, 1);
+    text_centred(FONT_SMALL, x0 + arrowWidth + 6, x1 - arrowWidth - 6, y + 6, value, YELLOW, 1);
 }
 
 /*
@@ -1227,9 +1227,9 @@ static void draw_menu(const State *s) {
                          MENU_PANEL_X0 - 4);
         }
     }
-    heading(MENU_PANEL_X0 + 12, MENU_PANEL_X1 - 40, 10, m->title, 0);
+    heading(MENU_PANEL_X0 + 12, MENU_PANEL_X1 - 40, 11, m->title, 0);
     if (m->pages[0] != '\0') {
-        text(FONT_SMALL, MENU_PANEL_X1 - 8 - text_width(FONT_SMALL, m->pages), 12, m->pages, HINT, 1);
+        text(FONT_SMALL, MENU_PANEL_X1 - 8 - text_width(FONT_SMALL, m->pages), 13, m->pages, HINT, 1);
     }
     for (i = 0; i < m->rowCount && i < BS_MENU_ROWS; i++) {
         const BsMenuRow *row = &m->rows[i];
@@ -1244,15 +1244,15 @@ static void draw_menu(const State *s) {
                  (Colour){ 140, 180, 255, 50 });
         }
         if (row->value[0] == '\0') {
-            arrow(0, MENU_PANEL_X1 - 20, y + 8);
+            arrow(0, MENU_PANEL_X1 - 20, y + 7);
             labelEnd = MENU_PANEL_X1 - 24;
         } else if (!draw_on_off(row->value, MENU_PANEL_X1 - 48, y + 3)) {
             stepper(BS_MENU_VALUE_X, MENU_PANEL_X1 - 8, y + 3, row->value);
         }
-        text_clipped(FONT_SMALL, MENU_PANEL_X0 + 14, y + 7, row->label, WHITE, 1, labelEnd);
+        text_clipped(FONT_SMALL, MENU_PANEL_X0 + 14, y + 8, row->label, WHITE, 1, labelEnd);
     }
     fill(MENU_PANEL_X0 + 8, MENU_TIP_Y - 1, MENU_PANEL_X1 - 6, MENU_TIP_Y, (Colour){ 140, 180, 255, 80 });
-    text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 6, tip, HINT, 1, MENU_PANEL_X1 - 6);
+    text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 11, tip, HINT, 1, MENU_PANEL_X1 - 6);
 }
 
 /* Small icons for the new styles' buttons, drawn smooth in a 14 pixel square around (cx, cy). */
