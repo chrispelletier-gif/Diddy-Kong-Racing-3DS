@@ -264,15 +264,14 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "cost: racers and objects not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 2) | (1 << 3), 1 },
     { "cost: sky not drawn", { "DKR_SKIP_KINDS", NULL }, 0, 1 << 4, 1 },
     { "cost: effects and shadows not drawn", { "DKR_SKIP_KINDS", NULL }, 0, (1 << 6) | (1 << 7), 1 },
-    // Diddy's head flicker hunt (#290/#299/#303/#320). The state cache, cache flush, shared vertices and index
-    // alignment rows all still flickered; an Old 3DS (which culls back faces in the walk) never does. So: back faces
-    // culled by the walk instead of the GPU, no culling at all, and fog from the vertices instead of the depth.
-    { "head: back faces culled by the walk (P40)", { "DKR_CPU_CULL", NULL }, 0, 1, 1 },
-    { "head: no back-face culling", { "DKR_NO_CULL", NULL }, 0, 1, 1 },
-    { "head: fog from vertices, not depth", { "DKR_VERTEX_FOG", NULL }, 0, 1, 1 },
-    // Bench #321 (Old 3DS): the Jungle Falls tunnel dropout went away with the depth cleared by a draw; a stale depth
-    // buffer could hide the head too.
-    { "head: depth cleared by a draw, not a memory fill (P18 off)", { "DKR_DEPTH_FILL", NULL }, 1, 0, 1 },
+    // Diddy's head flicker hunt (#290/#299/#303/#320, c5fea20 bench): culling, vertex fog and the depth clear all
+    // still flickered. The Old 3DS never flickers and runs other renderer defaults, so these rows bisect them; they
+    // join the all-switches race, which runs every Old 3DS default together.
+    { "head: Old 3DS draw paths (lean draw, lean walk, VFP)", { "DKR_DRAW_LEAN", "DKR_WALK_LEAN", "DKR_VFP_VECTORS" }, 0, 1, 0 },
+    { "head: texture lookups remembered (tex memo)", { "DKR_TEX_MEMO", NULL }, 0, 1, 0 },
+    { "head: texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
+    { "head: Old 3DS flush and frame pacing", { "DKR_SVC_FLUSH", "DKR_FRAME_PACE", NULL }, 0, 1, 0 },
+    { "head: no timing in parts, two top buffers", { "DKR_DRAW_PARTS", "DKR_WALK_PARTS", "DKR_TRIPLE_BUFFER" }, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
