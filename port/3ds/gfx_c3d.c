@@ -1421,15 +1421,12 @@ static char sCapturePath[256];
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
  * (about a second), both eyes in 3D. The slots are taken at start-up, before textures fill linear memory. A snapshot keeps the two that look most like they hold a bright vertical
- * line (a screen column is a row of the rotated picture). On in debug builds with 3 slots, so a report carries the screen as it was shown (all 8 slots with
- * DKR_RECENT_FRAMES=1). It was for the white vertical line, since fixed (the banana counter icon's sprite overran
- * its buffer).
+ * line (a screen column is a row of the rotated picture). Off unless DKR_RECENT_FRAMES=1: it was for the white
+ * vertical line, since fixed (the banana counter icon's sprite overran its buffer).
  */
 #define RECENT_SLOTS 8
 #define RECENT_EVERY 3 // Odd, so the ring holds both even and odd frames
 #define RECENT_KEEP 2
-// Slots taken when the ring is on by default (debug builds): the last few screens before a snapshot, as shown.
-#define RECENT_DEFAULT_SLOTS 3
 #define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8, 2 in 16-bit)
 static u8 *sRecent[RECENT_SLOTS];
 static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentBpp[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
@@ -1810,9 +1807,7 @@ PLAT_COLD static void log_timing(void) {
  * taken are kept. */
 PLAT_COLD static void allocate_recent_frames(void) {
     // Leave most of linear memory for textures (each slot is 576 KB).
-    int wanted = plat_getenv("DKR_RECENT_FRAMES") != NULL ? RECENT_SLOTS : RECENT_DEFAULT_SLOTS;
-
-    while (sRecentCount < wanted && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
+    while (sRecentCount < RECENT_SLOTS && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
         sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
         if (sRecent[sRecentCount] == NULL) {
             break;
@@ -2263,9 +2258,7 @@ PLAT_COLD static void save_recent_frames(int snapshotFrame) {
     for (k = 0; k < RECENT_KEEP; k++) {
         int pick = -1;
         for (i = 0; i < sRecentCount; i++) {
-            // The most line-like picture; with no line they tie, and the newest is the one that was just on screen.
-            if (score[i] >= 0 && (pick < 0 || score[i] > score[pick] ||
-                                  (score[i] == score[pick] && sRecentFrame[i] > sRecentFrame[pick]))) {
+            if (score[i] >= 0 && (pick < 0 || score[i] > score[pick])) {
                 pick = i;
             }
         }
@@ -2566,7 +2559,7 @@ PLAT_COLD static void alloc_frame_slots(void) {
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
     sIbo = sSlots[0].ibo;
-    if (plat_switch("DKR_RECENT_FRAMES", PLAT_DEBUG_TOOLS)) {
+    if (plat_switch("DKR_RECENT_FRAMES", 0)) {
         allocate_recent_frames();
     }
 }
@@ -3299,7 +3292,7 @@ static void read_switches(void) {
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
-    recent = plat_switch("DKR_RECENT_FRAMES", PLAT_DEBUG_TOOLS) != 0;
+    recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
     }
