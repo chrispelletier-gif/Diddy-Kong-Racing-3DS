@@ -2134,6 +2134,9 @@ static void map_box(int mode, int *box) {
     }
 }
 
+/* Whether this race is drawn with a look's own layout rather than the Classic panels (defined with them below). */
+static int own_race_layout(const RaceHud *hud);
+
 /* The parts that only change with the track or the mode: the background, the panels and the map. */
 static int sRaceBaseMode = -1;
 static void make_race_base(const RaceHud *hud) {
@@ -2145,6 +2148,13 @@ static void make_race_base(const RaceHud *hud) {
         sprite = level_map(hud->level, colour);
     }
     map_box(hud->mode, mapBox);
+    if (own_race_layout(hud)) {
+        // Dock's map: the big one on the left. Glass and Broadcast have none.
+        mapBox[0] = 6;
+        mapBox[1] = 52;
+        mapBox[2] = 150;
+        mapBox[3] = 198;
+    }
     if (sprite != sMapSprite || hud->mapMirrored != sMapMirrored || memcmp(colour, sMapColour, 3) ||
         memcmp(mapBox, sMapBox, sizeof(mapBox))) {
         load_map(sprite, hud->mapMirrored, colour, mapBox);
@@ -2167,6 +2177,8 @@ static void make_race_base(const RaceHud *hud) {
         box(TOWER_X0, UPPER_Y0, TOWER_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
         box(MIDDLE_X0, HUB_MAP_Y0, RIGHT_X1, HUB_MAP_Y1, BOX_FILL, BOX_EDGE);
         box(MIDDLE_X0, HUB_AMULET_Y0, RIGHT_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
+    } else if (own_race_layout(hud)) {
+        // The look draws its own panels each frame.
     } else {
         box(TOWER_X0, UPPER_Y0, TOWER_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
         box(MIDDLE_X0, UPPER_Y0, MIDDLE_X1, UPPER_Y1, BOX_FILL, BOX_EDGE);
@@ -2174,7 +2186,7 @@ static void make_race_base(const RaceHud *hud) {
         box(MIDDLE_X0, LOWER_Y0, MIDDLE_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
         box(RIGHT_X0, LOWER_Y0, RIGHT_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
     }
-    if (sMap.rgba != NULL) {
+    if (sMap.rgba != NULL && !(own_race_layout(hud) && sStyle != 3)) {
         picture(&sMap, sMapX, sMapY);
     }
     sRaceBaseMade = 1;
@@ -2916,6 +2928,333 @@ static void draw_menu_track(const RaceHud *hud) {
     }
 }
 
+/******** The looks' own race layouts (the mockups in 3ds/bottom-ui/modern-mockups): Glass, Broadcast and Dock. ********/
+
+static const char *const sCharacterCodes[10] = { "KRU", "BUM", "TIP", "CON", "TIM", "BAN", "DRU", "PIP", "TT", "DID" };
+static const char *const sCharacterNames[10] = { "Krunch", "Bumper", "Tiptup", "Conker", "Timber",
+                                                 "Banjo",  "Drumstick", "Pipsy", "T.T.", "Diddy" };
+static const char *const sSpecialCodes[RACE_HUD_SPECIALS] = { "TRI", "BLU", "BUB", "SMO", "WIZ", "TAJ" };
+static const char *const sSpecialTitles[RACE_HUD_SPECIALS] = { "Tricky", "Bluey", "Bubbler", "Smokey", "Wizpig", "Taj" };
+
+static const char *racer_code(const RaceHudRacer *r) {
+    if (r->special > RACE_HUD_NOT_SPECIAL && r->special < RACE_HUD_SPECIALS) {
+        return sSpecialCodes[r->special];
+    }
+    return r->character >= 0 && r->character < 10 ? sCharacterCodes[r->character] : "";
+}
+
+static const char *racer_name(const RaceHudRacer *r) {
+    if (r->special > RACE_HUD_NOT_SPECIAL && r->special < RACE_HUD_SPECIALS) {
+        return sSpecialTitles[r->special];
+    }
+    return r->character >= 0 && r->character < 10 ? sCharacterNames[r->character] : "";
+}
+
+/* The 20 pixel portrait with no frame (the mockups' rounded ring is drawn by the caller). */
+static void plain_portrait(const RaceHudRacer *r, int x, int y) {
+    if (r->special == RACE_HUD_NOT_SPECIAL && r->character >= 0 && r->character < 10) {
+        picture(&sPortraits[r->character], x, y);
+    } else if (r->special > RACE_HUD_NOT_SPECIAL && r->special < RACE_HUD_SPECIALS &&
+               sSpecialPortraits[r->special].rgba != NULL) {
+        picture(&sSpecialPortraits[r->special], x, y);
+    } else if (r->special > RACE_HUD_NOT_SPECIAL && r->special < RACE_HUD_SPECIALS) {
+        char initial[2] = { (char) (sSpecialNames[r->special][0] - 'a' + 'A'), 0 };
+        fill(x, y, x + 20, y + 20, (Colour){ 0, 20, 90, 255 });
+        text_centred(FONT_FUN, x, x + 20, y + 3, initial, WHITE, 1);
+    }
+}
+
+static void ring_portrait(const RaceHudRacer *r, int x, int y, int lit) {
+    Colour colour = { 255, 255, 255, 200 };
+    if (!lit) {
+        racer_colour(r, &colour);
+    }
+    smooth_box(x - 2, y - 2, x + 22, y + 22, 12, colour, colour, (Colour){ 0, 0, 0, 0 }, 1);
+    plain_portrait(r, x, y);
+}
+
+static const Colour LABEL_BLUE = { 170, 195, 240, 255 };
+
+/* The place, its suffix and "of n", the lap and the time, at the positions each look wants. Returns nothing. */
+static void place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
+    if (hud->position >= 1 && hud->position <= 8) {
+        int suffix = hud->position <= 3 ? hud->position - 1 : 3;
+        x = piece(&sPlaces[hud->position - 1], x, y, 1);
+        piece(&sSuffixes[suffix], x, y + suffixDy, 0);
+    }
+}
+
+static void lap_pieces(const RaceHud *hud, int x, int y) {
+    if (hud->finished) {
+        piece(&sFinishLabel, x, y, 0);
+    } else if (hud->laps > 0 && hud->lap >= hud->laps && hud->laps > 1) {
+        x = piece(&sFinalLabel, x, y, 3);
+        piece(&sLapSmallLabel, x, y, 0);
+    } else if (hud->laps > 0) {
+        x = piece(&sLapLabel, x, y + 3, 4);
+        x = piece(&sDigits[hud->lap % 10], x, y, 1);
+        x = piece(&sSlash, x, y + 1, 1);
+        piece(&sDigits[hud->laps % 10], x, y, 0);
+    }
+}
+
+/* The last finished lap's number and time (or the lap so far), and the best finished lap's time; -1 when none. */
+static void lap_facts(const RaceHud *hud, int *lapNumber, int *lapTime, int *best) {
+    int i, timed, done;
+    timed_laps(hud, &timed, &done);
+    *best = -1;
+    for (i = 0; i < done; i++) {
+        if (*best < 0 || hud->lapTimes[i] < *best) {
+            *best = hud->lapTimes[i];
+        }
+    }
+    *lapNumber = done > 0 ? done : timed;
+    *lapTime = *lapNumber > 0 ? hud->lapTimes[*lapNumber - 1] : -1;
+}
+
+static void item_in_slot(const RaceHud *hud, int x, int y, int countX, int countY) {
+    int index = hud->item * 3 + hud->itemLevel;
+    if (hud->item < 0 || index < 0 || index >= 15 || sItems[index].rgba == NULL) {
+        return;
+    }
+    picture_scaled(&sItems[index], x, y, 1, 1);
+    if (hud->itemCount > 1 && hud->itemCount <= 10) {
+        piece(&sItemCounts[hud->itemCount - 1], countX, countY, 0);
+    }
+}
+
+/* A picture shrunk or grown to w by h (nearest pixel) at x, y. */
+static void picture_fit(const Picture *p, int x, int y, int w, int h) {
+    int i, j;
+    if (p->rgba == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    for (j = 0; j < h; j++) {
+        for (i = 0; i < w; i++) {
+            const unsigned char *t = p->rgba + ((j * p->height / h) * p->width + i * p->width / w) * 4;
+            if (t[3] != 0) {
+                plot(x + i, y + j, t[0], t[1], t[2], t[3]);
+            }
+        }
+    }
+}
+
+static void bananas_count(const RaceHud *hud, int bananaX, int bananaY, int bananaHeight, int timesX, int timesY,
+                          int digitsY) {
+    int x;
+    picture_fit(&sBanana, bananaX, bananaY, sBanana.width * bananaHeight / (sBanana.height > 0 ? sBanana.height : 1),
+                bananaHeight);
+    x = piece(&sTimes, timesX, timesY, 2);
+    x = piece(&sDigits[(hud->bananas / 10) % 10], x, digitsY, 1);
+    piece(&sDigits[hud->bananas % 10], x, digitsY, 0);
+}
+
+static void lap_segments(const RaceHud *hud, int x, int y, int w, int gap, int h, Colour lit, Colour unlit, int slant) {
+    int k, n = hud->laps > 0 ? hud->laps : 0;
+    for (k = 0; k < n && k < 5; k++) {
+        int x0 = x + k * (w + gap);
+        int filled = k < hud->lap - 1 || hud->finished ? w : (k == hud->lap - 1 ? w / 2 : 0);
+        if (slant) {
+            slab(x0, y, x0 + w, y + h, 3, unlit, unlit);
+            if (filled > 0) {
+                slab(x0, y, x0 + filled, y + h, 3, lit, lit);
+            }
+        } else {
+            smooth_box(x0, y, x0 + w, y + h, h / 2, unlit, unlit, (Colour){ 0, 0, 0, 0 }, 1);
+            if (filled > 0) {
+                smooth_box(x0, y, x0 + filled, y + h, h / 2, lit, lit, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+        }
+    }
+}
+
+static void gap_text(int x, int y, int rightAligned, const RaceHudRacer *r) {
+    char gap[16];
+    format_gap(r->gap, gap, sizeof(gap));
+    if (rightAligned) {
+        x -= text_width(FONT_SMALL, gap);
+    }
+    text(FONT_SMALL, x, y, gap, r->gap > 0 ? AHEAD : BEHIND, 1);
+}
+
+static void race_glass(const RaceHud *hud) {
+    int i, lapNumber, lapTime, best;
+    char of[16], label[24];
+    box(6, 6, 114, 198, BOX_FILL, BOX_EDGE);
+    for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
+        const RaceHudRacer *r = &hud->racers[i];
+        int y = 10 + i * 47 / 2;
+        char number[4];
+        snprintf(number, sizeof(number), "%d", i + 1);
+        if (r->player) {
+            smooth_box(9, y - 1, 111, y + 22, 11, (Colour){ 255, 222, 80, 235 }, (Colour){ 230, 150, 20, 235 },
+                       (Colour){ 255, 250, 200, 200 }, 1);
+        }
+        text_centred(FONT_FUN, 10, 28, y + 4, number, WHITE, 1);
+        ring_portrait(r, 32, y + 1, r->player ? 0 : 1);
+        if (r->player) {
+            text(FONT_SMALL, 62, y + 6, "You", (Colour){ 70, 30, 0, 255 }, 0);
+        } else {
+            gap_text(62, y + 6, 0, r);
+        }
+    }
+    // The hero card: place, lap with its segments, the time.
+    box(120, 6, 314, 98, BOX_FILL, BOX_EDGE);
+    place_pieces(hud, 130, 12, 2);
+    if (hud->racerCount > 0) {
+        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
+        text(FONT_SMALL, 130, 46, of, LABEL_BLUE, 1);
+    }
+    lap_pieces(hud, 200, 14);
+    lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
+    fill(130, 52, 304, 53, (Colour){ 255, 255, 255, 45 });
+    {
+        int x = piece(&sTimeLabel, 130, 64, 4);
+        race_time(x, 61, hud->raceTime, 0);
+    }
+    lap_facts(hud, &lapNumber, &lapTime, &best);
+    if (lapNumber > 0) {
+        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
+        text(FONT_SMALL, 130, 82, label, LABEL_BLUE, 1);
+        race_time(176, 83, lapTime, 1);
+    }
+    // The item slot and the bananas.
+    box(120, 104, 196, 198, BOX_FILL, BOX_EDGE);
+    smooth_box(134, 114, 182, 162, 9, (Colour){ 0, 0, 0, 70 }, (Colour){ 0, 0, 0, 70 }, (Colour){ 255, 255, 255, 60 }, 1);
+    item_in_slot(hud, 138, 118, 166, 148);
+    text(FONT_SMALL, 127, 176, "Item", LABEL_BLUE, 1);
+    box(202, 104, 314, 198, BOX_FILL, BOX_EDGE);
+    bananas_count(hud, 208, 112, 40, 244, 128, 124);
+    text(FONT_SMALL, 240, 146, "Best lap", LABEL_BLUE, 1);
+    if (best >= 0) {
+        race_time(240, 160, best, 1);
+    } else {
+        text(FONT_SMALL, 240, 160, "--", DIM, 1);
+    }
+}
+
+static void race_broadcast(const RaceHud *hud) {
+    static const Colour podium[3] = { { 255, 200, 40, 255 }, { 200, 210, 230, 255 }, { 220, 140, 70, 255 } };
+    int i, lapNumber, lapTime, best;
+    char of[16], label[24];
+    Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
+           orange = { 255, 150, 20, 255 };
+    for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
+        const RaceHudRacer *r = &hud->racers[i];
+        int y = 7 + i * 24;
+        char number[4];
+        Colour c = i < 3 ? podium[i] : (Colour){ 60, 80, 160, 255 }, racer;
+        snprintf(number, sizeof(number), "%d", i + 1);
+        if (r->player) {
+            slab(4, y, 128, y + 21, 5, (Colour){ 255, 240, 220, 245 }, (Colour){ 255, 220, 170, 245 });
+        } else {
+            slab(4, y, 128, y + 21, 5, slabFill, slabFill);
+        }
+        slab(4, y, 27, y + 21, 5, c, c);
+        text_centred(FONT_FUN, 7, 25, y + 3, number, WHITE, 1);
+        plain_portrait(r, 28, y + 1);
+        if (racer_colour(r, &racer)) {
+            fill(50, y + 3, 52, y + 18, racer);
+        }
+        if (r->player) {
+            text(FONT_SMALL, 56, y + 5, racer_code(r), (Colour){ 20, 20, 50, 255 }, 0);
+            text(FONT_SMALL, 120 - text_width(FONT_SMALL, "YOU"), y + 5, "YOU", (Colour){ 200, 40, 30, 255 }, 0);
+        } else {
+            text(FONT_SMALL, 56, y + 5, racer_code(r), WHITE, 1);
+            gap_text(122, y + 5, 1, r);
+        }
+    }
+    // The place block, the lap slab and the time strip.
+    slab(144, 8, 232, 64, 10, red, orange);
+    place_pieces(hud, 148, 10, 3);
+    if (hud->racerCount > 0) {
+        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
+        text(FONT_SMALL, 196, 48, of, (Colour){ 255, 240, 220, 255 }, 1);
+    }
+    slab(226, 8, 316, 64, 6, slabLight, slabLight);
+    lap_pieces(hud, 240, 12);
+    lap_segments(hud, 240, 34, 20, 3, 6, red, (Colour){ 255, 255, 255, 40 }, 1);
+    lap_facts(hud, &lapNumber, &lapTime, &best);
+    if (lapNumber > 0) {
+        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
+        text(FONT_SMALL, 240, 46, label, BEHIND, 1);
+    }
+    slab(132, 69, 316, 97, 6, slabFill, slabFill);
+    {
+        int x = piece(&sTimeLabel, 160, 78, 4);
+        race_time(x, 75, hud->raceTime, 0);
+    }
+    slab(132, 102, 214, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 146, 107, "ITEM", LABEL_BLUE, 1);
+    item_in_slot(hud, 151, 124, 179, 154);
+    slab(218, 102, 316, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 232, 107, "BANANAS", LABEL_BLUE, 1);
+    bananas_count(hud, 228, 122, 34, 258, 140, 136);
+    fill(228, 162, 304, 163, (Colour){ 255, 255, 255, 40 });
+    text(FONT_SMALL, 228, 167, "BEST LAP", LABEL_BLUE, 1);
+    if (best >= 0) {
+        race_time(228, 181, best, 1);
+    } else {
+        text(FONT_SMALL, 228, 181, "--", DIM, 1);
+    }
+}
+
+static void race_dock(const RaceHud *hud) {
+    int i, me = 0, first, lapNumber, lapTime, best, x, rowY = 50;
+    char of[16], label[24];
+    place_pieces(hud, 10, 6, 2);
+    if (hud->racerCount > 0) {
+        snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
+        text(FONT_SMALL, 38, 26, of, LABEL_BLUE, 1);
+    }
+    lap_pieces(hud, 92, 6);
+    lap_segments(hud, 94, 25, 8, 4, 8, GOLD, (Colour){ 255, 255, 255, 50 }, 0);
+    x = piece(&sTimeLabel, 176, 9, 4);
+    race_time(x, 6, hud->raceTime, 0);
+    lap_facts(hud, &lapNumber, &lapTime, &best);
+    if (lapNumber > 0) {
+        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
+        text(FONT_SMALL, 176, 26, label, LABEL_BLUE, 1);
+        race_time(212, 27, lapTime, 1);
+    }
+    fill(8, 44, 312, 45, (Colour){ 255, 255, 255, 40 });
+    // The player and the racers either side of them, on a calm panel.
+    for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
+        if (hud->racers[i].player) {
+            me = i;
+        }
+    }
+    first = me - 1 < 0 ? 0 : me - 1;
+    if (first + 3 > hud->racerCount) {
+        first = hud->racerCount - 3 < 0 ? 0 : hud->racerCount - 3;
+    }
+    for (i = first; i < first + 3 && i < hud->racerCount; i++) {
+        const RaceHudRacer *r = &hud->racers[i];
+        int y = rowY + (i - first) * 30;
+        char number[4];
+        snprintf(number, sizeof(number), "%d", i + 1);
+        if (r->player) {
+            smooth_box(156, y - 3, 314, y + 25, 14, (Colour){ 255, 255, 255, 50 }, (Colour){ 255, 255, 255, 25 },
+                       (Colour){ 255, 214, 40, 255 }, 1);
+        }
+        text_centred(FONT_FUN, 160, 176, y + 5, number, r->player ? GOLD : WHITE, 1);
+        ring_portrait(r, 182, y + 3, r->player ? 0 : 1);
+        text(FONT_SMALL, 212, y + 8, r->player ? "You" : racer_name(r), WHITE, 1);
+        if (!r->player) {
+            gap_text(306, y + 8, 1, r);
+        }
+    }
+    fill(160, 142, 312, 143, (Colour){ 255, 255, 255, 40 });
+    item_in_slot(hud, 164, 150, 190, 176);
+    bananas_count(hud, 232, 150, 36, 262, 170, 166);
+}
+
+/* Whether this race is drawn with a look's own layout rather than the Classic panels. */
+static int own_race_layout(const RaceHud *hud) {
+    return sStyle != 0 && hud->mode == RACE_HUD_MODE_RACE && hud->silverCoins < 0;
+}
+
+
 static void draw_race(const State *s) {
     const RaceHud *hud = &s->race;
     make_race_base(hud);
@@ -2943,6 +3282,17 @@ static void draw_race(const State *s) {
             draw_menu_track(hud);
             return;
         default:
+            if (own_race_layout(hud)) {
+                if (sStyle == 1) {
+                    race_glass(hud);
+                } else if (sStyle == 2) {
+                    race_broadcast(hud);
+                } else {
+                    race_dock(hud);
+                    draw_map_markers(hud);
+                }
+                return;
+            }
             if (hud->silverCoins >= 0) {
                 draw_silver_coins(hud);
             } else {
