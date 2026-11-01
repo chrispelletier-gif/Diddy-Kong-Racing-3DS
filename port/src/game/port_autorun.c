@@ -250,12 +250,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * 400-pixel rows. Bench #320: the sky drawn last (P41) and a depth buffer without stencil (P42) saved nothing (left
  * off, rows dropped); the untextured track row looks for what makes a track pixel cost. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    // Head and cliff dropouts (2026-11-01): every draw's settings written twice (DKR_REWRITE=2) kept them away in
-    // every race where the usual settings flickered, so it is the New 3DS default; this row checks the flicker comes
-    // back with the old setting. The racer LOD row (also clean) went: it changes how the karts look.
-    { "head check: settings written twice only on blend or depth changes (old)", { "DKR_REWRITE", NULL }, 2, 1, 1, 1 },
-    // Every draw twice costs ~1.7 ms of GPU and some 33 ms frames (#360): this checks a cheaper way that may also hold.
-    { "head check: settings twice on texture changes too", { "DKR_REWRITE", NULL }, 2, 3, 1, 1 },
+    // Head and cliff dropouts (2026-11-01): every draw's settings written twice (DKR_REWRITE=2) is the New 3DS
+    // default. Bench runs #375/#380: no flicker with 2 or 3 (texture changes too), flicker with the old 1; 3 was not
+    // measurably cheaper, so 2 stays and both check rows went.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*
