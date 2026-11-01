@@ -1227,6 +1227,7 @@ static COLD void flush_mesh_batch(void);
  * them, and a take that lands mid-frame is off by part of a frame. */
 static u8 sDrawKind;
 static u32 sSkipKinds; // DKR_SKIP_KINDS (read_switches)
+static u32 sNoTexKinds; // DKR_NOTEX_KINDS (read_switches): kinds drawn in their shade colour only, no textures
 static u8 sDrawObj = PROF_OBJ_NONE; // The object kind whose tag came last (profile.h ProfObjMix)
 static ProfDrawMix sMix;
 static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
@@ -1325,6 +1326,18 @@ static void kind_frame_end(void) {
 }
 
 
+/* The batch drawn in its shade colour only (DKR_NOTEX_KINDS, the switch bench's texture cost row). */
+static COLD NOINLINE void no_textures(void) {
+    GfxCombiner *c = &sBatchState.combiner;
+    sBatchState.textures[0] = sBatchState.textures[1] = NULL;
+    c->numCycles = 1;
+    c->rgb[0].a = c->rgb[0].b = c->rgb[0].c = GFX_CC_ZERO;
+    c->rgb[0].d = GFX_CC_SHADE;
+    c->alpha[0] = c->rgb[0];
+    c->rgb[1] = c->rgb[0];
+    c->alpha[1] = c->alpha[0];
+}
+
 /* Draws the sky batches held back by sky_hold (see sSky), at the farthest depth behind what has been drawn. */
 static COLD NOINLINE void sky_draw_held(void) {
     s32 i;
@@ -1398,6 +1411,9 @@ static COLD NOINLINE s32 sky_hold(void) {
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
+        if (UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1) {
+            no_textures();
+        }
         if (UNLIKELY(sSkyLast) && sky_hold()) {
             sBatchCount = 0;
             sBatchVertices = 0;
@@ -1589,6 +1605,8 @@ static void read_switches(void) {
     // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
     sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
     sSkyLast = plat_switch("DKR_SKY_LAST", 0) != 0;
+    // The switch bench's texture cost row: these kinds (a bit each, as DKR_SKIP_KINDS) are drawn without textures.
+    sNoTexKinds = (u32) plat_switch("DKR_NOTEX_KINDS", 0);
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
