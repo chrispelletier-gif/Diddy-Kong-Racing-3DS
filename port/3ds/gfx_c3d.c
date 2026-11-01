@@ -4634,9 +4634,11 @@ static void __attribute__((noinline, cold)) read_drain_settings(void) {
              sFlushMode == 0 ? "off" : sFlushMode == 1 ? "on state changes" : "always");
     env = plat_getenv("DKR_AFTER_CLEAR");
     sAfterClear = env != NULL ? atoi(env) : 1;
-    // DKR_REWRITE=2 (head flicker bench): every draw's settings written twice, in case the GPU also misses texture
-    // or combiner settings written right after a draw. A switch, read again for each bench race.
-    sRewrite = plat_switch("DKR_REWRITE", 1);
+    // DKR_REWRITE=2: every draw's settings written twice, as the GPU also misses texture or combiner settings written
+    // right after a draw: an AI Diddy's head and far cliffs dropped out on a New 3DS, more under GPU load, and the
+    // switch bench's =2 races were clean where the usual ones flickered (2026-11-01). New 3DS default; the Old 3DS
+    // never showed it and keeps =1. A switch, read again for each bench race.
+    sRewrite = plat_switch("DKR_REWRITE", plat_old_3ds() ? 1 : 2);
     plat_log("settings written twice: %s", sRewrite == 2 ? "on every draw"
                                            : sRewrite    ? "on every blend or depth change"
                                                          : "known cases only");

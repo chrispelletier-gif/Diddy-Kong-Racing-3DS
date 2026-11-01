@@ -250,14 +250,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
  * 400-pixel rows. Bench #320: the sky drawn last (P41) and a depth buffer without stencil (P42) saved nothing (left
  * off, rows dropped); the untextured track row looks for what makes a track pixel cost. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    // Trimmed 2026-11-01 (user): the cost rows were measured in #320/#332, adaptive AA is the default, and every
-    // Old 3DS default the head flicker hunt bisected still flickered, as did per-queue wake-ups (now on by default).
-    // What is left is the one Old 3DS difference not yet raced: the other karts' lower detail models.
-    { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1, 1 },
-    // The GPU misses some settings written right after a draw (drain_before_draw); only blend and depth changes are
-    // written twice. A flicker that grows with GPU load (less with AA off, user 2026-11-01) fits a missed texture or
-    // combiner setting: this writes every draw's settings twice.
-    { "head: every draw's settings written twice", { "DKR_REWRITE", NULL }, 1, 2, 1, 1 },
+    // Head and cliff dropouts (2026-11-01): every draw's settings written twice (DKR_REWRITE=2) kept them away in
+    // every race where the usual settings flickered, so it is the New 3DS default; this row checks the flicker comes
+    // back with the old setting. The racer LOD row (also clean) went: it changes how the karts look.
+    { "head check: settings written twice only on blend or depth changes (old)", { "DKR_REWRITE", NULL }, 2, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*
