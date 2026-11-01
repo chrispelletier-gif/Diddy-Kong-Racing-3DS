@@ -64,3 +64,14 @@ void port_draw_kind_game(int kind, int object) {
     (void) kind;
     (void) object;
 }
+
+/* The switch bench's cost rows and native meshes (DKR_SKIP_GAME_KINDS, DKR_NATIVE_MESH): both off in a player's build. */
+int port_skip_game_kind(int kind) {
+    (void) kind;
+    return 0;
+}
+
+int port_native_mesh_for(int isRacer) {
+    (void) isRacer;
+    return 0;
+}

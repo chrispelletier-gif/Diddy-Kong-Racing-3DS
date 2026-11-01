@@ -38,6 +38,11 @@ struct PlatThread {
     const char *name;
 };
 
+static PlatThread *volatile sSplitBackend; // The two-core renderer's second thread (PLAT_THREAD_RCP2), once made
+static int sSplitBackendPrio;
+static int sSplitBackendOnGameCore;
+static int split_backend_prio(void);
+
 struct PlatSem {
     LightSemaphore sem;
 };
@@ -189,9 +194,19 @@ void plat_split_render_cores(int on) {
     if (sRcpCore != 0) {
         return;
     }
-    if (on && !sRaised) {
-        const char *env = plat_getenv("DKR_SPLIT_SHARE");
-        int share = env != NULL ? atoi(env) : 80;
+    if (on && sRaised) {
+        // Called every frame while split: the switch bench changes the share between races (DKR_SPLIT_SHARE).
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
+        if (share != sSyscoreShare && share >= 5 && share <= 89) {
+            Result res = APT_SetAppCpuTimeLimit(share);
+            plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
+                     R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+            if (R_SUCCEEDED(res)) {
+                sSyscoreShare = share;
+            }
+        }
+    } else if (on) {
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
         Result res;
         if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
             sBefore = 0;
@@ -378,10 +393,13 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             // it goes above the game as the renderer does.
             stackSize = 64 * 1024;
             if (sRcpCore == 1 || sRcpCore == 2) {
-                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle (#168: 80%), so the
-                // backend goes there, above the game, rather than onto the system core's limited share.
+                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle in races (#168: 80%), so
+                // the backend goes there rather than onto the system core's limited share: below the game
+                // (plat_split_backend_priority), which it held up by most of its own time when above it (#383:
+                // Central Area logic 12.7 ms a frame with the backend 12.7 ms busy, 47-52 fps).
                 core = 0;
-                prio = PRIO_RCP;
+                prio = split_backend_prio();
+                sSplitBackendOnGameCore = 1;
             } else {
                 // The share was raised first (plat_split_render_cores).
                 core = 1;
@@ -390,12 +408,23 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
                 prio = PRIO_SYSCORE_AUDIO + 1;
             }
             break;
+        case PLAT_THREAD_RCP2_SYS:
+            // On the system core with its share raised (plat_split_syscore_share), below the system's services there
+            // (the GPU's among them: above them the frame times doubled, #78).
+            stackSize = 64 * 1024;
+            core = 1;
+            prio = PRIO_SYSCORE_AUDIO + 1;
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
             break;
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
+    if (kind == PLAT_THREAD_RCP2) {
+        sSplitBackend = thread;
+        sSplitBackendPrio = prio;
+    }
     if (thread->handle == NULL && kind == PLAT_THREAD_AUDIO && core != sRcpCore) {
         plat_log("thread %s: core %d unavailable, using the renderer's core %d", name, core, sRcpCore);
         core = sAudioCore = sRcpCore;
@@ -408,8 +437,8 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             sSyscoreShare = 0;
             prio = PRIO_RCP;
         }
-        if (kind == PLAT_THREAD_RCP2) {
-            prio = PRIO_RCP;
+        if (kind == PLAT_THREAD_RCP2 || kind == PLAT_THREAD_RCP2_SYS) {
+            prio = kind == PLAT_THREAD_RCP2_SYS ? split_backend_prio() : PRIO_RCP;
         }
         core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
@@ -419,6 +448,62 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         plat_fatal("Could not create thread %s", name);
     }
     return thread;
+}
+
+/*
+ * The two-core renderer's backend on a New 3DS's game core (DKR_SPLIT_BELOW_GAME): 1 (default) just below the
+ * game's main thread (N64 priority 10), so the game's frame comes first and the backend has the core whenever the
+ * game waits; 0 above the game, as before.
+ */
+static int split_backend_prio(void) {
+    return plat_switch("DKR_SPLIT_BELOW_GAME", 1) ? PRIO_GAME_LOWEST - 10 + 1 : PRIO_RCP;
+}
+
+int plat_split_syscore_possible(void) {
+    return sRcpCore == 2 && sAudioCore != 1;
+}
+
+/* The system core's share for the backend there (DKR_SPLIT_SHARE, 80% by default), and back as it was. */
+int plat_split_syscore_share(int on) {
+    static int sRaised;
+    static u32 sBefore;
+    if (on && !sRaised) {
+        const char *env = plat_getenv("DKR_SPLIT_SHARE");
+        int share = env != NULL ? atoi(env) : 80;
+        Result res;
+        if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
+            sBefore = 0;
+        }
+        res = APT_SetAppCpuTimeLimit(share);
+        plat_log("system core time limit %d%% for the renderer's second thread (was %lu%%): %s (0x%08lX)", share,
+                 (unsigned long) sBefore, R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        if (R_FAILED(res)) {
+            return 0;
+        }
+        sRaised = 1;
+        sSyscoreShare = share;
+    } else if (!on && sRaised) {
+        Result res = APT_SetAppCpuTimeLimit(sBefore >= 5 ? sBefore : 5);
+        plat_log("system core time limit back to %lu%%: %s (0x%08lX)", (unsigned long) (sBefore >= 5 ? sBefore : 5),
+                 R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+        sRaised = 0;
+        sSyscoreShare = 0;
+    }
+    return 1;
+}
+
+void plat_split_backend_priority(void) {
+    PlatThread *thread = sSplitBackend;
+    int prio;
+    if (thread == NULL || thread->handle == NULL || !sSplitBackendOnGameCore) {
+        return;
+    }
+    prio = split_backend_prio();
+    if (prio != sSplitBackendPrio) {
+        sSplitBackendPrio = prio;
+        svcSetThreadPriority(threadGetHandle(thread->handle), prio);
+        plat_log("two-core renderer: its second thread %s the game", prio == PRIO_RCP ? "above" : "below");
+    }
 }
 
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {
@@ -538,6 +623,7 @@ const char *plat_data_dir(void) {
 static LightLock sLogLock;
 static int sLogLines;
 static int sLogDebug;
+static volatile int sLogAsync; // Start-up lines written by the writer thread (from when the ROM is loaded)
 static int sLogLockReady;
 static int sLockReady_hook(void) {
     return sLogLockReady;
@@ -621,6 +707,7 @@ static WriteJob *sJobHead, *sJobTail;
 static volatile unsigned int sJobsPending;  /* Queued or running. */
 static volatile unsigned int sBytesPending;
 static int sWriterState; /* 0 not started, 1 running, -1 could not start. */
+static Thread sWriter;
 static LogChunk sLogChunk, sCopyChunk;
 
 static void run_job(WriteJob *job) {
@@ -674,7 +761,8 @@ static void queue_job(int kind, FILE *file, char *data, unsigned int size, const
     }
     if (sWriterState == 0) {
         // Below every game thread, on the game's core (the renderer has its own on a New 3DS).
-        sWriterState = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true) != NULL ? 1 : -1;
+        sWriter = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true);
+        sWriterState = sWriter != NULL ? 1 : -1;
     }
     while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
         svcSleepThread(2000000);
@@ -763,9 +851,22 @@ void plat_log_drain(void) {
         chunk_flush(&sCopyChunk);
         LightLock_Unlock(&sLogLock);
     }
+    // On an Old 3DS the game keeps its core busy in races and on the overworld, so the writer, below every game
+    // thread there, would never run and a bug report waited for it for ever. It is raised until it has caught up.
+    int raised = 0;
+    if (sJobsPending > 0 && sWriterState > 0 && plat_old_3ds()) {
+        raised = R_SUCCEEDED(svcSetThreadPriority(threadGetHandle(sWriter), 0x18));
+    }
     while (sJobsPending > 0 && sWriterState > 0) {
         svcSleepThread(5000000);
     }
+    if (raised) {
+        svcSetThreadPriority(threadGetHandle(sWriter), 0x3E);
+    }
+}
+
+void plat_saves_drain(void) {
+    plat_log_drain();
 }
 
 /* Saves a file on the writer thread; data comes from malloc and is freed there. */
@@ -788,9 +889,16 @@ static FILE *log_file(void) {
     if (!sLogDebug && sLogLines >= LOG_BOOT_LINES) {
         if (sFile != NULL && sLogLines == LOG_BOOT_LINES) {
             // Said in the file, so that its end is not taken for the moment the game stopped.
-            fprintf(sFile, "(log.txt ends here; bug reports carry the latest lines, and a hang saves them to "
-                           "hang_log.txt)\n");
-            fflush(sFile);
+            static const char sEnds[] = "(log.txt ends here; bug reports carry the latest lines, and a hang saves "
+                                        "them to hang_log.txt)\n";
+            char *copy = sLogAsync ? malloc(sizeof(sEnds) - 1) : NULL;
+            if (copy != NULL) {
+                memcpy(copy, sEnds, sizeof(sEnds) - 1);
+                queue_job(JOB_WRITE, sFile, copy, sizeof(sEnds) - 1, NULL);
+            } else {
+                fputs(sEnds, sFile);
+                fflush(sFile);
+            }
             sLogLines++;
         }
         return NULL;
@@ -822,10 +930,19 @@ static void log_line(const char *prefix, const char *text) {
         if (length >= (int) sizeof(line)) {
             length = sizeof(line) - 1;
         }
-        if (sLogLines < LOG_BOOT_LINES) {
+        if (sLogLines < LOG_BOOT_LINES && !sLogAsync) {
             // The start-up lines go to the card at once: they are what is left if the game never gets going.
             fwrite(line, 1, length, file);
             fflush(file);
+        } else if (sLogLines < LOG_BOOT_LINES) {
+            // Once the game runs, each of these lines still goes to the card at once, but on the writer thread: an
+            // fflush takes about 7 ms, and a profile report is 7 lines, so the game thread lost ~50 ms a time.
+            char *copy = malloc(length);
+            chunk_flush(&sLogChunk);
+            if (copy != NULL) {
+                memcpy(copy, line, length);
+                queue_job(JOB_WRITE, file, copy, length, NULL);
+            }
         } else {
             chunk_add(&sLogChunk, file, line, length);
         }
@@ -1035,6 +1152,7 @@ void plat_rom_loaded(void) {
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
+    sLogAsync = !plat_switch("DKR_LOG_SYNC", 0);
 }
 
 /* The buttons (see bs_set_buttons). */

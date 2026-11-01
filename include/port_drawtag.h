@@ -25,6 +25,18 @@ enum {
 /* The game thread's side: notes when each kind (and object kind, profile.h PROF_OBJ_*; -1 for none) starts, for the
  * time it spends building it (port_profile.c). */
 void port_draw_kind_game(int kind, int object);
+/* DKR_SKIP_GAME_KINDS (a bitmask of the kinds above, switch bench cost rows): the game doesn't build these at all, so
+ * neither the game thread nor the renderer pays for them; the most a native renderer for that kind could save. */
+int port_skip_game_kind(int kind);
+/*
+ * Native model meshes (roadmap NR1, DKR_NATIVE_MESH, a bitmask: 1 the racers, 2 other objects' 3D models): render_mesh
+ * puts this tag before each batch's vertex loads and triangles. The renderer then draws the batch from its own tables
+ * (gfx_rdp.c native_mesh: each model's corners and indices worked out once, every vertex transformed once) instead of
+ * replaying the N64 vertex slots; when it can't (billboards, flat matrices, the profiler's audit frames) it ignores the
+ * tag and the commands after it draw the batch as before.
+ */
+#define PORT_NATIVE_TAG 0x504E0000 /* "PN" */
+int port_native_mesh_for(int isRacer);
 #define port_draw_tag(dl, kind)                                                                                        \
     do {                                                                                                               \
         gDPNoOpTag(dl, PORT_DRAW_TAG | (kind));                                                                        \

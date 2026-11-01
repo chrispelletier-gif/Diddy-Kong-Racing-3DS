@@ -72,6 +72,12 @@ s32 port_save_write(const char *name, const void *data, u32 size) {
     return plat_save_file(path, data, size);
 }
 
+void port_save_write_later(const char *name, void *data, u32 size) {
+    char path[256];
+    make_path(path, sizeof(path), name);
+    plat_save_file_later(path, data, size);
+}
+
 static s32 has_rom_extension(const char *name) {
     s32 len = strlen(name);
     const char *ext;
@@ -146,6 +152,7 @@ void port_boot(void) {
         case PORT_ROM_OK:
             plat_status("ROM loaded in %.1f s", (plat_time_ns() - start) / 1e9);
             port_log("Using ROM %s", path);
+            gPortGameStage = "starting: bottom screen"; // The watchdog names the start-up step a hang is in
             plat_rom_loaded();
             break;
         case PORT_ROM_WRONG_VERSION:
@@ -168,9 +175,12 @@ void port_boot(void) {
                        port_rom_supported_release(), plat_data_dir());
             break;
     }
+    gPortGameStage = "starting: saves";
     port_si_init();
+    gPortGameStage = "starting: vi and rcp threads";
     port_vi_init();
     port_rcp_init();
+    gPortGameStage = "starting";
     plat_status("Starting the game...");
     mainproc();
 }

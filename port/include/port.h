@@ -153,6 +153,8 @@ void port_rumble(s32 controller, s32 enable);
 /* Save files. */
 s32 port_save_read(const char *name, void *data, u32 size);
 s32 port_save_write(const char *name, const void *data, u32 size);
+/* Writes on the background writer and frees data (malloc'd) there; plat_saves_drain() waits for such writes. */
+void port_save_write_later(const char *name, void *data, u32 size);
 /* Whether the data folder has the file at all (an empty one counts). */
 s32 port_save_exists(const char *name);
 /*

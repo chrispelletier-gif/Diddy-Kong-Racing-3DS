@@ -253,6 +253,7 @@ static void preview_race(const char *dir) {
     int i;
     memset(&hud, 0, sizeof(hud));
     hud.mapSprite = -1;
+    hud.level = 10; // Crescent Island's map, for the looks that show one.
     hud.silverCoins = -1;
     hud.racerCount = 8;
     for (i = 0; i < 8; i++) {

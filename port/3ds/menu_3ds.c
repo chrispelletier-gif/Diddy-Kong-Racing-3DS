@@ -102,6 +102,7 @@ enum {
     MAIN_BUGREPORT,
     MAIN_PICTURE_DELAY,
     MAIN_PICTURE,
+    MAIN_RESEND_RESULTS,
     MAIN_O3DS_RENDER
 };
 
@@ -167,6 +168,8 @@ static const char *row_label(int i) {
         return "Check for updates";
     } else if (i == MAIN_O3DS_RENDER) {
         return "Renderer (restart)";
+    } else if (i == MAIN_RESEND_RESULTS) {
+        return "Send test results again";
     }
     return "Send a bug report";
 }
@@ -226,6 +229,8 @@ static const char *row_hint(int i) {
         return "Install a newer build from GitHub";
     } else if (i == MAIN_O3DS_RENDER) {
         return "Old 3DS: lend it the system core";
+    } else if (i == MAIN_RESEND_RESULTS) {
+        return "The last run's results, from the SD card";
     }
     return "Log and snapshot (also SELECT+touch)";
 }
@@ -242,11 +247,13 @@ static void row_change(int i, int step) {
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
         plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
     } else if (i == MAIN_FPS) {
-        // 30, 60, then a steady 20 for an Old 3DS.
+        // 30, 60, then a steady 20 for an Old 3DS (which has no 60).
         static const int sRates[3] = { 30, 60, 20 };
-        int at;
-        for (at = 0; at < 2 && sRates[at] != plat_frame_rate_setting(); at++) {}
-        plat_set_frame_rate_setting(sRates[(at + step + 3) % 3]);
+        static const int sOldRates[2] = { 30, 20 };
+        const int *rates = plat_can_60fps() ? sRates : sOldRates;
+        int n = plat_can_60fps() ? 3 : 2, at;
+        for (at = 0; at < n - 1 && rates[at] != plat_frame_rate_setting(); at++) {}
+        plat_set_frame_rate_setting(rates[(at + step + n) % n]);
     } else if (i == MAIN_MIPMAPS) {
         int modes = PLAT_DEBUG_TOOLS ? 3 : 2; // Show is for debugging.
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + modes) % modes);
@@ -266,6 +273,8 @@ static void row_change(int i, int step) {
         sResult = MENU_UPDATES;
     } else if (i == MAIN_O3DS_RENDER) {
         settings_set("o3ds_render", ((settings_get("o3ds_render", 0) & 3) + step + 4) % 4);
+    } else if (i == MAIN_RESEND_RESULTS) {
+        sResult = MENU_RESEND_RESULTS;
     } else {
         sResult = MENU_BUGREPORT;
     }
@@ -306,10 +315,10 @@ static void picture_change(int i, int step) {
 static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, picture_value,
                                        picture_change, picture_hint, NULL };
 
-/* The Tools page (a debug build's only): the profiler, updates and bug reports, and on an Old 3DS where its renderer
- * runs. */
+/* The Tools page (a debug build's only): the profiler, updates, bug reports and sending test results again, and on an
+ * Old 3DS where its renderer runs. */
 static int tools_count(void) {
-    return is_old_3ds() ? 6 : 5;
+    return is_old_3ds() ? 7 : 6;
 }
 
 static const char *tools_label(int i) {
@@ -636,25 +645,23 @@ void menu_3ds_scroll(int direction) {
 
 /* A tap at (x, y) above the panel. Returns what the panel should do (MENU_*). */
 int menu_3ds_tap(int x, int y) {
-    int slot, i;
+    int slot, i, hit, stepBack;
     char value[48];
 
     if (sPage == NULL) {
         return MENU_STAY;
     }
-    if (x < BS_MENU_TAB_X1) {
-        // A tab.
-        slot = (y - BS_MENU_TAB_Y0) / BS_MENU_TAB_HEIGHT(sTabCount);
-        if (y >= BS_MENU_TAB_Y0 && slot < sTabCount && sTabs[slot] != sPage) {
+    hit = bs_menu_hit(x, y, sTabCount, &slot, &stepBack);
+    if (hit == BS_MENU_HIT_TAB) {
+        if (sTabs[slot] != sPage) {
             plat_request_ui_sound(PLAT_UI_SOUND_MOVE);
             open_page(sTabs[slot]);
         }
         return MENU_STAY;
     }
-    if (y < BS_MENU_FIRST_Y) {
+    if (hit != BS_MENU_HIT_ROW) {
         return MENU_STAY;
     }
-    slot = (y - BS_MENU_FIRST_Y) / BS_MENU_ROW_HEIGHT;
     i = sFirst + slot;
     if (slot >= ROWS_PER_PAGE || i >= sPage->count()) {
         return MENU_STAY;
@@ -664,7 +671,7 @@ int menu_3ds_tap(int x, int y) {
     sResult = MENU_STAY;
     // A value changing, or a row that does something or opens a page.
     plat_request_ui_sound(value[0] != '\0' ? PLAT_UI_SOUND_MOVE : PLAT_UI_SOUND_SELECT);
-    sPage->change(i, value[0] != '\0' && x >= BS_MENU_VALUE_X && x < BS_MENU_VALUE_SPLIT ? -1 : 1);
+    sPage->change(i, value[0] != '\0' && stepBack ? -1 : 1);
     if (sResult == MENU_STAY && sPage != NULL) {
         // Redraws the changed row (all of them, as a change can add or remove rows, and the lit row moves).
         draw();

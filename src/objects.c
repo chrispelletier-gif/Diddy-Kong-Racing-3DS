@@ -3726,6 +3726,9 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     if (obj->objectID == ASSET_OBJECT_ID_N64LOGO) {
         return;
     }
+    if (obj->behaviorId == BHV_RACER && port_skip_game_kind(PORT_DRAW_RACERS)) {
+        return;
+    }
 #endif
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
     gObjectCurrDisplayList = *dList;
@@ -3845,12 +3848,12 @@ void set_temp_model_transforms(Object *obj) {
                     batchNum = 0;
 #ifdef TARGET_PORT
                     {
-                        // DKR_RACER_LOD=n: the other racers switch to their lower detail models at the distances
-                        // the game uses with n + 1 players on screen (Old 3DS default 2). The player's kart keeps
+                        // Old 3DS work (DKR_RACER_LOD=n): the other racers switch to their lower detail models at
+                        // the distances the game uses with n + 1 players on screen. The player's own kart keeps
                         // its own distances.
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
-                            s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0);
+                            s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }
@@ -4338,6 +4341,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     dList = gObjectCurrDisplayList;
     i = startIndex;
     endLoop = FALSE;
+#ifdef TARGET_PORT
+    {
+        // Native model meshes (port_drawtag.h, DKR_NATIVE_MESH): tag each batch's vertices and triangles.
+        s32 nativeTag = obj != NULL && port_native_mesh_for(obj->behaviorId == BHV_RACER);
+#endif
     while (i < objModel->numberOfBatches && !endLoop) {
         if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
             // Hidden/Invisible geometry
@@ -4374,6 +4382,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     gDkrDmaDisplayList(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(texToSet->cmd),
                                        texToSet->numberOfCommands);
                 }
+#ifdef TARGET_PORT
+                if (nativeTag) {
+                    gDPNoOpTag(dList++, PORT_NATIVE_TAG);
+                }
+#endif
                 if (offsetStartVertex == numVertices) {
                     gSPVertexDKR(dList++, OS_K0_TO_PHYSICAL(vtx), numVertices, 0);
                 } else {
@@ -4395,6 +4408,9 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
             endLoop = TRUE;
         }
     }
+#ifdef TARGET_PORT
+    }
+#endif
     if (i >= objModel->numberOfBatches) {
         i = -1;
     }

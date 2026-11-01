@@ -24,7 +24,10 @@
 #include "gfx_backend.h"
 #include "gfx_split.h"
 
-#define SPLIT_RING_BYTES (2u * 1024u * 1024u)
+/* The queue's size, a power of two (the ring's offsets wrap with the unsigned counters): 2 MB on a New 3DS, 1 MB on
+ * an Old 3DS, where a crowded frame queues about 200 KB and the heap is tight. Set before the queue is allocated. */
+static unsigned int sRingBytes = 2u * 1024u * 1024u;
+#define SPLIT_RING_BYTES sRingBytes
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {
@@ -37,6 +40,9 @@ enum {
     OP_TEX_UPLOAD,
     OP_TEX_FREE,
     OP_TEX_SHARE,
+    OP_MODEL,
+    OP_MESHES,
+    OP_MESH_FREE,
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -54,6 +60,13 @@ typedef struct SplitDraw {
     int numVerts, numTriangles; // OP_TRIANGLES: numVerts is 3 * numTriangles and there are no indices
 } SplitDraw;
 
+/* OP_MODEL: followed by numVerts model vertices and 3 * numTriangles indices. OP_MESHES: by numParts parts. */
+typedef struct SplitModel {
+    GfxDrawState state;
+    GfxModelParams params;
+    int numVerts, numTriangles;
+} SplitModel;
+
 typedef struct SplitTexture {
     GfxTexture *tex;
     const GfxTexture *src;
@@ -61,7 +74,11 @@ typedef struct SplitTexture {
 
 static unsigned char *sRing;
 static volatile unsigned int sHead, sTail; // Bytes written and read so far (they wrap together)
-static PlatSem *sData;                      // A record (or a wake-up) for the backend thread
+static PlatSem *sData;                      // A record (or a wake-up) for the backend thread (the owner's)
+static PlatSem *sDataSems[2];               // Each backend thread's: [0] on the game's core, [1] on the system core
+static volatile int sOwner;                 // Which backend thread takes the queue (gfx_split_frame_start)
+static volatile int sParked[2];             // That thread saw it isn't the owner and waits to be one again
+static int sMade[2];                        // That thread exists
 static PlatSem *sSpace;                     // The backend thread moved on while the walk waited for it
 static PlatSem *sFrameSlots;                // Frames the walk may still start ahead of the backend
 static volatile int sWalkWaiting;           // The walk waits on sSpace for room (or for the ring to empty)
@@ -142,13 +159,21 @@ static void commit(void *payload) {
 }
 
 static void backend_thread(void *arg) {
-    (void) arg;
+    int self = (int) (long) arg;
     for (;;) {
+        if (sOwner != self) {
+            // Another backend thread has the queue (it was handed over with the queue empty): wait to have it again.
+            sParked[self] = 1;
+            __sync_synchronize();
+            plat_sem_wait(sDataSems[self]);
+            sParked[self] = 0;
+            continue;
+        }
         sBackendIdle = 1;
         __sync_synchronize(); // The flag is set before the head is looked at (see commit).
         if (sTail == sHead) {
             unsigned long long start = plat_time_ns();
-            plat_sem_wait(sData);
+            plat_sem_wait(sDataSems[self]);
             sBackendWaitNs += plat_time_ns() - start;
             sBackendWakes++;
         }
@@ -197,6 +222,21 @@ static void backend_thread(void *arg) {
                     }
                     break;
                 }
+                case OP_MODEL: {
+                    SplitModel *m = p;
+                    const GfxModelVertex *verts = (const GfxModelVertex *) (m + 1);
+                    gfxb_draw_model(&m->state, &m->params, verts, m->numVerts,
+                                    (const unsigned short *) (verts + m->numVerts), m->numTriangles);
+                    break;
+                }
+                case OP_MESHES: {
+                    SplitModel *m = p;
+                    gfxb_draw_meshes(&m->state, &m->params, (const GfxMeshPart *) (m + 1), m->numVerts);
+                    break;
+                }
+                case OP_MESH_FREE:
+                    gfxb_mesh_free(((SplitTexture *) p)->tex);
+                    break;
                 case OP_TEX_UPLOAD:
                     gfxb_texture_upload(((SplitTexture *) p)->tex);
                     break;
@@ -235,18 +275,58 @@ static int start_backend(void) {
     if (sFailed) {
         return FALSE;
     }
+    sRingBytes = plat_old_3ds() ? 1024u * 1024u : 2u * 1024u * 1024u;
     sRing = plat_malloc(SPLIT_RING_BYTES);
     if (sRing == NULL) {
         plat_log("two-core renderer: no memory for its queue");
         sFailed = TRUE;
         return FALSE;
     }
-    sData = plat_sem_create(0);
+    sDataSems[0] = plat_sem_create(0);
+    sDataSems[1] = plat_sem_create(0);
+    sData = sDataSems[0];
+    sOwner = 0;
     sSpace = plat_sem_create(0);
     sFrameSlots = plat_sem_create(SPLIT_FRAMES_AHEAD);
-    plat_thread_create(backend_thread, NULL, 0, PLAT_THREAD_RCP2, "rdp2");
+    plat_thread_create(backend_thread, (void *) 0L, 0, PLAT_THREAD_RCP2, "rdp2");
+    sMade[0] = TRUE;
     sStarted = TRUE;
     return TRUE;
+}
+
+/*
+ * A New 3DS can also run the backend on the system core (DKR_SPLIT_SYSCORE=1), with its share raised, instead of on
+ * the game's core, which the game and the backend together fill in a busy race (#390: game core 2-14% idle, a 33 ms
+ * frame every 8-16). Each core has a thread of its own; the queue is handed over empty, at a frame's start.
+ */
+static void choose_backend(void) {
+    int want = plat_split_syscore_possible() && plat_switch("DKR_SPLIT_SYSCORE", 0) ? 1 : 0;
+    int old = sOwner;
+    if (want == old) {
+        return;
+    }
+    if (want == 1 && !plat_split_syscore_share(TRUE)) {
+        return;
+    }
+    gfx_split_drain();
+    sOwner = want;
+    __sync_synchronize();
+    plat_sem_post(sDataSems[old]); // So it sees it isn't the owner, if it waits for records
+    while (!sParked[old]) {
+        plat_sleep_ns(1000000ULL);
+    }
+    sData = sDataSems[want];
+    if (!sMade[want]) {
+        plat_thread_create(backend_thread, (void *) (long) want, 0, want ? PLAT_THREAD_RCP2_SYS : PLAT_THREAD_RCP2,
+                           want ? "rdp2 system core" : "rdp2");
+        sMade[want] = TRUE;
+    } else {
+        plat_sem_post(sDataSems[want]);
+    }
+    if (want == 0) {
+        plat_split_syscore_share(FALSE);
+    }
+    plat_log("two-core renderer: its second thread on the %s core", want ? "system" : "game's");
 }
 
 void gfx_split_drain(void) {
@@ -276,8 +356,12 @@ int gfx_split_frame_start(int direct) {
     }
     if (!sActive) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
+    } else {
+        plat_split_render_cores(TRUE); // Follows a change of the system core's share (the switch bench's)
     }
     sActive = TRUE;
+    choose_backend();
+    plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
     if (!plat_sem_try_wait(sFrameSlots)) {
         unsigned long long start = plat_time_ns();
@@ -412,4 +496,54 @@ void gfx_split_texture_free(GfxTexture *tex) {
     // catches up first, then the free is made here, with the backend idle.
     gfx_split_drain();
     gfxb_texture_free(tex);
+}
+
+/*
+ * GPU vertex maths (P30) and meshes (P31, P34) on two cores: model draws are queued like the others, with their
+ * matrix. The walk creates meshes itself (gfxb_mesh_create may be called from either thread); a mesh freed goes
+ * through the queue, after the draws that still use it.
+ */
+void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
+                          int numVerts, const unsigned short *indices, int numTriangles) {
+    SplitModel *m;
+    unsigned int vertBytes = (unsigned int) numVerts * sizeof(GfxModelVertex);
+    unsigned int indexBytes = (unsigned int) numTriangles * 3u * sizeof(unsigned short);
+    if (!sActive || sizeof(SplitModel) + vertBytes + indexBytes + 64u > SPLIT_RING_BYTES / 4u) {
+        gfx_split_drain();
+        gfxb_draw_model(state, params, verts, numVerts, indices, numTriangles);
+        return;
+    }
+    m = reserve(OP_MODEL, sizeof(SplitModel) + vertBytes + indexBytes);
+    m->state = *state;
+    m->params = *params;
+    m->numVerts = numVerts;
+    m->numTriangles = numTriangles;
+    memcpy(m + 1, verts, vertBytes);
+    memcpy((unsigned char *) (m + 1) + vertBytes, indices, indexBytes);
+    commit(m);
+}
+
+void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                           int numParts) {
+    SplitModel *m;
+    unsigned int partBytes = (unsigned int) numParts * sizeof(GfxMeshPart);
+    if (!sActive) {
+        gfxb_draw_meshes(state, params, parts, numParts);
+        return;
+    }
+    m = reserve(OP_MESHES, sizeof(SplitModel) + partBytes);
+    m->state = *state;
+    m->params = *params;
+    m->numVerts = numParts;
+    m->numTriangles = 0;
+    memcpy(m + 1, parts, partBytes);
+    commit(m);
+}
+
+void gfx_split_mesh_free(void *mesh) {
+    if (!sActive) {
+        gfxb_mesh_free(mesh);
+        return;
+    }
+    texture_op(OP_MESH_FREE, mesh, NULL);
 }

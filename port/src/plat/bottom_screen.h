@@ -39,6 +39,11 @@ enum { BS_AREA_TOP, BS_AREA_BUTTONS, BS_AREA_STATUS, BS_AREA_COUNT };
 #define BS_MENU_VALUE_X 214
 #define BS_MENU_VALUE_SPLIT 261
 
+/* What a tap in the Settings menu lands on, in the current look's layout (bottom_screen.c). */
+enum { BS_MENU_HIT_NONE, BS_MENU_HIT_TAB, BS_MENU_HIT_ROW };
+/* index: the tab, or the row on the page (0 to BS_MENU_ROWS - 1); stepBack: the tap is on a value's back half. */
+int bs_menu_hit(int x, int y, int tabCount, int *index, int *stepBack);
+
 typedef struct BsMenuRow {
     char label[40];
     char value[40]; /* Empty: the row does something or opens a page. */

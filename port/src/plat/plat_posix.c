@@ -260,6 +260,18 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+int plat_split_syscore_possible(void) {
+    return 0;
+}
+
+int plat_split_syscore_share(int on) {
+    (void) on;
+    return 0;
+}
+
+void plat_split_backend_priority(void) {
+}
+
 void plat_split_render_cores(int on) {
     (void) on;
 }
@@ -436,6 +448,15 @@ void plat_log_copy_to(const char *path) {
 
 unsigned int plat_log_total(void) {
     return 0;
+}
+
+/* On PC a save is quick: written here. */
+void plat_save_file_later(const char *path, void *data, unsigned int size) {
+    plat_save_file(path, data, size);
+    free(data);
+}
+
+void plat_saves_drain(void) {
 }
 
 int plat_log_recent(char *out, int size) {

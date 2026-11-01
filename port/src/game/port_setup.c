@@ -32,7 +32,7 @@ enum { RACE_HUD_TOP, RACE_HUD_BOTTOM, RACE_HUD_BOTH }; // port_set_race_hud_sett
 void plat_set_bottom_style(int style);
 s32 port_bottom_style(void);
 
-/* The fine tuning's pages in order; the picture's is left out where 60 fps can't be had (an Old 3DS). */
+/* The fine tuning's pages in order. */
 #define STEPS 5
 static const s32 sSteps[STEPS] = { SETUP_PAGE_PICTURE, SETUP_PAGE_SCREEN, SETUP_PAGE_CAMERA, SETUP_PAGE_HUD,
                                     SETUP_PAGE_LOOK };
@@ -55,7 +55,7 @@ static s32 can_60fps(void) {
 }
 
 static s32 first_step(void) {
-    return can_60fps() ? 0 : 1;
+    return 0; // An Old 3DS's picture page offers a steady 20 fps instead of 60.
 }
 
 /* Where the page is among the fine tuning's steps (first_step on), or -1. */
@@ -104,7 +104,11 @@ static void apply_tile(s32 page, s32 tile) {
             port_set_race_hud_setting(tile == SETUP_STYLE_CLASSIC ? RACE_HUD_TOP : RACE_HUD_BOTTOM);
             break;
         case SETUP_PAGE_PICTURE:
-            plat_set_picture_style(tile == 1);
+            if (can_60fps()) {
+                plat_set_picture_style(tile == 1);
+            } else {
+                plat_set_frame_rate_setting(tile == 1 ? 20 : 30);
+            }
             break;
         case SETUP_PAGE_SCREEN:
             plat_set_widescreen_style(tile);
@@ -132,7 +136,7 @@ static s32 current_tile(s32 page) {
         case SETUP_PAGE_STYLE:
             return sStyle;
         case SETUP_PAGE_PICTURE:
-            return plat_picture_style() != 0;
+            return can_60fps() ? plat_picture_style() != 0 : plat_frame_rate_setting() == 20;
         case SETUP_PAGE_SCREEN:
             return plat_widescreen_style();
         case SETUP_PAGE_CAMERA:
@@ -204,6 +208,20 @@ static const TileText sPictureTiles[2] = {
       { { "60 fps,", "rougher edges", NULL }, { "60 ips,", "bords moins lisses", NULL } },
       { "60 frames a second for smoother motion. Anti-aliasing is off so that every frame keeps up.",
         "60 images par seconde pour des mouvements plus fluides. Sans anticrenelage, pour suivre le rythme." } },
+};
+
+/* An Old 3DS's picture page: the 3DS screen refreshes 60 times a second, so a cap holds even at 30 or 20 only. */
+static const TileText sPictureTilesOld[2] = {
+    { { "30 FPS", "30 IPS" },
+      { "RECOMMENDED", "RECOMMANDE" },
+      { { "Up to 30 fps,", "may dip a little", NULL }, { "Jusqu'a 30 ips,", "peut baisser un peu", NULL } },
+      { "Aims for 30 frames a second. Busy tracks, widescreen most of all, can dip a little.",
+        "Vise 30 images par seconde. Les pistes chargees, surtout en large, peuvent baisser un peu." } },
+    { { "20 FPS", "20 IPS" },
+      { "STEADY", "STABLE" },
+      { { "Locked 20 fps,", "never wobbles", NULL }, { "20 ips fixes,", "sans a-coups", NULL } },
+      { "A locked 20 frames a second, timed to the screen: less smooth than 30, but even, with no dips.",
+        "20 images par seconde fixes, calees sur l'ecran: moins fluide que 30, mais regulier, sans baisses." } },
 };
 
 static const TileText sScreenTiles[4] = {
@@ -290,7 +308,7 @@ static const TileText *tiles_of(s32 page) {
         case SETUP_PAGE_STYLE:
             return sStyleTiles;
         case SETUP_PAGE_PICTURE:
-            return sPictureTiles;
+            return can_60fps() ? sPictureTiles : sPictureTilesOld;
         case SETUP_PAGE_SCREEN:
             return sScreenTiles;
         case SETUP_PAGE_CAMERA:

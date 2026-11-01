@@ -197,12 +197,34 @@ static int sIndexed = -1;    // DKR_INDEXED, read on first use
 static int sFull = -1; // DKR_FULL_FLUSH, re-read when the switches change (switch bench)
 static int sIboAlign;   // DKR_IBO_ALIGN: each draw's indices start on an 8-index (16-byte) boundary
 
+/* DKR_FLUSH_TEST (Old 3DS tunnel dropout bench, #306: the whole-memory flush row had no dropout): 1 = the whole
+ * linear heap flushed before the frame is handed over, the written ranges as usual; 2 = no extra flush, but the frame
+ * end waits as long as a whole-heap flush takes (only its timing). Read with sFull. */
+static int sFlushTest;
+static unsigned long long sHeapFlushNs, sHeapFlushTotalNs;
+static unsigned int sHeapFlushes;
+
 static int full_flush(void) {
     if (sFull < 0) {
         sFull = plat_switch("DKR_FULL_FLUSH", 0) != 0;
-        plat_log("GPU cache flush: %s", sFull ? "whole linear heap" : "written ranges only");
+        sFlushTest = plat_switch("DKR_FLUSH_TEST", 0);
+        plat_log("GPU cache flush: %s%s", sFull ? "whole linear heap" : "written ranges only",
+                 sFlushTest == 1 ? ", whole heap before the hand-over" : sFlushTest == 2 ? ", heap flush's time waited" : "");
     }
     return sFull;
+}
+
+/* The whole linear heap through the GSP service, as C3D_FrameEnd(0) does, timed (logged every 600 frames). */
+static void heap_flush(void) {
+    unsigned long long start = plat_time_ns();
+    GSPGPU_FlushDataCache((const void *) __ctru_linear_heap, __ctru_linear_heap_size);
+    sHeapFlushNs = plat_time_ns() - start;
+    sHeapFlushTotalNs += sHeapFlushNs;
+    if (++sHeapFlushes % 600 == 0) {
+        plat_log("whole-heap cache flush: %.2f ms on average (%lu KB)", sHeapFlushTotalNs / 600 / 1e6,
+                 (unsigned long) (__ctru_linear_heap_size / 1024));
+        sHeapFlushTotalNs = 0;
+    }
 }
 
 // DKR_IBO_ALIGN (head flicker bench): pads the index buffer so a draw's indices start 16-byte aligned.
@@ -1421,15 +1443,12 @@ static char sCapturePath[256];
  * Recent frames for bug reports. A glitch that lasts a second is gone by the time the snapshot is taken, so every
  * RECENT_EVERY-th frame the screen's picture is copied, exactly as it was shown, into a ring of RECENT_SLOTS
  * (about a second), both eyes in 3D. The slots are taken at start-up, before textures fill linear memory. A snapshot keeps the two that look most like they hold a bright vertical
- * line (a screen column is a row of the rotated picture). On in debug builds with 3 slots, so a report carries the screen as it was shown (all 8 slots with
- * DKR_RECENT_FRAMES=1). It was for the white vertical line, since fixed (the banana counter icon's sprite overran
- * its buffer).
+ * line (a screen column is a row of the rotated picture). Off unless DKR_RECENT_FRAMES=1: it was for the white
+ * vertical line, since fixed (the banana counter icon's sprite overran its buffer).
  */
 #define RECENT_SLOTS 8
 #define RECENT_EVERY 3 // Odd, so the ring holds both even and odd frames
 #define RECENT_KEEP 2
-// Slots taken when the ring is on by default (debug builds): the last few screens before a snapshot, as shown.
-#define RECENT_DEFAULT_SLOTS 3
 #define RECENT_MAX_BYTES (TOP_HEIGHT * TOP_WIDTH * 2 * 3) // 800 pixels across, 3 bytes each (RGB8, 2 in 16-bit)
 static u8 *sRecent[RECENT_SLOTS];
 static int sRecentFrame[RECENT_SLOTS], sRecentRows[RECENT_SLOTS], sRecentBpp[RECENT_SLOTS], sRecentEyes[RECENT_SLOTS];
@@ -1810,9 +1829,7 @@ PLAT_COLD static void log_timing(void) {
  * taken are kept. */
 PLAT_COLD static void allocate_recent_frames(void) {
     // Leave most of linear memory for textures (each slot is 576 KB).
-    int wanted = plat_getenv("DKR_RECENT_FRAMES") != NULL ? RECENT_SLOTS : RECENT_DEFAULT_SLOTS;
-
-    while (sRecentCount < wanted && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
+    while (sRecentCount < RECENT_SLOTS && linearSpaceFree() >= RECENT_MAX_BYTES + 14 * 1024 * 1024) {
         sRecent[sRecentCount] = linearAlloc(RECENT_MAX_BYTES);
         if (sRecent[sRecentCount] == NULL) {
             break;
@@ -1998,8 +2015,8 @@ static void history_start(void) {
     sHistoryTest = sHistoryOn == 2;
 #endif
     if (sHistoryOn) {
-        // An Old 3DS has half the memory: a second.
-        int slots = is_old_3ds() ? HISTORY_FRAMES / 3 : HISTORY_FRAMES;
+        // An Old 3DS keeps 1 s at its 30 fps: its heap was down to 1 MB with 2 s (v35), and bug reports failed to send.
+        int slots = is_old_3ds() ? HISTORY_FRAMES / 6 : HISTORY_FRAMES;
         while (slots >= 30 && (sHistory = malloc((size_t) slots * HISTORY_PIXELS * 2)) == NULL) {
             slots /= 2;
         }
@@ -2026,6 +2043,8 @@ static int *history_buffer_frame(const u8 *buffer, int add) {
     sHistoryBuf[0].frame = -1;
     return &sHistoryBuf[0].frame;
 }
+
+static void flash_watch(void);
 
 /* Called with sRecentScreen found for this frame, before its picture is copied in. */
 static void history_sample(void) {
@@ -2085,6 +2104,7 @@ static void history_sample(void) {
     }
     sHistoryFrame[sHistoryNext] = *frame;
     sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
+    flash_watch();
     sHistoryNs += plat_time_ns() - start;
     if (++sHistorySampled == 600) {
         plat_log("frame history: %llu us a frame (%llu of it cache invalidate)", sHistoryNs / 1000 / 600,
@@ -2124,6 +2144,67 @@ static int history_flash_pixels(const u16 *a, const u16 *b, const u16 *c) {
         }
     }
     return count;
+}
+
+/*
+ * The flash watch (Old 3DS tunnel dropout, #306): as each picture comes in, the one FLASH_LAG pictures back is
+ * scored against those 1 and 2 before and after it (when they are all the frames after one another), on one pixel
+ * in sixteen (v45's one in four and gap 4 cost the Old 3DS's system core some 5 ms a frame). A score over FLASH_SHARE of the pixels counts as a flash; a run of flashed pictures counts once
+ * (PLAT_COUNTER_FLASHES, the switch bench's flashes column) and is logged. DKR_FLASH_WATCH=0 turns it off.
+ */
+#define FLASH_LAG 4
+#define FLASH_SHARE 20 // per cent (#306's tunnel: 32%; 8% caught some 25 a race of other things in v45)
+static int sFlashWatch = -1, sFlashRun;
+
+static int flash_pixels_sparse(const u16 *a, const u16 *b, const u16 *c) {
+    int x, y, count = 0;
+    for (x = 0; x < HISTORY_W; x += 4) {
+        for (y = 0; y < HISTORY_H; y += 4) {
+            int i = x * HISTORY_H + y;
+            int la = history_luma(a[i]), lb = history_luma(b[i]), lc = history_luma(c[i]);
+            int da = abs(lb - la), dc = abs(lb - lc), d = da < dc ? da : dc;
+            if (d - abs(la - lc) > 40) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+static void flash_watch(void) {
+    static const int gaps[2] = { 1, 2 };
+    const int sampled = (HISTORY_W / 4) * (HISTORY_H / 4);
+    int mid, g, best = 0, newest;
+    if (sFlashWatch < 0) {
+        sFlashWatch = plat_switch("DKR_FLASH_WATCH", 1) != 0;
+    }
+    if (!sFlashWatch || sHistorySlots < 2 * FLASH_LAG + 1) {
+        return;
+    }
+    newest = (sHistoryNext + sHistorySlots - 1) % sHistorySlots;
+    mid = (newest + sHistorySlots - FLASH_LAG) % sHistorySlots;
+    for (g = 0; g < 2; g++) {
+        int a = (mid + sHistorySlots - gaps[g]) % sHistorySlots, c = (mid + gaps[g]) % sHistorySlots, sc;
+        if (sHistoryFrame[a] < 0 || sHistoryFrame[c] < 0 || sHistoryFrame[mid] < 0 ||
+            sHistoryFrame[mid] - sHistoryFrame[a] != gaps[g] || sHistoryFrame[c] - sHistoryFrame[mid] != gaps[g]) {
+            continue;
+        }
+        sc = flash_pixels_sparse(sHistory + a * HISTORY_PIXELS, sHistory + mid * HISTORY_PIXELS,
+                                 sHistory + c * HISTORY_PIXELS);
+        if (sc > best) {
+            best = sc;
+        }
+    }
+    if (best * 100 > sampled * FLASH_SHARE) {
+        if (!sFlashRun) {
+            gPlatCounters[PLAT_COUNTER_FLASHES]++;
+            plat_log("picture flash: frame %d, %d%% of the picture unlike the frames around it", sHistoryFrame[mid],
+                     best * 100 / sampled);
+        }
+        sFlashRun = 1;
+    } else {
+        sFlashRun = 0;
+    }
 }
 
 /*
@@ -2263,9 +2344,7 @@ PLAT_COLD static void save_recent_frames(int snapshotFrame) {
     for (k = 0; k < RECENT_KEEP; k++) {
         int pick = -1;
         for (i = 0; i < sRecentCount; i++) {
-            // The most line-like picture; with no line they tie, and the newest is the one that was just on screen.
-            if (score[i] >= 0 && (pick < 0 || score[i] > score[pick] ||
-                                  (score[i] == score[pick] && sRecentFrame[i] > sRecentFrame[pick]))) {
+            if (score[i] >= 0 && (pick < 0 || score[i] > score[pick])) {
                 pick = i;
             }
         }
@@ -2566,7 +2645,7 @@ PLAT_COLD static void alloc_frame_slots(void) {
              (unsigned long) (sCmdWords * 4 / 1024), (unsigned long) (linearSpaceFree() / 1024));
     sVbo = sSlots[0].vbo;
     sIbo = sSlots[0].ibo;
-    if (plat_switch("DKR_RECENT_FRAMES", PLAT_DEBUG_TOOLS)) {
+    if (plat_switch("DKR_RECENT_FRAMES", 0)) {
         allocate_recent_frames();
     }
 }
@@ -2847,12 +2926,16 @@ static void process_pending_frees(FrameSlot *slot) {
 }
 
 static int overlap_setting(void) {
-    static int sSetting = -1;
-    if (sSetting < 0) {
-        const char *env = plat_getenv("DKR_OVERLAP");
-        sSetting = env == NULL || atoi(env) != 0;
-        plat_log("frames built while the GPU draws the last one: %s",
-                 !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
+    // Re-read when the switches change (the Old 3DS tunnel bench turns it off for a race).
+    static int sSetting = -1, sEpoch = -1;
+    if (sEpoch != gPlatSwitchEpoch) {
+        int setting = plat_switch("DKR_OVERLAP", 1) != 0;
+        sEpoch = gPlatSwitchEpoch;
+        if (setting != sSetting) {
+            sSetting = setting;
+            plat_log("frames built while the GPU draws the last one: %s",
+                     !sSetting ? "no (DKR_OVERLAP=0)" : sNumSlots < 2 ? "no (one slot)" : "yes");
+        }
     }
     return sSetting && sNumSlots == 2;
 }
@@ -3254,7 +3337,7 @@ int gfxb_gpu_transform(void) {
  * when one changes: DKR_GPU_SPLIT (command list splits before blended draws, P19; 0 off, the default, 1 before
  * blending, 2 on every state change; see drain_before_draw), DKR_LINE_WATCH and DKR_RECENT_FRAMES (the white-line
  * diagnostics, P28), DKR_EARLY_DEPTH (the early depth test, P20), DKR_SVC_FLUSH (cache flushes as a system call,
- * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default, see
+ * P24, see gpu_flush) and DKR_DEPTH_FILL (the depth clear as a memory fill, P18, on by default on a New 3DS, see
  * gfxb_clear_depth). DKR_TEX_VRAM (P17) is read when a texture is made instead, as the switch bench sets it while a
  * level loads its textures.
  */
@@ -3264,6 +3347,7 @@ static int sDrawLean; // DKR_DRAW_LEAN: the one-pass draw, see gfxb_draw_indexed
 static void set_frame_band(void);
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
 static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyond the band dropped, not clipped
+static int sBackendLoadMs; // DKR_BACKEND_LOAD: milliseconds of busy waiting at each frame end (tunnel bench)
 static int sDrawParts;     // DKR_DRAW_PARTS: time each draw's parts while the profiler is on (gfxb_draw_indexed)
 
 static void read_switches(void) {
@@ -3278,13 +3362,17 @@ static void read_switches(void) {
     // On by default on an Old 3DS only (switch bench #241: with the renderer on the system core the GPU service's
     // flushes are slow there). The New 3DS's #176 showed no difference.
     sSvcFlush = plat_switch("DKR_SVC_FLUSH", plat_old_3ds()) != 0;
-    sDepthFill = plat_switch("DKR_DEPTH_FILL", 1) != 0;
+    // Off on an Old 3DS: switch bench run 22 (v46) counted no Jungle Falls tunnel flashes in two races with the depth
+    // clear drawn, 5-11 in every other pair (#306: walls and ceiling missing for a frame or two).
+    sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
+    sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
     sIndexed = -1;
     sNoCull = -1;  // DKR_NO_CULL and the fog mode too (head flicker bench)
+    sFlashWatch = -1; // DKR_FLASH_WATCH
     sFlushMode = -1; // drain_before_draw's settings (DKR_REWRITE, head flicker bench)
     sFogMode = -1;
     sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
@@ -3299,7 +3387,7 @@ static void read_switches(void) {
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
-    recent = plat_switch("DKR_RECENT_FRAMES", PLAT_DEBUG_TOOLS) != 0;
+    recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
     }
@@ -3481,6 +3569,12 @@ PLAT_COLD static void draw_test_pattern(void) {
 }
 
 void gfxb_end_frame(void) {
+    if (sBackendLoadMs > 0) {
+        // DKR_BACKEND_LOAD (tunnel bench): this core kept busy that long, as a heavier frame would.
+        unsigned long long until = plat_time_ns() + (unsigned long long) sBackendLoadMs * 1000000ULL;
+        while (plat_time_ns() < until) {
+        }
+    }
     {
         static int sTest = -1;
         if (sTest < 0) {
@@ -3549,6 +3643,9 @@ void gfxb_end_frame(void) {
                 C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_DEPTH, 0, 0);
             }
         }
+        if (!sFull && sFlushTest == 1) {
+            heap_flush();
+        }
         for (i = 0; i < slot->numParts; i++) {
             if (sSvcFlush) {
                 gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
@@ -3578,7 +3675,15 @@ void gfxb_end_frame(void) {
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         if (full_flush()) {
-            C3D_FrameEnd(0); // Also flushes the whole linear heap.
+            heap_flush(); // What C3D_FrameEnd(0) would do, timed
+            C3D_FrameEnd(GX_CMDLIST_FLUSH);
+        } else if (sFlushTest == 2) {
+            if (sHeapFlushNs == 0) {
+                heap_flush(); // Once, for its time
+            } else {
+                svcSleepThread(sHeapFlushNs);
+            }
+            C3D_FrameEnd(GX_CMDLIST_FLUSH);
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
@@ -4985,6 +5090,7 @@ PLAT_HOT static void write_settings_twice(const GfxDrawState *state, float *su0,
 
 static volatile int sGuardBand = -1; // Settings > Screen > Edge trimming (settings.txt "guardband"), else DKR_GUARD_BAND
 static float sBandX = GUARD_BAND, sBandY = GUARD_BAND; // The band in clip space: |x| <= sBandX * w, |y| <= sBandY * w
+static volatile float sCheckBandX = GUARD_BAND, sCheckBandY = GUARD_BAND; // The frame's band for gfxb_model_check
 static GfxVertex *sClipVerts;
 static u16 *sClipIndices;
 static u8 *sClipOutside; // For each vertex of the draw: outside the guard band
@@ -5002,6 +5108,8 @@ static float band_for(int pixels) {
 static void set_frame_band(void) {
     sBandX = band_for(sTarget->frameBuf.height);
     sBandY = band_for(sTarget->frameBuf.width);
+    sCheckBandX = sBandX;
+    sCheckBandY = sBandY;
 }
 
 /* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
@@ -5711,18 +5819,18 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
  * GPU vertex maths (P30): whether a model draw can go to the GPU. The CPU path trims triangles to the guard band
  * (clip_to_guard_band), which needs their positions; here only the corners of the vertices' box are transformed. A box
  * wholly beyond one side of the band is drawn by neither path; one reaching past the band, or behind the camera, is
- * left to the CPU path.
+ * left to the CPU path. With the two-core renderer the walk calls this ahead of the backend, so it reads only what
+ * the backend's last frame left (the band, the settings), never the state of the draw being built.
  */
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
     int all = ~0, any = 0, i;
+    float bandX = sCheckBandX, bandY = sCheckBandY;
     if (!sTransformOn) {
         return GFX_MODEL_CPU;
     }
     if (!sGuardBandFrame) {
         return GFX_MODEL_GPU;
     }
-    sBandX = band_for(sTarget->frameBuf.height);
-    sBandY = band_for(sTarget->frameBuf.width);
     for (i = 0; i < 8; i++) {
         float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
         GfxVertex c;
@@ -5730,11 +5838,37 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
         c.x = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
         c.y = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
         c.w = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
-        out = outside_band(&c);
+        out = outside_band_of(&c, bandX, bandY);
         all &= out;
         any |= out;
     }
     return (all & OUTSIDE_PLANES) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
+}
+
+/*
+ * A model draw that reaches a frame without GPU vertex maths: with the two-core renderer the walk decides on a frame's
+ * model draws from the backend's last frame, so the frame GPU vertex maths turns off (the setting, or a hang) may
+ * still get some. They are transformed here the way the CPU path would have (indices less base: a mesh's are into
+ * the arena).
+ */
+static GfxVertex *sModelCpuVerts;
+static u16 *sModelCpuIndices;
+static int sModelCpuVertCapacity, sModelCpuIndexCapacity;
+
+static void model_draw_on_cpu(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
+                              int numVerts, const unsigned short *indices, int numTriangles, u32 base) {
+    int i;
+    if (!grow((void **) &sModelCpuVerts, &sModelCpuVertCapacity, numVerts, sizeof(GfxVertex)) ||
+        !grow((void **) &sModelCpuIndices, &sModelCpuIndexCapacity, numTriangles * 3, sizeof(u16))) {
+        return;
+    }
+    for (i = 0; i < numVerts; i++) {
+        gfx_model_to_vertex(&sModelCpuVerts[i], &verts[i], params);
+    }
+    for (i = 0; i < numTriangles * 3; i++) {
+        sModelCpuIndices[i] = (u16) (indices[i] - base);
+    }
+    gfxb_draw_indexed(state, sModelCpuVerts, numVerts, sModelCpuIndices, numTriangles);
 }
 
 /* What a model or mesh draw does before its vertices: room, hang report, settings, uniforms. Returns FALSE if the draw
@@ -5772,6 +5906,10 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
     u16 *ibo;
 
+    if (__builtin_expect(!sTransformOn, 0)) {
+        model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
+        return;
+    }
     if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
         return;
     }
@@ -5814,6 +5952,8 @@ typedef struct C3DMesh {
 } C3DMesh;
 
 static GfxModelVertex *sMeshArena;
+static LightLock sArenaLock; // With the two-core renderer the walk creates meshes while the backend deletes them
+static int sArenaLockMade;
 static struct {
     u32 start, count;
 } sArenaFree[MESH_FREE_RUNS];
@@ -5880,24 +6020,37 @@ static void arena_free(u32 start, u32 count) {
     sArenaFreeRuns++;
 }
 
+static void arena_lock(void) {
+    if (!sArenaLockMade) {
+        LightLock_Init(&sArenaLock); // First made on the walk's thread, before the backend has a mesh to delete
+        sArenaLockMade = 1;
+    }
+    LightLock_Lock(&sArenaLock);
+}
+
 void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned short *indices, int numIndices) {
     C3DMesh *m = malloc(sizeof(C3DMesh));
-    int i;
+    GfxModelVertex *arena;
+    int i, ok;
     if (m == NULL || (m->indices = malloc(numIndices * sizeof(u16))) == NULL) {
         free(m);
         return NULL;
     }
-    if (!arena_alloc(numVerts, &m->base)) {
+    arena_lock();
+    ok = arena_alloc(numVerts, &m->base);
+    arena = sMeshArena; // Stays while this mesh is in it, whatever the backend frees meanwhile
+    LightLock_Unlock(&sArenaLock);
+    if (!ok) {
         free(m->indices);
         free(m);
         return NULL;
     }
     m->numVerts = numVerts;
-    memcpy(&sMeshArena[m->base], verts, numVerts * sizeof(GfxModelVertex));
+    memcpy(&arena[m->base], verts, numVerts * sizeof(GfxModelVertex));
     for (i = 0; i < numIndices; i++) {
         m->indices[i] = (u16) (m->base + indices[i]);
     }
-    gpu_flush(&sMeshArena[m->base], numVerts * sizeof(GfxModelVertex));
+    gpu_flush(&arena[m->base], numVerts * sizeof(GfxModelVertex));
     return m;
 }
 
@@ -5921,6 +6074,7 @@ void gfxb_mesh_free(void *mesh) {
 
 static void delete_mesh(void *mesh) {
     C3DMesh *m = mesh;
+    arena_lock();
     arena_free(m->base, m->numVerts);
     if (sArenaFreeRuns == 1 && sArenaFree[0].count == MESH_ARENA_VERTS) {
         // The last mesh is gone (meshes turned off, or a level left): the arena's megabyte goes back to the linear
@@ -5933,6 +6087,7 @@ static void delete_mesh(void *mesh) {
         }
         plat_log("meshes: arena freed");
     }
+    LightLock_Unlock(&sArenaLock);
     free(m->indices);
     free(m);
 }
@@ -5944,6 +6099,14 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
     int i, count = 0;
     u16 *ibo;
 
+    if (__builtin_expect(!sTransformOn, 0)) {
+        for (i = 0; i < numParts; i++) {
+            const C3DMesh *m = parts[i].mesh;
+            model_draw_on_cpu(state, params, &sMeshArena[m->base], m->numVerts, m->indices + parts[i].firstIndex,
+                              parts[i].numTriangles, m->base);
+        }
+        return;
+    }
     for (i = 0; i < numParts; i++) {
         count += parts[i].numTriangles * 3;
     }

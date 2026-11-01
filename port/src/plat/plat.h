@@ -53,6 +53,7 @@ enum PlatThreadKind {
     PLAT_THREAD_RCP,      /* Emulated RDP (graphics). May run on a different core. */
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
     PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
+    PLAT_THREAD_RCP2_SYS, /* The same on a New 3DS's system core (DKR_SPLIT_SYSCORE), below its services. */
 };
 
 void plat_init(void);
@@ -123,6 +124,10 @@ int plat_main_loop_iteration(void);
 /* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
+/* Saves on a background writer (in order with the other queued writes) and frees data there. */
+void plat_save_file_later(const char *path, void *data, unsigned int size);
+/* Waits for every queued background write. */
+void plat_saves_drain(void);
 /* Adds data to the end of a file, making it if there is none. Returns 0 if anything failed. */
 int plat_append_file(const char *path, const void *data, unsigned int size);
 /* Reads up to size bytes from the start of a file. Returns the number read, or -1 if it cannot be opened. */
@@ -317,6 +322,7 @@ enum PlatCounter {
     PLAT_COUNTER_AUDIO_UNDERRUN, /* Sound buffers queued after the output had run dry (a gap in the sound). */
     PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
     PLAT_COUNTER_TEXTURE_FAILED, /* Textures the GPU had no memory for (drawn white instead). */
+    PLAT_COUNTER_FLASHES,        /* Picture flashes seen in the frame history (a few frames unlike those around). */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
@@ -336,6 +342,12 @@ void plat_set_frame_step(int retraces);
 int plat_frame_step(void);
 /* The two-core renderer (gfx_split.c) going on or off: the system core's share it needs is held only while on. */
 void plat_split_render_cores(int on);
+/* Applies DKR_SPLIT_BELOW_GAME to the two-core renderer's second thread when it shares the game's core. */
+void plat_split_backend_priority(void);
+/* Whether the renderer's second half can go on the system core instead (a New 3DS); raising/restoring its share
+ * there (TRUE when that worked). */
+int plat_split_syscore_possible(void);
+int plat_split_syscore_share(int on);
 
 /* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
  * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with
