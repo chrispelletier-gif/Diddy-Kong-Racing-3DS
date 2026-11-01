@@ -438,12 +438,22 @@ void port_describe_threads(char *buffer, s32 size) {
  * thread waiting on a queue sleeps on that queue's variable (plat_kwait_on_timeout) and a message wakes only those.
  * Nothing else waits on queues, so nothing else needs the queue's wake-ups; the bounded wait stays as it was.
  */
+/* New 3DS default on (2026-11-01): with every thread woken by every message, an AI Diddy's head flickered in every
+ * switch bench race; the per-queue race had none. Off on the Old 3DS (never flickered there, not benched) and on PC. */
+static int queue_wake_default(void) {
+#ifdef __3DS__
+    return !plat_old_3ds();
+#else
+    return 0;
+#endif
+}
+
 static int queue_wake_keyed(void) {
     // Read again only when a switch override changes (gPlatSwitchEpoch): this runs for every message.
     static int sEpoch = -1, sKeyed;
     if (sEpoch != gPlatSwitchEpoch) {
         sEpoch = gPlatSwitchEpoch;
-        sKeyed = plat_switch("DKR_QUEUE_WAKE", 0) != 0;
+        sKeyed = plat_switch("DKR_QUEUE_WAKE", queue_wake_default()) != 0;
     }
     return sKeyed && !port_lockstep_enabled();
 }
