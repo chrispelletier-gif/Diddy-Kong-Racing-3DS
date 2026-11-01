@@ -638,13 +638,22 @@ static int advance(const Font *f, unsigned char c) {
     return f->fixedAdvance ? f->fixedAdvance : f->glyphs[c - 0x20].advance;
 }
 
+static int sLetterGap; /* Extra pixels between letters (the side tabs' lettering, where tight letters touched). */
+
+/* Letters of the fun font whose art overhangs the one before: they get a pixel more room (side tabs only). */
+static int letter_kern(char prev, char c) {
+    return sLetterGap && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
+}
+
 static int text_width_as_is(int font, const char *text) {
     int width = 0;
+    char prev = 0;
     if (!font_ready(font)) {
         return (int) strlen(text) * 8;
     }
     for (; *text != '\0'; text++) {
-        width += advance(&sFonts[font], (unsigned char) *text);
+        width += advance(&sFonts[font], (unsigned char) *text) + sLetterGap + letter_kern(prev, *text);
+        prev = *text;
     }
     return width;
 }
@@ -652,6 +661,7 @@ static int text_width_as_is(int font, const char *text) {
 /* Draws text from x (until right, if text would go further) with its top at y, as it is. Returns where it ended. */
 static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
+    char prev = 0;
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
         for (; *text != '\0' && x + 8 <= right; text++) {
@@ -664,7 +674,10 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
     }
     for (; *text != '\0'; text++) {
         unsigned char c = (unsigned char) *text;
-        int step = advance(f, c);
+        int step = advance(f, c) + sLetterGap;
+        int lift = sLetterGap && (c == 'A' || c == 'V') ? 1 : 0; /* these two sat a pixel low against their neighbours */
+        x += letter_kern(prev, (char) c);
+        prev = (char) c;
         if (x + step > right) {
             break;
         }
@@ -672,9 +685,9 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
             const Glyph *g = &f->glyphs[c - 0x20];
             const Picture *t = &f->textures[g->texture];
             if (shadow) {
-                picture_part(t, g->s, g->t, g->width, g->height, x + g->x + 1, y + g->y + 1, (Colour){ 0, 0, 0, 170 });
+                picture_part(t, g->s, g->t, g->width, g->height, x + g->x + 1, y + g->y + 1 - lift, (Colour){ 0, 0, 0, 170 });
             }
-            picture_part(t, g->s, g->t, g->width, g->height, x + g->x, y + g->y, colour);
+            picture_part(t, g->s, g->t, g->width, g->height, x + g->x, y + g->y - lift, colour);
         }
         x += step;
     }
@@ -1217,7 +1230,12 @@ static void draw_menu(const State *s) {
         upper_text(upper, sizeof(upper), m->tabs[i]);
         /* A long name (French ones) that would touch the tab's edges drops to the small font. */
         if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
+            sLetterGap = 1;
+            if (text_width_as_is(FONT_FUN, upper) > MENU_PANEL_X0 - 16) {
+                sLetterGap = 0;
+            }
             heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + sTabNudge[sStyle], m->tabs[i], 1);
+            sLetterGap = 0;
         } else if (font_ready(FONT_FUN)) {
             text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
                                i == m->tab ? YELLOW : WHITE, 1);
