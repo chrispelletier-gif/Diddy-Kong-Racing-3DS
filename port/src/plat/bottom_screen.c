@@ -1027,7 +1027,9 @@ static void draw_controls(int y0, int y1) {
     char keys[MAX_ROWS][24];
     const char *what[MAX_ROWS];
     int i, count = 0, lineHeight = font_ready(FONT_SMALL) ? 12 : 10, keyWidth[2] = { 0, 0 }, top = y0 + 4;
-    box(4, y0, BS_WIDTH - 4, y1, BOX_FILL, BOX_EDGE);
+    if (sStyle <= 1) {
+        box(4, y0, BS_WIDTH - 4, y1, BOX_FILL, BOX_EDGE);
+    }
     for (i = 0; i < (int) (sizeof(sRows) / sizeof(sRows[0])); i++) {
         if (i == BUG_ROW && !PLAT_DEBUG_TOOLS) {
             continue; // A player's build has no bug reports.
@@ -1043,8 +1045,19 @@ static void draw_controls(int y0, int y1) {
         what[count++] = sRows[i].what;
     }
     if (font_ready(FONT_FUN)) {
-        text(FONT_FUN, 12, y0 + 4, "CONTROLS", WHITE, 1);
+        if (sStyle == 2) {
+            // Broadcast: the heading on a red tag, like a race broadcast's lower third.
+            Colour red = { 235, 40, 40, 255 }, orange = { 255, 150, 20, 255 };
+            slab(8, y0 + 2, 12 + text_width(FONT_FUN, "CONTROLS") + 18, y0 + 22, 5, red, orange);
+        }
+        text(FONT_FUN, sStyle == 2 ? 18 : 12, y0 + 4, "CONTROLS", WHITE, 1);
         top = y0 + 21;
+    }
+    if (sStyle != 0 && font_ready(FONT_SMALL)) {
+        int rows = (count + 1) / 2;
+        lineHeight = rows > 0 ? (y1 - top - 24) / rows : 20;
+        lineHeight = lineHeight > 22 ? 22 : (lineHeight < 12 ? 12 : lineHeight);
+        top += 4;
     }
     if (font_ready(FONT_SMALL)) {
         char build[48];
@@ -1057,7 +1070,10 @@ static void draw_controls(int y0, int y1) {
         text(FONT_SMALL, BS_WIDTH - 12 - text_width(FONT_SMALL, build), y0 + 6, build, DIM, 1);
     }
     for (i = 0; i < count; i++) {
-        int width = text_width(FONT_SMALL, keys[i]) + 8;
+        int width = text_width(FONT_SMALL, keys[i]) + (sStyle != 0 ? 14 : 8);
+        if (sStyle != 0 && width < 20) {
+            width = 20;
+        }
         if (width > keyWidth[i % 2]) {
             keyWidth[i % 2] = width;
         }
@@ -1066,6 +1082,23 @@ static void draw_controls(int y0, int y1) {
         int x = (i % 2) ? 164 : 12, y = top + (i / 2) * lineHeight;
         if (!font_ready(FONT_SMALL) && (i % 2)) {
             continue; // The 8x8 font only fits one column; the second waits for the ROM.
+        }
+        if (sStyle != 0) {
+            // The keys as white caps (a pill; a slanted one in Broadcast), the action beside them.
+            int w = text_width(FONT_SMALL, keys[i]) + 14, cy = y + 6;
+            Colour cap = { 235, 240, 255, 255 }, ink = { 20, 26, 70, 255 };
+            if (w < 20) {
+                w = 20;
+            }
+            if (sStyle == 2) {
+                slab(x - 3, cy - 10, x + 142, cy + 10, 5, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
+                slab(x, cy - 8, x + w, cy + 8, 4, cap, cap);
+            } else {
+                smooth_box(x, cy - 8, x + w, cy + 8, 8, cap, (Colour){ 205, 215, 245, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+            text_centred(FONT_SMALL, x, x + w, y + 1, keys[i], ink, 0);
+            text(FONT_SMALL, x + w + 6, y + 1, what[i], WHITE, 1);
+            continue;
         }
         text(FONT_SMALL, x, y, keys[i], YELLOW, 1);
         text(FONT_SMALL, x + keyWidth[i % 2], y, what[i], WHITE, 1);
