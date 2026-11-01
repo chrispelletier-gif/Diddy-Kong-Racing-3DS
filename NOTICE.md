@@ -45,9 +45,9 @@ for this project. No Nintendo or Rare artwork, logos or audio are used.
 
 ## Bottom screen fonts
 
-The Broadcast, Dock and Glass looks of the bottom screen draw their small text with pixel images of
-[Barlow Condensed](https://fonts.google.com/specimen/Barlow+Condensed) (SemiBold) and
-[Outfit](https://fonts.google.com/specimen/Outfit) (Medium), made by `port/tools/ui_font/make_ui_font.py` into
+The Broadcast, Dock and Glass looks of the bottom screen draw their text and numbers with pixel images of
+[Barlow Condensed](https://fonts.google.com/specimen/Barlow+Condensed) (SemiBold),
+[Outfit](https://fonts.google.com/specimen/Outfit) (Medium) and [Inter](https://rsms.me/inter/) (SemiBold), made by `port/tools/ui_font/make_ui_font.py` into
 `port/src/plat/ui_font_data.h`. Both fonts are under the SIL Open Font License 1.1, which allows this; the font files
 themselves are not included. The Classic look uses the game's own fonts.
 

@@ -7,5 +7,5 @@ python3 "$(dirname "$0")/make_ui_font.py" "$(dirname "$0")/../../src/plat/ui_fon
   "OutfitXL:$D/Outfit[wght].ttf:36:28:Bold:0123456789" "OutfitLG:$D/Outfit[wght].ttf:20:15:Bold" "OutfitSM:$D/Outfit[wght].ttf:12:9:SemiBold" \
   "Barlow:$D/BarlowCondensed-SemiBold.ttf:14:10" "BarlowHead:$D/BarlowCondensed-Bold.ttf:16:11" \
   "BarlowXL:$D/BarlowCondensed-Bold.ttf:38:28::0123456789" "BarlowLG:$D/BarlowCondensed-Bold.ttf:22:15" "BarlowSM:$D/BarlowCondensed-SemiBold.ttf:13:9" \
-  "Fredoka:$D/Fredoka[wdth,wght].ttf:13:10:Medium" "FredokaHead:$D/Fredoka[wdth,wght].ttf:13:10:SemiBold" \
-  "FredokaXL:$D/Fredoka[wdth,wght].ttf:34:28:Bold:0123456789" "FredokaLG:$D/Fredoka[wdth,wght].ttf:19:15:Bold" "FredokaSM:$D/Fredoka[wdth,wght].ttf:12:9:SemiBold"
+  "Glass:$D/Inter-SemiBold.otf:12:10" "GlassHead:$D/Inter-Bold.otf:12:10" \
+  "GlassXL:$D/Inter-Bold.otf:34:28::0123456789" "GlassLG:$D/Inter-Bold.otf:19:15" "GlassSM:$D/Inter-Bold.otf:11:9"

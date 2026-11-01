@@ -670,8 +670,8 @@ enum { UI_BODY, UI_HEAD, UI_XL, UI_LG, UI_SM };
 static const UiFont *ui_font_kind(int kind) {
     switch (sStyle) {
         case 1:
-            return kind == UI_HEAD ? &kFredokaHead : kind == UI_XL ? &kFredokaXL : kind == UI_LG ? &kFredokaLG
-                   : kind == UI_SM ? &kFredokaSM : &kFredoka;
+            return kind == UI_HEAD ? &kGlassHead : kind == UI_XL ? &kGlassXL : kind == UI_LG ? &kGlassLG
+                   : kind == UI_SM ? &kGlassSM : &kGlass;
         case 2:
             return kind == UI_HEAD ? &kBarlowHead : kind == UI_XL ? &kBarlowXL : kind == UI_LG ? &kBarlowLG
                    : kind == UI_SM ? &kBarlowSM : &kBarlow;
@@ -1211,7 +1211,7 @@ static void draw_controls(int y0, int y1) {
 
 static void draw_logo(void) {
     if (sLogo.rgba != NULL) {
-        picture(&sLogo, (BS_WIDTH - 160) / 2, 3);
+        picture(&sLogo, (BS_WIDTH - 160) / 2, sStyle == 2 ? 7 : 3); /* Broadcast's top stripe needs room */
     } else {
         text_centred(FONT_MONO, 0, BS_WIDTH, 20, "Diddy Kong Racing", YELLOW, 1);
         text_centred(FONT_MONO, 0, BS_WIDTH, 36, "Nintendo 3DS port", DIM, 1);
@@ -2522,7 +2522,7 @@ static void make_race_base(const RaceHud *hud) {
             box(6, SAVE_PANEL_Y0, BS_WIDTH - 6, MENU_PANEL_Y1, BOX_FILL, BOX_EDGE);
         }
         if (sSmallLogo.rgba != NULL) {
-            picture(&sSmallLogo, 6, 4);
+            picture(&sSmallLogo, 6, sStyle == 2 ? 8 : 4);
         }
     } else if (hud->mode == RACE_HUD_MODE_HUB) {
         box(TOWER_X0, UPPER_Y0, TOWER_X1, LOWER_Y1, BOX_FILL, BOX_EDGE);
@@ -3372,6 +3372,32 @@ static void trophy_and_key(const RaceHud *hud, int world, int x, int y, int gap)
     }
 }
 
+/* "23 / 47" in one size and one colour, the total fainter: the progress numbers of the file select companion. */
+static int fraction_width(int value, int total) {
+    char text_[24];
+    snprintf(text_, sizeof(text_), "%d / %d", value, total);
+    return text_width_as_is(FONT_SMALL, text_) + 3;
+}
+
+static void fraction_at(int x, int y, int value, int total) {
+    char text_[16];
+    Colour gold = sStyle == 2 ? WHITE : GOLD, faint = gold;
+    const UiFont *u = ui_font_kind(UI_HEAD);
+    faint.a = 150;
+    snprintf(text_, sizeof(text_), "%d", value);
+    x = ui_draw(u, x, y, text_, gold, 1, BS_WIDTH);
+    snprintf(text_, sizeof(text_), " / %d", total);
+    ui_draw(u, x, y, text_, faint, 1, BS_WIDTH);
+}
+
+static void fraction_centred(int x0, int x1, int y, int value, int total) {
+    char text_[24];
+    int w;
+    snprintf(text_, sizeof(text_), "%d / %d", value, total);
+    w = text_width_as_is(FONT_SMALL, text_);
+    fraction_at(x0 + (x1 - x0 - w) / 2, y, value, total);
+}
+
 static int number_pieces(int x, int y, int value) {
     char count[8];
     int i;
@@ -3384,7 +3410,7 @@ static int number_pieces(int x, int y, int value) {
 
 /* The file select companion in the Glass, Broadcast and Dock layouts. */
 static void menu_save_styled(const RaceHud *hud) {
-    int i, x;
+    int i;
     char line[48];
     Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
            orange = { 255, 150, 20, 255 }, chip = { 0, 0, 0, 60 };
@@ -3400,20 +3426,17 @@ static void menu_save_styled(const RaceHud *hud) {
         // Rings: the balloons, then the two amulets.
         progress_ring(56, 104, 40, 6, hud->balloons * 256 / 47, GOLD);
         picture_scaled(&sBalloon, 42, 76, 1, 1);
-        number_pieces(46, 108, hud->balloons);
-        text_centred(FONT_SMALL, 16, 96, 126, "of 47", LABEL_BLUE, 1);
+        fraction_centred(16, 96, 111, hud->balloons, 47);
         progress_ring(30, 168, 15, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
             picture(&sTTAmulet[hud->ttAmulet], 19, 157);
         }
-        snprintf(line, sizeof(line), "%d/4", hud->ttAmulet);
-        text_centred(FONT_SMALL, 6, 54, 186, line, LABEL_BLUE, 0);
+        fraction_centred(6, 54, 186, hud->ttAmulet, 4);
         progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
             picture(&sWizpigAmulet[hud->wizpigAmulet], 71, 157);
         }
-        snprintf(line, sizeof(line), "%d/4", hud->wizpigAmulet);
-        text_centred(FONT_SMALL, 58, 106, 186, line, LABEL_BLUE, 0);
+        fraction_centred(58, 106, 186, hud->wizpigAmulet, 4);
         for (i = 0; i < RACE_HUD_WORLDS; i++) {
             int y = 56 + i * 28, balloons = hud->worldBalloons[i];
             Colour ink = balloons > 0 ? WHITE : DIM;
@@ -3446,9 +3469,8 @@ static void menu_save_styled(const RaceHud *hud) {
         } else if (i == 2 && hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
             picture(&sWizpigAmulet[hud->wizpigAmulet], cx + 8, 54);
         }
-        x = number_pieces(cx + 38, 54, value);
-        text(FONT_SMALL, x + 2, 59, i == 0 ? "/ 47" : "/ 4", LABEL_BLUE, 1);
-        text(FONT_SMALL, cx + 38, 73, name, LABEL_BLUE, 1);
+        fraction_at(cx + 38, 54, value, i == 0 ? 47 : 4);
+        text(FONT_SMALL, cx + 38, 71, name, LABEL_BLUE, 1);
     }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
         int y = sStyle == 2 ? 92 + i * 21 : 96 + i * 20, balloons = hud->worldBalloons[i], k;
@@ -3604,9 +3626,12 @@ static void lap_pieces(const RaceHud *hud, int x, int y) {
 /* The last finished lap's number and time (or the lap so far), and the best finished lap's time; -1 when none. */
 /* A little stopwatch with the time of the lap being driven beside it: stands in for a "Lap 1" label (the lap counter says
  * which lap it is). Returns where it ends. */
-static int lap_clock(int x, int y, int frames, Colour c) {
+static int lap_clock(int x, int y, int frames, Colour c, int xMax) {
     static const char *const rows[7] = { "..###..", ".#...#.", "#..#..#", "#..##.#", "#.....#", ".#...#.", "..###.." };
-    int i, j;
+    int i, j, width = 11 + DRY(race_time(0, 0, frames, 1));
+    if (x + width > xMax) {
+        x = xMax - width; /* keeps its digits inside the panel */
+    }
     for (j = 0; j < 7; j++) {
         for (i = 0; i < 7; i++) {
             if (rows[j][i] == '#') {
@@ -3729,21 +3754,31 @@ static void race_glass(const RaceHud *hud) {
     }
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        lap_clock(130, 83, lapTime, LABEL_BLUE);
+        lap_clock(DRY(piece(&sTimeLabel, 130, 64, 4)) - 11, 77, lapTime, LABEL_BLUE, 312);
+    }
+    if (best >= 0) {
+        // The best lap under the lap clock.
+        int labelWidth = text_width(FONT_SMALL, "Best"), timeWidth = DRY(race_time(0, 0, best, 1)), bx;
+        bx = DRY(piece(&sTimeLabel, 130, 64, 4)) - 11;
+        text(FONT_SMALL, bx, 88, "Best", LABEL_BLUE, 1);
+        race_time(bx + labelWidth + 4, 89, best, 1);
+        (void)timeWidth;
     }
     // The item slot and the bananas.
     box(120, 104, 196, 198, BOX_FILL, BOX_EDGE);
-    smooth_box(134, 114, 182, 162, 9, (Colour){ 0, 0, 0, 70 }, (Colour){ 0, 0, 0, 70 }, (Colour){ 255, 255, 255, 60 }, 1);
-    item_in_slot(hud, 138, 118, 166, 148);
-    text(FONT_SMALL, 127, 176, "Item", LABEL_BLUE, 1);
-    box(202, 104, 314, 198, BOX_FILL, BOX_EDGE);
-    bananas_count(hud, 208, 112, 40, 244, 128, 124);
-    text(FONT_SMALL, 240, 146, "Best lap", LABEL_BLUE, 1);
-    if (best >= 0) {
-        race_time(240, 160, best, 1);
-    } else {
-        text(FONT_SMALL, 240, 160, "--", DIM, 1);
+    smooth_box(128, 112, 188, 172, 14, (Colour){ 0, 0, 0, 70 }, (Colour){ 0, 0, 0, 70 }, (Colour){ 255, 255, 255, 60 }, 1);
+    {
+        int index = hud->item * 3 + hud->itemLevel;
+        if (hud->item >= 0 && index >= 0 && index < 15 && sItems[index].rgba != NULL) {
+            picture_fit(&sItems[index], 136, 120, 44, 44);
+            if (hud->itemCount > 1 && hud->itemCount <= 10) {
+                piece(&sItemCounts[hud->itemCount - 1], 168, 150, 0);
+            }
+        }
     }
+    text_centred(FONT_SMALL, 120, 196, 178, "Item", LABEL_BLUE, 1);
+    box(202, 104, 314, 198, BOX_FILL, BOX_EDGE);
+    bananas_count(hud, 224, 130, 40, 260, 146, 142);
 }
 
 static void race_broadcast(const RaceHud *hud) {
@@ -3784,26 +3819,26 @@ static void race_broadcast(const RaceHud *hud) {
     lap_segments(hud, 240, 34, 20, 3, 6, red, (Colour){ 255, 255, 255, 40 }, 1);
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        lap_clock(240, 46, lapTime, BEHIND);
+        lap_clock(240, 46, lapTime, BEHIND, 306);
     }
-    slab(132, 69, 316, 97, 6, slabFill, slabFill);
+    // The clock and, under it on the same digits, the best lap: all the times in one slab.
+    slab(132, 66, 316, 104, 6, slabFill, slabFill);
     {
-        int x = piece(&sTimeLabel, 160, 78, 4);
-        race_time(x, 75, hud->raceTime, 0);
+        int x = piece(&sTimeLabel, 160, 73, 4), labelWidth = text_width(FONT_SMALL, "BEST");
+        race_time(x, 70, hud->raceTime, 0);
+        text(FONT_SMALL, x - 4 - labelWidth, 88, "BEST", LABEL_BLUE, 1);
+        if (best >= 0) {
+            race_time(x, 87, best, 1);
+        } else {
+            text(FONT_SMALL, x, 88, "--", DIM, 1);
+        }
     }
-    slab(132, 102, 214, 198, 6, slabFill, slabFill);
-    text(FONT_SMALL, 146, 107, "ITEM", LABEL_BLUE, 1);
-    item_in_slot(hud, 151, 124, 179, 154);
-    slab(218, 102, 316, 198, 6, slabFill, slabFill);
-    text(FONT_SMALL, 232, 107, "BANANAS", LABEL_BLUE, 1);
-    bananas_count(hud, 228, 122, 34, 258, 140, 136);
-    fill(228, 162, 304, 163, (Colour){ 255, 255, 255, 40 });
-    text(FONT_SMALL, 228, 167, "BEST LAP", LABEL_BLUE, 1);
-    if (best >= 0) {
-        race_time(228, 181, best, 1);
-    } else {
-        text(FONT_SMALL, 228, 181, "--", DIM, 1);
-    }
+    slab(132, 109, 214, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 146, 114, "ITEM", LABEL_BLUE, 1);
+    item_in_slot(hud, 151, 134, 179, 164);
+    slab(218, 109, 316, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 232, 114, "BANANAS", LABEL_BLUE, 1);
+    bananas_count(hud, 232, 134, 40, 268, 152, 148);
 }
 
 static void race_dock(const RaceHud *hud) {
@@ -3815,7 +3850,7 @@ static void race_dock(const RaceHud *hud) {
     race_time(x, 6, hud->raceTime, 0);
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        lap_clock(176, 27, lapTime, LABEL_BLUE);
+        lap_clock(DRY(piece(&sTimeLabel, 176, 9, 4)) - 11, 27, lapTime, LABEL_BLUE, 312);
     }
     fill(8, 44, 312, 45, (Colour){ 255, 255, 255, 40 });
     // The player and the racers either side of them, on a calm panel.
