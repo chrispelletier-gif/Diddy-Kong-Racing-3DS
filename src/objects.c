@@ -3726,6 +3726,9 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
     if (obj->objectID == ASSET_OBJECT_ID_N64LOGO) {
         return;
     }
+    if (obj->behaviorId == BHV_RACER && port_skip_game_kind(PORT_DRAW_RACERS)) {
+        return;
+    }
 #endif
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
     gObjectCurrDisplayList = *dList;

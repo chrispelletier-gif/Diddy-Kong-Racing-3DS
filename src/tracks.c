@@ -1964,6 +1964,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     if (port_portrait_active()) {
         return; // The portrait camera shows the model alone.
     }
+    if (port_skip_game_kind(nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK)) {
+        return;
+    }
 #endif
     port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized

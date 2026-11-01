@@ -116,6 +116,11 @@ ifeq ($(PGO),gen)
   LDFLAGS_PGO := -fprofile-generate
 else ifeq ($(PGO),use)
   PGO_FLAGS := -fprofile-use -fno-profile-values -fprofile-partial-training -Wno-missing-profile
+  # PGO_LEAN=1: the profile only steers branch layout and hot/cold placement; the code growth -fprofile-use also turns
+  # on (unrolling, peeling, tracing, clones) is left off, as the first PGO build was 12% bigger and slower (#331).
+  ifeq ($(PGO_LEAN),1)
+    PGO_FLAGS += -fno-unroll-loops -fno-peel-loops -fno-tracer -fno-ipa-cp-clone -fno-unswitch-loops -fno-split-loops
+  endif
 endif
 HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
 # Roadmap P25: the hot files (only the renderer has floats) may reorder float maths, use reciprocals and skip NaN,

@@ -25,6 +25,9 @@ enum {
 /* The game thread's side: notes when each kind (and object kind, profile.h PROF_OBJ_*; -1 for none) starts, for the
  * time it spends building it (port_profile.c). */
 void port_draw_kind_game(int kind, int object);
+/* DKR_SKIP_GAME_KINDS (a bitmask of the kinds above, switch bench cost rows): the game doesn't build these at all, so
+ * neither the game thread nor the renderer pays for them; the most a native renderer for that kind could save. */
+int port_skip_game_kind(int kind);
 #define port_draw_tag(dl, kind)                                                                                        \
     do {                                                                                                               \
         gDPNoOpTag(dl, PORT_DRAW_TAG | (kind));                                                                        \

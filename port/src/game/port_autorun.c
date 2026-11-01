@@ -253,8 +253,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // came and went whatever was switched; the frame history now counts big flashes (flashes column). Run 22 (v46),
     // two races a row: usual 5 flashes, system core 4 ms busier 10, no overlap 11, depth clear drawn 0. So the depth
     // clear is drawn by default on an Old 3DS now (DKR_DEPTH_FILL=0, gfx_c3d.c); this row puts the memory fill back to
-    // confirm it, over three races each.
-    { "depth clear by memory fill (the old way)", { "DKR_DEPTH_FILL", NULL }, 0, 1, 1 },
+    // The user was sure after run 22, so its confirmation row is gone. 2026-11-01 (PGO run #331 no gain): how much a
+    // native track or racer renderer (drawing from our own 3DS data instead of the game's display lists) could save at
+    // most, with the game not building them at all (DKR_SKIP_GAME_KINDS: track 1 << 1, racers 1 << 2), on the worst
+    // tracks of the whole game baseline #326.
+    { "cost: track not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 2, 1 },
+    { "cost: racers not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 4, 1 },
+    { "cost: track and racers not built or drawn", { "DKR_SKIP_GAME_KINDS", NULL }, 0, 6, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -608,8 +613,7 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_JUNGLEFALLS }; // head flicker
-    static const s8 sSwitchTracksOld3ds[] = { ASSET_LEVEL_JUNGLEFALLS, ASSET_LEVEL_JUNGLEFALLS,
-                                            ASSET_LEVEL_JUNGLEFALLS }; // tunnel (#306), three times
+    static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13 }; // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst)
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {

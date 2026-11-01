@@ -377,6 +377,16 @@ const char *prof_object_name(int bucket) {
     return bucket == PROF_OBJ_PARTICLES ? "particles" : bucket >= 0 && bucket < PROF_OBJ_PARTICLES ? sObjectNames[bucket] : "?";
 }
 
+int port_skip_game_kind(int kind) {
+    static int epoch = -1;
+    static u32 mask;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        mask = (u32) plat_switch("DKR_SKIP_GAME_KINDS", 0);
+    }
+    return (mask >> kind) & 1;
+}
+
 void port_draw_kind_game(int kind, int object) {
     unsigned long long now;
     if (object >= 0 && object < PROF_OBJ_BUCKETS) {
