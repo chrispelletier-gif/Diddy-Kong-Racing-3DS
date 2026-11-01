@@ -253,6 +253,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Head and cliff dropouts (2026-11-01): every draw's settings written twice (DKR_REWRITE=2) is the New 3DS
     // default. Bench runs #375/#380: no flicker with 2 or 3 (texture changes too), flicker with the old 1; 3 was not
     // measurably cheaper, so 2 stays and both check rows went.
+    // The two-core renderer's second thread now runs below the game on its core (#383: above it, it held the
+    // Central Area's game logic up to 12.7 ms a frame, 47-52 fps); this row races the old order.
+    { "renderer's second thread above the game (old)", { "DKR_SPLIT_BELOW_GAME", NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*

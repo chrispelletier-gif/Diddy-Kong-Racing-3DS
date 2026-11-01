@@ -278,6 +278,7 @@ int gfx_split_frame_start(int direct) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
     }
     sActive = TRUE;
+    plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
     if (!plat_sem_try_wait(sFrameSlots)) {
         unsigned long long start = plat_time_ns();

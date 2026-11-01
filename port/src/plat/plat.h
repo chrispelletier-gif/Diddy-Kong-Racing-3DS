@@ -336,6 +336,8 @@ void plat_set_frame_step(int retraces);
 int plat_frame_step(void);
 /* The two-core renderer (gfx_split.c) going on or off: the system core's share it needs is held only while on. */
 void plat_split_render_cores(int on);
+/* Applies DKR_SPLIT_BELOW_GAME to the two-core renderer's second thread when it shares the game's core. */
+void plat_split_backend_priority(void);
 
 /* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
  * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with

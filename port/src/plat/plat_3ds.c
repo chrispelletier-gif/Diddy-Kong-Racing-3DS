@@ -38,6 +38,11 @@ struct PlatThread {
     const char *name;
 };
 
+static PlatThread *volatile sSplitBackend; // The two-core renderer's second thread (PLAT_THREAD_RCP2), once made
+static int sSplitBackendPrio;
+static int sSplitBackendOnGameCore;
+static int split_backend_prio(void);
+
 struct PlatSem {
     LightSemaphore sem;
 };
@@ -378,10 +383,13 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             // it goes above the game as the renderer does.
             stackSize = 64 * 1024;
             if (sRcpCore == 1 || sRcpCore == 2) {
-                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle (#168: 80%), so the
-                // backend goes there, above the game, rather than onto the system core's limited share.
+                // A New 3DS's walk has core 2 to itself, and its game core is mostly idle in races (#168: 80%), so
+                // the backend goes there rather than onto the system core's limited share: below the game
+                // (plat_split_backend_priority), which it held up by most of its own time when above it (#383:
+                // Central Area logic 12.7 ms a frame with the backend 12.7 ms busy, 47-52 fps).
                 core = 0;
-                prio = PRIO_RCP;
+                prio = split_backend_prio();
+                sSplitBackendOnGameCore = 1;
             } else {
                 // The share was raised first (plat_split_render_cores).
                 core = 1;
@@ -396,6 +404,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             break;
     }
     thread->handle = threadCreate(thread_entry, thread, stackSize, prio, core, true);
+    if (kind == PLAT_THREAD_RCP2) {
+        sSplitBackend = thread;
+        sSplitBackendPrio = prio;
+    }
     if (thread->handle == NULL && kind == PLAT_THREAD_AUDIO && core != sRcpCore) {
         plat_log("thread %s: core %d unavailable, using the renderer's core %d", name, core, sRcpCore);
         core = sAudioCore = sRcpCore;
@@ -419,6 +431,29 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         plat_fatal("Could not create thread %s", name);
     }
     return thread;
+}
+
+/*
+ * The two-core renderer's backend on a New 3DS's game core (DKR_SPLIT_BELOW_GAME): 1 (default) just below the
+ * game's main thread (N64 priority 10), so the game's frame comes first and the backend has the core whenever the
+ * game waits; 0 above the game, as before.
+ */
+static int split_backend_prio(void) {
+    return plat_switch("DKR_SPLIT_BELOW_GAME", 1) ? PRIO_GAME_LOWEST - 10 + 1 : PRIO_RCP;
+}
+
+void plat_split_backend_priority(void) {
+    PlatThread *thread = sSplitBackend;
+    int prio;
+    if (thread == NULL || thread->handle == NULL || !sSplitBackendOnGameCore) {
+        return;
+    }
+    prio = split_backend_prio();
+    if (prio != sSplitBackendPrio) {
+        sSplitBackendPrio = prio;
+        svcSetThreadPriority(threadGetHandle(thread->handle), prio);
+        plat_log("two-core renderer: its second thread %s the game", prio == PRIO_RCP ? "above" : "below");
+    }
 }
 
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {

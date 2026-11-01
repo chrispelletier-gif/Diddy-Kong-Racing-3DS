@@ -260,6 +260,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+void plat_split_backend_priority(void) {
+}
+
 void plat_split_render_cores(int on) {
     (void) on;
 }
