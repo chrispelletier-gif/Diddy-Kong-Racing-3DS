@@ -252,6 +252,10 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Old 3DS default the head flicker hunt bisected still flickered, as did per-queue wake-ups (now on by default).
     // What is left is the one Old 3DS difference not yet raced: the other karts' lower detail models.
     { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1 },
+    // The GPU misses some settings written right after a draw (drain_before_draw); only blend and depth changes are
+    // written twice. A flicker that grows with GPU load (less with AA off, user 2026-11-01) fits a missed texture or
+    // combiner setting: this writes every draw's settings twice.
+    { "head: every draw's settings written twice", { "DKR_REWRITE", NULL }, 1, 2, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*
