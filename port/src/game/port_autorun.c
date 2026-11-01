@@ -274,9 +274,31 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "head: no timing in parts, two top buffers", { "DKR_DRAW_PARTS", "DKR_WALK_PARTS", "DKR_TRIPLE_BUFFER" }, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-#define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds)
+/*
+ * New 3DS: the shelved switches bench ("Shelved switches" in the Test run menu, 2026-11-01; the user asked whether
+ * anything shelved earlier is worth another look now that the profiler times every part, the renderer runs on two
+ * cores and adaptive anti-aliasing is the default). Every switch shelved for no gain on a New 3DS, at the bench's
+ * usual settings. Left out: those shelved for graphics problems (P20 early depth, P30/P31/P34 GPU vertex maths and
+ * meshes), those just re-tested at these settings (P17, P37, P41, P42), P40 (a row of the switch bench) and P33
+ * (3D only). It is the switch bench with this list (sShort set), so its results go to the same file as a new run.
+ */
+static const BenchSwitch sSwitchesShelved[] = {
+    { "cache flush as a system call (P24)", { "DKR_SVC_FLUSH", NULL }, 0, 1, 0 },
+    { "VFP vector maths (P27)", { "DKR_VFP_VECTORS", NULL }, 0, 1, 0 },
+    { "texture lookup memo (P38)", { "DKR_TEX_MEMO", NULL }, 0, 1, 0 },
+    { "lean walk (P38)", { "DKR_WALK_LEAN", NULL }, 0, 1, 0 },
+    { "lean draws (P38)", { "DKR_DRAW_LEAN", NULL }, 0, 1, 0 },
+    { "texture hashes checked every 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
+    { "wake-ups per queue (P32)", { "DKR_QUEUE_WAKE", NULL }, 0, 1, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+static s32 sShort; // (Defined again below: the whole game run's short variant, or the shelved switches bench)
+#define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sShort ? sSwitchesShelved : sSwitchesNew3ds)
 // The usual settings, then each switch flipped
-#define SWITCH_CONFIGS (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds) : (s32) ARRAY_COUNT(sSwitchesNew3ds))
+#define SWITCH_CONFIGS                                                                                                 \
+    (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds)                                                               \
+     : sShort       ? (s32) ARRAY_COUNT(sSwitchesShelved)                                                              \
+                    : (s32) ARRAY_COUNT(sSwitchesNew3ds))
 /* With two switches or more (not counting the cost rows), a last race flips them all together: gains don't always add
  * up. */
 static s32 switch_all_config(void) {
@@ -382,7 +404,7 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
 enum Request {
     REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
-    REQUEST_WHOLE, REQUEST_WHOLE_SHORT
+    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED
 };
 
 typedef struct ModeInfo {
@@ -422,7 +444,7 @@ static const char *config_name(s32 config) {
 }
 
 static s32 sEnabled = -1;
-static s32 sShort;          // The whole game run's short variant
+static s32 sShort;          // The whole game run's short variant, or the switch bench's shelved switches
 static s32 sReportedAt = -1; // The whole game run: the stop before which the last progress report went out
 static unsigned long long sLastReportNs;
 static unsigned long long sReportWaitNs; // When the run started waiting for a report to go out, or 0
@@ -1253,7 +1275,7 @@ s32 port_autorun_enabled(void) {
             const char *env = plat_getenv(sModes[mode].env);
             if (env != NULL && env[0] != '0') {
                 sMode = mode;
-                sShort = mode == MODE_WHOLE && env[0] == '2';
+                sShort = (mode == MODE_WHOLE || (mode == MODE_SWITCH && !plat_old_3ds())) && env[0] == '2';
             }
         }
         for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
@@ -1300,7 +1322,7 @@ static void init(void) {
             hash_text(plat_getenv(benchNames[i]));
         }
     } else if (sMode == MODE_SWITCH) {
-        hash_text("switch bench");
+        hash_text(sShort ? "shelved switches" : "switch bench");
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
@@ -1440,13 +1462,19 @@ s32 port_autorun_switch_count(void) {
     return SWITCH_CONFIGS - 1;
 }
 
+/* The shelved switches bench's switches (a New 3DS only; 0 on an Old 3DS, where the button has nothing to run). */
+s32 port_autorun_shelved_count(void) {
+    return plat_old_3ds() ? 0 : (s32) ARRAY_COUNT(sSwitchesShelved) - 1;
+}
+
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
- * boss fights (4), the switch bench (5) or the whole game run (6, or 7 for its short variant), or stop whichever is
- * going (0), at the next game frame.
+ * boss fights (4), the switch bench (5), the whole game run (6, or 7 for its short variant) or the shelved switches
+ * bench (8), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 7   ? REQUEST_WHOLE_SHORT
+    sRequest = start == 8   ? REQUEST_SWITCH_SHELVED
+               : start == 7 ? REQUEST_WHOLE_SHORT
                : start == 6 ? REQUEST_WHOLE
                : start == 5 ? REQUEST_SWITCH
                : start == 4 ? REQUEST_BOSS
@@ -1816,7 +1844,7 @@ static void show_status(void) {
     }
     plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
                   sMode == MODE_BENCH    ? "GPU BENCH"
-                  : sMode == MODE_SWITCH ? "SWITCH BENCH"
+                  : sMode == MODE_SWITCH ? (sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
                   : sMode == MODE_QUICK  ? "QUICK TEST"
                   : sMode == MODE_BOSS  ? "BOSS FIGHTS"
                   : sMode == MODE_WHOLE ? (sShort ? "WHOLE GAME (SHORT)" : "WHOLE GAME")
@@ -2538,7 +2566,7 @@ static void send_results(const char *why) {
     io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
                   sMode == MODE_BENCH    ? "GPU benchmark "
-                  : sMode == MODE_SWITCH ? "switch bench "
+                  : sMode == MODE_SWITCH ? (sShort ? "shelved switches " : "switch bench ")
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
                   : sMode == MODE_WHOLE ? (sShort ? "whole game (short) " : "whole game ")
@@ -2549,7 +2577,7 @@ static void send_results(const char *why) {
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
                            sMode == MODE_BENCH    ? "GPU benchmark run"
-                           : sMode == MODE_SWITCH ? "Switch bench run"
+                           : sMode == MODE_SWITCH ? (sShort ? "Shelved switches bench run" : "Switch bench run")
                            : sMode == MODE_QUICK  ? "Quick test run"
                            : sMode == MODE_BOSS  ? "Boss fights run"
                            : sMode == MODE_WHOLE ? "Whole game run"
@@ -2672,13 +2700,21 @@ static void handle_request(void) {
     s32 request = sRequest;
     sRequest = REQUEST_NONE;
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
-         request == REQUEST_SWITCH || request == REQUEST_WHOLE || request == REQUEST_WHOLE_SHORT) &&
+         request == REQUEST_SWITCH || request == REQUEST_SWITCH_SHELVED || request == REQUEST_WHOLE ||
+         request == REQUEST_WHOLE_SHORT) &&
         !port_autorun_active()) {
+        sShort = request == REQUEST_WHOLE_SHORT || (request == REQUEST_SWITCH_SHELVED && !plat_old_3ds());
+        if (request == REQUEST_SWITCH_SHELVED) {
+            if (plat_old_3ds()) {
+                plat_status("Shelved switches: a New 3DS bench");
+                return;
+            }
+            request = REQUEST_SWITCH;
+        }
         if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1) {
             plat_status("Switch bench: no switches to test right now");
             return;
         }
-        sShort = request == REQUEST_WHOLE_SHORT;
         sMode = (request == REQUEST_WHOLE || request == REQUEST_WHOLE_SHORT) ? MODE_WHOLE
                 : request == REQUEST_SWITCH  ? MODE_SWITCH
                 : request == REQUEST_BENCH ? MODE_BENCH

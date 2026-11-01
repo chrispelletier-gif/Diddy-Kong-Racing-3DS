@@ -39,6 +39,7 @@ int plat_3ds_guard_band_setting(void);
 long port_autorun_enabled(void);
 void port_autorun_request(long start);
 long port_autorun_switch_count(void);
+long port_autorun_shelved_count(void);
 
 typedef struct MenuPage {
     const char *title;
@@ -400,14 +401,14 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its seven kinds. */
+/* The test run (port_autorun.c): stop the one running, or start one of its eight kinds. */
 static int test_count(void) {
-    return port_autorun_enabled() ? 1 : 7;
+    return port_autorun_enabled() ? 1 : 8;
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[7] = { "Full test",    "Quick test", "Boss fights",       "GPU bench",
-                                           "Switch bench", "Whole game", "Whole game (short)" };
+    static const char *const sStart[8] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
+                                           "Switch bench", "Whole game", "Whole game (short)", "Shelved switches" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -418,10 +419,10 @@ static void test_value(int i, char *out, int size) {
 }
 
 static const char *test_hint(int i) {
-    static const char *const sStart[7] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
+    static const char *const sStart[8] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
                                            "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
                                            NULL, "Menus, races, coins, arenas, bosses, hubs, ~5 hours",
-                                           "Every part, 1 lap each, ~1 hour" };
+                                           "Every part, 1 lap each, ~1 hour", NULL };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -435,6 +436,15 @@ static const char *test_hint(int i) {
                  (sets * 13 + 1) / 2);
         return sSwitchHint;
     }
+    if (i == 7) {
+        long sets = port_autorun_shelved_count() + 1;
+        if (sets < 2) {
+            return "Shelved switches: a New 3DS bench";
+        }
+        snprintf(sSwitchHint, sizeof(sSwitchHint), port_text("3 heavy tracks x %ld shelved switch sets, ~%ld min"),
+                 sets, (sets * 13 + 1) / 2);
+        return sSwitchHint;
+    }
     return sStart[i];
 }
 
@@ -444,8 +454,8 @@ static void test_change(int i, int step) {
         port_autorun_request(0);
     } else {
         // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark, 5 the switch
-        // bench, 6 the whole game run, 7 its short variant.
-        static const long sRequests[7] = { 1, 3, 4, 2, 5, 6, 7 };
+        // bench, 6 the whole game run, 7 its short variant, 8 the shelved switches bench.
+        static const long sRequests[8] = { 1, 3, 4, 2, 5, 6, 7, 8 };
         port_autorun_request(sRequests[i]);
     }
     // The run turns on or off at the game's next frame.

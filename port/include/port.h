@@ -206,6 +206,7 @@ s32 port_autorun_time_trial(void);
 s32 port_autorun_quit_race(void);
 void port_autorun_request(s32 start);
 s32 port_autorun_switch_count(void);
+s32 port_autorun_shelved_count(void);
 void port_autorun_frame(s32 updateRate);
 /* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
 s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
