@@ -100,6 +100,8 @@ enum {
     MAIN_PROFILER,
     MAIN_UPDATES,
     MAIN_BUGREPORT,
+    MAIN_PICTURE_DELAY,
+    MAIN_PICTURE,
     MAIN_O3DS_RENDER
 };
 
@@ -125,7 +127,24 @@ static int main_hidden(int row) {
     return !PLAT_DEBUG_TOOLS && (row == MAIN_AHEAD || row >= MAIN_GPU_MATHS);
 }
 
+static const int sPictureDelays[3] = { 5, 10, 20 };
+
+int menu_3ds_picture_delay(void) {
+    int i, seconds = settings_get("shotdelay", 10);
+    for (i = 0; i < 3; i++) {
+        if (sPictureDelays[i] == seconds) {
+            return seconds;
+        }
+    }
+    return 10;
+}
+
 static const char *row_label(int i) {
+    if (i == MAIN_PICTURE_DELAY) {
+        return "Picture delay";
+    } else if (i == MAIN_PICTURE) {
+        return "Send bottom screen picture";
+    }
     if (i == MAIN_AA) {
         return "Anti-aliasing";
     } else if (i == MAIN_FPS) {
@@ -153,7 +172,9 @@ static const char *row_label(int i) {
 }
 
 static void row_value(int i, char *out, int size) {
-    if (i == MAIN_AA) {
+    if (i == MAIN_PICTURE_DELAY) {
+        snprintf(out, size, "%d s", menu_3ds_picture_delay());
+    } else if (i == MAIN_AA) {
         snprintf(out, size, "%s", sAaNames[plat_3ds_antialias_setting()]);
     } else if (i == MAIN_FPS) {
         snprintf(out, size, port_text("%d fps"), plat_frame_rate_setting());
@@ -178,7 +199,11 @@ static void row_value(int i, char *out, int size) {
 }
 
 static const char *row_hint(int i) {
-    if (i == MAIN_AA) {
+    if (i == MAIN_PICTURE_DELAY) {
+        return "Wait before the picture is taken";
+    } else if (i == MAIN_PICTURE) {
+        return "Closes this menu; reopen a page, then wait";
+    } else if (i == MAIN_AA) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
     } else if (i == MAIN_FPS) {
@@ -206,7 +231,13 @@ static const char *row_hint(int i) {
 }
 
 static void row_change(int i, int step) {
-    if (i == MAIN_AA) {
+    if (i == MAIN_PICTURE_DELAY) {
+        int at;
+        for (at = 0; at < 2 && sPictureDelays[at] != menu_3ds_picture_delay(); at++) {}
+        settings_set("shotdelay", sPictureDelays[(at + step + 3) % 3]);
+    } else if (i == MAIN_PICTURE) {
+        sResult = MENU_PICTURE;
+    } else if (i == MAIN_AA) {
         int at;
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
         plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
@@ -278,7 +309,7 @@ static const MenuPage sPicturePage = { "Picture", picture_count, picture_label, 
 /* The Tools page (a debug build's only): the profiler, updates and bug reports, and on an Old 3DS where its renderer
  * runs. */
 static int tools_count(void) {
-    return is_old_3ds() ? 4 : 3;
+    return is_old_3ds() ? 6 : 5;
 }
 
 static const char *tools_label(int i) {

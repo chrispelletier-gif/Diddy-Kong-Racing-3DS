@@ -271,6 +271,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "head: texture lookups remembered (tex memo)", { "DKR_TEX_MEMO", NULL }, 0, 1, 0 },
     { "head: texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
     { "head: Old 3DS flush and frame pacing", { "DKR_SVC_FLUSH", "DKR_FRAME_PACE", NULL }, 0, 1, 0 },
+    { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1 },
+    // P32 per-queue wake-ups are the New 3DS default since they stopped the head flicker: this row checks it comes back.
+    { "head check: wake-ups for all threads (old way)", { "DKR_QUEUE_WAKE", NULL }, 1, 0, 1 },
     { "head: no timing in parts, two top buffers", { "DKR_DRAW_PARTS", "DKR_WALK_PARTS", "DKR_TRIPLE_BUFFER" }, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
@@ -289,7 +292,6 @@ static const BenchSwitch sSwitchesShelved[] = {
     { "lean walk (P38)", { "DKR_WALK_LEAN", NULL }, 0, 1, 0 },
     { "lean draws (P38)", { "DKR_DRAW_LEAN", NULL }, 0, 1, 0 },
     { "texture hashes checked every 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
-    { "wake-ups per queue (P32)", { "DKR_QUEUE_WAKE", NULL }, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 static s32 sShort; // (Defined again below: the whole game run's short variant, or the shelved switches bench)

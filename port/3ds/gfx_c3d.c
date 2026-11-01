@@ -3315,7 +3315,7 @@ static void read_switches(void) {
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
     plat_log("switches: adaptive anti-aliasing %s, top screen buffers %d, queue wake-ups %s, depth %s, sky %s",
              sAdaptive ? "on" : "off", sTripleWanted ? 3 : 2,
-             plat_switch("DKR_QUEUE_WAKE", 0) ? "per queue" : "all threads",
+             plat_switch("DKR_QUEUE_WAKE", !plat_old_3ds()) ? "per queue" : "all threads",
              plat_switch("DKR_DEPTH24", 0) ? "24-bit" : "24-bit + stencil",
              plat_switch("DKR_SKY_LAST", 0) ? "drawn last" : "drawn first");
 }

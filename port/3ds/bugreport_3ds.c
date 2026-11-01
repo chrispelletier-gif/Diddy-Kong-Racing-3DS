@@ -51,6 +51,7 @@ enum ReportKind {
     REPORT_LAST_CRASHED, /* The last run crashed (crash.txt). */
     REPORT_LAST_UNENDED, /* The last run never reached its normal exit. */
     REPORT_TEST_RUN,     /* The results of the unattended test run (port_autorun.c). */
+    REPORT_PICTURE,      /* A picture of the bottom screen (Tools page), for checking its layout. */
 };
 
 typedef struct ReportConfig {
@@ -349,8 +350,9 @@ static void build_body(Report *report, const char *crashText, const char *recent
         "The last run crashed; sent at the next start",
         "The last run did not end normally (a freeze, or the power button); sent at the next start",
         "Results of the unattended test run",
+        "A picture of the bottom screen, sent from the Tools page (bottom.ppm: P6, 320x240, exact pixels)",
     };
-    static const char *const sKindNames[] = { "button", "crash", "unended", "testrun" };
+    static const char *const sKindNames[] = { "button", "crash", "unended", "testrun", "picture" };
     size_t capacity = 60000, length = 0;
     char *body = malloc(capacity);
     bool isNew3DS = false;
@@ -820,6 +822,62 @@ static void report_now(void) {
 }
 
 static volatile int sReportRequested;
+static volatile u64 sPictureAt; /* plat_time_ns() when the screen picture is due; 0: none. */
+
+void plat_3ds_bottom_picture(u16 *out);
+
+/* "Send bottom screen picture" on the Tools page: in seconds, so the menu can be closed and a page reopened. */
+void bugreport_request_picture(int seconds) {
+    sPictureAt = plat_time_ns() + (u64) seconds * 1000000000ULL;
+}
+
+/* The bottom screen exactly as drawn, as a PPM (RGB565 widened the usual way), sent as an issue. */
+static void picture_now(void) {
+    static u16 shot[320 * 240];
+    static const char header[] = "P6\n320 240\n255\n";
+    ReportConfig config;
+    Report report;
+    int haveToken = load_config(&config), i;
+    unsigned int size = sizeof(header) - 1 + 320 * 240 * 3;
+    u8 *ppm = malloc(size);
+    FILE *f;
+    BugReportFile *file;
+
+    plat_3ds_bottom_picture(shot);
+    if (ppm == NULL) {
+        show_status("Picture: out of memory");
+        return;
+    }
+    memcpy(ppm, header, sizeof(header) - 1);
+    for (i = 0; i < 320 * 240; i++) {
+        u8 *out = ppm + sizeof(header) - 1 + i * 3;
+        out[0] = (shot[i] >> 11) * 255 / 31;
+        out[1] = ((shot[i] >> 5) & 63) * 255 / 63;
+        out[2] = (shot[i] & 31) * 255 / 31;
+    }
+    f = fopen(DATA_DIR "/bottom.ppm", "wb");
+    if (f != NULL) {
+        fwrite(ppm, 1, size, f);
+        fclose(f);
+    }
+    if (!haveToken) {
+        show_status("Picture: no token in sdmc:/3ds/dkr/bugreport.txt; saved as sdmc:/3ds/dkr/bottom.ppm");
+        free(ppm);
+        return;
+    }
+    memset(&report, 0, sizeof(report));
+    report.kind = REPORT_PICTURE;
+    snprintf(report.title, sizeof(report.title), "[3DS screen picture] %s", PORT_BUILD_VERSION);
+    file = &report.files[report.fileCount++];
+    file->name = strdup("bottom.ppm");
+    file->data = ppm;
+    file->size = size;
+    add_file(&report, "settings.txt");
+    build_body(&report, NULL, NULL);
+    sShow = show_status;
+    send_and_show(&config, &report);
+    free_report(&report);
+}
 static volatile int sResultsRequested;
 static volatile int sResultsSending;
 static int sResultsKind; // PLAT_RESULTS_*
@@ -962,6 +1020,14 @@ static void button_thread(void *arg) {
             sReportRequested = 0;
             sBusy = 0;
         }
+        if (sPictureAt != 0 && plat_time_ns() >= sPictureAt && !sBusy) {
+            sPictureAt = 0;
+            sBusy = 1;
+            net_3ds_background(1);
+            picture_now();
+            net_3ds_background(0);
+            sBusy = 0;
+        }
         if (sResultsRequested && !sBusy) {
             sBusy = 1;
             net_3ds_background(1);
@@ -982,6 +1048,10 @@ void bugreport_start(void) {
 }
 #else
 void bugreport_request(void) {
+}
+
+void bugreport_request_picture(int seconds) {
+    (void) seconds;
 }
 
 void plat_send_test_results(const char *title, const char *summary) {
