@@ -592,6 +592,9 @@ void mode_game(s32 updateRate) {
         gDrumstickSceneLoadTimer = 0;
         buttonHeldInputs |= (L_TRIG | R_TRIG);
         loadContext = LEVEL_CONTEXT_NONE;
+        // The results screen's tiled background (postrace_start) is put away by its menu, which a test run skips:
+        // left on, it was drawn behind the sky of every later race (some 250 triangles, 1.3 ms of Old 3DS renderer).
+        bgdraw_texture_init(NULL, NULL, 0);
     }
 #endif
     process_onscreen_textbox(updateRate);
