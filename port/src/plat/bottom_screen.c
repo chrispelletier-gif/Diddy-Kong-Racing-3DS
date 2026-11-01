@@ -1059,9 +1059,9 @@ static void draw_controls(int y0, int y1) {
         if (sStyle == 2) {
             // Broadcast: the heading on a red tag, like a race broadcast's lower third.
             Colour red = { 235, 40, 40, 255 }, orange = { 255, 150, 20, 255 };
-            slab(8, y0 + 2, 12 + text_width(FONT_FUN, "CONTROLS") + 18, y0 + 22, 5, red, orange);
+            slab(8, y0 + 2, 16 + text_width(FONT_FUN, "CONTROLS") + 13, y0 + 22, 5, red, orange);
         }
-        text(FONT_FUN, sStyle == 2 ? 18 : 12, y0 + 4, "CONTROLS", WHITE, 1);
+        text(FONT_FUN, sStyle == 2 ? 16 : 12, y0 + (sStyle == 2 ? 5 : 4), "CONTROLS", WHITE, 1);
         top = y0 + 21;
     }
     if (sStyle != 0 && font_ready(FONT_SMALL)) {
@@ -2500,7 +2500,7 @@ static int lap_row(const RaceHud *hud, int x, int y) {
     if (hud->finished) {
         return piece(&sFinishLabel, x, y, 0);
     } else if (hud->laps > 0 && hud->lap >= hud->laps && hud->laps > 1) {
-        x = piece(&sFinalLabel, x, y, 3);
+        x = piece(&sFinalLabel, x, y, 7);
         return piece(&sLapSmallLabel, x, y, 0);
     } else if (hud->laps > 0) {
         x = piece(&sLapLabel, x, y + 3, 4);
@@ -2517,26 +2517,46 @@ static int place_row(int place, int x, int y) {
 }
 
 static int time_row(const RaceHud *hud, int x, int y, int small) {
-    x = piece(&sTimeLabel, x, y + 2, 4);
+    const Picture *digit = small ? &sSmallDigits[0] : &sDigits[0];
+    int labelY = y + digit->height - sTimeLabel.height; /* bottoms on one line */
+    x = piece(&sTimeLabel, x, labelY, 4);
     return race_time(x, y, hud->raceTime, small);
 }
 
-/* TIME and the clock, centred in the top right panel; the big digits when they fit, else the small ones. */
+/* The clock's size and where it starts: the big digits when they fit, else the small ones. */
+static int time_small(const RaceHud *hud, int y) {
+    return DRY(time_row(hud, 0, y, 0)) > RIGHT_X1 - RIGHT_X0 - 8;
+}
+
+/* The x where the lap line and the clock both start, so their left edges line up (centred as a pair). */
+static int lap_time_left(const RaceHud *hud, int lapWidth, int y) {
+    int small = time_small(hud, y);
+    int tw = DRY(time_row(hud, 0, small ? y + 2 : y, small));
+    int w = lapWidth > tw ? lapWidth : tw;
+    return right_centred(w);
+}
+
+static void time_at(const RaceHud *hud, int x, int y) {
+    int small = time_small(hud, y);
+    time_row(hud, x, small ? y + 2 : y, small);
+}
+
 static void time_centred(const RaceHud *hud, int y) {
-    int small = DRY(time_row(hud, 0, y, 0)) > RIGHT_X1 - RIGHT_X0 - 8;
+    int small = time_small(hud, y);
     int yy = small ? y + 2 : y;
     time_row(hud, right_centred(DRY(time_row(hud, 0, yy, small))), yy, small);
 }
 
 static void draw_standing(const RaceHud *hud) {
+    int lapW = hud->laps > 0 || hud->finished ? DRY(lap_row(hud, 0, 44)) : 0, left;
     if (hud->position >= 1 && hud->position <= 8) {
         place_row(hud->position, right_centred(DRY(place_row(hud->position, 0, 9))), 9);
     }
-    if (hud->laps > 0 || hud->finished) {
-        int w = DRY(lap_row(hud, 0, 44));
-        lap_row(hud, right_centred(w), 44);
+    left = lap_time_left(hud, lapW, 68);
+    if (lapW > 0) {
+        lap_row(hud, left, 44);
     }
-    time_centred(hud, 68);
+    time_at(hud, left, 68);
 }
 
 /* The laps the HUD has times for, and of those the finished ones (after the finish line, all of them). */
@@ -2691,12 +2711,12 @@ static int seconds_gap(int x, int y, int gap) {
 
 /* Lap and time, top right, as in a race but without the place (time trial, battle). */
 static void draw_lap_and_time(const RaceHud *hud, const char *title, int laps) {
+    int lapW = laps && hud->laps > 0 ? DRY(lap_row(hud, 0, 40)) : 0, left = lap_time_left(hud, lapW, 68);
     text_centred(FONT_FUN, RIGHT_X0, RIGHT_X1, 9, title, WHITE, 1);
-    if (laps && hud->laps > 0) {
-        int w = DRY(lap_row(hud, 0, 40));
-        lap_row(hud, right_centred(w), 40);
+    if (lapW > 0) {
+        lap_row(hud, left, 40);
     }
-    time_centred(hud, 68);
+    time_at(hud, left, 68);
 }
 
 /* Lap times down a panel (the lower middle one): the finished laps, then the best. */
@@ -2996,7 +3016,7 @@ static void draw_challenge(const RaceHud *hud) {
         piece(&sDigits[hud->racerCount % 10], x, 46, 0);
         time_centred(hud, 70);
     } else {
-        int place = 1, togo;
+        int place = 1;
         for (i = 0; i < hud->racerCount; i++) {
             if (hud->racers[i].player) {
                 place = i + 1;
@@ -3009,11 +3029,6 @@ static void draw_challenge(const RaceHud *hud) {
         text_centred_as_is(FONT_SMALL, RIGHT_X0, RIGHT_X1, 32, line, HINT, 1);
         if (place >= 1 && place <= 8) {
             place_row(place, right_centred(DRY(place_row(place, 0, 48))), 48);
-        }
-        togo = me != NULL ? hud->goal - me->score : 0;
-        if (togo > 0) {
-            snprintf(line, sizeof(line), port_text("%d to go"), togo);
-            text_centred_as_is(FONT_SMALL, RIGHT_X0, RIGHT_X1, 80, line, DIM, 1);
         }
     }
 }
@@ -3201,8 +3216,8 @@ static void menu_save_styled(const RaceHud *hud) {
     Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
            orange = { 255, 150, 20, 255 }, chip = { 0, 0, 0, 60 };
     if (sStyle == 2) {
-        slab(94, 8, 94 + 8 + text_width(FONT_FUN, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE") + 14, 28, 5, red, orange);
-        text(FONT_FUN, 100, 11, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
+        slab(94, 8, 94 + 8 + text_width(FONT_FUN, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE") + 13, 28, 5, red, orange);
+        text(FONT_FUN, 102, 11, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
     } else {
         text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", sStyle == 1 || sStyle == 3 ? GOLD : WHITE, 1);
     }
@@ -3405,7 +3420,7 @@ static void lap_pieces(const RaceHud *hud, int x, int y) {
     if (hud->finished) {
         piece(&sFinishLabel, x, y, 0);
     } else if (hud->laps > 0 && hud->lap >= hud->laps && hud->laps > 1) {
-        x = piece(&sFinalLabel, x, y, 3);
+        x = piece(&sFinalLabel, x, y, 7);
         piece(&sLapSmallLabel, x, y, 0);
     } else if (hud->laps > 0) {
         x = piece(&sLapLabel, x, y + 3, 4);
@@ -3416,6 +3431,23 @@ static void lap_pieces(const RaceHud *hud, int x, int y) {
 }
 
 /* The last finished lap's number and time (or the lap so far), and the best finished lap's time; -1 when none. */
+/* A little stopwatch with the time of the lap being driven beside it: stands in for a "Lap 1" label (the lap counter says
+ * which lap it is). Returns where it ends. */
+static int lap_clock(int x, int y, int frames, Colour c) {
+    static const char *const rows[7] = { "..###..", ".#...#.", "#..#..#", "#..##.#", "#.....#", ".#...#.", "..###.." };
+    int i, j;
+    for (j = 0; j < 7; j++) {
+        for (i = 0; i < 7; i++) {
+            if (rows[j][i] == '#') {
+                fill(x + i + 1, y + j + 2, x + i + 2, y + j + 3, (Colour){ 0, 0, 20, 160 });
+                fill(x + i, y + j + 1, x + i + 1, y + j + 2, c);
+            }
+        }
+    }
+    fill(x + 2, y, x + 5, y + 1, c);
+    return race_time(x + 11, y - 1, frames, 1);
+}
+
 static void lap_facts(const RaceHud *hud, int *lapNumber, int *lapTime, int *best) {
     int i, timed, done;
     timed_laps(hud, &timed, &done);
@@ -3496,7 +3528,6 @@ static void gap_text(int x, int y, int rightAligned, const RaceHudRacer *r) {
 
 static void race_glass(const RaceHud *hud) {
     int i, lapNumber, lapTime, best;
-    char label[24];
     box(6, 6, 114, 198, BOX_FILL, BOX_EDGE);
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
         const RaceHudRacer *r = &hud->racers[i];
@@ -3527,9 +3558,7 @@ static void race_glass(const RaceHud *hud) {
     }
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
-        text(FONT_SMALL, 130, 82, label, LABEL_BLUE, 1);
-        race_time(176, 83, lapTime, 1);
+        lap_clock(130, 83, lapTime, LABEL_BLUE);
     }
     // The item slot and the bananas.
     box(120, 104, 196, 198, BOX_FILL, BOX_EDGE);
@@ -3549,7 +3578,6 @@ static void race_glass(const RaceHud *hud) {
 static void race_broadcast(const RaceHud *hud) {
     static const Colour podium[3] = { { 255, 200, 40, 255 }, { 200, 210, 230, 255 }, { 220, 140, 70, 255 } };
     int i, lapNumber, lapTime, best;
-    char label[24];
     Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
            orange = { 255, 150, 20, 255 };
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
@@ -3585,8 +3613,7 @@ static void race_broadcast(const RaceHud *hud) {
     lap_segments(hud, 240, 34, 20, 3, 6, red, (Colour){ 255, 255, 255, 40 }, 1);
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
-        text(FONT_SMALL, 240, 46, label, BEHIND, 1);
+        lap_clock(240, 46, lapTime, BEHIND);
     }
     slab(132, 69, 316, 97, 6, slabFill, slabFill);
     {
@@ -3610,7 +3637,6 @@ static void race_broadcast(const RaceHud *hud) {
 
 static void race_dock(const RaceHud *hud) {
     int i, me = 0, first, lapNumber, lapTime, best, x, rowY = 50;
-    char label[24];
     place_centred(hud, 4, 4, 84, 42, 2);
     lap_pieces(hud, 92, 6);
     lap_segments(hud, 94, 25, 8, 4, 8, GOLD, (Colour){ 255, 255, 255, 50 }, 0);
@@ -3618,9 +3644,7 @@ static void race_dock(const RaceHud *hud) {
     race_time(x, 6, hud->raceTime, 0);
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        snprintf(label, sizeof(label), port_text("Lap %d"), lapNumber);
-        text(FONT_SMALL, 176, 26, label, LABEL_BLUE, 1);
-        race_time(212, 27, lapTime, 1);
+        lap_clock(176, 27, lapTime, LABEL_BLUE);
     }
     fill(8, 44, 312, 45, (Colour){ 255, 255, 255, 40 });
     // The player and the racers either side of them, on a calm panel.
