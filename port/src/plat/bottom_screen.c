@@ -3456,12 +3456,12 @@ static void menu_save_styled(const RaceHud *hud) {
         fraction_centred(16, 96, 111, hud->balloons, 47);
         progress_ring(30, 168, 15, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
-            picture(&sTTAmulet[hud->ttAmulet], 19, 157);
+            picture_fit(&sTTAmulet[hud->ttAmulet], 19, 157, 22, 22);
         }
         fraction_centred(6, 54, 187, hud->ttAmulet, 4);
         progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
-            picture(&sWizpigAmulet[hud->wizpigAmulet], 71, 157);
+            picture_fit(&sWizpigAmulet[hud->wizpigAmulet], 71, 157, 22, 22);
         }
         fraction_centred(58, 106, 187, hud->wizpigAmulet, 4);
         for (i = 0; i < RACE_HUD_WORLDS; i++) {
