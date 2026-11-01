@@ -3354,10 +3354,10 @@ static void race_broadcast(const RaceHud *hud) {
     }
     // The place block, the lap slab and the time strip.
     slab(144, 8, 232, 64, 10, red, orange);
-    place_pieces(hud, 148, 10, 3);
+    place_pieces(hud, 166, 12, 3);
     if (hud->racerCount > 0) {
         snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, 196, 48, of, (Colour){ 255, 240, 220, 255 }, 1);
+        text(FONT_SMALL, 174, 46, of, (Colour){ 255, 240, 220, 255 }, 1);
     }
     slab(226, 8, 316, 64, 6, slabLight, slabLight);
     lap_pieces(hud, 240, 12);
