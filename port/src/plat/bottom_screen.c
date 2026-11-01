@@ -836,6 +836,8 @@ static void upper_text(char *out, int size, const char *s) {
 
 /* Dense text (the profiler and the watchdog) in 8 pixel columns: the 8x8 font, or the small font centred. */
 static void mono_text(int x, int y, const char *s, Colour colour) {
+    int style = sStyle;
+    sStyle = 0; /* debug text always uses the game's small font, whatever look is picked */
     for (; *s != '\0' && x + 8 <= BS_WIDTH; s++, x += 8) {
         if (sMono != NULL || !font_ready(FONT_SMALL)) {
             mono_char(x, y, (unsigned char) *s, colour);
@@ -844,6 +846,7 @@ static void mono_text(int x, int y, const char *s, Colour colour) {
             text_centred_as_is(FONT_SMALL, x, x + 8, y - 2, one, colour, 0);
         }
     }
+    sStyle = style;
 }
 
 /*
@@ -2627,6 +2630,11 @@ static void draw_item(const RaceHud *hud) {
         dryValue_; \
     })
 
+/* The distance between two lines of small text: the look fonts are a little taller than the game's. */
+static int line_pitch(void) {
+    return sStyle == 0 ? 11 : 13;
+}
+
 /* Small text centred between x0 and x1; a line too wide for the panel breaks at spaces. Returns the next line's y. */
 static int wrapped_centred(int x0, int x1, int y, const char *s, Colour colour) {
     char line[48];
@@ -2657,7 +2665,7 @@ static int wrapped_centred(int x0, int x1, int y, const char *s, Colour colour) 
         memcpy(line, s + start, end - start);
         line[end - start] = '\0';
         text_centred_as_is(FONT_SMALL, x0, x1, y, line, colour, 1);
-        y += 11;
+        y += line_pitch();
         start = end + 1;
     }
     return y;
@@ -2901,8 +2909,8 @@ static void draw_lap_list(const RaceHud *hud, int x0, int y0) {
     for (i = timed > 2 ? timed - 2 : 0; i < timed; i++) {
         snprintf(label, sizeof(label), port_text("Lap %d"), i + 1);
         text(FONT_SMALL, x0 + 8, y, label, HINT, 1);
-        race_time(x0 + 8, y + 11, hud->lapTimes[i], 1);
-        y += 27;
+        race_time(x0 + 8, y + line_pitch(), hud->lapTimes[i], 1);
+        y += 27 + (sStyle != 0) * 3;
     }
     for (i = 0; i < done; i++) {
         if (best < 0 || hud->lapTimes[i] < best) {
@@ -2911,9 +2919,9 @@ static void draw_lap_list(const RaceHud *hud, int x0, int y0) {
     }
     text(FONT_SMALL, x0 + 8, y, "Best lap", HINT, 1);
     if (best >= 0) {
-        race_time(x0 + 8, y + 11, best, 1);
+        race_time(x0 + 8, y + line_pitch(), best, 1);
     } else {
-        text(FONT_SMALL, x0 + 8, y + 11, "--", DIM, 1);
+        text(FONT_SMALL, x0 + 8, y + line_pitch(), "--", DIM, 1);
     }
 }
 
@@ -2958,8 +2966,8 @@ static void draw_time_trial(const RaceHud *hud) {
             delta[0] = d <= 0 ? '-' : '+';
             text(FONT_SMALL, TOWER_X1 - 6 - text_width(FONT_SMALL, delta), y, delta, d <= 0 ? BEHIND : AHEAD, 1);
         }
-        race_time(TOWER_X0 + 8, y + 11, hud->lapTimes[i], 1);
-        y += 30;
+        race_time(TOWER_X0 + 8, y + line_pitch(), hud->lapTimes[i], 1);
+        y += 30 + (sStyle != 0) * 3;
         if (finished && (best < 0 || hud->lapTimes[i] < best)) {
             best = hud->lapTimes[i];
         }
@@ -2967,21 +2975,21 @@ static void draw_time_trial(const RaceHud *hud) {
     fill(TOWER_X0 + 6, y - 2, TOWER_X1 - 6, y - 1, SLOT_EDGE);
     text(FONT_SMALL, TOWER_X0 + 8, y + 2, "Best lap", HINT, 1);
     if (best >= 0) {
-        race_time(TOWER_X0 + 8, y + 13, best, 1);
+        race_time(TOWER_X0 + 8, y + 2 + line_pitch(), best, 1);
     } else {
-        text(FONT_SMALL, TOWER_X0 + 8, y + 13, "--", DIM, 1);
+        text(FONT_SMALL, TOWER_X0 + 8, y + 2 + line_pitch(), "--", DIM, 1);
     }
     if (hud->bestTotal > 0 && y + 54 < LOWER_Y1) {
         text(FONT_SMALL, TOWER_X0 + 8, y + 32, "Best run", HINT, 1);
-        race_time(TOWER_X0 + 8, y + 43, hud->bestTotal, 1);
+        race_time(TOWER_X0 + 8, y + 32 + line_pitch(), hud->bestTotal, 1);
     }
     // Middle top: against the best run, the thing to glance at.
     picture_scaled(&sGhostIcon, MIDDLE_X0 + 3, UPPER_Y0 + 5, 1, 1);
-    text(FONT_SMALL, MIDDLE_X0 + 44, 12, "Best run", HINT, 1);
+    text(FONT_SMALL, MIDDLE_X0 + 44, 12, sStyle == 0 ? "Best run" : "Best", HINT, 1);
     if (hud->bestGap == RACE_HUD_NO_GAP) {
         text(FONT_SMALL, MIDDLE_X0 + 44, 24, hud->bestTotal > 0 ? "" : "none yet", DIM, 1);
     } else {
-        text(FONT_SMALL, MIDDLE_X0 + 44, 24, hud->bestGap <= 0 ? "you lead" : "behind",
+        text(FONT_SMALL, MIDDLE_X0 + 44, 12 + line_pitch(), hud->bestGap <= 0 ? (sStyle == 0 ? "you lead" : "ahead") : "behind",
              hud->bestGap <= 0 ? BEHIND : AHEAD, 1);
         seconds_gap(MIDDLE_X0 + 8, 60, hud->bestGap);
     }
@@ -2997,7 +3005,7 @@ static void draw_time_trial(const RaceHud *hud) {
         RaceHudRacer tt = { 8 /* CHARACTER_TT */, RACE_HUD_NOT_SPECIAL, 0 };
         framed_portrait(&tt, MIDDLE_X0 + 8, LOWER_Y0 + 50, 0, 0);
         text(FONT_SMALL, MIDDLE_X0 + 34, LOWER_Y0 + 50, "T.T.", HINT, 1);
-        text(FONT_SMALL, MIDDLE_X0 + 34, LOWER_Y0 + 61, "to beat", DIM, 1);
+        text(FONT_SMALL, MIDDLE_X0 + 34, LOWER_Y0 + 50 + line_pitch(), "to beat", DIM, 1);
         race_time(MIDDLE_X0 + 8, LOWER_Y0 + 78, hud->staffTime, 1);
     } else if (hud->recordLap >= 0) {
         text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 50, "Record lap", HINT, 1);
@@ -3028,7 +3036,7 @@ static void draw_head_to_head(const RaceHud *hud, const char *subtitle) {
             char gap[16];
             text(FONT_SMALL, 26, y + 52, subtitle, DIM, 1);
             format_gap(r->gap, gap, sizeof(gap));
-            text(FONT_SMALL, 26, y + 64, gap, r->gap > 0 ? AHEAD : BEHIND, 1);
+            text(FONT_SMALL, 26, y + 52 + line_pitch(), gap, r->gap > 0 ? AHEAD : BEHIND, 1);
         }
     }
     text(FONT_FUN, 36, 92, "VS", WHITE, 1);
@@ -3044,12 +3052,17 @@ static void draw_versus(const RaceHud *hud) {
         if (text_width(FONT_FUN, sNames[v]) <= MIDDLE_X1 - MIDDLE_X0 - 6) {
             text_centred(FONT_FUN, MIDDLE_X0, MIDDLE_X1, 22, sNames[v], WHITE, 1);
         } else {
+            static const char *const sTiny[3] = { "CAR", "HOVER", "PLANE" };
+            const char *title = sNames[v];
             sNoGap = 1;
-            text_centred(FONT_FUN, MIDDLE_X0, MIDDLE_X1, 22, sNames[v], WHITE, 1);
+            if (text_width(FONT_FUN, title) > MIDDLE_X1 - MIDDLE_X0 - 6) {
+                title = sTiny[v]; /* the look's heading font is wider than the game's */
+            }
+            text_centred(FONT_FUN, MIDDLE_X0, MIDDLE_X1, 22, title, WHITE, 1);
             sNoGap = 0;
         }
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, 52, "Taj's challenge", YELLOW, 1);
-        wrapped_centred(MIDDLE_X0, MIDDLE_X1, 66, "Win: a new balloon", DIM);
+        wrapped_centred(MIDDLE_X0, MIDDLE_X1, 52 + line_pitch() + 1, "Win: a new balloon", DIM);
     } else {
         snprintf(subtitle, sizeof(subtitle), port_text("Round %d"), hud->round > 0 ? hud->round : 1);
         draw_head_to_head(hud, subtitle);
@@ -3133,7 +3146,7 @@ static void draw_four_rows(const RaceHud *hud) {
                     }
                 }
                 if (r->carrying) {
-                    text(FONT_SMALL, 54, y + 33, "+1 held", YELLOW, 1);
+                    text(FONT_SMALL, 54, y + 33, sStyle == 0 ? "+1 held" : "+1", YELLOW, 1);
                 }
                 break;
         }
@@ -3157,8 +3170,8 @@ static void draw_challenge(const RaceHud *hud) {
         if (me != NULL && me->carrying) {
             picture_scaled(&sEgg, MIDDLE_X0 + 8, LOWER_Y0 + 20, 1, 1);
             text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26, "Get it", YELLOW, 1);
-            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 38, "to your", YELLOW, 1);
-            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 50, "nest", YELLOW, 1);
+            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26 + line_pitch(), "to your", YELLOW, 1);
+            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26 + 2 * line_pitch(), "nest", YELLOW, 1);
         } else {
             text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 26, "No egg", DIM, 1);
         }
@@ -3171,8 +3184,13 @@ static void draw_challenge(const RaceHud *hud) {
         x = piece(&sDigits[(hud->bananas / 10) % 10], x, LOWER_Y0 + 26, 1);
         piece(&sDigits[hud->bananas % 10], x, LOWER_Y0 + 26, 0);
         if (hud->mode == RACE_HUD_MODE_BATTLE) {
-            wrapped_centred(MIDDLE_X0, MIDDLE_X1, wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 54, "Hits take bananas", DIM) + 2,
-                            "Last one left wins", DIM);
+            if (sStyle == 0) {
+                wrapped_centred(MIDDLE_X0, MIDDLE_X1,
+                                wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 54, "Hits take bananas", DIM) + 2,
+                                "Last one left wins", DIM);
+            } else {
+                wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 56, "Last one left wins", DIM); /* room for two lines */
+            }
         } else {
             wrapped_centred(MIDDLE_X0, MIDDLE_X1, wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 54, "Bring them home", DIM) + 2,
                             "to your base", DIM);
@@ -3195,8 +3213,13 @@ static void draw_challenge(const RaceHud *hud) {
                 place = i + 1;
             }
         }
-        text_centred(FONT_FUN, RIGHT_X0, RIGHT_X1, 9, hud->mode == RACE_HUD_MODE_EGGS ? "EGG COLLECTOR" : "BANANAS",
-                     WHITE, 1);
+        {
+            const char *title = hud->mode == RACE_HUD_MODE_EGGS ? "EGG COLLECTOR" : "BANANAS";
+            if (text_width(FONT_FUN, title) > RIGHT_X1 - RIGHT_X0 - 8) {
+                title = "EGGS"; /* the look's heading font is wider than the game's */
+            }
+            text_centred(FONT_FUN, RIGHT_X0, RIGHT_X1, 9, title, WHITE, 1);
+        }
         snprintf(line, sizeof(line), port_text("First to %d %s"), hud->goal,
                  port_text(hud->mode == RACE_HUD_MODE_EGGS ? "eggs wins" : "wins"));
         text_centred_as_is(FONT_SMALL, RIGHT_X0, RIGHT_X1, 32, line, HINT, 1);
@@ -3225,7 +3248,16 @@ static void draw_hub(const RaceHud *hud) {
     }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
         int balloons = hud->worldBalloons[i];
-        text(FONT_SMALL, TOWER_X0 + 5, y, sWorldShortNames[i], balloons > 0 ? WHITE : DIM, 1);
+        {
+            char name[24];
+            char *space;
+            snprintf(name, sizeof(name), "%s", sWorldShortNames[i]);
+            space = strrchr(name, ' ');
+            if (space != NULL && text_width(FONT_SMALL, name) > TOWER_X1 - TOWER_X0 - 8) {
+                *space = '\0'; /* the look's font is wider: "Snowflake Mtn" becomes "Snowflake" */
+            }
+            text(FONT_SMALL, TOWER_X0 + 5, y, name, balloons > 0 ? WHITE : DIM, 1);
+        }
         // Eight balloons a world (four races, four silver coin races): two rows of four.
         for (k = 0; k < 8; k++) {
             pip(TOWER_X0 + 6 + (k % 4) * 8, y + 13 + (k / 4) * 7, 4, 4, k < balloons);
@@ -3747,20 +3779,31 @@ static void race_glass(const RaceHud *hud) {
     place_centred(hud, 124, 10, 196, 50, 2);
     lap_pieces(hud, 200, 14);
     lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
-    fill(130, 45, 304, 46, (Colour){ 255, 255, 255, 45 });
-    {
-        int x = piece(&sTimeLabel, 130, 55, 4);
-        race_time(x, 52, hud->raceTime, 0);
-    }
+    fill(130, 47, 304, 48, (Colour){ 255, 255, 255, 45 });
     lap_facts(hud, &lapNumber, &lapTime, &best);
-    if (lapNumber > 0) {
-        lap_clock(DRY(piece(&sTimeLabel, 130, 55, 4)) - 11, 71, lapTime, LABEL_BLUE, 312);
-    }
-    if (best >= 0) {
-        // The best lap under the lap clock: labels end at the same column, digits start at the TIME digits.
-        int labelWidth = text_width(FONT_SMALL, "Best"), xd = DRY(piece(&sTimeLabel, 130, 55, 4));
-        text(FONT_SMALL, xd - 4 - labelWidth, 82, "Best", LABEL_BLUE, 1);
-        race_time(xd, 83, best, 1);
+    {
+        // Total, Current and Best: one label font, one digit size, digits in one column.
+        static const char *const names[3] = { "Total", "Current", "Best" };
+        int values[3], shown[3], k, rowsShown = 0, dx, widest = 0;
+        values[0] = hud->raceTime;
+        values[1] = lapTime;
+        values[2] = best;
+        shown[0] = 1;
+        shown[1] = lapNumber > 0;
+        shown[2] = best >= 0;
+        for (k = 0; k < 3; k++) {
+            int w = text_width(FONT_SMALL, names[k]);
+            widest = w > widest ? w : widest;
+        }
+        dx = 130 + widest + 10;
+        for (k = 0; k < 3; k++) {
+            if (shown[k]) {
+                int y = 54 + rowsShown * 15;
+                text(FONT_SMALL, 130, y, names[k], LABEL_BLUE, 1);
+                race_time(dx, y, values[k], 1);
+                rowsShown++;
+            }
+        }
     }
     // The item slot and the bananas.
     box(120, 104, 196, 198, BOX_FILL, BOX_EDGE);
@@ -3813,36 +3856,56 @@ static void race_broadcast(const RaceHud *hud) {
     slab(144, 8, 232, 64, 10, red, orange);
     place_centred(hud, 150, 8, 224, 64, 3);
     slab(226, 8, 316, 64, 6, slabLight, slabLight);
-    lap_pieces(hud, 240, 12);
+    if (hud->laps > 1 && hud->lap >= hud->laps && !hud->finished) {
+        text_centred(FONT_FUN, 226, 316, 14, "FINAL LAP", WHITE, 1);
+    } else {
+        lap_pieces(hud, 240, 12);
+    }
     lap_segments(hud, 240, 34, 20, 3, 6, red, (Colour){ 255, 255, 255, 40 }, 1);
     lap_facts(hud, &lapNumber, &lapTime, &best);
-    if (lapNumber > 0) {
-        lap_clock(240, 46, lapTime, BEHIND, 306);
-    }
-    // The clock and, under it on the same digits, the best lap: all the times in one slab.
-    slab(132, 66, 316, 104, 6, slabFill, slabFill);
+    // All the times in one slab: Total, Current and Best, one label font, one digit size, one digit column.
+    slab(132, 66, 316, 114, 6, slabFill, slabFill);
     {
-        int x = piece(&sTimeLabel, 160, 73, 4), labelWidth = text_width(FONT_SMALL, "BEST");
-        race_time(x, 70, hud->raceTime, 0);
-        text(FONT_SMALL, x - 4 - labelWidth, 88, "BEST", LABEL_BLUE, 1);
-        if (best >= 0) {
-            race_time(x, 87, best, 1);
-        } else {
-            text(FONT_SMALL, x, 88, "--", DIM, 1);
+        static const char *const names[3] = { "TOTAL", "CURRENT", "BEST" };
+        int values[3], shown[3], k, row = 0, widest = 0, dx;
+        values[0] = hud->raceTime;
+        values[1] = lapTime;
+        values[2] = best;
+        shown[0] = 1;
+        shown[1] = lapNumber > 0;
+        shown[2] = best >= 0;
+        for (k = 0; k < 3; k++) {
+            int w = text_width(FONT_SMALL, names[k]);
+            widest = w > widest ? w : widest;
+        }
+        dx = 146 + widest + 12;
+        for (k = 0; k < 3; k++) {
+            int y = 70 + row * 14;
+            text(FONT_SMALL, 146, y, names[k], LABEL_BLUE, 1);
+            if (shown[k]) {
+                race_time(dx, y, values[k], 1);
+            } else {
+                text(FONT_SMALL, dx, y, "--", DIM, 1);
+            }
+            row++;
         }
     }
-    slab(132, 109, 214, 198, 6, slabFill, slabFill);
-    text(FONT_SMALL, 146, 114, "ITEM", LABEL_BLUE, 1);
-    item_in_slot(hud, 151, 134, 179, 164);
-    slab(218, 109, 316, 198, 6, slabFill, slabFill);
-    text(FONT_SMALL, 232, 114, "BANANAS", LABEL_BLUE, 1);
-    bananas_count(hud, 232, 134, 40, 268, 152, 148);
+    slab(132, 119, 214, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 146, 124, "ITEM", LABEL_BLUE, 1);
+    item_in_slot(hud, 151, 143, 179, 173);
+    slab(218, 119, 316, 198, 6, slabFill, slabFill);
+    text(FONT_SMALL, 232, 124, "BANANAS", LABEL_BLUE, 1);
+    bananas_count(hud, 232, 144, 40, 268, 162, 158);
 }
 
 static void race_dock(const RaceHud *hud) {
     int i, me = 0, first, lapNumber, lapTime, best, rowY = 50;
     place_centred(hud, 4, 4, 84, 42, 2);
-    lap_pieces(hud, 92, 6);
+    if (hud->laps > 1 && hud->lap >= hud->laps && !hud->finished) {
+        text(FONT_FUN, 92, 8, "FINAL LAP", GOLD, 1);
+    } else {
+        lap_pieces(hud, 92, 6);
+    }
     lap_segments(hud, 94, 25, 8, 4, 8, GOLD, (Colour){ 255, 255, 255, 50 }, 0);
     lap_facts(hud, &lapNumber, &lapTime, &best);
     {
