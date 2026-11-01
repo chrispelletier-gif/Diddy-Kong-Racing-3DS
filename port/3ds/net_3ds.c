@@ -23,6 +23,11 @@ static __thread s32 sSavedPrio = -1;
 void net_3ds_background(int background) {
     s32 prio = 0;
 
+    if (plat_old_3ds()) {
+        // Below the game on an Old 3DS, whose game core is busy all race (and on the overworld), the report or
+        // upload never ran: the bug report shortcut did nothing at all. It keeps its priority and costs some frames.
+        return;
+    }
     if (background && sSavedPrio < 0) {
         if (R_SUCCEEDED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE)) && prio < BACKGROUND_PRIO) {
             sSavedPrio = prio;

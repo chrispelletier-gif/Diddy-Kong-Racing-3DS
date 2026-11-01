@@ -4,7 +4,7 @@
 /* The Settings menu on the bottom screen (menu_3ds.c). */
 
 /* What the panel (update_3ds.c) should do after a tap on the menu. */
-enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT, MENU_PICTURE };
+enum { MENU_STAY, MENU_CLOSE, MENU_UPDATES, MENU_BUGREPORT, MENU_PICTURE, MENU_RESEND_RESULTS };
 
 /* Seconds the Tools page's screen picture waits (menu_3ds.c, 5, 10 or 20). */
 int menu_3ds_picture_delay(void);

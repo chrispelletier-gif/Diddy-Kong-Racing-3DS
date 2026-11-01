@@ -336,6 +336,8 @@ typedef struct TexCacheEntry {
     GfxTexture tex;
     GfxTexture otherFilter; // The same texture with the other filter, sharing its GPU copy (when hasOtherFilter)
     u8 hasOtherFilter;
+    u8 atlasState[2];       // For each filter: ATLAS_UNKNOWN, ATLAS_NEVER, ATLAS_UNPLACED or ATLAS_PAGE0 + a page
+    u8 atlasX[2], atlasY[2]; // For each filter: where the texture's first texel sits in its page
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
@@ -669,6 +671,7 @@ static void free_entry(TexCacheEntry *e) {
     }
     gfx_split_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
+    e->atlasState[0] = e->atlasState[1] = 0; // Its place in a page is not given out again (see atlas_place)
     e->used = FALSE;
     e->gen++;
     if (e->gen == 0) {
@@ -954,6 +957,8 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     e->tex.wrapS = wrapS;
     e->tex.wrapT = wrapT;
     e->tex.backendData = NULL;
+    e->tex.atlas = 0;
+    e->atlasState[0] = e->atlasState[1] = 0;
     gfx_split_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
     walk_switch(WALK_TEXTURES);
@@ -1138,6 +1143,219 @@ static inline float tex_axis_coord(const TexAxis *a, s32 coord) {
         c /= a->size;
     }
     return c;
+}
+
+/*
+ * The texture atlas (Old 3DS work, DKR_TEX_ATLAS). A draw costs both renderer halves far more than its triangles, and
+ * a third to a half of the walk's draws end only because the next command has another texture. Small textures (up to
+ * ATLAS_MAX_TEX texels a side, a power of two, without mipmaps, so the picture is the same) are also copied into
+ * pages of ATLAS_SIZE texels a side, one set for each texture format and filter, and a command whose texture
+ * coordinates stay inside its texture is drawn from the page instead, with its coordinates moved there: commands with
+ * different small textures then batch together. Each texture gets a border of one texel, filled the way its wrap
+ * mode reads past the edge, so bilinear filtering at the edges reads what it would have from the texture itself.
+ * Pages are packed in shelves and never reuse a place (draws still queued may read it), so when a set fills up it is
+ * freed and started again (at most every ATLAS_RESET_FRAMES frames). A page is uploaded again before a draw from it
+ * when textures were added to it since.
+ * Most small textures drawn in a race have mipmaps, which pages can't keep (a level would mix neighbours): only 2-3
+ * commands a frame qualify on a PC run of Jungle Falls and Whale Bay, against 19-40 with them. DKR_TEX_ATLAS=2 puts
+ * them in too, losing their mipmaps, to measure what the atlas could gain before making pages that keep them.
+ * Switching it between frames is safe once the batch is drawn: textures already placed stay placed.
+ */
+#define ATLAS_SIZE 256
+#define ATLAS_MAX_TEX 64
+#define ATLAS_PAGES_PER_KIND 2
+#define ATLAS_KINDS 8 // Texture format (4) x filter (2)
+#define ATLAS_RESET_FRAMES 120
+enum { ATLAS_UNKNOWN, ATLAS_NEVER, ATLAS_UNPLACED, ATLAS_PAGE0 };
+
+typedef struct AtlasPage {
+    GfxTexture tex;
+    unsigned int *pixels;
+    u16 shelfX, shelfY, shelfH; // The shelf being filled: its next free x, its top and its height
+    u8 dirty, used;
+} AtlasPage;
+
+static AtlasPage sAtlas[ATLAS_KINDS * ATLAS_PAGES_PER_KIND];
+static s32 sAtlasLastReset[ATLAS_KINDS];
+static s32 sAtlasOn;
+static unsigned long sAtlasStats[3]; // Commands drawn from a page, textures placed, sets reset (the profiler's log)
+
+int gfx_atlas_take(unsigned long out[3]) {
+    __builtin_memcpy(out, sAtlasStats, sizeof(sAtlasStats));
+    __builtin_memset(sAtlasStats, 0, sizeof(sAtlasStats));
+    return sAtlasOn;
+}
+
+static inline TexCacheEntry *atlas_entry_of(const GfxTexture *tex) {
+    uintptr_t at = (uintptr_t) tex - (uintptr_t) sTexCache;
+    if (at >= sizeof(sTexCache)) {
+        return NULL;
+    }
+    return &sTexCache[at / sizeof(TexCacheEntry)];
+}
+
+/* Whether a texture can go in a page at all (worked out once for each texture and filter). */
+static s32 atlas_eligible(const GfxTexture *tex) {
+    return tex->width <= ATLAS_MAX_TEX && tex->height <= ATLAS_MAX_TEX && (tex->width & (tex->width - 1)) == 0 &&
+           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn == 2 || !gfx_wants_mipmaps(tex));
+}
+
+static inline u32 atlas_wrap(s32 i, u32 size, u8 wrap) {
+    if (i >= 0 && i < (s32) size) {
+        return (u32) i;
+    }
+    if (wrap == GFX_WRAP_REPEAT) {
+        return (u32) (i + (s32) size) % size;
+    }
+    return i < 0 ? 0 : size - 1; // Clamp, and mirror (which repeats the edge texel)
+}
+
+static void flush_batch_for_atlas(void);
+
+/* Frees a set of pages: every texture in them is placed afresh when next drawn. */
+static void atlas_reset_kind(s32 kind) {
+    s32 i, p;
+    flush_batch_for_atlas(); // The batch may draw from them
+    for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
+        AtlasPage *page = &sAtlas[p];
+        if (page->used) {
+            gfx_split_texture_free(&page->tex);
+            page->tex.backendData = NULL;
+            __builtin_memset(page->pixels, 0, ATLAS_SIZE * ATLAS_SIZE * 4);
+            page->used = FALSE;
+        }
+        page->shelfX = page->shelfY = page->shelfH = 0;
+        page->dirty = FALSE;
+    }
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        TexCacheEntry *e = &sTexCache[i];
+        for (p = 0; p < 2; p++) {
+            if (e->atlasState[p] >= ATLAS_PAGE0 && (e->atlasState[p] - ATLAS_PAGE0) / ATLAS_PAGES_PER_KIND == kind) {
+                e->atlasState[p] = ATLAS_UNPLACED;
+            }
+        }
+    }
+    sAtlasLastReset[kind] = sFrameCount;
+    sAtlasStats[2]++;
+}
+
+/* Starts every page set again and forgets which textures may go in (after DKR_TEX_ATLAS changes). */
+static void atlas_forget_all(void) {
+    s32 kind, i;
+    for (kind = 0; kind < ATLAS_KINDS; kind++) {
+        atlas_reset_kind(kind);
+        sAtlasLastReset[kind] = -ATLAS_RESET_FRAMES;
+    }
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        sTexCache[i].atlasState[0] = sTexCache[i].atlasState[1] = ATLAS_UNKNOWN;
+    }
+}
+
+/* Copies the texture (with its border) into a page of its kind; FALSE if there's no room or memory. */
+static NOINLINE s32 atlas_place(TexCacheEntry *e, const GfxTexture *tex, s32 f) {
+    s32 kind = tex->format * 2 + tex->filter, p, attempt;
+    u32 w = tex->width + 2, h = tex->height + 2, x, y;
+    for (attempt = 0; attempt < 2; attempt++) {
+        for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
+            AtlasPage *page = &sAtlas[p];
+            if (page->pixels == NULL) {
+                page->pixels = plat_malloc(ATLAS_SIZE * ATLAS_SIZE * 4);
+                if (page->pixels == NULL) {
+                    return FALSE;
+                }
+                __builtin_memset(page->pixels, 0, ATLAS_SIZE * ATLAS_SIZE * 4);
+            }
+            if (page->shelfX + w > ATLAS_SIZE) {
+                page->shelfY += page->shelfH; // A new shelf
+                page->shelfX = page->shelfH = 0;
+            }
+            if (page->shelfY + h > ATLAS_SIZE) {
+                continue;
+            }
+            for (y = 0; y < h; y++) {
+                u32 sy = atlas_wrap((s32) y - 1, tex->height, tex->wrapT);
+                unsigned int *out = &page->pixels[(page->shelfY + y) * ATLAS_SIZE + page->shelfX];
+                for (x = 0; x < w; x++) {
+                    out[x] = tex->pixels[sy * tex->width + atlas_wrap((s32) x - 1, tex->width, tex->wrapS)];
+                }
+            }
+            e->atlasX[f] = (u8) (page->shelfX + 1);
+            e->atlasY[f] = (u8) (page->shelfY + 1);
+            e->atlasState[f] = (u8) (ATLAS_PAGE0 + p);
+            page->shelfX += w;
+            if (h > page->shelfH) {
+                page->shelfH = h;
+            }
+            if (!page->used) {
+                page->tex.width = ATLAS_SIZE;
+                page->tex.height = ATLAS_SIZE;
+                page->tex.pixels = page->pixels;
+                page->tex.format = tex->format;
+                page->tex.filter = tex->filter;
+                page->tex.wrapS = page->tex.wrapT = GFX_WRAP_CLAMP;
+                page->tex.atlas = 1;
+                page->tex.backendData = NULL;
+                page->used = TRUE;
+            }
+            page->dirty = TRUE;
+            sAtlasStats[1]++;
+            return TRUE;
+        }
+        if (attempt > 0 || sFrameCount - sAtlasLastReset[kind] < ATLAS_RESET_FRAMES) {
+            return FALSE;
+        }
+        atlas_reset_kind(kind);
+    }
+    return FALSE;
+}
+
+/* The page a command's texture can be drawn from, moving its coordinate axes there; NULL to draw it as it is. The
+ * command's texture coordinates, minU..maxU and minV..maxV, must stay inside the texture. */
+static NOINLINE GfxTexture *atlas_page_for(const GfxTexture *tex, TexAxis *u, TexAxis *v, s32 minU, s32 maxU,
+                                          s32 minV, s32 maxV) {
+    TexCacheEntry *e = atlas_entry_of(tex);
+    s32 f;
+    float k, du, dv;
+    if (e == NULL) {
+        return NULL;
+    }
+    f = tex == &e->tex ? 0 : 1;
+    if (e->atlasState[f] == ATLAS_UNKNOWN) {
+        e->atlasState[f] = atlas_eligible(tex) ? ATLAS_UNPLACED : ATLAS_NEVER;
+    }
+    if (e->atlasState[f] == ATLAS_NEVER) {
+        return NULL;
+    }
+    // Filtering reads at most half a texel past c * size - 1/2 (bilinear) or floor(c * size) (point), so with the
+    // border coordinates up to half a texel outside the texture read only it and the border.
+    du = 0.5f / tex->width;
+    dv = 0.5f / tex->height;
+    if (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du || tex_axis_coord(v, minV) < -dv ||
+        tex_axis_coord(v, maxV) > 1.0f + dv) {
+        return NULL;
+    }
+    if (e->atlasState[f] == ATLAS_UNPLACED && !atlas_place(e, tex, f)) {
+        return NULL;
+    }
+    // c' = (c * size + at) / ATLAS_SIZE, all powers of two: exact.
+    k = (float) tex->width / ATLAS_SIZE;
+    u->scale *= k;
+    u->offset = u->offset * k - (float) e->atlasX[f] / ATLAS_SIZE;
+    k = (float) tex->height / ATLAS_SIZE;
+    v->scale *= k;
+    v->offset = v->offset * k - (float) e->atlasY[f] / ATLAS_SIZE;
+    u->size = v->size = ATLAS_SIZE;
+    sAtlasStats[0]++;
+    return &sAtlas[e->atlasState[f] - ATLAS_PAGE0].tex;
+}
+
+/* Before a draw from a page: its GPU copy has every texture placed in it so far. */
+static inline void atlas_upload(GfxTexture *tex) {
+    AtlasPage *page = (AtlasPage *) tex; // tex is a page's first member
+    if (page->dirty) {
+        page->dirty = FALSE;
+        gfx_split_texture_upload(tex);
+    }
 }
 
 /******************************** Combiner and blender ********************************/
@@ -1578,6 +1796,9 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             trace_batch();
         }
         part = walk_switch(WALK_DRAWS);
+        if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
+            atlas_upload(sBatchState.textures[0]);
+        }
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
@@ -1603,6 +1824,10 @@ static inline void flush_batch(void) {
 }
 
 static COLD NOINLINE void sky_kind_boundary(void) {
+    flush_batch();
+}
+
+static void flush_batch_for_atlas(void) {
     flush_batch();
 }
 
@@ -1718,7 +1943,13 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
+static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
+static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
+// DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
+// rest are transformed here as without it (Old 3DS bench 2026-11-01: the racers' or the track's maths alone on the GPU,
+// as a native renderer would do them).
+static u32 sGpuKinds = 0xFFFF;
 static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
 /* Back faces culled here rather than by the GPU (DKR_CPU_CULL, on by default on an Old 3DS only), this frame: a
  * command's double sided triangles no longer split its draw from the one sided ones (about one draw in eight), and
@@ -1744,6 +1975,13 @@ static void read_switches(void) {
     // Remembers what each tile's texture lookup resolved to (tex_memo_check). Stale entries are checked, so it can
     // be switched either way between frames.
     sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
+    {
+        s32 atlas = plat_switch("DKR_TEX_ATLAS", 0);
+        if (atlas != sAtlasOn) {
+            atlas_forget_all();
+            sAtlasOn = atlas;
+        }
+    }
     // Old 3DS work (roadmap O9): the walk skips what it can show it doesn't need (draw_dkr_triangles): the per
     // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
     // that have none. The frames are the same either way.
@@ -1753,6 +1991,7 @@ static void read_switches(void) {
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
+    sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
@@ -1761,6 +2000,7 @@ static void read_switches(void) {
     sSkyLast = plat_switch("DKR_SKY_LAST", 0) != 0;
     // The switch bench's texture cost row: these kinds (a bit each, as DKR_SKIP_KINDS) are drawn without textures.
     sNoTexKinds = (u32) plat_switch("DKR_NOTEX_KINDS", 0);
+    sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -1975,7 +2215,8 @@ static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
         }
         forget_slots(dest, end);
     }
-    if (sGpuTransform && !g.billboard && !gGfxSweep && count > 0 && dest + count <= MAX_VERTICES &&
+    if (sGpuTransform && ((sGpuKinds >> sDrawKind) & 1) && !g.billboard && !gGfxSweep && count > 0 &&
+        dest + count <= MAX_VERTICES &&
         !(m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
         u32 l = sNextLoad++ % PENDING_LOADS, i;
         PendingLoad *pl = &sLoads[l];
@@ -2194,7 +2435,7 @@ static COLD void flush_model_batch(void) {
     part = walk_switch(WALK_DRAWS);
     sky_draw_if_held(); // (DKR_SKY_LAST) Model draws are rare enough to just draw the held sky first
     sDepthDrawn |= sModelState.depthWrite;
-    gfxb_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
+    gfx_split_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
     prof_count(PROF_DRAWS, 1);
     sMix.kinds[sDrawKind].draws++;
@@ -2328,7 +2569,7 @@ static u32 mesh_hash(const Triangle *tris, s32 numTris, const Vertex *src, s32 n
 static void mesh_drop(MeshEntry *e) {
     if (e->mesh != NULL) {
         flush_mesh_batch(); // Its parts may be waiting to be drawn
-        gfxb_mesh_free(e->mesh);
+        gfx_split_mesh_free(e->mesh);
         sMeshBytes -= e->bytes;
     }
     __builtin_memset(e, 0, sizeof(*e));
@@ -2439,7 +2680,7 @@ static COLD void flush_mesh_batch(void) {
     part = walk_switch(WALK_DRAWS);
     sky_draw_if_held();
     sDepthDrawn |= sModelState.depthWrite;
-    gfxb_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
+    gfx_split_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
     prof_count(PROF_DRAWS, 1);
     sMix.kinds[sDrawKind].draws++;
@@ -2533,7 +2774,7 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
         if (e->mesh != NULL) {
             sMeshStats[3]++;
             flush_mesh_batch();
-            gfxb_mesh_free(e->mesh);
+            gfx_split_mesh_free(e->mesh);
             sMeshBytes -= e->bytes;
             e->mesh = NULL;
             if (++e->changes >= MESH_DYNAMIC_AFTER) {
@@ -2711,6 +2952,59 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     return TRUE;
 }
 
+/*
+ * DKR_WALK_REJECT (Old 3DS work): the profiler's monitor found 30-85% of the sky's, the track's and the effects'
+ * triangles off the screen, and the walk's cost to be mostly per command (some 50-70 us each on an Old 3DS), not per
+ * triangle. A command whose corners all lie past the same edge of the screen (or behind the camera) draws nothing,
+ * so it is dropped here, before the draw state, texture coordinates and shared vertices are set up for it. The test
+ * is audit_triangle's. Only for the 3D world's vertices: flat ones (the HUD, sprites) are placed on the screen.
+ */
+static NOINLINE HOT s32 command_off_screen(const Triangle *tris, s32 count) {
+    Viewport vp;
+    u32 all = 0x1F;
+    s32 i, k;
+    viewport_init(&vp);
+    for (i = 0; i < count && all != 0; i++) {
+        const u8 *idx = &tris[i].verticesArray[1];
+        for (k = 0; k < 3; k++) {
+            const RspVertex *v;
+            float x, y, w;
+            u32 out = 0;
+            if (idx[k] >= MAX_VERTICES) {
+                return FALSE;
+            }
+            v = &g.verts[idx[k]];
+            w = v->w;
+            x = v->x * vp.scaleX + w * vp.transX;
+            y = v->y * vp.scaleY + w * vp.transY;
+            out |= (x > w) ? 1 : 0;
+            out |= (x < -w) ? 2 : 0;
+            out |= (y > w) ? 4 : 0;
+            out |= (y < -w) ? 8 : 0;
+            out |= (w <= 1e-3f) ? 16 : 0;
+            all &= out;
+        }
+    }
+    if (all == 0 || count <= 0) {
+        return FALSE;
+    }
+    sWalkRejected++;
+    sWalkRejectedTris += (u32) count;
+    if (UNLIKELY(sAuditFrame)) {
+        sMix.kinds[sDrawKind].audited += (unsigned long) count;
+        sMix.kinds[sDrawKind].offscreen += (unsigned long) count;
+    }
+    return TRUE;
+}
+
+/* The commands and triangles DKR_WALK_REJECT dropped since the last call (profiler). */
+void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris) {
+    *commands = sWalkRejected;
+    *tris = sWalkRejectedTris;
+    sWalkRejected = 0;
+    sWalkRejectedTris = 0;
+}
+
 static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -2743,6 +3037,9 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
                 resolve_load(sSlotLoad[t->vi2]);
             }
         }
+    }
+    if (sWalkReject && g.flatVerts == 0 && command_off_screen(tris, count)) {
+        return;
     }
     if (!sTriStateValid) {
         build_draw_state(&sTriState, FALSE);
@@ -2777,6 +3074,22 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         float shift = texel_centre_shift(tex);
         tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+        s32 minU = 0x7FFF, maxU = -0x8000, minV = 0x7FFF, maxV = -0x8000;
+        GfxTexture *page;
+        for (i = 0; i < count; i++) {
+            const TexCoords *c = &tris[i].uv0;
+            for (k = 0; k < 3; k++) {
+                minU = c[k].u < minU ? c[k].u : minU;
+                maxU = c[k].u > maxU ? c[k].u : maxU;
+                minV = c[k].v < minV ? c[k].v : minV;
+                maxV = c[k].v > maxV ? c[k].v : maxV;
+            }
+        }
+        page = atlas_page_for(state.textures[0], &u0, &v0, minU, maxU, minV, maxV);
+        if (page != NULL) {
+            state.textures[0] = page;
+        }
     }
     // While no loaded vertex is flat (the 3D world) no triangle is, so DKR_WALK_LEAN skips the checks per triangle.
     anyFlat = !sWalkLean || g.flatVerts != 0;
@@ -2892,6 +3205,392 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
         }
     }
+}
+
+#define OP(x) ((u8) (x))
+
+/******************************** Native model meshes (NR1) ********************************/
+
+/*
+ * Roadmap NR1 (DKR_NATIVE_MESH, port_drawtag.h): a model batch tagged PORT_NATIVE_TAG is drawn from the renderer's own
+ * tables rather than through the N64's vertex slots. The first time a batch's triangles are seen, their corners (a
+ * vertex with one set of texture coordinates) are listed once, with each triangle's three corners as numbers into
+ * that list. After that a frame transforms each of the batch's vertices once into a local array and writes each
+ * corner a triangle uses straight into the draw batch: no slot bookkeeping, no search for a vertex already written,
+ * no per triangle flatness checks. The triangles are kept with the tables and compared each frame, so a model whose
+ * triangles change (or memory reused by another) gets new tables. The result is the same draw the walk would make
+ * (the same vertices, culling and batches), so frames are identical; anything unusual leaves the tag unused.
+ */
+#define NATIVE_TABLE_SIZE 512          // Meshes remembered (a power of two); full at three quarters, then all forgotten
+#define NATIVE_POOL_BYTES (160 * 1024) // Their tables; full, all are forgotten
+#define NATIVE_MAX_CORNERS 1024
+#define NATIVE_MAX_LOADS 4
+
+typedef struct NativeMesh {
+    const Triangle *tris; // The game's triangles (the key); NULL: unused
+    Triangle *copy;       // What they held when the tables were made
+    u16 numTris, numCorners;
+    u8 maxVertex;   // The highest vertex number used
+    u8 usable;      // Fits the tables (corners)
+    s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
+    u8 *cornerVertex;
+    u32 *cornerUv;  // As TexCoords.texCoords
+    u16 *triCorners; // Three a triangle
+} NativeMesh;
+
+static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
+static u32 sNativeMeshCount;
+static u8 *sNativePool;
+static u32 sNativePoolUsed;
+static RspVertex sNativeVerts[MAX_VERTICES];
+static u16 sNativeCornerIndex[NATIVE_MAX_CORNERS];
+static u32 sNativeCornerStamp[NATIVE_MAX_CORNERS];
+static u32 sNativeStamp;
+static unsigned long sNativeDrawn, sNativeDeclined; // Batches drawn natively, tags left unused (profiler)
+
+/* The native meshes drawn and declined since the last call (profiler). */
+void gfx_native_mesh_take(unsigned long *drawn, unsigned long *declined) {
+    *drawn = sNativeDrawn;
+    *declined = sNativeDeclined;
+    sNativeDrawn = 0;
+    sNativeDeclined = 0;
+}
+
+static COLD void native_forget_all(void) {
+    __builtin_memset(sNativeMeshes, 0, sizeof(sNativeMeshes));
+    sNativeMeshCount = 0;
+    sNativePoolUsed = 0;
+}
+
+static void *native_alloc(u32 bytes) {
+    void *p;
+    bytes = (bytes + 7) & ~7u;
+    if (sNativePool == NULL) {
+        sNativePool = (u8 *) plat_malloc(NATIVE_POOL_BYTES);
+        if (sNativePool == NULL) {
+            return NULL;
+        }
+    }
+    if (sNativePoolUsed + bytes > NATIVE_POOL_BYTES) {
+        return NULL;
+    }
+    p = sNativePool + sNativePoolUsed;
+    sNativePoolUsed += bytes;
+    return p;
+}
+
+/* Lists the corners of the triangles into e (whose slot is reserved). Returns FALSE when out of room. */
+static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count) {
+    u32 i, k, n = 0;
+    u8 *cornerVertex;
+    u32 *cornerUv;
+    u16 *triCorners;
+    e->copy = (Triangle *) native_alloc(count * sizeof(Triangle));
+    cornerVertex = (u8 *) native_alloc(count * 3);
+    cornerUv = (u32 *) native_alloc(count * 3 * sizeof(u32));
+    triCorners = (u16 *) native_alloc(count * 3 * sizeof(u16));
+    if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL) {
+        return FALSE;
+    }
+    __builtin_memcpy(e->copy, tris, count * sizeof(Triangle));
+    e->minU = e->minV = 0x7FFF;
+    e->maxU = e->maxV = -0x8000;
+    e->maxVertex = 0;
+    for (i = 0; i < (u32) count; i++) {
+        const Triangle *t = &tris[i];
+        const TexCoords *c = &t->uv0;
+        for (k = 0; k < 3; k++) {
+            u8 vi = t->verticesArray[1 + k];
+            u32 uv = c[k].texCoords, q;
+            for (q = 0; q < n; q++) {
+                if (cornerVertex[q] == vi && cornerUv[q] == uv) {
+                    break;
+                }
+            }
+            if (q == n) {
+                cornerVertex[n] = vi;
+                cornerUv[n] = uv;
+                n++;
+            }
+            triCorners[i * 3 + k] = (u16) q;
+            e->maxVertex = vi > e->maxVertex ? vi : e->maxVertex;
+            e->minU = c[k].u < e->minU ? c[k].u : e->minU;
+            e->maxU = c[k].u > e->maxU ? c[k].u : e->maxU;
+            e->minV = c[k].v < e->minV ? c[k].v : e->minV;
+            e->maxV = c[k].v > e->maxV ? c[k].v : e->maxV;
+        }
+    }
+    e->cornerVertex = cornerVertex;
+    e->cornerUv = cornerUv;
+    e->triCorners = triCorners;
+    e->numTris = (u16) count;
+    e->numCorners = (u16) n;
+    e->usable = n <= NATIVE_MAX_CORNERS;
+    e->tris = tris;
+    return TRUE;
+}
+
+/* The tables of these triangles, made if need be; NULL if they can't be. */
+static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count) {
+    u32 h = (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1), probes;
+    NativeMesh *e;
+    if (count <= 0 || count > 0xFFFF) {
+        return NULL;
+    }
+    for (probes = 0; probes < NATIVE_TABLE_SIZE; probes++) {
+        e = &sNativeMeshes[(h + probes) & (NATIVE_TABLE_SIZE - 1)];
+        if (e->tris == NULL) {
+            break;
+        }
+        if (e->tris == tris && e->numTris == count) {
+            if (__builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
+                return e->usable ? e : NULL;
+            }
+            // Changed: new tables (the old ones' room is only won back when all are forgotten)
+            if (!native_build(e, tris, count)) {
+                native_forget_all();
+                return NULL;
+            }
+            return e->usable ? e : NULL;
+        }
+    }
+    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= NATIVE_TABLE_SIZE * 3 / 4) {
+        native_forget_all();
+        return NULL;
+    }
+    if (!native_build(e, tris, count)) {
+        native_forget_all();
+        return NULL;
+    }
+    sNativeMeshCount++;
+    return e->usable ? e : NULL;
+}
+
+/*
+ * The PORT_NATIVE_TAG at dl[-1]: draws the batch whose commands follow (vertex loads, matrix selects, then the
+ * triangles) and returns how many of them it used, or 0 to leave them to the walk.
+ */
+static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
+    struct {
+        const Vertex *src;
+        s32 count, dest, matrix;
+    } loads[NATIVE_MAX_LOADS];
+    s32 numLoads = 0, n, cur = g.curMatrix, next = 0, total = 0, used = 0, i, k, count = 0, textured = 0;
+    s32 fog = (g.geometryMode & G_FOG) != 0;
+    const Triangle *tris = NULL;
+    NativeMesh *mesh;
+    GfxDrawState state;
+    Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
+    TexAxis u0, v0, u1, v1;
+    Viewport vp;
+    u8 batchedKey = 0xFF;
+    u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
+    s32 tex0, tex1, zeroTex1;
+    u32 generation, stamp;
+    float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+
+    for (n = 0; n < 8 && n < remaining; n++) {
+        u32 w0 = dl[n].words.w0, w1 = dl[n].words.w1, op = w0 >> 24;
+        if (op == OP(G_VTX)) {
+            s32 c = ((w0 >> 19) & 0x1F) + 1;
+            s32 dest = (w0 & 0x00010000) ? next : 0;
+            if (numLoads == NATIVE_MAX_LOADS) {
+                break;
+            }
+            loads[numLoads].src = (const Vertex *) seg_addr(w1);
+            loads[numLoads].count = c;
+            loads[numLoads].dest = dest;
+            loads[numLoads].matrix = cur;
+            numLoads++;
+            next = dest + c;
+            total = next > total ? next : total;
+        } else if (op == OP(G_MOVEWORD) && (w0 & 0xFF) == OP(G_MW_MVPMATRIX)) {
+            cur = (w1 >> 6) & 3;
+        } else if (op == OP(G_TRIN)) {
+            tris = (const Triangle *) seg_addr(w1);
+            count = (w0 >> 4) & 0xFFF;
+            textured = (w0 >> 16) & 1;
+            used = n + 1;
+            break;
+        } else {
+            break;
+        }
+    }
+    if (used == 0 || numLoads == 0 || total > MAX_VERTICES || g.billboard || UNLIKELY(sTracing) ||
+        UNLIKELY(sAuditFrame) || UNLIKELY(gGfxSweep) || sAnyPending || UNLIKELY(sSkipKinds != 0) ||
+        (sGpuTransform && ((sGpuKinds >> sDrawKind) & 1))) {
+        sNativeDeclined++;
+        return 0;
+    }
+    for (i = 0; i < numLoads; i++) {
+        float(*m)[4] = g.matrices[loads[i].matrix];
+        if (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f) {
+            sNativeDeclined++;
+            return 0; // Flat (orthographic): the walk's flatness rules apply
+        }
+    }
+    mesh = native_find(tris, count);
+    if (mesh == NULL || mesh->maxVertex >= total) {
+        sNativeDeclined++;
+        return 0;
+    }
+
+    // The loads, as load_vertices_now makes them (only what draw_dkr_triangles then reads).
+    for (i = 0; i < numLoads; i++) {
+        RspVertex *verts = &sNativeVerts[loads[i].dest];
+        const Vertex *src = loads[i].src;
+        s32 c = loads[i].count;
+        float(*m)[4] = g.matrices[loads[i].matrix];
+#ifdef HAVE_VFP_VECTORS
+        if (sVfpVectors) {
+            transform_vertices_vfp(src, c, verts, m);
+        } else
+#endif
+        {
+            transform_vertices(src, c, verts, m);
+        }
+        for (k = 0; k < c; k++) {
+            u32 rgba;
+            __builtin_memcpy(&rgba, &src[k].r, 4);
+            if (fog) {
+                rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
+            }
+            verts[k].rgba = rgba;
+        }
+    }
+    // The state the walk would be left in.
+    g.curMatrix = cur;
+    g.vertexIndex = 0;
+    g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+    for (i = 0; i < numLoads; i++) {
+        sMix.kinds[sDrawKind].verts += (unsigned long) loads[i].count;
+    }
+    sNativeDrawn++;
+    sObjTris[sDrawObj] += count;
+
+    if (sWalkReject && g.flatVerts == 0) {
+        // command_off_screen's test on these vertices
+        u32 all = 0x1F;
+        viewport_init(&vp);
+        for (i = 0; i < count && all != 0; i++) {
+            const u16 *tc = &mesh->triCorners[i * 3];
+            for (k = 0; k < 3; k++) {
+                const RspVertex *v = &sNativeVerts[mesh->cornerVertex[tc[k]]];
+                float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
+                u32 out = 0;
+                out |= (x > w) ? 1 : 0;
+                out |= (x < -w) ? 2 : 0;
+                out |= (y > w) ? 4 : 0;
+                out |= (y < -w) ? 8 : 0;
+                out |= (w <= 1e-3f) ? 16 : 0;
+                all &= out;
+            }
+        }
+        if (all != 0 && count > 0) {
+            sWalkRejected++;
+            sWalkRejectedTris += (u32) count;
+            return used;
+        }
+    }
+    if (!sTriStateValid) {
+        build_draw_state(&sTriState, FALSE);
+        sTriStateValid = TRUE;
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    viewport_init(&vp);
+    keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
+    tex0 = state.textures[0] != NULL;
+    tex1 = state.textures[1] != NULL;
+    if (tex0) {
+        const GfxTexture *tex = state.textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+    }
+    if (tex1) {
+        const GfxTexture *tex = state.textures[1];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+        GfxTexture *page = atlas_page_for(state.textures[0], &u0, &v0, mesh->minU, mesh->maxU, mesh->minV, mesh->maxV);
+        if (page != NULL) {
+            state.textures[0] = page;
+        }
+    }
+    zeroTex1 = !tex1 && !sWalkLean;
+    state.flat = 0;
+    sBatchGeneration++;
+    generation = sBatchGeneration;
+    stamp = ++sNativeStamp;
+    for (i = 0; i < count; i++) {
+        const u16 *tc = &mesh->triCorners[i * 3];
+        u8 batchKey;
+        u16 *out;
+        state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
+        if (sCpuCull && state.cullMode != 0) {
+            const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];
+            const RspVertex *b = &sNativeVerts[mesh->cornerVertex[tc[1]]];
+            const RspVertex *c = &sNativeVerts[mesh->cornerVertex[tc[2]]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue;
+            }
+            state.cullMode = 0;
+        }
+        batchKey = state.cullMode;
+        if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
+            out = &sBatchIndices[sBatchCount++ * 3];
+        } else {
+            out = batch_triangle(&state);
+            batchedKey = batchKey;
+            if (sBatchGeneration != generation) {
+                generation = sBatchGeneration;
+                stamp = ++sNativeStamp;
+            }
+        }
+        for (k = 0; k < 3; k++) {
+            u32 cn = tc[k];
+            const RspVertex *in;
+            GfxVertex *v;
+            TexCoords uv;
+            u16 index;
+            if (sNativeCornerStamp[cn] == stamp) {
+                out[k] = sNativeCornerIndex[cn];
+                continue;
+            }
+            index = (u16) sBatchVertices++;
+            sNativeCornerStamp[cn] = stamp;
+            sNativeCornerIndex[cn] = index;
+            out[k] = index;
+            v = &sBatchVerts[index];
+            in = &sNativeVerts[mesh->cornerVertex[cn]];
+            v->x = in->x * vp.scaleX + in->w * vp.transX;
+            v->y = in->y * vp.scaleY + in->w * vp.transY;
+            v->z = in->z;
+            v->w = in->w;
+            __builtin_memcpy(&v->r, &in->rgba, 4);
+            uv.texCoords = mesh->cornerUv[cn];
+            if (tex0) {
+                v->u0 = tex_axis_coord(&u0, uv.u);
+                v->v0 = tex_axis_coord(&v0, uv.v);
+            } else {
+                v->u0 = v->v0 = 0.0f;
+            }
+            if (tex1) {
+                v->u1 = tex_axis_coord(&u1, uv.u);
+                v->v1 = tex_axis_coord(&v1, uv.v);
+            } else if (zeroTex1) {
+                v->u1 = v->v1 = 0.0f;
+            }
+        }
+    }
+    return used;
 }
 
 /******************************** RDP rectangles ********************************/
@@ -3064,7 +3763,6 @@ static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
 /******************************** Display list ********************************/
 
 /* F3D defines its immediate opcodes as negative numbers. */
-#define OP(x) ((u8) (x))
 
 static void set_other_mode(u32 *mode, u32 shift, u32 len, u32 data) {
     u32 mask = ((1u << len) - 1) << shift;
@@ -3186,6 +3884,10 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             case OP(G_NOOP):
                 if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
                     kind_switch(w1);
+                } else if (w1 == PORT_NATIVE_TAG) {
+                    s32 used = native_mesh(dl, remaining);
+                    dl += used;
+                    remaining -= used;
                 }
                 break;
             case OP(G_SPNOOP):
@@ -3750,11 +4452,9 @@ void port_gfx_run_task(void *taskPtr) {
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
-    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly;
-    // so are frames with GPU vertex maths, whose walk asks the backend about each model (gfxb_model_check).
+    // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly.
     snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
-    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
-                          plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1));
+    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame);
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(snapshot)) {
         start_snapshot();
@@ -3765,7 +4465,7 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = !gfx_split_active() && gfxb_gpu_transform();
+    sGpuTransform = gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;

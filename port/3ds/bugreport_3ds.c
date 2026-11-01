@@ -994,13 +994,47 @@ static void send_test_results(void) {
         attach_recording(&report, &sRecording, "timeline.csv");
     }
     add_file(&report, "autorun_drawmix.csv");
+    add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
     add_file(&report, "autorun_hitches.txt"); // Last: the largest after a long run.
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);
     sShow = show_status;
-    send_and_show_to(&config, issue, &report, result, sizeof(result));
+    if (send_and_show_to(&config, issue, &report, result, sizeof(result)) < 0) {
+        // Kept for "Send test results again" (bugreport_resend_results): the title, then the summary.
+        FILE *file = fopen(DATA_DIR "/results_unsent.txt", "w");
+        if (file != NULL) {
+            fprintf(file, "%s\n%s", sTitle, sSummary);
+            fclose(file);
+        }
+    } else {
+        remove(DATA_DIR "/results_unsent.txt");
+    }
     free_report(&report);
     sResultsSending = 0;
+}
+
+/*
+ * "Send test results again" in the Tools page: the results files on the SD card, with the title and summary of a run
+ * whose results didn't go out (results_unsent.txt), else a plain title (the files hold every race either way).
+ */
+void bugreport_resend_results(void) {
+    static char sTitle[sizeof(sResultsTitle)], sSummary[sizeof(sResultsSummary)];
+    FILE *file = fopen(DATA_DIR "/results_unsent.txt", "r");
+    sTitle[0] = sSummary[0] = '\0';
+    if (file != NULL) {
+        size_t n;
+        if (fgets(sTitle, sizeof(sTitle), file) != NULL) {
+            sTitle[strcspn(sTitle, "\n")] = '\0';
+        }
+        n = fread(sSummary, 1, sizeof(sSummary) - 1, file);
+        sSummary[n] = '\0';
+        fclose(file);
+    }
+    if (sTitle[0] == '\0') {
+        snprintf(sTitle, sizeof(sTitle), "[3DS test run] results sent again from the menu");
+        snprintf(sSummary, sizeof(sSummary), "%s.\n", port_text("Test results sent again from the menu"));
+    }
+    plat_send_test_results(sTitle, sSummary);
 }
 
 static void button_thread(void *arg) {
@@ -1052,6 +1086,9 @@ void bugreport_request(void) {
 
 void bugreport_request_picture(int seconds) {
     (void) seconds;
+}
+
+void bugreport_resend_results(void) {
 }
 
 void plat_send_test_results(const char *title, const char *summary) {

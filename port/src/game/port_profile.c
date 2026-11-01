@@ -377,6 +377,26 @@ const char *prof_object_name(int bucket) {
     return bucket == PROF_OBJ_PARTICLES ? "particles" : bucket >= 0 && bucket < PROF_OBJ_PARTICLES ? sObjectNames[bucket] : "?";
 }
 
+int port_skip_game_kind(int kind) {
+    static int epoch = -1;
+    static u32 mask;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        mask = (u32) plat_switch("DKR_SKIP_GAME_KINDS", 0);
+    }
+    return (mask >> kind) & 1;
+}
+
+int port_native_mesh_for(int isRacer) {
+    static int epoch = -1;
+    static u32 mask;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        mask = (u32) plat_switch("DKR_NATIVE_MESH", 0);
+    }
+    return (mask >> (isRacer ? 0 : 1)) & 1;
+}
+
 void port_draw_kind_game(int kind, int object) {
     unsigned long long now;
     if (object >= 0 && object < PROF_OBJ_BUCKETS) {
@@ -813,6 +833,29 @@ static void show_overlay(void) {
                 port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
                 prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
                 port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
+                {
+                    unsigned long rejected, rejectedTris;
+                    gfx_walk_reject_take(&rejected, &rejectedTris);
+                    if (rejected > 0) {
+                        port_log("walk: %lu commands (%lu triangles) a frame dropped wholly off the screen",
+                                 rejected / frames, rejectedTris / frames);
+                    }
+                }
+                {
+                    unsigned long drawn, declined;
+                    gfx_native_mesh_take(&drawn, &declined);
+                    if (drawn + declined > 0) {
+                        port_log("native meshes (DKR_NATIVE_MESH): %lu batches a frame drawn natively, %lu left to the walk",
+                                 drawn / frames, declined / frames);
+                    }
+                }
+                {
+                    unsigned long atlas[3];
+                    if (gfx_atlas_take(atlas)) {
+                        port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
+                                 "%lu page sets started again", atlas[0] / frames, atlas[1], atlas[2]);
+                    }
+                }
                 if (gfx_split_active()) {
                     unsigned long long walkWait, busy;
                     unsigned int backendFrames, wakes;

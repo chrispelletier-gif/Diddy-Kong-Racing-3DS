@@ -24,7 +24,7 @@
 #include "gfx_backend.h"
 #include "gfx_split.h"
 
-#define SPLIT_RING_BYTES (2u * 1024u * 1024u)
+#define SPLIT_RING_BYTES (1024u * 1024u) // A crowded Old 3DS frame queues about 200 KB; the heap there is tight
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {
@@ -37,6 +37,9 @@ enum {
     OP_TEX_UPLOAD,
     OP_TEX_FREE,
     OP_TEX_SHARE,
+    OP_MODEL,
+    OP_MESHES,
+    OP_MESH_FREE,
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -53,6 +56,13 @@ typedef struct SplitDraw {
     GfxDrawState state;
     int numVerts, numTriangles; // OP_TRIANGLES: numVerts is 3 * numTriangles and there are no indices
 } SplitDraw;
+
+/* OP_MODEL: followed by numVerts model vertices and 3 * numTriangles indices. OP_MESHES: by numParts parts. */
+typedef struct SplitModel {
+    GfxDrawState state;
+    GfxModelParams params;
+    int numVerts, numTriangles;
+} SplitModel;
 
 typedef struct SplitTexture {
     GfxTexture *tex;
@@ -209,6 +219,21 @@ static void backend_thread(void *arg) {
                     }
                     break;
                 }
+                case OP_MODEL: {
+                    SplitModel *m = p;
+                    const GfxModelVertex *verts = (const GfxModelVertex *) (m + 1);
+                    gfxb_draw_model(&m->state, &m->params, verts, m->numVerts,
+                                    (const unsigned short *) (verts + m->numVerts), m->numTriangles);
+                    break;
+                }
+                case OP_MESHES: {
+                    SplitModel *m = p;
+                    gfxb_draw_meshes(&m->state, &m->params, (const GfxMeshPart *) (m + 1), m->numVerts);
+                    break;
+                }
+                case OP_MESH_FREE:
+                    gfxb_mesh_free(((SplitTexture *) p)->tex);
+                    break;
                 case OP_TEX_UPLOAD:
                     gfxb_texture_upload(((SplitTexture *) p)->tex);
                     break;
@@ -327,6 +352,8 @@ int gfx_split_frame_start(int direct) {
     }
     if (!sActive) {
         plat_log("two-core renderer: on (the walk and the GPU commands on separate cores)");
+    } else {
+        plat_split_render_cores(TRUE); // Follows a change of the system core's share (the switch bench's)
     }
     sActive = TRUE;
     choose_backend();
@@ -465,4 +492,54 @@ void gfx_split_texture_free(GfxTexture *tex) {
     // catches up first, then the free is made here, with the backend idle.
     gfx_split_drain();
     gfxb_texture_free(tex);
+}
+
+/*
+ * GPU vertex maths (P30) and meshes (P31, P34) on two cores: model draws are queued like the others, with their
+ * matrix. The walk creates meshes itself (gfxb_mesh_create may be called from either thread); a mesh freed goes
+ * through the queue, after the draws that still use it.
+ */
+void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
+                          int numVerts, const unsigned short *indices, int numTriangles) {
+    SplitModel *m;
+    unsigned int vertBytes = (unsigned int) numVerts * sizeof(GfxModelVertex);
+    unsigned int indexBytes = (unsigned int) numTriangles * 3u * sizeof(unsigned short);
+    if (!sActive || sizeof(SplitModel) + vertBytes + indexBytes + 64u > SPLIT_RING_BYTES / 4u) {
+        gfx_split_drain();
+        gfxb_draw_model(state, params, verts, numVerts, indices, numTriangles);
+        return;
+    }
+    m = reserve(OP_MODEL, sizeof(SplitModel) + vertBytes + indexBytes);
+    m->state = *state;
+    m->params = *params;
+    m->numVerts = numVerts;
+    m->numTriangles = numTriangles;
+    memcpy(m + 1, verts, vertBytes);
+    memcpy((unsigned char *) (m + 1) + vertBytes, indices, indexBytes);
+    commit(m);
+}
+
+void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                           int numParts) {
+    SplitModel *m;
+    unsigned int partBytes = (unsigned int) numParts * sizeof(GfxMeshPart);
+    if (!sActive) {
+        gfxb_draw_meshes(state, params, parts, numParts);
+        return;
+    }
+    m = reserve(OP_MESHES, sizeof(SplitModel) + partBytes);
+    m->state = *state;
+    m->params = *params;
+    m->numVerts = numParts;
+    m->numTriangles = 0;
+    memcpy(m + 1, parts, partBytes);
+    commit(m);
+}
+
+void gfx_split_mesh_free(void *mesh) {
+    if (!sActive) {
+        gfxb_mesh_free(mesh);
+        return;
+    }
+    texture_op(OP_MESH_FREE, mesh, NULL);
 }

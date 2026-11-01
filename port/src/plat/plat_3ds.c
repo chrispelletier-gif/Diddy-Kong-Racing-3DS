@@ -194,9 +194,19 @@ void plat_split_render_cores(int on) {
     if (sRcpCore != 0) {
         return;
     }
-    if (on && !sRaised) {
-        const char *env = plat_getenv("DKR_SPLIT_SHARE");
-        int share = env != NULL ? atoi(env) : 80;
+    if (on && sRaised) {
+        // Called every frame while split: the switch bench changes the share between races (DKR_SPLIT_SHARE).
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
+        if (share != sSyscoreShare && share >= 5 && share <= 89) {
+            Result res = APT_SetAppCpuTimeLimit(share);
+            plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
+                     R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
+            if (R_SUCCEEDED(res)) {
+                sSyscoreShare = share;
+            }
+        }
+    } else if (on) {
+        int share = plat_switch("DKR_SPLIT_SHARE", 80);
         Result res;
         if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
             sBefore = 0;
@@ -697,6 +707,7 @@ static WriteJob *sJobHead, *sJobTail;
 static volatile unsigned int sJobsPending;  /* Queued or running. */
 static volatile unsigned int sBytesPending;
 static int sWriterState; /* 0 not started, 1 running, -1 could not start. */
+static Thread sWriter;
 static LogChunk sLogChunk, sCopyChunk;
 
 static void run_job(WriteJob *job) {
@@ -750,7 +761,8 @@ static void queue_job(int kind, FILE *file, char *data, unsigned int size, const
     }
     if (sWriterState == 0) {
         // Below every game thread, on the game's core (the renderer has its own on a New 3DS).
-        sWriterState = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true) != NULL ? 1 : -1;
+        sWriter = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true);
+        sWriterState = sWriter != NULL ? 1 : -1;
     }
     while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
         svcSleepThread(2000000);
@@ -839,8 +851,17 @@ void plat_log_drain(void) {
         chunk_flush(&sCopyChunk);
         LightLock_Unlock(&sLogLock);
     }
+    // On an Old 3DS the game keeps its core busy in races and on the overworld, so the writer, below every game
+    // thread there, would never run and a bug report waited for it for ever. It is raised until it has caught up.
+    int raised = 0;
+    if (sJobsPending > 0 && sWriterState > 0 && plat_old_3ds()) {
+        raised = R_SUCCEEDED(svcSetThreadPriority(threadGetHandle(sWriter), 0x18));
+    }
     while (sJobsPending > 0 && sWriterState > 0) {
         svcSleepThread(5000000);
+    }
+    if (raised) {
+        svcSetThreadPriority(threadGetHandle(sWriter), 0x3E);
     }
 }
 

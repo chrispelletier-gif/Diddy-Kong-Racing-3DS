@@ -20,6 +20,11 @@ void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, i
 void gfx_split_texture_upload(GfxTexture *tex);
 void gfx_split_texture_share(GfxTexture *dst, const GfxTexture *src);
 void gfx_split_texture_free(GfxTexture *tex);
+void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
+                          int numVerts, const unsigned short *indices, int numTriangles);
+void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
+                           int numParts);
+void gfx_split_mesh_free(void *mesh);
 
 /* Since the last call: the walk's time waiting for the backend, the backend's busy time and frames, and how often the
  * backend was woken (the profiler's "two-core renderer" line). */
