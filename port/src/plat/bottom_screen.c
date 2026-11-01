@@ -1085,16 +1085,17 @@ static void draw_controls(int y0, int y1) {
         }
         if (sStyle != 0) {
             // The keys as white caps (a pill; a slanted one in Broadcast), the action beside them.
-            int w = text_width(FONT_SMALL, keys[i]) + 14, cy = y + 6;
+            int w = text_width(FONT_SMALL, keys[i]) + 14, cy = y + 6, half = lineHeight >= 18 ? 8 : 6;
             Colour cap = { 235, 240, 255, 255 }, ink = { 20, 26, 70, 255 };
             if (w < 20) {
                 w = 20;
             }
             if (sStyle == 2) {
-                slab(x - 3, cy - 10, x + 142, cy + 10, 5, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
-                slab(x, cy - 8, x + w, cy + 8, 4, cap, cap);
+                // The row's slab and the key's cap, both kept inside the line so that neighbouring lines never touch.
+                slab(x - 3, cy - half - 1, x + 142, cy + half + 1, 4, (Colour){ 26, 38, 96, 235 }, (Colour){ 26, 38, 96, 235 });
+                slab(x, cy - half, x + w, cy + half, 4, cap, cap);
             } else {
-                smooth_box(x, cy - 8, x + w, cy + 8, 8, cap, (Colour){ 205, 215, 245, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
+                smooth_box(x, cy - half, x + w, cy + half, half, cap, (Colour){ 205, 215, 245, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
             }
             text_centred(FONT_SMALL, x, x + w, y + 1, keys[i], ink, 0);
             text(FONT_SMALL, x + w + 6, y + 1, what[i], WHITE, 1);
@@ -1561,6 +1562,10 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 if (w + iconW > x1 - x0 - 14) {
                     sNoGap = 1;
                     w = text_width(FONT_FUN, upper);
+                }
+                if (sStyle == 2 && iconW && w + iconW > x1 - x0 - 26) {
+                    // Broadcast's slabs lean 8 pixels at each end: a label that still would touch them loses its icon.
+                    iconW = 0;
                 }
                 if (iconW) {
                     int tx = x0 + (x1 - x0 - w - iconW) / 2;
@@ -2299,7 +2304,8 @@ static void make_race_base(const RaceHud *hud) {
     int top = sClipTop, end = sClipEnd, mapBox[4], sprite = hud->mapSprite;
     unsigned char colour[3];
     memcpy(colour, hud->mapColour, 3);
-    if (hud->mode == RACE_HUD_MODE_MENU_TRACK) {
+    if (hud->mode == RACE_HUD_MODE_MENU_TRACK || (sprite < 0 && hud->level > 0)) {
+        // (A race's own level is only set by the host preview, which has no track model to take the map from.)
         sprite = level_map(hud->level, colour);
     }
     map_box(hud->mode, mapBox);
@@ -3115,7 +3121,7 @@ static void menu_save_styled(const RaceHud *hud) {
         text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", sStyle == 1 || sStyle == 3 ? GOLD : WHITE, 1);
     }
     snprintf(line, sizeof(line), port_text("Save file %s"), hud->name);
-    text(FONT_SMALL, 98, 31, line, LABEL_BLUE, 1);
+    text(FONT_SMALL, sStyle == 2 ? 100 : 98, sStyle == 2 ? 32 : 28, line, WHITE, 1);
     if (sStyle == 3) {
         // Rings: the balloons, then the two amulets.
         progress_ring(56, 104, 40, 6, hud->balloons * 256 / 47, GOLD);
@@ -3285,12 +3291,13 @@ static void ring_portrait(const RaceHudRacer *r, int x, int y, int lit) {
 
 
 /* The place, its suffix and "of n", the lap and the time, at the positions each look wants. Returns nothing. */
-static void place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
+static int place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
     if (hud->position >= 1 && hud->position <= 8) {
         int suffix = hud->position <= 3 ? hud->position - 1 : 3;
         x = piece(&sPlaces[hud->position - 1], x, y, 1);
         piece(&sSuffixes[suffix], x, y + suffixDy, 0);
     }
+    return x; /* Where the suffix starts: "of 8" goes under it. */
 }
 
 static void lap_pieces(const RaceHud *hud, int x, int y) {
@@ -3387,7 +3394,7 @@ static void gap_text(int x, int y, int rightAligned, const RaceHudRacer *r) {
 }
 
 static void race_glass(const RaceHud *hud) {
-    int i, lapNumber, lapTime, best;
+    int i, x, lapNumber, lapTime, best;
     char of[16], label[24];
     box(6, 6, 114, 198, BOX_FILL, BOX_EDGE);
     for (i = 0; i < hud->racerCount && i < RACE_HUD_RACERS; i++) {
@@ -3409,10 +3416,10 @@ static void race_glass(const RaceHud *hud) {
     }
     // The hero card: place, lap with its segments, the time.
     box(120, 6, 314, 98, BOX_FILL, BOX_EDGE);
-    place_pieces(hud, 130, 12, 2);
+    x = place_pieces(hud, 130, 12, 2);
     if (hud->racerCount > 0) {
         snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, 130, 46, of, LABEL_BLUE, 1);
+        text(FONT_SMALL, x, 30, of, WHITE, 1);
     }
     lap_pieces(hud, 200, 14);
     lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
@@ -3444,7 +3451,7 @@ static void race_glass(const RaceHud *hud) {
 
 static void race_broadcast(const RaceHud *hud) {
     static const Colour podium[3] = { { 255, 200, 40, 255 }, { 200, 210, 230, 255 }, { 220, 140, 70, 255 } };
-    int i, lapNumber, lapTime, best;
+    int i, x, lapNumber, lapTime, best;
     char of[16], label[24];
     Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
            orange = { 255, 150, 20, 255 };
@@ -3475,10 +3482,10 @@ static void race_broadcast(const RaceHud *hud) {
     }
     // The place block, the lap slab and the time strip.
     slab(144, 8, 232, 64, 10, red, orange);
-    place_pieces(hud, 166, 12, 3);
+    x = place_pieces(hud, 166, 12, 3);
     if (hud->racerCount > 0) {
         snprintf(of, sizeof(of), port_text("of %d"), hud->racerCount);
-        text(FONT_SMALL, 174, 46, of, (Colour){ 255, 240, 220, 255 }, 1);
+        text(FONT_SMALL, x, 32, of, WHITE, 1);
     }
     slab(226, 8, 316, 64, 6, slabLight, slabLight);
     lap_pieces(hud, 240, 12);
