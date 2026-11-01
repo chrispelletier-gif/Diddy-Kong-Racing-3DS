@@ -42,6 +42,13 @@ void port_autorun_frame(s32 updateRate) {
     (void) updateRate;
 }
 
+int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY) {
+    (void) buttons;
+    (void) stickX;
+    (void) stickY;
+    return 0;
+}
+
 /* The host renderer's clipping sweep. */
 s32 port_sweep_level_vertex(const void *vertices) {
     (void) vertices;

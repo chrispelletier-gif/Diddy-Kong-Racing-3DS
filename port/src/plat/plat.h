@@ -239,6 +239,13 @@ void plat_overlay_graph(const unsigned char *halfMs, const unsigned char *kinds,
 int plat_overlay_tap(int x, int y);
 /* Sends the unattended test run's results as a GitHub issue, in the background, if bug reports are set up (3DS). */
 void plat_send_test_results(const char *title, const char *summary);
+/* A long test run's reports as it goes (the whole game run): PLAT_RESULTS_NEW is plat_send_test_results (a new
+ * issue with the result files); PLAT_RESULTS_PROGRESS adds the summary to the run's issue (the first one makes it,
+ * without files); PLAT_RESULTS_FINAL does the same with the result files. */
+enum { PLAT_RESULTS_NEW, PLAT_RESULTS_PROGRESS, PLAT_RESULTS_FINAL };
+void plat_send_test_update(const char *title, const char *summary, int kind);
+/* Nonzero while test results wait to be sent or are being sent (the run holds its next race until they are out). */
+int plat_test_results_busy(void);
 /*
  * The 3DS render target: anti-aliasing (the GPU draws more pixels than the screen has and the display transfer averages
  * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only). -1 is the player's setting

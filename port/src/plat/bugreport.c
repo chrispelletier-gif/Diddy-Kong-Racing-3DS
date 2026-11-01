@@ -97,9 +97,10 @@ static size_t write_response(char *data, size_t size, size_t count, void *user) 
     return size * count;
 }
 
-/* POSTs JSON to apiUrl + path. Returns the HTTP status (0 if the request failed), with the response in response. */
-static long post_json(const BugReportConfig *config, const char *path, const char *json, StrBuf *response,
-                      char *error, size_t errorSize) {
+/* Sends JSON to apiUrl + path with method (NULL: POST). Returns the HTTP status (0 if the request failed), with the
+ * response in response. */
+static long send_json(const BugReportConfig *config, const char *method, const char *path, const char *json,
+                      StrBuf *response, char *error, size_t errorSize) {
     CURL *curl = curl_easy_init();
     struct curl_slist *headers = NULL;
     char url[512], auth[512], curlError[CURL_ERROR_SIZE];
@@ -120,6 +121,9 @@ static long post_json(const BugReportConfig *config, const char *path, const cha
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, config->userAgent != NULL ? config->userAgent : "dkr-bugreport");
+    if (method != NULL) {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+    }
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) strlen(json));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_response);
@@ -146,6 +150,11 @@ static long post_json(const BugReportConfig *config, const char *path, const cha
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     return status;
+}
+
+static long post_json(const BugReportConfig *config, const char *path, const char *json, StrBuf *response,
+                      char *error, size_t errorSize) {
+    return send_json(config, NULL, path, json, response, error, errorSize);
 }
 
 /* Copies the string value of "key" in a JSON response (the first one, which for an issue is the issue's own). */
@@ -335,12 +344,45 @@ static int post_file(const BugReportConfig *config, const char *commentsPath, co
 int bugreport_send(const BugReportConfig *config, const char *title, const char *body, const BugReportFile *files,
                    int fileCount, unsigned int maxAttachmentBytes, BugReportProgress progress, char *result,
                    size_t resultSize) {
+    return bugreport_send_to(config, NULL, title, body, files, fileCount, maxAttachmentBytes, progress, result,
+                             resultSize);
+}
+
+int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
+                      const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
+                      BugReportProgress progress, char *result, size_t resultSize) {
     StrBuf json = { 0 }, response = { 0 }, skipped = { 0 };
     char path[256], number[32], url[256], curlError[CURL_ERROR_SIZE];
     unsigned int budget = maxAttachmentBytes;
     long status;
     int i;
 
+    if (issue != NULL && issue[0] != '\0') {
+        // An issue made earlier (a long test run's progress): the body becomes a comment on it, and the title replaces
+        // its title.
+        snprintf(number, sizeof(number), "%s", issue);
+        snprintf(url, sizeof(url), "https://github.com/%s/issues/%s", config->repo, number);
+        snprintf(path, sizeof(path), "/repos/%s/issues/%s/comments", config->repo, number);
+        if (progress != NULL) {
+            progress("Adding to the issue");
+        }
+        if (post_comment(config, path, body, result, resultSize) != 201) {
+            return -1;
+        }
+        if (title != NULL) {
+            char issuePath[256];
+            sb_add(&json, "{\"title\":\"");
+            sb_add_json(&json, title);
+            sb_add(&json, "\"}");
+            snprintf(issuePath, sizeof(issuePath), "/repos/%s/issues/%s", config->repo, number);
+            if (!json.failed) {
+                send_json(config, "PATCH", issuePath, json.data, &response, curlError, sizeof(curlError));
+            }
+            sb_free(&json);
+            sb_free(&response);
+        }
+        goto attach;
+    }
     if (progress != NULL) {
         progress("Creating the issue");
     }
@@ -375,6 +417,7 @@ int bugreport_send(const BugReportConfig *config, const char *title, const char 
     snprintf(number, sizeof(number), "%s", strrchr(url, '/') + 1);
     snprintf(path, sizeof(path), "/repos/%s/issues/%s/comments", config->repo, number);
 
+attach:
     for (i = 0; i < fileCount; i++) {
         int outcome;
         if (files[i].data == NULL) {
