@@ -442,7 +442,7 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
 static int sStyle;
 /* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
 static const int sTabNudge[4] = { 2, 2, 1, 1 };
-static const int sButtonNudge[4] = { 0, 0, 0, 0 };
+static const int sButtonNudge[4] = { 0, 0, -1, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
@@ -564,7 +564,6 @@ static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
             } else if (frame) {
                 smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 24, 44, 118, 165 },
                            (Colour){ 16, 34, 100, 170 }, (Colour){ 190, 215, 255, 80 }, 1);
-                fill(x0 + 6, y0 + 1, x1 - 6, y0 + 2, (Colour){ 255, 255, 255, 70 });
             }
             break;
         case 2: // Broadcast: flat slanted slabs, the lit one in the logo's red-to-yellow.
@@ -639,13 +638,22 @@ static int advance(const Font *f, unsigned char c) {
     return f->fixedAdvance ? f->fixedAdvance : f->glyphs[c - 0x20].advance;
 }
 
+static int sLetterGap; /* Extra pixels between letters (the side tabs' lettering, where tight letters touched). */
+
+/* Letters of the fun font whose art overhangs the one before: they get a pixel more room (side tabs only). */
+static int letter_kern(char prev, char c) {
+    return sLetterGap && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
+}
+
 static int text_width_as_is(int font, const char *text) {
     int width = 0;
+    char prev = 0;
     if (!font_ready(font)) {
         return (int) strlen(text) * 8;
     }
     for (; *text != '\0'; text++) {
-        width += advance(&sFonts[font], (unsigned char) *text);
+        width += advance(&sFonts[font], (unsigned char) *text) + sLetterGap + letter_kern(prev, *text);
+        prev = *text;
     }
     return width;
 }
@@ -653,6 +661,7 @@ static int text_width_as_is(int font, const char *text) {
 /* Draws text from x (until right, if text would go further) with its top at y, as it is. Returns where it ended. */
 static int text_clipped_as_is(int font, int x, int y, const char *text, Colour colour, int shadow, int right) {
     const Font *f = &sFonts[font];
+    char prev = 0;
     if (!font_ready(font)) {
         // Before the ROM's fonts are loaded: the 8x8 font, a little lower so it sits like the small font.
         for (; *text != '\0' && x + 8 <= right; text++) {
@@ -665,7 +674,10 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
     }
     for (; *text != '\0'; text++) {
         unsigned char c = (unsigned char) *text;
-        int step = advance(f, c);
+        int step = advance(f, c) + sLetterGap;
+        int lift = sLetterGap && (c == 'A' || c == 'V') ? 1 : 0; /* these two sat a pixel low against their neighbours */
+        x += letter_kern(prev, (char) c);
+        prev = (char) c;
         if (x + step > right) {
             break;
         }
@@ -673,9 +685,9 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
             const Glyph *g = &f->glyphs[c - 0x20];
             const Picture *t = &f->textures[g->texture];
             if (shadow) {
-                picture_part(t, g->s, g->t, g->width, g->height, x + g->x + 1, y + g->y + 1, (Colour){ 0, 0, 0, 170 });
+                picture_part(t, g->s, g->t, g->width, g->height, x + g->x + 1, y + g->y + 1 - lift, (Colour){ 0, 0, 0, 170 });
             }
-            picture_part(t, g->s, g->t, g->width, g->height, x + g->x, y + g->y, colour);
+            picture_part(t, g->s, g->t, g->width, g->height, x + g->x, y + g->y - lift, colour);
         }
         x += step;
     }
@@ -772,10 +784,7 @@ static void make_background(void) {
                                                    b + light < 0 ? 0 : b + light);
         }
     }
-    // A thin light line above the status strip.
-    for (x = 0; x < BS_WIDTH; x++) {
-        sBackground[(BS_STATUS_Y - 1) * BS_WIDTH + x] = rgb565(60, 90, 170);
-    }
+    // No line above the status strip: it read as a stray line under the buttons and threw their alignment off.
     sBackgroundMade = 1;
 }
 
@@ -1218,7 +1227,12 @@ static void draw_menu(const State *s) {
         upper_text(upper, sizeof(upper), m->tabs[i]);
         /* A long name (French ones) that would touch the tab's edges drops to the small font. */
         if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
+            sLetterGap = 1;
+            if (text_width_as_is(FONT_FUN, upper) > MENU_PANEL_X0 - 16) {
+                sLetterGap = 0;
+            }
             heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + sTabNudge[sStyle], m->tabs[i], 1);
+            sLetterGap = 0;
         } else if (font_ready(FONT_FUN)) {
             text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
                                i == m->tab ? YELLOW : WHITE, 1);
@@ -1341,10 +1355,7 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 top = (Colour){ 130, 135, 155, 255 };
                 bottom = (Colour){ 80, 85, 105, 255 };
             }
-            smooth_box(x0 - 1, y0, x1 + 1, y1 + 1, 11, (Colour){ 0, 0, 30, 90 }, (Colour){ 0, 0, 30, 90 },
-                       (Colour){ 0, 0, 0, 0 }, 1);
             smooth_box(x0, y0, x1, y1, 11, top, bottom, (Colour){ 255, 255, 255, grey ? 80 : 150 }, 1);
-            fill(x0 + 8, y0 + 2, x1 - 8, y0 + 4, (Colour){ 255, 255, 255, 60 });
         } else if (sStyle == 2) {
             Colour top = i == 0 && !grey ? (Colour){ 235, 40, 40, 255 } : (Colour){ 52, 74, 168, 255 };
             Colour bottom = i == 0 && !grey ? (Colour){ 255, 150, 20, 255 } : (Colour){ 36, 54, 134, 255 };
