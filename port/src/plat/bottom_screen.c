@@ -442,7 +442,7 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
 static int sStyle;
 /* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
 static const int sTabNudge[4] = { 2, 2, 1, 1 };
-static const int sButtonNudge[4] = { 0, 0, -1, 0 };
+static const int sButtonNudge[4] = { 0, -1, -1, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
