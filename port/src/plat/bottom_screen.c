@@ -442,7 +442,7 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
 static int sStyle;
 /* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
 static const int sTabNudge[4] = { 2, 2, 1, 1 };
-static const int sButtonNudge[4] = { 0, 0, -1, 0 };
+static const int sButtonNudge[4] = { 0, -1, -1, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
@@ -638,11 +638,16 @@ static int advance(const Font *f, unsigned char c) {
     return f->fixedAdvance ? f->fixedAdvance : f->glyphs[c - 0x20].advance;
 }
 
-static int sLetterGap; /* Extra pixels between letters (the side tabs' lettering, where tight letters touched). */
+static int sNoGap; /* 1: draw the fun font without its extra letter gap (a label that has no room for it). */
+
+/* The game's big letters fill their cells edge to edge, so they touched; every label gets a pixel between letters. */
+static int letter_gap(int font) {
+    return font == FONT_FUN && !sNoGap ? 1 : 0;
+}
 
 /* Letters of the fun font whose art overhangs the one before: they get a pixel more room (side tabs only). */
-static int letter_kern(char prev, char c) {
-    return sLetterGap && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
+static int letter_kern(int font, char prev, char c) {
+    return letter_gap(font) && ((prev == 'S' && c == 'A') || (prev == 'V' && c == 'E')) ? 1 : 0;
 }
 
 static int text_width_as_is(int font, const char *text) {
@@ -652,7 +657,7 @@ static int text_width_as_is(int font, const char *text) {
         return (int) strlen(text) * 8;
     }
     for (; *text != '\0'; text++) {
-        width += advance(&sFonts[font], (unsigned char) *text) + sLetterGap + letter_kern(prev, *text);
+        width += advance(&sFonts[font], (unsigned char) *text) + letter_gap(font) + letter_kern(font, prev, *text);
         prev = *text;
     }
     return width;
@@ -674,9 +679,9 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
     }
     for (; *text != '\0'; text++) {
         unsigned char c = (unsigned char) *text;
-        int step = advance(f, c) + sLetterGap;
-        int lift = sLetterGap && (c == 'A' || c == 'V') ? 1 : 0; /* these two sat a pixel low against their neighbours */
-        x += letter_kern(prev, (char) c);
+        int step = advance(f, c) + letter_gap(font);
+        int lift = letter_gap(font) && (c == 'A' || c == 'V') ? 1 : 0; /* these two sat a pixel low against their neighbours */
+        x += letter_kern(font, prev, (char) c);
         prev = (char) c;
         if (x + step > right) {
             break;
@@ -1226,17 +1231,18 @@ static void draw_menu(const State *s) {
         char upper[40];
         upper_text(upper, sizeof(upper), m->tabs[i]);
         /* A long name (French ones) that would touch the tab's edges drops to the small font. */
+        sNoGap = 1;
         if (font_ready(FONT_FUN) && text_width_as_is(FONT_FUN, upper) <= MENU_PANEL_X0 - 16) {
-            sLetterGap = 1;
-            if (text_width_as_is(FONT_FUN, upper) > MENU_PANEL_X0 - 16) {
-                sLetterGap = 0;
-            }
+            sNoGap = 0;
+            sNoGap = text_width_as_is(FONT_FUN, upper) > MENU_PANEL_X0 - 16;
             heading(4, MENU_PANEL_X0 - 2, y + tabHeight / 2 - 8 + sTabNudge[sStyle], m->tabs[i], 1);
-            sLetterGap = 0;
+            sNoGap = 0;
         } else if (font_ready(FONT_FUN)) {
+            sNoGap = 0;
             text_centred_as_is(FONT_SMALL, 4, MENU_PANEL_X0 - 4, y + tabHeight / 2 - 6 + (sStyle != 0 ? 1 : 0), upper,
                                i == m->tab ? YELLOW : WHITE, 1);
         } else {
+            sNoGap = 0;
             text_clipped(FONT_SMALL, 10, y + tabHeight / 2 - 6, m->tabs[i], i == m->tab ? YELLOW : WHITE, 1,
                          MENU_PANEL_X0 - 4);
         }
