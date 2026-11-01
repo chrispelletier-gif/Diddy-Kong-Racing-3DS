@@ -3496,8 +3496,9 @@ static void menu_save_styled(const RaceHud *hud) {
             int numberW = fraction_width(value, i == 0 ? 47 : 4), nameW = text_width(FONT_SMALL, name);
             int textW = numberW > nameW ? numberW : nameW, groupW = 28 + 8 + textW, gx = cx + (cw - groupW) / 2;
             picture_fit(icon, gx, 54, 28, 28);
-            fraction_at(gx + 36, 54, value, i == 0 ? 47 : 4);
-            text(FONT_SMALL, gx + 36, 71, name, LABEL_BLUE, 1);
+            // The number and its label share one centre line, the pair centred top to bottom in the chip.
+            fraction_at(gx + 36 + (textW - numberW) / 2, 55, value, i == 0 ? 47 : 4);
+            text(FONT_SMALL, gx + 36 + (textW - nameW) / 2, 70, name, LABEL_BLUE, 1);
         }
     }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
