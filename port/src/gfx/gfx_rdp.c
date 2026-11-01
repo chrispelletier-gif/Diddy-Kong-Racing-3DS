@@ -390,8 +390,10 @@ static inline u32 tile_row_bytes(const Tile *tile) {
     return tile->line * ((tile->siz == G_IM_SIZ_32b) ? 16 : 8);
 }
 
-/* Out of line (see decode_into_cache). */
-__attribute__((noinline)) static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width,
+static s32 sTexDecodeCheck = -1; // DKR_TEX_DECODE_CHECK=1: decode_texture also checked against the old way
+
+/* The texel by texel decode that decode_texture replaced, kept for its DKR_TEX_DECODE_CHECK=1 check. */
+__attribute__((noinline, cold)) static void decode_texture_ref(u32 *out, const TmemLoad *load, const Tile *tile, u32 width,
                                                      u32 height, const u8 *tlut) {
     u32 x, y;
     u32 rowBytes = tile_row_bytes(tile);
@@ -449,6 +451,158 @@ __attribute__((noinline)) static void decode_texture(u32 *out, const TmemLoad *l
                     break;
             }
             out[y * width + x] = c;
+        }
+    }
+}
+
+/*
+ * rgba5551_to_8888 split by byte: green straddles the two, but widening it to 8 bits ((g << 3) | (g >> 2)) only
+ * puts its top 3 bits and its bottom 2 in separate places, so the two halves can simply be OR'd together.
+ */
+static u32 sRgba5551High[256], sRgba5551Low[256];
+
+__attribute__((constructor)) static void build_rgba5551_tables(void) {
+    u32 b;
+    for (b = 0; b < 256; b++) {
+        u32 r = b >> 3, gh = b & 7, gl = b >> 6, bl = (b >> 1) & 0x1F;
+        sRgba5551High[b] = rgba((r << 3) | (r >> 2), (gh << 5) | gh, 0, 0);
+        sRgba5551Low[b] = rgba(0, gl << 3, (bl << 3) | (bl >> 2), (b & 1) ? 255 : 0);
+    }
+}
+
+/* The 32 bit colour of each palette entry (CI textures): 16 or 256 entries, as RGBA5551 or IA16. */
+static void decode_palette(u32 *out, const u8 *tlut, u32 count) {
+    u32 i;
+    if ((g.omH & (3 << G_MDSFT_TEXTLUT)) == G_TT_IA16) {
+        for (i = 0; i < count; i++) {
+            out[i] = ia16_to_8888((tlut[i * 2] << 8) | tlut[i * 2 + 1]);
+        }
+    } else {
+        for (i = 0; i < count; i++) {
+            out[i] = rgba5551_to_8888((tlut[i * 2] << 8) | tlut[i * 2 + 1]);
+        }
+    }
+}
+
+/*
+ * Out of line (see decode_into_cache). A row at a time: the format is picked once per texture and the line swap
+ * once per row, instead of per texel, and palettes are converted once (level loads decode hundreds of textures).
+ */
+__attribute__((noinline)) static void decode_texture(u32 *out, const TmemLoad *load, const Tile *tile, u32 width,
+                                                     u32 height, const u8 *tlut) {
+    u32 rowBytes = tile_row_bytes(tile);
+    u32 swapMask = (tile->siz == G_IM_SIZ_32b) ? 8 : 4;
+    u32 palette[256];
+    u32 x, y;
+    s32 kind;
+
+    // 0 CI4, 1 IA4, 2 I4, 3 CI8, 4 IA8, 5 I8, 6 IA16, 7 RGBA16, 8 32 bit
+    switch (tile->siz) {
+        case G_IM_SIZ_4b:
+            kind = tile->fmt == G_IM_FMT_CI ? 0 : tile->fmt == G_IM_FMT_IA ? 1 : 2;
+            break;
+        case G_IM_SIZ_8b:
+            kind = tile->fmt == G_IM_FMT_CI ? 3 : tile->fmt == G_IM_FMT_IA ? 4 : 5;
+            break;
+        case G_IM_SIZ_16b:
+            kind = tile->fmt == G_IM_FMT_IA ? 6 : 7;
+            break;
+        case G_IM_SIZ_32b:
+            kind = 8;
+            break;
+        default:
+            bzero(out, width * height * sizeof(u32));
+            return;
+    }
+    if (kind == 0 || kind == 3) {
+        decode_palette(palette, tlut, kind == 0 ? 16 : 256);
+    }
+    for (y = 0; y < height; y++) {
+        const u8 *row;
+        u32 swap = 0;
+        u32 *dst = out + y * width;
+        if (load->rowStride != 0) {
+            row = load->addr + y * load->rowStride;
+        } else {
+            row = load->addr + y * rowBytes;
+            if ((y & 1) && load->lineSwapped) {
+                swap = swapMask;
+            }
+        }
+#define TEX_BYTE(offset) row[(offset) ^ swap]
+        switch (kind) {
+            case 0:
+                for (x = 0; x < width; x++) {
+                    u32 b = TEX_BYTE(x >> 1);
+                    dst[x] = palette[(x & 1) ? (b & 0xF) : (b >> 4)];
+                }
+                break;
+            case 1:
+                for (x = 0; x < width; x++) {
+                    u32 b = TEX_BYTE(x >> 1);
+                    u32 i3, i;
+                    b = (x & 1) ? (b & 0xF) : (b >> 4);
+                    // Widened by repeating the bits, as the RDP does.
+                    i3 = b >> 1;
+                    i = (i3 << 5) | (i3 << 2) | (i3 >> 1);
+                    dst[x] = rgba(i, i, i, (b & 1) ? 255 : 0);
+                }
+                break;
+            case 2:
+                for (x = 0; x < width; x++) {
+                    u32 b = TEX_BYTE(x >> 1);
+                    u32 i = ((x & 1) ? (b & 0xF) : (b >> 4)) * 17;
+                    dst[x] = rgba(i, i, i, i);
+                }
+                break;
+            case 3:
+                for (x = 0; x < width; x++) {
+                    dst[x] = palette[TEX_BYTE(x)];
+                }
+                break;
+            case 4:
+                for (x = 0; x < width; x++) {
+                    u32 b = TEX_BYTE(x);
+                    u32 i = (b >> 4) * 17, a = (b & 0xF) * 17;
+                    dst[x] = rgba(i, i, i, a);
+                }
+                break;
+            case 5:
+                for (x = 0; x < width; x++) {
+                    u32 b = TEX_BYTE(x);
+                    dst[x] = rgba(b, b, b, b);
+                }
+                break;
+            case 6:
+                for (x = 0; x < width; x++) {
+                    dst[x] = ia16_to_8888((TEX_BYTE(x * 2) << 8) | TEX_BYTE(x * 2 + 1));
+                }
+                break;
+            case 7:
+                for (x = 0; x < width; x++) {
+                    dst[x] = sRgba5551High[TEX_BYTE(x * 2)] | sRgba5551Low[TEX_BYTE(x * 2 + 1)];
+                }
+                break;
+            default:
+                for (x = 0; x < width; x++) {
+                    dst[x] = rgba(TEX_BYTE(x * 4), TEX_BYTE(x * 4 + 1), TEX_BYTE(x * 4 + 2), TEX_BYTE(x * 4 + 3));
+                }
+                break;
+        }
+#undef TEX_BYTE
+    }
+    if (sTexDecodeCheck < 0) {
+        sTexDecodeCheck = plat_switch("DKR_TEX_DECODE_CHECK", 0);
+    }
+    if (sTexDecodeCheck) {
+        u32 *ref = plat_malloc(width * height * sizeof(u32));
+        if (ref != NULL) {
+            decode_texture_ref(ref, load, tile, width, height, tlut);
+            if (__builtin_memcmp(ref, out, width * height * sizeof(u32)) != 0) {
+                plat_log("texture decode differs: %ux%u fmt %u siz %u", (unsigned) width, (unsigned) height,
+                         (unsigned) tile->fmt, (unsigned) tile->siz);
+            }
+            plat_free(ref);
         }
     }
 }

@@ -3657,8 +3657,9 @@ static u32 pot_texel(const GfxTexture *tex, unsigned int pw, unsigned int ph, in
     unsigned int w = tex->width, h = tex->height;
     unsigned int sx, sy;
     if (resample) {
-        sx = px * w / pw;
-        sy = py * h / ph;
+        // pw and ph are powers of two: shifts, not the ARM11's slow software divides (one per texel).
+        sx = (px * w) >> __builtin_ctz(pw);
+        sy = (py * h) >> __builtin_ctz(ph);
     } else {
         sx = (px < w) ? px : w - 1;
         sy = (py < h) ? py : h - 1;
@@ -3834,6 +3835,58 @@ PLAT_NOINLINE static int upload_mip_levels(C3DTexture *t, const GfxTexture *tex,
     return 1;
 }
 
+/* DKR_TEX_SLOW_UPLOAD=1: textures written texel by texel through gpu_texel, as before upload_level0. */
+static int sSlowUpload = -1;
+
+/*
+ * One 8x8 tile row of the texture's first level, for one GPU format: the same texels as gpu_texel and put_texel
+ * give, with the format's choice made once per texture and each texel's source row and column worked out once per
+ * tile row instead of per texel. Level loads upload hundreds of textures in one frame.
+ */
+#define UPLOAD_LEVEL0(type, fmt)                                                                                       \
+    do {                                                                                                               \
+        type *out_ = (type *) data;                                                                                    \
+        for (ty = 0; ty < ph; ty += 8) {                                                                               \
+            const unsigned int *rows_[8];                                                                              \
+            for (r = 0; r < 8; r++) {                                                                                  \
+                unsigned int py_ = ty + r;                                                                             \
+                unsigned int sy_ = resample ? (py_ * h) >> shiftH : (py_ < h ? py_ : h - 1);                          \
+                rows_[r] = tex->pixels + sy_ * w;                                                                      \
+            }                                                                                                          \
+            for (tx = 0; tx < pw; tx += 8, out_ += 64) {                                                               \
+                unsigned int cols_[8];                                                                                 \
+                for (r = 0; r < 8; r++) {                                                                              \
+                    unsigned int px_ = tx + r;                                                                         \
+                    cols_[r] = resample ? (px_ * w) >> shiftW : (px_ < w ? px_ : w - 1);                              \
+                }                                                                                                      \
+                for (i = 0; i < 64; i++) {                                                                             \
+                    out_[sTileOrder[i]] = (type) gfx_texel_encode(rows_[i >> 3][cols_[i & 7]], fmt);                   \
+                }                                                                                                      \
+            }                                                                                                          \
+        }                                                                                                              \
+    } while (0)
+
+static void upload_level0(u8 *data, const GfxTexture *tex, int format, unsigned int pw, unsigned int ph,
+                          int resample) {
+    unsigned int w = tex->width, h = tex->height, tx, ty, r, i;
+    unsigned int shiftW = __builtin_ctz(pw), shiftH = __builtin_ctz(ph);
+    switch (format) {
+        case GFX_TEXFMT_RGBA5551:
+            UPLOAD_LEVEL0(u16, GFX_TEXFMT_RGBA5551);
+            break;
+        case GFX_TEXFMT_LA8:
+            UPLOAD_LEVEL0(u16, GFX_TEXFMT_LA8);
+            break;
+        case GFX_TEXFMT_LA4:
+            UPLOAD_LEVEL0(u8, GFX_TEXFMT_LA4);
+            break;
+        default:
+            UPLOAD_LEVEL0(u32, GFX_TEXFMT_RGBA8);
+            break;
+    }
+}
+#undef UPLOAD_LEVEL0
+
 void gfxb_texture_upload(GfxTexture *tex) {
     C3DTexture *t = (C3DTexture *) tex->backendData;
     unsigned int w = tex->width, h = tex->height;
@@ -3890,12 +3943,19 @@ void gfxb_texture_upload(GfxTexture *tex) {
     // of the data). No temporary buffer: when the heap was short, skipping the upload left whatever the memory held
     // before, such as an old solid black texture.
     data = (u8 *) t->tex.data;
-    for (ty = 0; ty < ph; ty += 8) {
-        for (tx = 0; tx < pw; tx += 8) {
-            u8 *tile = &data[((ty / 8) * (pw / 8) + tx / 8) * 64 * bytes];
-            for (i = 0; i < 64; i++) {
-                put_texel(tile, format, sTileOrder[i], gpu_texel(tex, format, pw, ph, resample, tx + (i & 7),
-                                                                  ty + (i >> 3)));
+    if (sSlowUpload < 0) {
+        sSlowUpload = plat_switch("DKR_TEX_SLOW_UPLOAD", 0);
+    }
+    if (!sSlowUpload) {
+        upload_level0(data, tex, format, pw, ph, resample);
+    } else {
+        for (ty = 0; ty < ph; ty += 8) {
+            for (tx = 0; tx < pw; tx += 8) {
+                u8 *tile = &data[((ty / 8) * (pw / 8) + tx / 8) * 64 * bytes];
+                for (i = 0; i < 64; i++) {
+                    put_texel(tile, format, sTileOrder[i], gpu_texel(tex, format, pw, ph, resample, tx + (i & 7),
+                                                                      ty + (i >> 3)));
+                }
             }
         }
     }
