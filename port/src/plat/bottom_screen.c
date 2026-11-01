@@ -3310,6 +3310,44 @@ static void draw_hub(const RaceHud *hud) {
 }
 
 /* The file select menu: the highlighted adventure's progress at a glance while picking a game. */
+/* A picture scaled so its visible pixels (not its frame) fit size by size, centred on cx, cy. */
+static void picture_fit_visible(const Picture *p, int cx, int cy, int size) {
+    int x0 = p->width, y0 = p->height, x1 = -1, y1 = -1, i, j, w, h, dw, dh;
+    if (p->rgba == NULL) {
+        return;
+    }
+    for (j = 0; j < p->height; j++) {
+        for (i = 0; i < p->width; i++) {
+            if (p->rgba[(j * p->width + i) * 4 + 3] > 40) {
+                x0 = i < x0 ? i : x0;
+                x1 = i > x1 ? i : x1;
+                y0 = j < y0 ? j : y0;
+                y1 = j > y1 ? j : y1;
+            }
+        }
+    }
+    if (x1 < x0 || y1 < y0) {
+        return;
+    }
+    w = x1 - x0 + 1;
+    h = y1 - y0 + 1;
+    if (w >= h) {
+        dw = size;
+        dh = (h * size + w / 2) / w;
+    } else {
+        dh = size;
+        dw = (w * size + h / 2) / h;
+    }
+    for (j = 0; j < dh; j++) {
+        for (i = 0; i < dw; i++) {
+            const unsigned char *t = p->rgba + (((y0 + j * h / dh) * p->width) + x0 + i * w / dw) * 4;
+            if (t[3] != 0) {
+                plot(cx - dw / 2 + i, cy - dh / 2 + j, t[0], t[1], t[2], t[3]);
+            }
+        }
+    }
+}
+
 static void picture_fit(const Picture *p, int x, int y, int w, int h);
 static void menu_save_styled(const RaceHud *hud);
 static void draw_menu_save(const RaceHud *hud) {
@@ -3456,12 +3494,12 @@ static void menu_save_styled(const RaceHud *hud) {
         fraction_centred(16, 96, 111, hud->balloons, 47);
         progress_ring(30, 168, 15, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
-            picture_fit(&sTTAmulet[hud->ttAmulet], 19, 157, 22, 22);
+            picture_fit_visible(&sTTAmulet[hud->ttAmulet], 30, 168, 18);
         }
         fraction_centred(6, 54, 187, hud->ttAmulet, 4);
         progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
-            picture_fit(&sWizpigAmulet[hud->wizpigAmulet], 71, 157, 22, 22);
+            picture_fit_visible(&sWizpigAmulet[hud->wizpigAmulet], 82, 168, 18);
         }
         fraction_centred(58, 106, 187, hud->wizpigAmulet, 4);
         for (i = 0; i < RACE_HUD_WORLDS; i++) {
@@ -3495,7 +3533,7 @@ static void menu_save_styled(const RaceHud *hud) {
                                                                   : &sWizpigAmulet[hud->wizpigAmulet < 0 || hud->wizpigAmulet > 4 ? 0 : hud->wizpigAmulet]);
             int numberW = fraction_width(value, i == 0 ? 47 : 4), nameW = text_width(FONT_SMALL, name);
             int textW = numberW > nameW ? numberW : nameW, groupW = 28 + 8 + textW, gx = cx + (cw - groupW) / 2;
-            picture_fit(icon, gx, 54, 28, 28);
+            picture_fit_visible(icon, gx + 14, 68, 28);
             // The number and its label share one centre line, the pair centred top to bottom in the chip.
             fraction_at(gx + 36 + (textW - numberW) / 2, 55, value, i == 0 ? 47 : 4);
             text(FONT_SMALL, gx + 36 + (textW - nameW) / 2, 70, name, LABEL_BLUE, 1);
