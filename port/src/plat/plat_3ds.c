@@ -1095,6 +1095,13 @@ static int same_standing(const RaceHud *a, const RaceHud *b) {
     return 1;
 }
 
+/* A copy of the bottom screen as last drawn (RGB565, 320x240), for the Tools page's screen picture. */
+void plat_3ds_bottom_picture(unsigned short *out) {
+    LightLock_Lock(&sConsoleLock);
+    memcpy(out, sImage, sizeof(sImage));
+    LightLock_Unlock(&sConsoleLock);
+}
+
 /* The bottom screen's look (Race HUD page, port_race_hud.c). */
 void plat_set_bottom_style(int style) {
     LightLock_Lock(&sConsoleLock);
