@@ -3779,7 +3779,7 @@ static void race_glass(const RaceHud *hud) {
     place_centred(hud, 124, 10, 196, 50, 2);
     lap_pieces(hud, 200, 14);
     lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
-    fill(130, 47, 304, 48, (Colour){ 255, 255, 255, 45 });
+    fill(130, 45, 304, 46, (Colour){ 255, 255, 255, 45 });
     lap_facts(hud, &lapNumber, &lapTime, &best);
     {
         // Total, Current and Best: one label font, one digit size, digits in one column.
@@ -3798,9 +3798,9 @@ static void race_glass(const RaceHud *hud) {
         dx = 130 + widest + 10;
         for (k = 0; k < 3; k++) {
             if (shown[k]) {
-                int y = 54 + rowsShown * 15;
+                int y = 52 + rowsShown * 14;
                 text(FONT_SMALL, 130, y, names[k], LABEL_BLUE, 1);
-                race_time(dx, y, values[k], 1);
+                race_time(dx, y - 2, values[k], 1);
                 rowsShown++;
             }
         }
