@@ -3310,6 +3310,7 @@ static void draw_hub(const RaceHud *hud) {
 }
 
 /* The file select menu: the highlighted adventure's progress at a glance while picking a game. */
+static void picture_fit(const Picture *p, int x, int y, int w, int h);
 static void menu_save_styled(const RaceHud *hud);
 static void draw_menu_save(const RaceHud *hud) {
     int i, k, x, y = 98;
@@ -3405,13 +3406,7 @@ static void trophy_and_key(const RaceHud *hud, int world, int x, int y, int gap)
 }
 
 /* "23 / 47" in one size and one colour, the total fainter: the progress numbers of the file select companion. */
-static int fraction_width(int value, int total) {
-    char text_[24];
-    snprintf(text_, sizeof(text_), "%d / %d", value, total);
-    return text_width_as_is(FONT_SMALL, text_) + 3;
-}
-
-static void fraction_at(int x, int y, int value, int total) {
+static int fraction_at(int x, int y, int value, int total) {
     char text_[16];
     Colour gold = sStyle == 2 ? WHITE : GOLD, faint = gold;
     const UiFont *u = ui_font_kind(UI_HEAD);
@@ -3419,15 +3414,15 @@ static void fraction_at(int x, int y, int value, int total) {
     snprintf(text_, sizeof(text_), "%d", value);
     x = ui_draw(u, x, y, text_, gold, 1, BS_WIDTH);
     snprintf(text_, sizeof(text_), " / %d", total);
-    ui_draw(u, x, y, text_, faint, 1, BS_WIDTH);
+    return ui_draw(u, x, y, text_, faint, 1, BS_WIDTH);
+}
+
+static int fraction_width(int value, int total) {
+    return DRY(fraction_at(0, 0, value, total));
 }
 
 static void fraction_centred(int x0, int x1, int y, int value, int total) {
-    char text_[24];
-    int w;
-    snprintf(text_, sizeof(text_), "%d / %d", value, total);
-    w = text_width_as_is(FONT_SMALL, text_);
-    fraction_at(x0 + (x1 - x0 - w) / 2, y, value, total);
+    fraction_at(x0 + (x1 - x0 - fraction_width(value, total)) / 2, y, value, total);
 }
 
 static int number_pieces(int x, int y, int value) {
@@ -3463,12 +3458,12 @@ static void menu_save_styled(const RaceHud *hud) {
         if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
             picture(&sTTAmulet[hud->ttAmulet], 19, 157);
         }
-        fraction_centred(6, 54, 186, hud->ttAmulet, 4);
+        fraction_centred(6, 54, 187, hud->ttAmulet, 4);
         progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
             picture(&sWizpigAmulet[hud->wizpigAmulet], 71, 157);
         }
-        fraction_centred(58, 106, 186, hud->wizpigAmulet, 4);
+        fraction_centred(58, 106, 187, hud->wizpigAmulet, 4);
         for (i = 0; i < RACE_HUD_WORLDS; i++) {
             int y = 56 + i * 28, balloons = hud->worldBalloons[i];
             Colour ink = balloons > 0 ? WHITE : DIM;
@@ -3494,15 +3489,16 @@ static void menu_save_styled(const RaceHud *hud) {
         } else {
             smooth_box(cx, 50, cx + cw, 86, 8, chip, chip, (Colour){ 255, 255, 255, 40 }, 1);
         }
-        if (i == 0) {
-            picture_scaled(&sBalloon, cx + 6, 52, 1, 1);
-        } else if (i == 1 && hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
-            picture(&sTTAmulet[hud->ttAmulet], cx + 8, 54);
-        } else if (i == 2 && hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
-            picture(&sWizpigAmulet[hud->wizpigAmulet], cx + 8, 54);
+        {
+            // Icon and the two text lines as one group, centred in the chip; every icon in the same 28 px square.
+            const Picture *icon = i == 0 ? &sBalloon : (i == 1 ? &sTTAmulet[hud->ttAmulet < 0 || hud->ttAmulet > 4 ? 0 : hud->ttAmulet]
+                                                                  : &sWizpigAmulet[hud->wizpigAmulet < 0 || hud->wizpigAmulet > 4 ? 0 : hud->wizpigAmulet]);
+            int numberW = fraction_width(value, i == 0 ? 47 : 4), nameW = text_width(FONT_SMALL, name);
+            int textW = numberW > nameW ? numberW : nameW, groupW = 28 + 8 + textW, gx = cx + (cw - groupW) / 2;
+            picture_fit(icon, gx, 54, 28, 28);
+            fraction_at(gx + 36, 54, value, i == 0 ? 47 : 4);
+            text(FONT_SMALL, gx + 36, 71, name, LABEL_BLUE, 1);
         }
-        fraction_at(cx + 38, 54, value, i == 0 ? 47 : 4);
-        text(FONT_SMALL, cx + 38, 71, name, LABEL_BLUE, 1);
     }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
         int y = sStyle == 2 ? 92 + i * 21 : 96 + i * 20, balloons = hud->worldBalloons[i], k;
