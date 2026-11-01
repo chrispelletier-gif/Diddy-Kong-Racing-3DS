@@ -335,6 +335,128 @@ void free_3d_model(ModelInstance *modInst) {
     }
 }
 
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+
+/*
+ * A vertex's key in port_model_dedupe's table: which search it belongs to (a batch's miscData for the lit batches,
+ * 0x100 for the environment mapped ones) and its position.
+ */
+static inline u64 dedupe_key(u32 group, const Vertex *v) {
+    return ((u64) group << 48) | ((u64) (u16) v->x << 32) | ((u32) (u16) v->y << 16) | (u16) v->z;
+}
+
+/* Finds key, or the empty slot where it goes. Keys are never 0 (group 0 sets bit 63 below). */
+static inline u32 dedupe_slot(const u64 *keys, u32 mask, u64 key) {
+    u32 h = (u32) (key ^ (key >> 29) ^ (key >> 47)) * 0x9E3779B1u;
+    u32 slot = (h >> 8) & mask;
+    while (keys[slot] != 0 && keys[slot] != key) {
+        slot = (slot + 1) & mask;
+    }
+    return slot;
+}
+
+/*
+ * The same numbering as object_model_init's vertex search: each vertex takes the number of the first earlier vertex
+ * at the same position that its batch would search (lit batches: those with the same miscData; environment mapped
+ * batches with miscData 0xFF: every environment mapped batch), else a new one. Returns the count of numbers, or -1
+ * if the table can't be allocated.
+ */
+static s32 port_model_dedupe(ObjectModel *model, s16 *v0) {
+    TriangleBatchInfo *batches = model->batches;
+    Vertex *vertices = model->vertices;
+    u32 size = 64, mask, slot;
+    u64 *keys;
+    s16 *values;
+    s32 i, l, next = 0;
+
+    while (size < (u32) model->numberOfVertices * 4) {
+        size <<= 1;
+    }
+    mask = size - 1;
+    keys = (u64 *) mempool_alloc(size * (sizeof(u64) + sizeof(s16)), COLOUR_TAG_ORANGE);
+    if (keys == NULL) {
+        return -1;
+    }
+    values = (s16 *) (keys + size);
+    __builtin_memset(keys, 0, size * sizeof(u64));
+
+    for (i = 0; i < model->numberOfBatches; i++) {
+        u32 misc = batches[i].miscData;
+        s32 envmap = (batches[i].flags & RENDER_ENVMAP) != 0;
+        for (l = batches[i].verticesOffset; l < batches[i + 1].verticesOffset; l++) {
+            u64 key;
+            if (misc < 0xFE || (misc == BATCH_VTX_COL && envmap)) {
+                key = dedupe_key(misc < 0xFE ? misc : 0x100, &vertices[l]) | (1ull << 63);
+                slot = dedupe_slot(keys, mask, key);
+                if (keys[slot] != 0) {
+                    v0[l] = values[slot];
+                } else {
+                    v0[l] = next++;
+                    keys[slot] = key;
+                    values[slot] = v0[l];
+                }
+            } else if (misc == 0xFE) {
+                v0[l] = next++;
+            } else {
+                v0[l] = -1;
+            }
+            // Environment mapped batches of any kind are what the environment mapped search looks through.
+            if (envmap && misc < 0xFF) {
+                key = dedupe_key(0x100, &vertices[l]) | (1ull << 63);
+                slot = dedupe_slot(keys, mask, key);
+                if (keys[slot] == 0) {
+                    keys[slot] = key;
+                    values[slot] = v0[l];
+                }
+            }
+        }
+    }
+    mempool_free(keys);
+    return next;
+}
+
+/* DKR_MODEL_DEDUPE=2: runs the game's search too and logs any vertex numbered differently. */
+static void port_model_dedupe_check(ObjectModel *model, s16 *v0, s32 count) {
+    TriangleBatchInfo *batches = model->batches;
+    Vertex *vertices = model->vertices;
+    s32 i, l, q, a0, a2, s6 = 0, bad = 0;
+    for (i = 0; i < model->numberOfBatches; i++) {
+        for (l = batches[i].verticesOffset; l < batches[i + 1].verticesOffset; l++) {
+            a2 = -1;
+            if (batches[i].miscData < 0xFE ||
+                (batches[i].miscData == BATCH_VTX_COL && (batches[i].flags & RENDER_ENVMAP))) {
+                for (q = 0; q <= i && a2 < 0; q++) {
+                    s32 match = batches[i].miscData < 0xFE ? batches[i].miscData == batches[q].miscData
+                                                           : (batches[q].flags & RENDER_ENVMAP) != 0;
+                    if (!match) {
+                        continue;
+                    }
+                    for (a0 = batches[q].verticesOffset;
+                         a0 < (q == i ? l : batches[q + 1].verticesOffset) && a2 < 0; a0++) {
+                        if (vertices[l].x == vertices[a0].x && vertices[l].y == vertices[a0].y &&
+                            vertices[l].z == vertices[a0].z) {
+                            a2 = v0[a0];
+                        }
+                    }
+                }
+                if (a2 < 0) {
+                    a2 = s6++;
+                }
+            } else if (batches[i].miscData == 0xFE) {
+                a2 = s6++;
+            }
+            if (a2 != v0[l]) {
+                bad++;
+            }
+        }
+    }
+    if (bad != 0 || s6 != count) {
+        plat_log("model vertex numbering differs: %d vertices, %d vs %d numbers", bad, count, s6);
+    }
+}
+#endif
+
 /**
  * Frees all associated meshes, textures and animations from the model.
  */
@@ -764,6 +886,23 @@ s32 model_init_normals(ObjectModel *model) {
 
         s6 = 0;
 
+#ifdef TARGET_PORT
+        // The search below compares every vertex with every earlier one (most of a racer's load time on the
+        // 3DS); a hash table finds the same first match. DKR_MODEL_DEDUPE=0 = the game's search, 2 = both, checked.
+        {
+            s32 mode = plat_switch("DKR_MODEL_DEDUPE", 1);
+            if (mode != 0) {
+                s6 = port_model_dedupe(model, v0);
+            }
+            if (s6 >= 0 && mode == 2) {
+                port_model_dedupe_check(model, v0, s6);
+            }
+            if (s6 >= 0 && mode != 0) {
+                goto port_deduped;
+            }
+            s6 = 0;
+        }
+#endif
         for (i = 0; i < model->numberOfBatches; i++) {
             for (l = batches[i].verticesOffset; l < batches[i + 1].verticesOffset; l++) {
                 if (batches[i].miscData < 0xFE) {
@@ -818,6 +957,9 @@ s32 model_init_normals(ObjectModel *model) {
             }
         }
 
+#ifdef TARGET_PORT
+    port_deduped:
+#endif
         v06 = (Vec3f *) mempool_alloc(s6 * sizeof(Vec3f), COLOUR_TAG_ORANGE);
         if (v06 == NULL) {
             mempool_free(floatNorms);

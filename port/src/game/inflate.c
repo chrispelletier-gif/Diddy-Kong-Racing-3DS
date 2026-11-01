@@ -1,8 +1,13 @@
 /*
  * Raw DEFLATE decoder replacing the game's hand written MIPS inflate routines (src/hasm/gzip_asm.s).
  *
- * The game decompresses in place: the compressed data sits at the end of the output buffer, so this decoder
- * reads its input strictly in order and never more than a few bytes ahead of what it has consumed.
+ * The game decompresses in place: the compressed data sits at the end of the output buffer. The output never
+ * catches up with the input that is still to be read, so reading a few bytes ahead is safe, but writing past the
+ * current match or literal is not (those bytes may still be unread input). Copies therefore never overshoot.
+ *
+ * Speed (level loads spend most of their time here): a 32-bit bit buffer topped up a byte at a time, 10-bit
+ * lookup tables whose entries already carry each length or distance code's base and extra bit count, and match
+ * copies done 4 bytes at a time when the distance allows.
  */
 #include <ultra64.h>
 #include "types.h"
@@ -12,13 +17,31 @@
 #define MAXLCODES 286
 #define MAXDCODES 30
 #define FIXLCODES 288
-#define FAST_BITS 9
+#define FAST_BITS 10 // Literal/length table; codes longer than this take the slow path.
+#define FAST_SIZE (1 << FAST_BITS)
+#define FAST_MASK (FAST_SIZE - 1)
+#define DIST_BITS 8 // Distance table: the codes are short, and a smaller table is quicker to fill per block.
+#define DIST_MASK ((1 << DIST_BITS) - 1)
+#define CODELEN_BITS 7 // Code length codes are 7 bits at most, so their table holds them all.
+
+/*
+ * A fast table entry, for the code whose bits (lowest first) index it:
+ *   bits 0-3   code length (0: the code is longer than FAST_BITS, use the slow path)
+ *   bits 4-7   extra bits that follow (lengths and distances)
+ *   bit  8     literal (lit/len table)
+ *   bit  9     end of block (lit/len table)
+ *   bit  10    invalid symbol
+ *   bits 16-31 literal byte, or the length or distance base
+ */
+#define E_LIT 0x100
+#define E_END 0x200
+#define E_BAD 0x400
 
 typedef struct Huffman {
     s16 count[MAXBITS + 1];
     s16 symbol[FIXLCODES];
-    /* Fast lookup indexed by the next FAST_BITS input bits: (length << 12) | symbol, or 0 for long codes. */
-    u16 fast[1 << FAST_BITS];
+    s32 bits; // Of the fast table's index.
+    u32 fast[FAST_SIZE];
 } Huffman;
 
 typedef struct InflateState {
@@ -37,12 +60,18 @@ static const u16 sDistBase[30] = { 1,   2,   3,   4,   5,   7,    9,    13,   17
                                    193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
 static const u8 sDistExtra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
 
+/* Each byte with its bits in reverse order: deflate sends Huffman codes highest bit first. */
+static u8 sReverse8[256];
+
+enum { TABLE_CODELEN, TABLE_LITLEN, TABLE_DIST };
+
 /* Built once before main (build_fixed_tables), not on first use: several threads unpack at the same time. */
 static Huffman sFixedLen;
 static Huffman sFixedDist;
 
-static inline void need_bits(InflateState *s, s32 n) {
-    while (s->bitCount < n) {
+/* Tops the bit buffer up to at least 25 bits: enough for any code plus its extra bits, or two 10-bit codes. */
+static inline void refill(InflateState *s) {
+    while (s->bitCount <= 24) {
         s->bitBuf |= (u32) (*s->in++) << s->bitCount;
         s->bitCount += 8;
     }
@@ -53,15 +82,38 @@ static inline u32 get_bits(InflateState *s, s32 n) {
     if (n == 0) {
         return 0;
     }
-    need_bits(s, n);
+    refill(s);
     val = s->bitBuf & ((1u << n) - 1);
     s->bitBuf >>= n;
     s->bitCount -= n;
     return val;
 }
 
+static u32 table_entry(s32 kind, s32 sym, s32 len) {
+    if (kind == TABLE_LITLEN) {
+        if (sym < 256) {
+            return ((u32) sym << 16) | E_LIT | len;
+        }
+        if (sym == 256) {
+            return E_END | len;
+        }
+        sym -= 257;
+        if (sym >= 29) {
+            return E_BAD | len;
+        }
+        return ((u32) sLengthBase[sym] << 16) | (sLengthExtra[sym] << 4) | len;
+    }
+    if (kind == TABLE_DIST) {
+        if (sym >= 30) {
+            return E_BAD | len;
+        }
+        return ((u32) sDistBase[sym] << 16) | (sDistExtra[sym] << 4) | len;
+    }
+    return ((u32) sym << 16) | len;
+}
+
 /* Builds a canonical Huffman decoding table. Returns 0 on success. */
-static s32 build_huffman(Huffman *h, const u8 *lengths, s32 n) {
+static s32 build_huffman(Huffman *h, const u8 *lengths, s32 n, s32 kind) {
     s16 offs[MAXBITS + 1];
     s32 i, len, left;
     s32 code, sym, reversed, fill, step;
@@ -72,8 +124,9 @@ static s32 build_huffman(Huffman *h, const u8 *lengths, s32 n) {
     for (sym = 0; sym < n; sym++) {
         h->count[lengths[sym]]++;
     }
+    h->bits = kind == TABLE_LITLEN ? FAST_BITS : kind == TABLE_DIST ? DIST_BITS : CODELEN_BITS;
+    bzero(h->fast, sizeof(h->fast[0]) << h->bits);
     if (h->count[0] == n) {
-        bzero(h->fast, sizeof(h->fast));
         return 0;
     }
     left = 1;
@@ -95,20 +148,18 @@ static s32 build_huffman(Huffman *h, const u8 *lengths, s32 n) {
     }
 
     // Fast table: walk the canonical codes in order.
-    bzero(h->fast, sizeof(h->fast));
     code = 0;
     i = 0;
-    for (len = 1; len <= FAST_BITS; len++) {
+    for (len = 1; len <= h->bits; len++) {
         s32 c;
         for (c = 0; c < h->count[len]; c++, i++, code++) {
             s32 b;
-            reversed = 0;
-            for (b = 0; b < len; b++) {
-                reversed |= ((code >> b) & 1) << (len - 1 - b);
-            }
+            u32 entry = table_entry(kind, h->symbol[i], len);
+            (void) b;
+            reversed = (sReverse8[code & 0xFF] << 8 | sReverse8[(code >> 8) & 0xFF]) >> (16 - len);
             step = 1 << len;
-            for (fill = reversed; fill < (1 << FAST_BITS); fill += step) {
-                h->fast[fill] = (u16) ((len << 12) | h->symbol[i]);
+            for (fill = reversed; fill < (1 << h->bits); fill += step) {
+                h->fast[fill] = entry;
             }
         }
         code <<= 1;
@@ -116,13 +167,18 @@ static s32 build_huffman(Huffman *h, const u8 *lengths, s32 n) {
     return 0;
 }
 
-static s32 decode_slow(InflateState *s, const Huffman *h) {
+/* A code longer than FAST_BITS (or one the table has no entry for): walk the canonical counts, bit by bit. */
+static s32 decode_slow(InflateState *s, const Huffman *h, s32 kind, u32 *entry) {
     s32 code = 0, first = 0, index = 0, len, count;
+    refill(s);
     for (len = 1; len <= MAXBITS; len++) {
-        code |= get_bits(s, 1);
+        code |= (s->bitBuf >> (len - 1)) & 1;
         count = h->count[len];
         if (code - count < first) {
-            return h->symbol[index + (code - first)];
+            s->bitBuf >>= len;
+            s->bitCount -= len;
+            *entry = table_entry(kind, h->symbol[index + (code - first)], 0);
+            return 0;
         }
         index += count;
         first += count;
@@ -132,60 +188,159 @@ static s32 decode_slow(InflateState *s, const Huffman *h) {
     return -1;
 }
 
-static inline s32 decode(InflateState *s, const Huffman *h) {
-    u32 entry;
+/* Returns the table entry for the next code, with its code bits already taken (the length field is then 0). */
+static inline s32 decode(InflateState *s, const Huffman *h, s32 kind, u32 *entry) {
+    u32 e;
     s32 len;
-
-    // Top the bit buffer up byte by byte without reading past what a code could need.
-    while (s->bitCount < FAST_BITS) {
-        s->bitBuf |= (u32) (*s->in++) << s->bitCount;
-        s->bitCount += 8;
-    }
-    entry = h->fast[s->bitBuf & ((1 << FAST_BITS) - 1)];
-    if (entry != 0) {
-        len = entry >> 12;
+    refill(s);
+    e = h->fast[s->bitBuf & ((1u << h->bits) - 1)];
+    len = e & 15;
+    if (len != 0) {
         s->bitBuf >>= len;
         s->bitCount -= len;
-        return entry & 0xFFF;
+        *entry = e & ~15u;
+        return 0;
     }
-    return decode_slow(s, h);
+    return decode_slow(s, h, kind, entry);
 }
 
+/* Loads 4 bytes, lowest first, from any alignment. */
+static inline u32 load_le32(const u8 *p) {
+    u32 v;
+    __builtin_memcpy(&v, p, 4); // One unaligned load on ARMv6K and x86.
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    v = __builtin_bswap32(v);
+#endif
+    return v;
+}
+
+/*
+ * The main loop keeps the bit buffer in locals: the output is written through a byte pointer, which could alias
+ * the state struct, so the compiler would otherwise reload it after every byte.
+ */
+#define LOCAL_REFILL()                                                                                                 \
+    do {                                                                                                               \
+        if (bitCount <= 24) {                                                                                          \
+            u32 n_ = (u32) (31 - bitCount) >> 3;                                                                       \
+            bitBuf |= load_le32(in) << bitCount;                                                                       \
+            in += n_;                                                                                                  \
+            bitCount += n_ << 3;                                                                                       \
+        }                                                                                                              \
+    } while (0)
+#define LOCAL_DROP(n)                                                                                                  \
+    do {                                                                                                               \
+        bitBuf >>= (n);                                                                                                \
+        bitCount -= (n);                                                                                               \
+    } while (0)
+#define SAVE_STATE()                                                                                                   \
+    do {                                                                                                               \
+        s->in = in;                                                                                                    \
+        s->bitBuf = bitBuf;                                                                                            \
+        s->bitCount = bitCount;                                                                                        \
+        s->out = out;                                                                                                  \
+    } while (0)
+
 static s32 inflate_codes(InflateState *s, const Huffman *lencode, const Huffman *distcode) {
-    s32 sym, len;
-    u32 dist;
+    const u8 *in = s->in;
+    u32 bitBuf = s->bitBuf;
+    s32 bitCount = s->bitCount;
+    u8 *out = s->out;
+    u8 *const start = s->start;
+    u8 *const end = s->end;
+    u32 e, len, dist, extra;
     u8 *from;
 
     for (;;) {
-        sym = decode(s, lencode);
-        if (sym < 0) {
+        // A literal or length whose code is in the table; a longer code goes the slow way.
+        LOCAL_REFILL();
+        e = lencode->fast[bitBuf & FAST_MASK];
+        if ((e & 15) != 0) {
+            LOCAL_DROP(e & 15);
+        } else {
+            SAVE_STATE();
+            if (decode_slow(s, lencode, TABLE_LITLEN, &e) != 0) {
+                return -1;
+            }
+            in = s->in;
+            bitBuf = s->bitBuf;
+            bitCount = s->bitCount;
+        }
+        if (e & E_LIT) {
+            if (out >= end) {
+                return -1;
+            }
+            *out++ = (u8) (e >> 16);
+            // A second literal often fits in the bits already buffered.
+            if (bitCount >= FAST_BITS) {
+                u32 e2 = lencode->fast[bitBuf & FAST_MASK];
+                if ((e2 & (E_LIT | 15)) > E_LIT) {
+                    if (out >= end) {
+                        return -1;
+                    }
+                    LOCAL_DROP(e2 & 15);
+                    *out++ = (u8) (e2 >> 16);
+                }
+            }
+            continue;
+        }
+        if (e & (E_END | E_BAD)) {
+            SAVE_STATE();
+            return (e & E_BAD) ? -1 : 0;
+        }
+        // A match: its length (base + extra bits), then its distance.
+        len = e >> 16;
+        extra = (e >> 4) & 15;
+        len += bitBuf & ((1u << extra) - 1);
+        LOCAL_DROP(extra);
+        LOCAL_REFILL();
+        e = distcode->fast[bitBuf & DIST_MASK];
+        if ((e & 15) != 0) {
+            LOCAL_DROP(e & 15);
+        } else {
+            SAVE_STATE();
+            if (decode_slow(s, distcode, TABLE_DIST, &e) != 0) {
+                return -1;
+            }
+            in = s->in;
+            bitBuf = s->bitBuf;
+            bitCount = s->bitCount;
+            LOCAL_REFILL();
+        }
+        if (e & E_BAD) {
             return -1;
         }
-        if (sym < 256) {
-            if (s->out >= s->end) {
-                return -1;
+        dist = e >> 16;
+        extra = (e >> 4) & 15;
+        dist += bitBuf & ((1u << extra) - 1);
+        LOCAL_DROP(extra);
+        if (dist > (u32) (out - start) || len > (u32) (end - out)) {
+            return -1;
+        }
+        from = out - dist;
+        if (dist >= 4) {
+            // Whole words, never past the match: the bytes after it may be input still to be read.
+            while (len >= 4) {
+                u32 w;
+                __builtin_memcpy(&w, from, 4);
+                __builtin_memcpy(out, &w, 4);
+                out += 4;
+                from += 4;
+                len -= 4;
             }
-            *s->out++ = (u8) sym;
-        } else if (sym == 256) {
-            return 0;
-        } else {
-            sym -= 257;
-            if (sym >= 29) {
-                return -1;
+        } else if (dist == 1) {
+            u8 b = *from;
+            while (len >= 4) {
+                out[0] = b;
+                out[1] = b;
+                out[2] = b;
+                out[3] = b;
+                out += 4;
+                len -= 4;
             }
-            len = sLengthBase[sym] + get_bits(s, sLengthExtra[sym]);
-            sym = decode(s, distcode);
-            if (sym < 0 || sym >= 30) {
-                return -1;
-            }
-            dist = sDistBase[sym] + get_bits(s, sDistExtra[sym]);
-            if (dist > (u32) (s->out - s->start) || len > s->end - s->out) {
-                return -1;
-            }
-            from = s->out - dist;
-            while (len--) {
-                *s->out++ = *from++;
-            }
+            from = out - 1;
+        }
+        while (len--) {
+            *out++ = *from++;
         }
     }
 }
@@ -209,7 +364,12 @@ static s32 inflate_stored(InflateState *s) {
 
 __attribute__((constructor)) static void build_fixed_tables(void) {
     u8 lengths[FIXLCODES];
-    s32 sym;
+    s32 sym, b;
+    for (sym = 0; sym < 256; sym++) {
+        for (b = 0; b < 8; b++) {
+            sReverse8[sym] |= ((sym >> b) & 1) << (7 - b);
+        }
+    }
     for (sym = 0; sym < 144; sym++) {
         lengths[sym] = 8;
     }
@@ -222,11 +382,11 @@ __attribute__((constructor)) static void build_fixed_tables(void) {
     for (; sym < FIXLCODES; sym++) {
         lengths[sym] = 8;
     }
-    build_huffman(&sFixedLen, lengths, FIXLCODES);
+    build_huffman(&sFixedLen, lengths, FIXLCODES, TABLE_LITLEN);
     for (sym = 0; sym < MAXDCODES; sym++) {
         lengths[sym] = 5;
     }
-    build_huffman(&sFixedDist, lengths, MAXDCODES);
+    build_huffman(&sFixedDist, lengths, MAXDCODES, TABLE_DIST);
 }
 
 static s32 inflate_fixed(InflateState *s) {
@@ -240,6 +400,7 @@ static s32 inflate_dynamic(InflateState *s) {
     Huffman lencode, distcode;
     u8 lengths[MAXLCODES + MAXDCODES];
     s32 nlen, ndist, ncode, index, sym, len;
+    u32 e;
 
     nlen = get_bits(s, 5) + 257;
     ndist = get_bits(s, 5) + 1;
@@ -253,15 +414,15 @@ static s32 inflate_dynamic(InflateState *s) {
     for (; index < 19; index++) {
         lengths[order[index]] = 0;
     }
-    if (build_huffman(&lencode, lengths, 19) != 0) {
+    if (build_huffman(&lencode, lengths, 19, TABLE_CODELEN) != 0) {
         return -1;
     }
     index = 0;
     while (index < nlen + ndist) {
-        sym = decode(s, &lencode);
-        if (sym < 0) {
+        if (decode(s, &lencode, TABLE_CODELEN, &e) != 0) {
             return -1;
         }
+        sym = e >> 16;
         if (sym < 16) {
             lengths[index++] = sym;
         } else {
@@ -285,7 +446,8 @@ static s32 inflate_dynamic(InflateState *s) {
             }
         }
     }
-    if (build_huffman(&lencode, lengths, nlen) != 0 || build_huffman(&distcode, lengths + nlen, ndist) != 0) {
+    if (build_huffman(&lencode, lengths, nlen, TABLE_LITLEN) != 0 ||
+        build_huffman(&distcode, lengths + nlen, ndist, TABLE_DIST) != 0) {
         return -1;
     }
     return inflate_codes(s, &lencode, &distcode);
