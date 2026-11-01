@@ -936,6 +936,7 @@ static void send_test_results(void) {
         attach_recording(&report, &sRecording, "timeline.csv");
     }
     add_file(&report, "autorun_drawmix.csv");
+    add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
     add_file(&report, "autorun_hitches.txt"); // Last: the largest after a long run.
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);

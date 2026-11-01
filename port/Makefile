@@ -49,7 +49,7 @@ PORT_GAME_SRC := $(wildcard src/*.c src/os/*.c src/game/*.c src/gfx/*.c src/audi
 # Port sources that use the platform's own headers.
 PORT_SYS_SRC := src/plat/plat_common.c src/plat/input_script.c $(wildcard src/gfx/sys/*.c src/audio/sys/*.c)
 PORT_SYS_SRC += src/plat/settings.c src/plat/controls.c src/plat/bottom_screen.c src/plat/options.c \
-                src/plat/save_backups.c src/plat/recorder.c
+                src/plat/save_backups.c src/plat/recorder.c src/plat/pgo.c
 
 ifeq ($(TARGET),3ds)
   PORT_SYS_SRC += src/plat/plat_3ds.c src/plat/bugreport.c $(wildcard 3ds/*.c)
@@ -102,6 +102,14 @@ else
   HOT_OPT ?= $(OPT)
   LTO ?= 1
   OPT_FLAGS := -O$(OPT) -g $(if $(filter 1,$(LTO)),-flto=auto)
+endif
+# Profile-guided optimisation (Old 3DS game core): PGO=gen builds the training build, whose counts src/plat/pgo.c
+# writes to pgo_counts.bin during the whole game run; port/tools/pgo_unpack.py puts them next to the objects (the same
+# BUILD_DIR), and PGO=use builds with them. Build both in a BUILD_DIR of their own.
+ifeq ($(PGO),gen)
+  OPT_FLAGS += -fprofile-generate -fprofile-update=single -fprofile-info-section=gcov_info -DPORT_PGO_GEN=1
+else ifeq ($(PGO),use)
+  OPT_FLAGS += -fprofile-use -fprofile-partial-training -Wno-missing-profile
 endif
 HOT_SRC := src/gfx/gfx_rdp.c src/audio/audio_rsp.c 3ds/gfx_c3d.c
 # Roadmap P25: the hot files (only the renderer has floats) may reorder float maths, use reciprocals and skip NaN,
