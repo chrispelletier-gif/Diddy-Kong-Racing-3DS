@@ -784,10 +784,7 @@ static void make_background(void) {
                                                    b + light < 0 ? 0 : b + light);
         }
     }
-    // A thin light line above the status strip (not Glass: there it read as a stray line under the buttons).
-    for (x = 0; sStyle != 1 && x < BS_WIDTH; x++) {
-        sBackground[(BS_STATUS_Y - 1) * BS_WIDTH + x] = rgb565(60, 90, 170);
-    }
+    // No line above the status strip: it read as a stray line under the buttons and threw their alignment off.
     sBackgroundMade = 1;
 }
 
