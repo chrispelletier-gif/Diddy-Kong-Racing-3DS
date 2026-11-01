@@ -271,6 +271,7 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "head: texture lookups remembered (tex memo)", { "DKR_TEX_MEMO", NULL }, 0, 1, 0 },
     { "head: texture hashes kept 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
     { "head: Old 3DS flush and frame pacing", { "DKR_SVC_FLUSH", "DKR_FRAME_PACE", NULL }, 0, 1, 0 },
+    { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1 },
     { "head: no timing in parts, two top buffers", { "DKR_DRAW_PARTS", "DKR_WALK_PARTS", "DKR_TRIPLE_BUFFER" }, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
