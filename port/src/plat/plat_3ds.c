@@ -573,6 +573,7 @@ const char *plat_data_dir(void) {
 static LightLock sLogLock;
 static int sLogLines;
 static int sLogDebug;
+static volatile int sLogAsync; // Start-up lines written by the writer thread (from when the ROM is loaded)
 static int sLogLockReady;
 static int sLockReady_hook(void) {
     return sLogLockReady;
@@ -823,9 +824,16 @@ static FILE *log_file(void) {
     if (!sLogDebug && sLogLines >= LOG_BOOT_LINES) {
         if (sFile != NULL && sLogLines == LOG_BOOT_LINES) {
             // Said in the file, so that its end is not taken for the moment the game stopped.
-            fprintf(sFile, "(log.txt ends here; bug reports carry the latest lines, and a hang saves them to "
-                           "hang_log.txt)\n");
-            fflush(sFile);
+            static const char sEnds[] = "(log.txt ends here; bug reports carry the latest lines, and a hang saves "
+                                        "them to hang_log.txt)\n";
+            char *copy = sLogAsync ? malloc(sizeof(sEnds) - 1) : NULL;
+            if (copy != NULL) {
+                memcpy(copy, sEnds, sizeof(sEnds) - 1);
+                queue_job(JOB_WRITE, sFile, copy, sizeof(sEnds) - 1, NULL);
+            } else {
+                fputs(sEnds, sFile);
+                fflush(sFile);
+            }
             sLogLines++;
         }
         return NULL;
@@ -857,10 +865,19 @@ static void log_line(const char *prefix, const char *text) {
         if (length >= (int) sizeof(line)) {
             length = sizeof(line) - 1;
         }
-        if (sLogLines < LOG_BOOT_LINES) {
+        if (sLogLines < LOG_BOOT_LINES && !sLogAsync) {
             // The start-up lines go to the card at once: they are what is left if the game never gets going.
             fwrite(line, 1, length, file);
             fflush(file);
+        } else if (sLogLines < LOG_BOOT_LINES) {
+            // Once the game runs, each of these lines still goes to the card at once, but on the writer thread: an
+            // fflush takes about 7 ms, and a profile report is 7 lines, so the game thread lost ~50 ms a time.
+            char *copy = malloc(length);
+            chunk_flush(&sLogChunk);
+            if (copy != NULL) {
+                memcpy(copy, line, length);
+                queue_job(JOB_WRITE, file, copy, length, NULL);
+            }
         } else {
             chunk_add(&sLogChunk, file, line, length);
         }
@@ -1070,6 +1087,7 @@ void plat_rom_loaded(void) {
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
+    sLogAsync = !plat_switch("DKR_LOG_SYNC", 0);
 }
 
 /* The buttons (see bs_set_buttons). */
