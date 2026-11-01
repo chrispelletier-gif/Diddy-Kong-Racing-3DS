@@ -1403,6 +1403,11 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 if (sStyle == 2 && !(i == 0 && !grey)) {
                     hole = (Colour){ 40, 60, 140, 255 };
                 }
+                /* A label (with its icon) that would run into the button's rounded ends drops the letter gap. */
+                if (w + iconW > x1 - x0 - 14) {
+                    sNoGap = 1;
+                    w = text_width(FONT_FUN, upper);
+                }
                 if (iconW) {
                     int tx = x0 + (x1 - x0 - w - iconW) / 2;
                     draw_icon(t, tx + 7, cy, ink, hole);
@@ -1410,6 +1415,7 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
                 } else {
                     text_centred(FONT_FUN, x0, x1, y0 + 5 + sButtonNudge[sStyle], upper, ink, !grey);
                 }
+                sNoGap = 0;
             }
         }
     }
