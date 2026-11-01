@@ -2704,9 +2704,35 @@ static int time_row(const RaceHud *hud, int x, int y, int small) {
     return race_time(x, y, hud->raceTime, small);
 }
 
-/* The clock's size and where it starts: the big digits when they fit, else the small ones. */
+/* The widest the clock row can be (TIME, then MM:SS:HH with every digit the set's widest): the Classic look trims each
+ * digit to its used columns, so the clock's own width changes as the digits tick. */
+static int time_row_widest(int y, int small) {
+    const Picture *set = small ? sSmallDigits : sDigits;
+    const Picture *colon = small ? &sSmallColon : &sColon;
+    const Picture *digit = &set[0];
+    int widest = 0, d, i, x;
+    for (d = 0; d < 10; d++) {
+        int w = DRY(piece(&set[d], 0, y, 1));
+        if (w > widest) {
+            widest = w;
+            digit = &set[d];
+        }
+    }
+    x = DRY(piece(&sTimeLabel, 0, y, 4));
+    for (i = 0; i < 6; i++) {
+        x = DRY(piece(digit, x, y, 1));
+        if (i == 1 || i == 3) {
+            x = DRY(piece(colon, x, y, 1));
+        }
+    }
+    return x;
+}
+
+/* The clock's size and where it starts: the big digits when they fit, else the small ones. Decided on the widest the
+ * clock can get, not on the time shown, so the size doesn't flip back and forth as the digits change. */
 static int time_small(const RaceHud *hud, int y) {
-    return DRY(time_row(hud, 0, y, 0)) > RIGHT_X1 - RIGHT_X0 - 8;
+    (void) hud;
+    return time_row_widest(y, 0) > RIGHT_X1 - RIGHT_X0 - 8;
 }
 
 /* The x where the lap line and the clock both start, so their left edges line up (centred as a pair). */
