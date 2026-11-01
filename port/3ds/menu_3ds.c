@@ -247,11 +247,13 @@ static void row_change(int i, int step) {
         for (at = 0; at < 3 && sAaOrder[at] != plat_3ds_antialias_setting(); at++) {}
         plat_3ds_set_antialias_setting(sAaOrder[(at + step + 3) % 3]);
     } else if (i == MAIN_FPS) {
-        // 30, 60, then a steady 20 for an Old 3DS.
+        // 30, 60, then a steady 20 for an Old 3DS (which has no 60).
         static const int sRates[3] = { 30, 60, 20 };
-        int at;
-        for (at = 0; at < 2 && sRates[at] != plat_frame_rate_setting(); at++) {}
-        plat_set_frame_rate_setting(sRates[(at + step + 3) % 3]);
+        static const int sOldRates[2] = { 30, 20 };
+        const int *rates = plat_can_60fps() ? sRates : sOldRates;
+        int n = plat_can_60fps() ? 3 : 2, at;
+        for (at = 0; at < n - 1 && rates[at] != plat_frame_rate_setting(); at++) {}
+        plat_set_frame_rate_setting(rates[(at + step + n) % n]);
     } else if (i == MAIN_MIPMAPS) {
         int modes = PLAT_DEBUG_TOOLS ? 3 : 2; // Show is for debugging.
         plat_3ds_set_mipmap_setting((plat_3ds_mipmap_setting() + step + modes) % modes);

@@ -4009,11 +4009,12 @@ static void draw_tile_art(const SetupScreen *s, int i, Rect r) {
             break;
         case SETUP_PAGE_PICTURE: {
             int d;
-            plain.ghosts = i == 1 ? 2 : 0;
+            int old = !plat_can_60fps(); // An Old 3DS's second tile is a steady 20 fps, not 60.
+            plain.ghosts = i == 1 && !old ? 2 : 0;
             draw_screen_style(r, 2, plain);
             // The frame rate in the HUD's digits, top left.
             for (d = 0; d < 2; d++) {
-                const Picture *digit = &sDigits[d == 0 ? (i == 1 ? 6 : 3) : 0];
+                const Picture *digit = &sDigits[d == 0 ? (i == 1 ? (old ? 2 : 6) : 3) : 0];
                 picture_stretched(digit, r.x0 + 3 + d * (digit->width - 1), r.y0 + 3, digit->width, digit->height, r,
                                   255);
             }
