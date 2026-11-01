@@ -38,6 +38,10 @@ s32 port_autorun_switch_count(void) {
     return 0;
 }
 
+s32 port_autorun_shelved_count(void) {
+    return 0;
+}
+
 void port_autorun_frame(s32 updateRate) {
     (void) updateRate;
 }

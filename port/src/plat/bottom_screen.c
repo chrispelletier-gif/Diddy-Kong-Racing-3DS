@@ -441,8 +441,8 @@ static void box_classic(int x0, int y0, int x1, int y1, Colour inside, Colour ed
  */
 static int sStyle;
 /* Lettering nudges (pixels down) found on a real screen, by style: tabs, then the buttons' fun-font text. */
-static const int sTabNudge[4] = { 2, 3, 1, 1 };
-static const int sButtonNudge[4] = { 2, 2, 0, 0 };
+static const int sTabNudge[4] = { 2, 2, 1, 1 };
+static const int sButtonNudge[4] = { 0, 0, 0, 0 };
 static int sRaceBaseMade;
 
 static Colour mix(Colour a, Colour b, int t, int span) {
@@ -562,8 +562,8 @@ static void box(int x0, int y0, int x1, int y1, Colour inside, Colour edge) {
                 smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 8 : (y1 - y0) / 2, (Colour){ 255, 230, 100, 230 },
                            (Colour){ 235, 150, 20, 230 }, (Colour){ 255, 250, 200, 200 }, 1);
             } else if (frame) {
-                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 40, 60, 140, 150 },
-                           (Colour){ 8, 20, 70, 160 }, (Colour){ 190, 215, 255, 80 }, 1);
+                smooth_box(x0, y0, x1, y1, (y1 - y0) > 40 ? 7 : (y1 - y0) / 2, (Colour){ 24, 44, 118, 165 },
+                           (Colour){ 16, 34, 100, 170 }, (Colour){ 190, 215, 255, 80 }, 1);
                 fill(x0 + 6, y0 + 1, x1 - 6, y0 + 2, (Colour){ 255, 255, 255, 70 });
             }
             break;
