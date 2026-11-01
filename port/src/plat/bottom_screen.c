@@ -3780,7 +3780,7 @@ static void race_glass(const RaceHud *hud) {
     {
         // Total, Current and Best: one label font, one digit size, digits in one column.
         static const char *const names[3] = { "Total", "Current", "Best" };
-        int values[3], shown[3], k, rowsShown = 0, dx, widest = 0;
+        int values[3], shown[3], k, rowsShown = 0, dx, left, widest = 0;
         values[0] = hud->raceTime;
         values[1] = lapTime;
         values[2] = best;
@@ -3791,11 +3791,12 @@ static void race_glass(const RaceHud *hud) {
             int w = text_width(FONT_SMALL, names[k]);
             widest = w > widest ? w : widest;
         }
-        dx = 130 + widest + 10;
+        left = 120 + (194 - (widest + 10 + DRY(race_time(0, 0, 0, 1)))) / 2; /* the group, centred in the card */
+        dx = left + widest + 10;
         for (k = 0; k < 3; k++) {
             if (shown[k]) {
                 int y = 52 + rowsShown * 14;
-                text(FONT_SMALL, 130, y, names[k], LABEL_BLUE, 1);
+                text(FONT_SMALL, left, y, names[k], LABEL_BLUE, 1);
                 race_time(dx, y - 2, values[k], 1);
                 rowsShown++;
             }
