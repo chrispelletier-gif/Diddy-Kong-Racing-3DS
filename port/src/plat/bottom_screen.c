@@ -3840,15 +3840,21 @@ static void race_broadcast(const RaceHud *hud) {
 }
 
 static void race_dock(const RaceHud *hud) {
-    int i, me = 0, first, lapNumber, lapTime, best, x, rowY = 50;
+    int i, me = 0, first, lapNumber, lapTime, best, rowY = 50;
     place_centred(hud, 4, 4, 84, 42, 2);
     lap_pieces(hud, 92, 6);
     lap_segments(hud, 94, 25, 8, 4, 8, GOLD, (Colour){ 255, 255, 255, 50 }, 0);
-    x = piece(&sTimeLabel, 176, 9, 4);
-    race_time(x, 6, hud->raceTime, 0);
     lap_facts(hud, &lapNumber, &lapTime, &best);
-    if (lapNumber > 0) {
-        lap_clock(DRY(piece(&sTimeLabel, 176, 9, 4)) - 11, 27, lapTime, LABEL_BLUE, 312);
+    {
+        // Total on top, Current below: the same label font and digit size, digits in one column.
+        int totalW = text_width(FONT_SMALL, "Total"), currentW = text_width(FONT_SMALL, "Current");
+        int dx = 176 + (totalW > currentW ? totalW : currentW) + 6;
+        text(FONT_SMALL, 176, 8, "Total", LABEL_BLUE, 1);
+        race_time(dx, 8, hud->raceTime, 1);
+        if (lapNumber > 0) {
+            text(FONT_SMALL, 176, 26, "Current", LABEL_BLUE, 1);
+            race_time(dx, 26, lapTime, 1);
+        }
     }
     fill(8, 44, 312, 45, (Colour){ 255, 255, 255, 40 });
     // The player and the racers either side of them, on a calm panel.
