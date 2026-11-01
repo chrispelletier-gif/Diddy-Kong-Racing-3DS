@@ -1571,6 +1571,7 @@ static const Colour sCharacterColours[10] = {
 static const Colour GOLD = { 255, 214, 40, 255 };
 static const Colour AHEAD = { 255, 150, 140, 255 };
 static const Colour BEHIND = { 140, 255, 160, 255 };
+static const Colour LABEL_BLUE = { 170, 195, 240, 255 };
 
 /* The track's map, drawn smooth at the size its panel allows, with its offsets, for the sprite in sMapSprite. */
 static Picture sMap;
@@ -2202,7 +2203,9 @@ static void make_race_base(const RaceHud *hud) {
         box(MENU_MAP_X0, MENU_PANEL_Y0, MENU_MAP_X1, MENU_PANEL_Y1, BOX_FILL, BOX_EDGE);
         box(MENU_RECORDS_X0, MENU_PANEL_Y0, MENU_RECORDS_X1, MENU_PANEL_Y1, BOX_FILL, BOX_EDGE);
     } else if (hud->mode == RACE_HUD_MODE_MENU_SAVE) {
-        box(6, SAVE_PANEL_Y0, BS_WIDTH - 6, MENU_PANEL_Y1, BOX_FILL, BOX_EDGE);
+        if (sStyle <= 1) {
+            box(6, SAVE_PANEL_Y0, BS_WIDTH - 6, MENU_PANEL_Y1, BOX_FILL, BOX_EDGE);
+        }
         if (sSmallLogo.rgba != NULL) {
             picture(&sSmallLogo, 6, 4);
         }
@@ -2874,9 +2877,14 @@ static void draw_hub(const RaceHud *hud) {
 }
 
 /* The file select menu: the highlighted adventure's progress at a glance while picking a game. */
+static void menu_save_styled(const RaceHud *hud);
 static void draw_menu_save(const RaceHud *hud) {
     int i, k, x, y = 98;
     char line[48];
+    if (sStyle != 0) {
+        menu_save_styled(hud);
+        return;
+    }
     text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
     snprintf(line, sizeof(line), port_text("Save file %s"), hud->name);
     text(FONT_SMALL, 96, 26, line, DIM, 1);
@@ -2922,6 +2930,154 @@ static void draw_menu_save(const RaceHud *hud) {
             text(FONT_SMALL, 252, y + 2, "cleared", BEHIND, 1);
         }
         y += 19;
+    }
+}
+
+/* A ring from the top, clockwise: frac of it lit (the Dock look's progress rings). */
+static void progress_ring(int cx, int cy, int r, int w, int frac256, Colour lit) {
+    int x, y;
+    for (y = -r - 1; y <= r + 1; y++) {
+        for (x = -r - 1; x <= r + 1; x++) {
+            float d = sqrtf((float) (x * x + y * y)), a;
+            int cover;
+            if (d > r + 0.5f || d < r - w - 0.5f) {
+                continue;
+            }
+            cover = d > r ? (int) ((r + 0.5f - d) * 255 * 2) : (d < r - w ? (int) ((d - (r - w - 0.5f)) * 255 * 2) : 255);
+            cover = cover > 255 ? 255 : (cover < 0 ? 0 : cover);
+            a = atan2f((float) x, (float) -y); /* 0 at the top, growing clockwise. */
+            if (a < 0) {
+                a += 6.2831853f;
+            }
+            if ((int) (a * 256 / 6.2831853f) < frac256) {
+                plot_c(cx + x, cy + y, lit, cover);
+            } else {
+                plot_c(cx + x, cy + y, (Colour){ 0, 0, 0, 90 }, cover);
+            }
+        }
+    }
+}
+
+static void trophy_and_key(const RaceHud *hud, int world, int x, int y, int gap) {
+    if (hud->worldTrophy[world] > 0) {
+        picture(&sTrophy[1], x, y);
+    } else {
+        picture_dim(&sTrophy[0], x, y);
+    }
+    if (hud->worldKeys & (1 << world)) {
+        picture(&sKey[1], x + gap, y);
+    } else {
+        picture_dim(&sKey[0], x + gap, y);
+    }
+}
+
+static int number_pieces(int x, int y, int value) {
+    char count[8];
+    int i;
+    snprintf(count, sizeof(count), "%d", value);
+    for (i = 0; count[i] != '\0'; i++) {
+        x = piece(&sDigits[count[i] - '0'], x, y, 1);
+    }
+    return x;
+}
+
+/* The file select companion in the Glass, Broadcast and Dock layouts. */
+static void menu_save_styled(const RaceHud *hud) {
+    int i, x;
+    char line[48];
+    Colour slabFill = { 26, 38, 96, 235 }, slabLight = { 36, 54, 130, 235 }, red = { 235, 40, 40, 255 },
+           orange = { 255, 150, 20, 255 }, chip = { 0, 0, 0, 60 };
+    if (sStyle == 2) {
+        slab(94, 8, 94 + 8 + text_width(FONT_FUN, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE") + 14, 28, 5, red, orange);
+        text(FONT_FUN, 100, 11, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", WHITE, 1);
+    } else {
+        text(FONT_FUN, 96, 9, hud->adventureTwo ? "ADVENTURE TWO" : "ADVENTURE", sStyle == 1 || sStyle == 3 ? GOLD : WHITE, 1);
+    }
+    snprintf(line, sizeof(line), port_text("Save file %s"), hud->name);
+    text(FONT_SMALL, 98, 31, line, LABEL_BLUE, 1);
+    if (sStyle == 3) {
+        // Rings: the balloons, then the two amulets.
+        progress_ring(56, 104, 40, 6, hud->balloons * 256 / 47, GOLD);
+        picture_scaled(&sBalloon, 42, 76, 1, 1);
+        number_pieces(46, 108, hud->balloons);
+        text_centred(FONT_SMALL, 16, 96, 126, "of 47", LABEL_BLUE, 1);
+        progress_ring(30, 168, 15, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
+        if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
+            picture(&sTTAmulet[hud->ttAmulet], 19, 157);
+        }
+        snprintf(line, sizeof(line), "%d/4", hud->ttAmulet);
+        text_centred(FONT_SMALL, 6, 54, 186, line, LABEL_BLUE, 0);
+        progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
+        if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
+            picture(&sWizpigAmulet[hud->wizpigAmulet], 71, 157);
+        }
+        snprintf(line, sizeof(line), "%d/4", hud->wizpigAmulet);
+        text_centred(FONT_SMALL, 58, 106, 186, line, LABEL_BLUE, 0);
+        for (i = 0; i < RACE_HUD_WORLDS; i++) {
+            int y = 56 + i * 28, balloons = hud->worldBalloons[i];
+            Colour ink = balloons > 0 ? WHITE : DIM;
+            text(FONT_SMALL, 118, y, sWorldShortNames[i], ink, 1);
+            snprintf(line, sizeof(line), "%d/8", balloons);
+            text(FONT_SMALL, 300 - text_width(FONT_SMALL, line), y, line, ink, 1);
+            smooth_box(118, y + 15, 304, y + 19, 2, (Colour){ 0, 0, 0, 80 }, (Colour){ 0, 0, 0, 80 }, (Colour){ 0, 0, 0, 0 }, 1);
+            if (balloons > 0) {
+                smooth_box(118, y + 15, 118 + 186 * balloons / 8, y + 19, 2, GOLD, GOLD, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+            trophy_and_key(hud, i, 232, y - 3, 16);
+        }
+        return;
+    }
+    // The three stat chips (Glass: rounded; Broadcast: slanted slabs).
+    for (i = 0; i < 3; i++) {
+        int cx = sStyle == 2 ? (i == 0 ? 8 : (i == 1 ? 128 : 222)) : 16 + i * 98;
+        int cw = sStyle == 2 ? (i == 0 ? 114 : (i == 1 ? 88 : 90)) : 90;
+        int value = i == 0 ? hud->balloons : (i == 1 ? hud->ttAmulet : hud->wizpigAmulet);
+        const char *name = i == 0 ? "Balloons" : (i == 1 ? "T.T. amulet" : "Wizpig");
+        if (sStyle == 2) {
+            slab(cx, 48, cx + cw, 86, 5, slabLight, slabLight);
+        } else {
+            smooth_box(cx, 50, cx + cw, 86, 8, chip, chip, (Colour){ 255, 255, 255, 40 }, 1);
+        }
+        if (i == 0) {
+            picture_scaled(&sBalloon, cx + 6, 52, 1, 1);
+        } else if (i == 1 && hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
+            picture(&sTTAmulet[hud->ttAmulet], cx + 8, 54);
+        } else if (i == 2 && hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
+            picture(&sWizpigAmulet[hud->wizpigAmulet], cx + 8, 54);
+        }
+        x = number_pieces(cx + 38, 54, value);
+        text(FONT_SMALL, x + 2, 59, i == 0 ? "/ 47" : "/ 4", LABEL_BLUE, 1);
+        text(FONT_SMALL, cx + 38, 73, name, LABEL_BLUE, 1);
+    }
+    for (i = 0; i < RACE_HUD_WORLDS; i++) {
+        int y = sStyle == 2 ? 92 + i * 21 : 96 + i * 20, balloons = hud->worldBalloons[i], k;
+        Colour ink = balloons > 0 ? WHITE : DIM;
+        if (sStyle == 2) {
+            slab(8, y, 312, y + 19, 4, slabFill, slabFill);
+            for (k = 0; k < 8; k++) {
+                slab(132 + k * 13, y + 6, 132 + k * 13 + 10, y + 13, 3, k < balloons ? red : (Colour){ 255, 255, 255, 30 },
+                     k < balloons ? orange : (Colour){ 255, 255, 255, 30 });
+            }
+            text(FONT_SMALL, 18, y + 4, sWorldShortNames[i], ink, 1);
+        } else {
+            text(FONT_SMALL, 18, y + 2, sWorldShortNames[i], ink, 1);
+            smooth_box(112, y + 5, 234, y + 10, 2, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 90 }, (Colour){ 0, 0, 0, 0 }, 1);
+            if (balloons > 0) {
+                smooth_box(112, y + 5, 112 + 122 * balloons / 8, y + 10, 2, (Colour){ 255, 236, 110, 255 },
+                           (Colour){ 240, 160, 20, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
+            }
+            snprintf(line, sizeof(line), "%d/8", balloons);
+            text(FONT_SMALL, 240, y + 2, line, ink, 1);
+        }
+        trophy_and_key(hud, i, sStyle == 2 ? 236 : 262, y + (sStyle == 2 ? 1 : -1), 16);
+        if (sStyle == 2) {
+            if (hud->worldBosses & (1 << i)) {
+                text(FONT_SMALL, 274, y + 4, "DONE", BEHIND, 1);
+            } else {
+                snprintf(line, sizeof(line), "%d/8", balloons);
+                text(FONT_SMALL, 276, y + 4, line, ink, 1);
+            }
+        }
     }
 }
 
@@ -3006,7 +3162,6 @@ static void ring_portrait(const RaceHudRacer *r, int x, int y, int lit) {
     plain_portrait(r, x, y);
 }
 
-static const Colour LABEL_BLUE = { 170, 195, 240, 255 };
 
 /* The place, its suffix and "of n", the lap and the time, at the positions each look wants. Returns nothing. */
 static void place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
