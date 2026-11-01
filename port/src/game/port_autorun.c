@@ -184,6 +184,8 @@ typedef struct BenchSwitch {
     const char *env[BENCH_SWITCH_VARS];
     short usual, test;
     s8 alone; // A measurement, not a setting: left out of the race with every switch flipped together.
+    s8 check; // Checks a bug fix, not performance: raced for one lap (user rule 2026-11-01). When every row is one,
+              // the usual races are one lap too.
 } BenchSwitch;
 
 /* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
@@ -251,11 +253,11 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Trimmed 2026-11-01 (user): the cost rows were measured in #320/#332, adaptive AA is the default, and every
     // Old 3DS default the head flicker hunt bisected still flickered, as did per-queue wake-ups (now on by default).
     // What is left is the one Old 3DS difference not yet raced: the other karts' lower detail models.
-    { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1 },
+    { "head: other karts at Old 3DS detail (racer LOD 2)", { "DKR_RACER_LOD", NULL }, 0, 2, 1, 1 },
     // The GPU misses some settings written right after a draw (drain_before_draw); only blend and depth changes are
     // written twice. A flicker that grows with GPU load (less with AA off, user 2026-11-01) fits a missed texture or
     // combiner setting: this writes every draw's settings twice.
-    { "head: every draw's settings written twice", { "DKR_REWRITE", NULL }, 1, 2, 1 },
+    { "head: every draw's settings written twice", { "DKR_REWRITE", NULL }, 1, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -292,6 +294,19 @@ static s32 switch_all_config(void) {
     return settings >= 2 ? SWITCH_CONFIGS : -1;
 }
 #define SWITCH_ALL switch_all_config()
+
+/* Laps for a switch bench race in config (0 = the usual settings): one for a bug check row, and for the usual races
+ * when every row is one; else the track's own. */
+static s32 switch_race_laps(s32 config) {
+    s32 i, all = SWITCH_CONFIGS > 1;
+    for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
+        all &= sSwitches[i].check != 0;
+    }
+    if (config >= 1 && config < SWITCH_CONFIGS) {
+        return sSwitches[config - 1].check ? 1 : 0;
+    }
+    return all ? 1 : 0;
+}
 #define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
 #define MAX_CONFIGS 16
 
@@ -677,7 +692,7 @@ static void build_short_list(void) {
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
             sRaces[sNumRaces].config = (quick || boss) ? -1 : configs[pass];
             sRaces[sNumRaces].kind = STOP_RACE;
-            sRaces[sNumRaces].laps = 0;
+            sRaces[sNumRaces].laps = sMode == MODE_SWITCH ? switch_race_laps(configs[pass]) : 0;
             sNumRaces++;
         }
     }
