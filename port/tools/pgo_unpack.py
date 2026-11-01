@@ -17,15 +17,20 @@ def read_files(data):
     if data[:4] != b"DKRP":
         sys.exit("not a pgo_counts.bin (no DKRP header)")
     pos, files = 4, []
-    while pos < len(data):
-        (name_len,) = struct.unpack_from("<I", data, pos)
-        pos += 4
-        name = data[pos:pos + name_len].decode()
-        pos += name_len
-        (size,) = struct.unpack_from("<I", data, pos)
-        pos += 4
-        files.append((name, data[pos:pos + size]))
-        pos += size
+    try:
+        while pos < len(data):
+            (name_len,) = struct.unpack_from("<I", data, pos)
+            pos += 4
+            name = data[pos:pos + name_len].decode()
+            pos += name_len
+            (size,) = struct.unpack_from("<I", data, pos)
+            pos += 4
+            if pos + size > len(data):
+                raise struct.error("file cut short")
+            files.append((name, data[pos:pos + size]))
+            pos += size
+    except (struct.error, UnicodeDecodeError) as e:
+        sys.exit("pgo_counts.bin is damaged or cut short (%s, at byte %d)" % (e, pos))
     return files
 
 
@@ -40,11 +45,20 @@ def main():
     for name, gcda in files:
         out = name
         if args.to is not None:
-            prefix = args.src if args.src else name[:name.index("/build/") + 1]
+            if args.src:
+                prefix = args.src
+            elif "/build/" in name:
+                prefix = name[:name.index("/build/") + 1]
+            else:
+                sys.exit("%s has no /build/ in it: pass --from" % name)
             if not name.startswith(prefix):
                 sys.exit("%s doesn't start with %s" % (name, prefix))
-            out = os.path.join(args.to, name[len(prefix):])
-        os.makedirs(os.path.dirname(out), exist_ok=True)
+            rel = name[len(prefix):]
+            if os.path.isabs(rel) or ".." in rel.split("/"):
+                sys.exit("%s would land outside %s" % (name, args.to))
+            out = os.path.join(args.to, rel)
+        if os.path.dirname(out):
+            os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, "wb") as f:
             f.write(gcda)
     print("%d .gcda files written" % len(files))

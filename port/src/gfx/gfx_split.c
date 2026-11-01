@@ -24,7 +24,10 @@
 #include "gfx_backend.h"
 #include "gfx_split.h"
 
-#define SPLIT_RING_BYTES (1024u * 1024u) // A crowded Old 3DS frame queues about 200 KB; the heap there is tight
+/* The queue's size, a power of two (the ring's offsets wrap with the unsigned counters): 2 MB on a New 3DS, 1 MB on
+ * an Old 3DS, where a crowded frame queues about 200 KB and the heap is tight. Set before the queue is allocated. */
+static unsigned int sRingBytes = 2u * 1024u * 1024u;
+#define SPLIT_RING_BYTES sRingBytes
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {
@@ -272,6 +275,7 @@ static int start_backend(void) {
     if (sFailed) {
         return FALSE;
     }
+    sRingBytes = plat_old_3ds() ? 1024u * 1024u : 2u * 1024u * 1024u;
     sRing = plat_malloc(SPLIT_RING_BYTES);
     if (sRing == NULL) {
         plat_log("two-core renderer: no memory for its queue");

@@ -3372,6 +3372,7 @@ static void read_switches(void) {
     sStateCache = -1;
     sIndexed = -1;
     sNoCull = -1;  // DKR_NO_CULL and the fog mode too (head flicker bench)
+    sFlashWatch = -1; // DKR_FLASH_WATCH
     sFlushMode = -1; // drain_before_draw's settings (DKR_REWRITE, head flicker bench)
     sFogMode = -1;
     sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;

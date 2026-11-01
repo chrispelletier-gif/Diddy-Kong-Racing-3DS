@@ -994,13 +994,16 @@ static void send_test_results(void) {
         attach_recording(&report, &sRecording, "timeline.csv");
     }
     add_file(&report, "autorun_drawmix.csv");
+#ifdef PORT_PGO_GEN
     add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
+#endif
     add_file(&report, "autorun_hitches.txt"); // Last: the largest after a long run.
     plat_log_recent(recent, sizeof(recent));
     build_body(&report, NULL, recent);
     sShow = show_status;
-    if (send_and_show_to(&config, issue, &report, result, sizeof(result)) < 0) {
-        // Kept for "Send test results again" (bugreport_resend_results): the title, then the summary.
+    if (send_and_show_to(&config, issue, &report, result, sizeof(result)) != 0) {
+        // Kept for "Send test results again" (bugreport_resend_results): the title, then the summary. Also when only
+        // part of the report went out (its attachments missing).
         FILE *file = fopen(DATA_DIR "/results_unsent.txt", "w");
         if (file != NULL) {
             fprintf(file, "%s\n%s", sTitle, sSummary);

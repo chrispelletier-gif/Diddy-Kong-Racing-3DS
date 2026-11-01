@@ -4453,8 +4453,11 @@ void port_gfx_run_task(void *taskPtr) {
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
 #endif
     // A frame the walk needs drawn at once (a snapshot, a traced frame, the reference renderer's) is made directly.
+    // On a New 3DS so are frames with GPU vertex maths, whose walk asks the backend about each model
+    // (gfxb_model_check, the guard band of the backend's last frame); the Old 3DS races them on the two-core renderer.
     snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
-    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame);
+    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
+                          (!plat_old_3ds() && plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)));
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(snapshot)) {
         start_snapshot();
@@ -4465,7 +4468,7 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = gfxb_gpu_transform();
+    sGpuTransform = (plat_old_3ds() || !gfx_split_active()) && gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
