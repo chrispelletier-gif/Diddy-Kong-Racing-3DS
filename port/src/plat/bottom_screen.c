@@ -3747,22 +3747,20 @@ static void race_glass(const RaceHud *hud) {
     place_centred(hud, 124, 10, 196, 50, 2);
     lap_pieces(hud, 200, 14);
     lap_segments(hud, 200, 38, 32, 4, 5, (Colour){ 255, 214, 60, 255 }, (Colour){ 255, 255, 255, 50 }, 0);
-    fill(130, 52, 304, 53, (Colour){ 255, 255, 255, 45 });
+    fill(130, 45, 304, 46, (Colour){ 255, 255, 255, 45 });
     {
-        int x = piece(&sTimeLabel, 130, 64, 4);
-        race_time(x, 61, hud->raceTime, 0);
+        int x = piece(&sTimeLabel, 130, 55, 4);
+        race_time(x, 52, hud->raceTime, 0);
     }
     lap_facts(hud, &lapNumber, &lapTime, &best);
     if (lapNumber > 0) {
-        lap_clock(DRY(piece(&sTimeLabel, 130, 64, 4)) - 11, 77, lapTime, LABEL_BLUE, 312);
+        lap_clock(DRY(piece(&sTimeLabel, 130, 55, 4)) - 11, 71, lapTime, LABEL_BLUE, 312);
     }
     if (best >= 0) {
-        // The best lap under the lap clock.
-        int labelWidth = text_width(FONT_SMALL, "Best"), timeWidth = DRY(race_time(0, 0, best, 1)), bx;
-        bx = DRY(piece(&sTimeLabel, 130, 64, 4)) - 11;
-        text(FONT_SMALL, bx, 88, "Best", LABEL_BLUE, 1);
-        race_time(bx + labelWidth + 4, 89, best, 1);
-        (void)timeWidth;
+        // The best lap under the lap clock: labels end at the same column, digits start at the TIME digits.
+        int labelWidth = text_width(FONT_SMALL, "Best"), xd = DRY(piece(&sTimeLabel, 130, 55, 4));
+        text(FONT_SMALL, xd - 4 - labelWidth, 82, "Best", LABEL_BLUE, 1);
+        race_time(xd, 83, best, 1);
     }
     // The item slot and the bananas.
     box(120, 104, 196, 198, BOX_FILL, BOX_EDGE);
