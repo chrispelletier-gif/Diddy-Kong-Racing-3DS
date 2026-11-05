@@ -330,8 +330,8 @@ int plat_switch(const char *name, int fallback) {
         // frames while "textures in VRAM" grew, issue #406) and race starts were 70-130 ms longer than before (#407).
         static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_NATIVE_DRAW" };
         if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
-            // One core on a New 3DS, so the PICA work's own gain shows; an Old 3DS needs both (user 2026-11-05).
-            return plat_old_3ds() ? 1 : 0;
+            // Two cores on both consoles: the New 3DS bench row was perfect, user 2026-11-05 21:17 ("default on both").
+            return 1;
         }
         for (i = 0; i < (int) (sizeof(sOn) / sizeof(sOn[0])); i++) {
             if (strcmp(sOn[i], name) == 0) {

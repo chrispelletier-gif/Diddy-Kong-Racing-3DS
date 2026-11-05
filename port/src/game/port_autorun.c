@@ -258,9 +258,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
+/* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
 static const BenchSwitch sSwitchesNew3ds[] = {
     PICA_ROWS,
-    { "PICA build: two-core renderer on", { "DKR_SPLIT_RENDER", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
