@@ -27,6 +27,10 @@ u32 *gAssetsLookupTable;
 #ifdef TARGET_PORT
 #include "asset_enums.h"
 #include "port.h"
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_native_rom_reads_on(void);
+#endif
 // The asset table lives at a fixed offset in the user supplied ROM.
 #define __ASSETS_LUT_START ((u8 *) port_assets_lut_start())
 #define __ASSETS_LUT_END ((u8 *) port_assets_lut_end())
@@ -73,6 +77,12 @@ u32 *asset_table_load(u32 assetIndex) {
 
 #if VERSION >= VERSION_79
     OSMesg msg = NULL;
+#ifdef PICA_ALL
+    if (port_native_rom_reads_on()) {
+        dmacopy_internal(romOffset, ramAddress, numBytes); // a copy from memory: no DMA engine to share
+        return;
+    }
+#endif
     osRecvMesg(&gDmaMutex, &msg, OS_MESG_BLOCK);
 #endif
 
@@ -288,6 +298,20 @@ void dmacopy_internal(u32 romOffset, u32 ramAddress, s32 numBytes) {
     OSMesg dmaMesg;
     s32 numBytesToDMA;
 
+#ifdef PICA_ALL
+    if (port_native_rom_reads_on()) {
+        // Native ROM reads: straight from the ROM image in memory, with no PI DMA requests and messages to wait on.
+        // The lockstep runs still count the bytes in the N64's transfer sizes (port_lockstep_dma paces them).
+        port_rom_read(romOffset, (void *) ramAddress, numBytes);
+        for (numBytesToDMA = MAX_TRANSFER_SIZE; numBytes > 0; numBytes -= numBytesToDMA) {
+            if (numBytes < numBytesToDMA) {
+                numBytesToDMA = numBytes;
+            }
+            port_lockstep_dma(numBytesToDMA);
+        }
+        return;
+    }
+#endif
     osInvalDCache((u32 *) ramAddress, numBytes);
     numBytesToDMA = MAX_TRANSFER_SIZE;
     while (numBytes > 0) {
