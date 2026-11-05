@@ -68,6 +68,8 @@ int port_native_draw(void);
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);
 void port_native_end(void);
+int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
+                          const void *tris, int numTris);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
 struct Vertex;
 int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);

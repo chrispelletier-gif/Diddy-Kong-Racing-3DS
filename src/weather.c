@@ -16,6 +16,10 @@
 #include "types.h"
 #include "port_step.h"
 #include "video.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 #define WEATHER_OVERRIDE_COUNT 16
 
@@ -542,6 +546,19 @@ void snow_render(void) {
             mtx = get_projection_matrix_s16();
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
+#ifdef PICA_ALL
+            if (port_native_draw()) {
+                while (i + gSnowVertOffset < gSnowVertCount) {
+                    port_native_batch(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, &gSnowVerts[i],
+                                      gSnowVertOffset, gSnowTriangles, gSnowTriCount, 1, 1);
+                    i += gSnowVertOffset;
+                }
+                port_native_batch(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, &gSnowVerts[i],
+                                  gSnowVertCount - i, gSnowTriangles, (s32) (gSnowVertCount - i) >> 1, 1, 1);
+                port_native_end();
+                return;
+            }
+#endif
             material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
             while (i + gSnowVertOffset < gSnowVertCount) {
                 vtx = &gSnowVerts[i];
@@ -1175,12 +1192,22 @@ void rain_render(RainGfxData *rainGfx, s32 time) {
     tri->uv2.v = v0;
     tri++;
 
-    gfx_init_basic_xlu(&curDL, 0,
-                       COLOUR_RGBA32(rainGfx->primitiveRed, rainGfx->primitiveGreen, rainGfx->primitiveBlue, opacity),
-                       COLOUR_RGBA32(rainGfx->environmentRed, rainGfx->environmentGreen, rainGfx->environmentBlue, 0));
-    gDkrDmaDisplayList(curDL++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
-    gSPVertexDKR(curDL++, OS_K0_TO_PHYSICAL(gRainVertices + gRainVertexFlip), 4, 0);
-    gSPPolygon(curDL++, OS_K0_TO_PHYSICAL(gCurrWeatherTriList), 2, 1);
+#ifdef PICA_ALL
+    if (port_native_batch_xlu(
+            &curDL, 0, COLOUR_RGBA32(rainGfx->primitiveRed, rainGfx->primitiveGreen, rainGfx->primitiveBlue, opacity),
+            COLOUR_RGBA32(rainGfx->environmentRed, rainGfx->environmentGreen, rainGfx->environmentBlue, 0), tex,
+            gRainVertices + gRainVertexFlip, 4, gCurrWeatherTriList, 2)) {
+        port_native_end();
+    } else
+#endif
+    {
+        gfx_init_basic_xlu(&curDL, 0,
+                           COLOUR_RGBA32(rainGfx->primitiveRed, rainGfx->primitiveGreen, rainGfx->primitiveBlue, opacity),
+                           COLOUR_RGBA32(rainGfx->environmentRed, rainGfx->environmentGreen, rainGfx->environmentBlue, 0));
+        gDkrDmaDisplayList(curDL++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        gSPVertexDKR(curDL++, OS_K0_TO_PHYSICAL(gRainVertices + gRainVertexFlip), 4, 0);
+        gSPPolygon(curDL++, OS_K0_TO_PHYSICAL(gCurrWeatherTriList), 2, 1);
+    }
     gDPPipeSync(curDL++);
     gRainVertexFlip = (gRainVertexFlip + 4) & 0xF;
     gCurrWeatherDisplayList = curDL;

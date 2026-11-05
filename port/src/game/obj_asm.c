@@ -227,6 +227,38 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
     return 1;
 }
 
+void gfx_init_basic_xlu(Gfx **dList, u32 index, u32 primitiveColor, u32 environmentColor);
+
+/* A batch drawn with gfx_init_basic_xlu settings and a texture's own load commands (sky flash, rain): the settings are
+ * kept with the material; only the two colours go in each frame. */
+int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
+                          const void *tris, int numTris) {
+    int capture;
+    s32 id;
+    Gfx *g;
+    TextureHeader *tex = (TextureHeader *) texture;
+    if (!port_native_draw() || tex == NULL || numVerts <= 0 || numVerts > 64 || numTris <= 0) {
+        return 0;
+    }
+    id = port_nmat_key(texture, (int) (0x40000000u | (u32) index), 0, &capture);
+    if (capture) {
+        gfx_init_basic_xlu(dl, (u32) index, prim, env);
+        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+    } else {
+        gDPSetPrimColorRGBA((*dl)++, prim);
+        gDPSetEnvColorRGBA((*dl)++, env);
+    }
+    gDPNoOpTag((*dl)++, PORT_NDRAW_TAG | id);
+    g = (*dl)++;
+    g->words.w0 = OS_K0_TO_PHYSICAL(verts);
+    g->words.w1 = OS_K0_TO_PHYSICAL(tris);
+    g = (*dl)++;
+    g->words.w0 = (u32) numVerts | ((u32) numVerts << 8) | (1u << 16) | (1u << 17);
+    g->words.w1 = (u32) numTris;
+    return 1;
+}
+
 /* After native batches: the renderer's settings are the last captured material's, so the next material_set sets
  * everything again. */
 void port_native_end(void) {

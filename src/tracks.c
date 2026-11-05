@@ -560,6 +560,22 @@ void void_free(void) {
 }
 
 // root func for the out of bounds void rendering
+#ifdef PICA_ALL
+static s32 sVoidNative;
+#endif
+
+/* The void mesh gathered so far, drawn. */
+static void void_draw_batch(void) {
+#ifdef PICA_ALL
+    if (sVoidNative && port_native_batch(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE, 0, gVoidCurrVerts,
+                                         gVoidVertCount, gVoidCurrTris, gVoidVertCount >> 1, 0, 1)) {
+        return;
+    }
+#endif
+    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
+    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), gVoidVertCount >> 1, TRIN_DISABLE_TEXTURE);
+}
+
 void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
     s16 i;
     s16 j;
@@ -582,7 +598,11 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
         gVoidTris[var_s0] = gVoidMesh[viewportIndex].tris[var_s0];
         gVoidVerts[var_s0] = gVoidMesh[viewportIndex].verts[var_s0];
     }
-    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
+#ifdef PICA_ALL
+    sVoidNative = port_native_draw();
+    if (!sVoidNative)
+#endif
+        material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
     D_8011D49C = 0;
     D_8011D49E = 0;
 
@@ -695,9 +715,13 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
         }
     }
     if (gVoidVertCount != 0) {
-        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
-        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), gVoidVertCount >> 1, TRIN_DISABLE_TEXTURE);
+        void_draw_batch();
     }
+#ifdef PICA_ALL
+    if (sVoidNative) {
+        port_native_end();
+    }
+#endif
     gTrackVtxPtr = vtx;
     gTrackTriPtr = tri;
 }
@@ -1024,8 +1048,7 @@ s32 void_generate_primitive(f32 *arg0, f32 *arg1, f32 arg2, f32 arg3) {
     }
 
     if (gVoidVertCount == 24) {
-        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
-        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), (gVoidVertCount >> 1), TRIN_DISABLE_TEXTURE);
+        void_draw_batch();
         gVoidCurrVerts = gTrackVtxPtr;
         gVoidVertCount = 0;
         gVoidCurrTris = gTrackTriPtr;
@@ -1528,11 +1551,18 @@ void trackbg_render_flashy(void) {
         var_a3 = COLOUR_WORD(levelHeader->rgba) & (~0xFF);
     }
 
-    gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
     texHeader = set_animated_texture_header(texHeader, gTrackTexAnimOffset << 8);
-    gDkrDmaDisplayList(gTrackDL++, OS_K0_TO_PHYSICAL(texHeader->cmd), texHeader->numberOfCommands);
-    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackVtxPtr), 9, 0);
-    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackTriPtr), 8, 1);
+#ifdef PICA_ALL
+    if (port_native_batch_xlu(&gTrackDL, 1, var_a2, var_a3, texHeader, gTrackVtxPtr, 9, gTrackTriPtr, 8)) {
+        port_native_end();
+    } else
+#endif
+    {
+        gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
+        gDkrDmaDisplayList(gTrackDL++, OS_K0_TO_PHYSICAL(texHeader->cmd), texHeader->numberOfCommands);
+        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackVtxPtr), 9, 0);
+        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackTriPtr), 8, 1);
+    }
     gDPPipeSync(gTrackDL++);
     if (var_t2 != NULL) {
         gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
@@ -1603,9 +1633,16 @@ void trackbg_render_gradient(void) {
     headerGreen1 = gCurrentLevelHeader2->BGColourBottomG;
     headerBlue1 = gCurrentLevelHeader2->BGColourBottomB;
     rendermode_reset(&gTrackDL);
-    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
-    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
-    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
+#ifdef PICA_ALL
+    if (port_native_batch(&gTrackDL, NULL, RENDER_FOG_ACTIVE, 0, verts, 4, tris, 2, 0, 1)) {
+        port_native_end();
+    } else
+#endif
+    {
+        material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
+        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
+        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
+    }
 
     z = 20;
     if (osTvType == OS_TV_TYPE_PAL) {
