@@ -252,9 +252,10 @@ typedef struct BenchSwitch {
         { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 },  \
         { "PICA build: vertex lighting on the CPU", { "DKR_GPU_LIGHT", NULL, NULL }, 1, 0, 1, 0 },                     \
         { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 }
+/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row; the GPU maths row stays until the
+ * native work is finished (user 2026-11-05). */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
-    { "PICA build: two-core renderer off", { "DKR_SPLIT_RENDER", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 static const BenchSwitch sSwitchesNew3ds[] = {

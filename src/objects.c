@@ -4697,6 +4697,36 @@ s32 func_80014B50(s32 arg0, s32 arg1, f32 arg2, u32 arg3) {
     return arg0;
 }
 
+#ifdef TARGET_PORT
+static s32 port_sort_objects_fast(s32 startIndex, s32 lastIndex) {
+    static f32 sKeys[OBJECT_SLOT_COUNT];
+    s32 n = lastIndex - startIndex + 1;
+    Object **list = &gObjPtrList[startIndex];
+    s32 i, j;
+    if (n > OBJECT_SLOT_COUNT || plat_switch("DKR_FAST_SORT", 1) == 0) {
+        return FALSE;
+    }
+    for (i = 0; i < n; i++) {
+        f32 d = list[i]->distanceToCamera;
+        if (d != d) {
+            return FALSE;
+        }
+        sKeys[i] = d;
+    }
+    for (i = 1; i < n; i++) {
+        f32 key = sKeys[i];
+        Object *obj = list[i];
+        for (j = i; j > 0 && sKeys[j - 1] < key; j--) {
+            sKeys[j] = sKeys[j - 1];
+            list[j] = list[j - 1];
+        }
+        sKeys[j] = key;
+        list[j] = obj;
+    }
+    return TRUE;
+}
+#endif
+
 /**
  * Takes every object and sorts the main object list by distance to the camera.
  */
@@ -4729,6 +4759,14 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
         }
     }
 
+#ifdef TARGET_PORT
+    // Same order as the bubble sort below (both are stable sorts with the same strict comparison), in one pass over
+    // cached keys instead of up to n passes over the objects. Falls back to the bubble sort if any distance is NaN,
+    // where the two would not agree.
+    if (port_sort_objects_fast(startIndex, lastIndex)) {
+        return;
+    }
+#endif
     // Keep swapping until all objects are sorted by the distance to the camera.
     do {
         didNotSwap = TRUE;

@@ -740,6 +740,23 @@ GLOBAL_ASM("asm/math_util/mtxf_from_scale.s")
  * Mirrors the asm: the table index is truncated, (small << 10) / big, not rounded.
  */
 static u16 atan2_lookup(u32 small, u32 big) {
+#ifdef TARGET_PORT
+    // The ARM11 has no divide instruction, so the 64-bit divide below is a long library call. The quotient here has
+    // only 11 bits (small < big <= 2^31), so 11 steps of long division give exactly the same index.
+    if (small < big && big <= 0x80000000u) {
+        u32 r = small, q = 0;
+        s32 i;
+        for (i = 0; i < 11; i++) {
+            r <<= 1;
+            q <<= 1;
+            if (r >= big) {
+                r -= big;
+                q |= 1;
+            }
+        }
+        return gArcTanTable[(q & 0xFFE) >> 1];
+    }
+#endif
     return gArcTanTable[(u32) ((((u64) small << 11) / big) & 0xFFE) >> 1];
 }
 
