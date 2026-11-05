@@ -100,6 +100,10 @@ static s32 __amDMA(s32 addr, s32 len, void *state);
 static ALDMAproc __amDmaNew(AMDMAState **state);
 static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo);
 static void __amHandleDoneMsg(AudioInfo *info);
+#ifdef PICA_ALL
+int port_native_audio_on(void);
+void port_native_audio_frame(void);
+#endif
 static void __clearAudioDMA(void);
 
 /**** Debug strings ****/
@@ -246,6 +250,13 @@ static void __amMain(UNUSED void *arg) {
         (void) osRecvMesg(&__am.audioFrameMsgQ, (OSMesg *) &msg, OS_MESG_BLOCK);
         switch (msg->gen.type) {
             case OS_SC_RETRACE_MSG:
+#ifdef PICA_ALL
+                if (port_native_audio_on()) {
+                    port_native_audio_frame();
+                    lastInfo = NULL;
+                    break;
+                }
+#endif
                 // TODO: Check type of ACMDList?
                 __amHandleFrameMsg((AudioInfo *) __am.ACMDList[(((u32) audFrameCt % 3)) + 2], lastInfo);
                 /* wait for done message */
@@ -282,6 +293,53 @@ static void __amMain(UNUSED void *arg) {
  * know that the next frame of audio is ready for processing.
  *
  *****************************************************************************/
+#ifdef PICA_ALL
+/*
+ * The native audio frame (PICA_ALL, DKR_NATIVE_AUDIO): with the DSP voices playing the sound, a frame of the N64's audio
+ * pipeline is an empty command list sent as an RSP task through the scheduler (which holds back the next graphics task
+ * while it runs), an emulated RSP thread that does nothing with it, the SP interrupt back through the scheduler, and
+ * the audio interface queue a frame late. Here the frame is sized from what the DSP still has to play, the sequence and
+ * sound players run (alAudioFrame: their parameter changes go straight to the DSP channels), and the frame is put on
+ * the DSP's clock at once: no task, no scheduler round trip, no RSP thread, no audio interface.
+ */
+int pv_active(void);
+void port_audio_output_queue(const s16 *samples, u32 numBytes);
+unsigned pv_output_remaining(void);
+int port_lockstep_enabled(void);
+
+int port_native_audio_on(void) {
+    static s32 sOn = -1;
+    if (!pv_active()) {
+        return FALSE; // the CPU mixer needs the command list and the RSP task
+    }
+    if (sOn < 0) {
+        // Lockstep runs (the host frame checks) keep the N64 pipeline: they wait on every RSP task.
+        sOn = plat_switch("DKR_NATIVE_AUDIO", 1) != 0 && !port_lockstep_enabled();
+    }
+    return sOn;
+}
+
+void port_native_audio_frame(void) {
+    s32 samplesLeft, frameSamples;
+
+    __clearAudioDMA(); // also counts the frame (audFrameCt)
+    samplesLeft = (s32) (pv_output_remaining() >> 2);
+    // The N64 sized a frame from what was left of the buffer playing now, with the one just made still queued behind
+    // it (osAiGetLength): the same lead, from the DSP's whole queue, is one frame more.
+    frameSamples = (16 + ((s32) frameSize * 2 - samplesLeft + EXTRA_SAMPLES)) & ~0xf;
+    if (frameSamples < (s32) minFrameSize) {
+        frameSamples = minFrameSize;
+    }
+    if (frameSamples > (s32) frameSize * 3) {
+        frameSamples = ((s32) frameSize * 3) & ~0xf; // the output fell far behind (a hitch): catch up over frames
+    }
+    gPortAudioStage = "synthesizing a frame (native)";
+    alAudioFrame(__am.ACMDList[curAcmdList], &gAudioCmdLen, NULL, frameSamples);
+    gPortAudioStage = "between frames";
+    port_audio_output_queue(NULL, (u32) frameSamples * 4); // the DSP voices' clock (the host's software channels mix here)
+}
+#endif
+
 static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo) {
     s16 *audioPtr;
     Acmd *cmdp;
