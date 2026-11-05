@@ -37,6 +37,18 @@ int port_skip_game_kind(int kind);
  */
 #define PORT_NATIVE_TAG 0x504E0000 /* "PN" */
 int port_native_mesh_for(int isRacer);
+/*
+ * Native track (roadmap NR4, DKR_NATIVE_TRACK): render_level_segment puts this tag before each batch's vertex load and
+ * triangles. The renderer then draws the batch from a copy in GPU memory made the first time it is seen (the track
+ * never changes during a level), transformed by the GPU's vertex shader with the camera's matrix, and draws the
+ * level's opaque batches sorted by material, one draw for each material instead of one for each batch. Batches near
+ * the camera, whose triangles the GPU can't draw that big, and anything unusual leave the tag unused, and the commands
+ * after it draw the batch as before. gPortLevelLoads counts the levels loaded, so a level loaded at the same address
+ * as the last one isn't drawn from the last one's copies.
+ */
+#define PORT_TRACK_TAG 0x50540000 /* "PT" */
+int port_native_track(void);
+extern unsigned int gPortLevelLoads;
 #define port_draw_tag(dl, kind)                                                                                        \
     do {                                                                                                               \
         gDPNoOpTag(dl, PORT_DRAW_TAG | (kind));                                                                        \

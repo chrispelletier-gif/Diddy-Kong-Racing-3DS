@@ -273,6 +273,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "native meshes for the racers", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 1, 1 },
     { "native meshes for the racers and objects", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 3, 1 },
     { "other karts' simpler models sooner (4-player distances)", { "DKR_RACER_LOD", NULL, NULL }, 2, 3, 1 },
+    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths,
+    // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
+    // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -292,6 +296,10 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Central Area's game logic up to 12.7 ms a frame, 47-52 fps); this row races the old order.
     { "renderer's second thread above the game (old)", { "DKR_SPLIT_BELOW_GAME", NULL }, 1, 0, 1, 0 },
     { "renderer's second thread on the system core", { "DKR_SPLIT_SYSCORE", NULL }, 0, 1, 1, 0 },
+    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths, the
+    // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
+    // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -667,7 +675,9 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
-    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND }; // head flicker
+    // Haunted Woods and Crescent Island for the head flicker, Jungle Falls for its tunnel with the native track (NR4).
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND,
+                                              ASSET_LEVEL_JUNGLEFALLS };
     static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13 }; // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst)
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak

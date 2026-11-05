@@ -1658,8 +1658,13 @@ static COLD void kind_switch_timed(void) {
 
 /* A tag's low 4 bits are the kind, bits 4-11 the object kind plus one (port_drawtag.h). */
 static void sky_kind_boundary(void);
+static s32 sTrackPending;
+static void track_flush(void);
 static inline void kind_switch(u32 tag) {
     u32 obj = ((tag >> 4) & 0xFF) - 1; // No object (0) wraps round to a big number
+    if (UNLIKELY(sTrackPending) && (tag & (PROF_KINDS - 1)) != PORT_DRAW_TRACK) {
+        track_flush(); // The sorted opaque track ends with its kind
+    }
     // A batch carries on across a kind's tag; with the sky drawn last (sSky) its batches must end at the sky's edges.
     if (UNLIKELY(sSkyLast) && (sDrawKind == PORT_DRAW_SKY) != ((tag & (PROF_KINDS - 1)) == PORT_DRAW_SKY)) {
         sky_kind_boundary();
@@ -1945,6 +1950,7 @@ static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's sh
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
+static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 // DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
 // rest are transformed here as without it (Old 3DS bench 2026-11-01: the racers' or the track's maths alone on the GPU,
@@ -1993,6 +1999,12 @@ static void read_switches(void) {
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
+    // The native track (NR4) turns the backend's GPU vertex maths on for itself: the other kinds stay on the CPU
+    // path unless DKR_GPU_TRANSFORM is on too.
+    sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+    if (!plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)) {
+        sGpuKinds = 0;
+    }
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
     // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
@@ -2809,6 +2821,44 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
     return TRUE;
 }
 
+/* A model draw's matrix: the vertices' matrix m with the N64 viewport folded in (clip space, gfx_backend.h). */
+static void model_params_matrix(float (*m)[4], GfxModelParams *params) {
+    Viewport vp;
+    s32 i;
+    viewport_init(&vp);
+    for (i = 0; i < 4; i++) {
+        params->mtx[i][0] = m[i][0] * vp.scaleX + m[i][3] * vp.transX;
+        params->mtx[i][1] = m[i][1] * vp.scaleY + m[i][3] * vp.transY;
+        params->mtx[i][2] = m[i][2];
+        params->mtx[i][3] = m[i][3];
+    }
+}
+
+/* The rest of a model draw's parameters: texture coordinate factors from the tiles of the state's textures, and the
+ * fog (when G_FOG is set) with these factors. */
+static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffset, GfxModelParams *params) {
+    s32 i;
+    for (i = 0; i < 4; i++) {
+        params->texScale[i] = 0.0f;
+        params->texOffset[i] = 0.0f;
+    }
+    for (i = 0; i < 2; i++) {
+        if (state->textures[i] != NULL) {
+            Tile *tile = &g.tiles[i];
+            float shift = texel_centre_shift(state->textures[i]);
+            TexAxis u, v;
+            tex_axis_init(&u, tile->shifts, tile->uls, state->textures[i]->width, shift);
+            tex_axis_init(&v, tile->shiftt, tile->ult, state->textures[i]->height, shift);
+            tex_axis_factors(&u, &params->texScale[i * 2], &params->texOffset[i * 2]);
+            tex_axis_factors(&v, &params->texScale[i * 2 + 1], &params->texOffset[i * 2 + 1]);
+        }
+    }
+    params->fog = (g.geometryMode & G_FOG) != 0;
+    params->fogMul = params->fog ? fogMul : 0;
+    params->fogOffset = params->fog ? fogOffset : 0;
+    params->pad[0] = params->pad[1] = params->pad[2] = 0;
+}
+
 /*
  * Draws a triangle command with GPU vertex maths, if every corner is one of the pending load's vertices and the
  * backend takes the load's box (else returns FALSE, for the CPU path). Returns TRUE when it is done: drawn, or wholly
@@ -2817,7 +2867,6 @@ static s32 mesh_triangles(const Triangle *tris, s32 count, const PendingLoad *pl
 static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     GfxModelParams params;
-    Viewport vp;
     PendingLoad *pl;
     s32 i, k, first, verdict;
     u32 generation;
@@ -2834,14 +2883,7 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     }
     pl = &sLoads[l];
     first = pl->dest;
-    viewport_init(&vp);
-    for (i = 0; i < 4; i++) {
-        float(*m)[4] = pl->m;
-        params.mtx[i][0] = m[i][0] * vp.scaleX + m[i][3] * vp.transX;
-        params.mtx[i][1] = m[i][1] * vp.scaleY + m[i][3] * vp.transY;
-        params.mtx[i][2] = m[i][2];
-        params.mtx[i][3] = m[i][3];
-    }
+    model_params_matrix(pl->m, &params);
     pending_box(pl);
     verdict = gfxb_model_check(params.mtx, pl->boxMin, pl->boxMax);
     if (sFrameCount == sTraceFrame) {
@@ -2867,26 +2909,8 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
         state.textures[1] = NULL;
     }
     state.flat = 0;
-    for (i = 0; i < 4; i++) {
-        params.texScale[i] = 0.0f;
-        params.texOffset[i] = 0.0f;
-    }
-    for (i = 0; i < 2; i++) {
-        if (state.textures[i] != NULL) {
-            Tile *tile = &g.tiles[i];
-            float shift = texel_centre_shift(state.textures[i]);
-            TexAxis u, v;
-            tex_axis_init(&u, tile->shifts, tile->uls, state.textures[i]->width, shift);
-            tex_axis_init(&v, tile->shiftt, tile->ult, state.textures[i]->height, shift);
-            tex_axis_factors(&u, &params.texScale[i * 2], &params.texOffset[i * 2]);
-            tex_axis_factors(&v, &params.texScale[i * 2 + 1], &params.texOffset[i * 2 + 1]);
-        }
-    }
-    params.fog = (g.geometryMode & G_FOG) != 0;
     // Fog worked out when the vertices came uses that time's settings, as load_vertices_now does
-    params.fogMul = params.fog ? (pl->fog ? pl->fogMul : g.fogMul) : 0;
-    params.fogOffset = params.fog ? (pl->fog ? pl->fogOffset : g.fogOffset) : 0;
-    params.pad[0] = params.pad[1] = params.pad[2] = 0;
+    model_params_rest(&state, pl->fog ? pl->fogMul : g.fogMul, pl->fog ? pl->fogOffset : g.fogOffset, &params);
 
     if ((sTrackMesh || sModelMesh) && !REF_ACTIVE() && mesh_triangles(tris, count, pl, &state, &params, frontCull)) {
         return TRUE;
@@ -2950,6 +2974,378 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
         }
     }
     return TRUE;
+}
+
+/******************************** Native track (NR4) ********************************/
+
+/*
+ * Roadmap NR4 (DKR_NATIVE_TRACK, port_drawtag.h): the level's geometry drawn the way a 3DS game draws its world. A
+ * track batch (one vertex load and its triangles, tagged PORT_TRACK_TAG by render_level_segment) is copied once,
+ * the first time it is drawn, into the GPU's mesh arena as model vertices and indices (mesh_build, as P31 makes
+ * them), with its box. The track never changes while a level is loaded, so unlike P31's meshes nothing is hashed or
+ * compared per frame; the table is emptied when another level loads (gPortLevelLoads). Each frame a batch costs a
+ * box test (gfxb_model_check: drawn by the GPU, left out, or near the camera and left to the CPU path, which keeps
+ * its triangles inside the GPU's guard band) and the GPU's vertex shader does the maths.
+ *
+ * The opaque track is then drawn sorted by material: batches of the TRACK kind with the same draw state and model
+ * parameters go into one bucket, whatever segment they come from, and each bucket is one draw when the kind ends.
+ * Opaque, depth-writing triangles can be drawn in any order. Decals (painted on what is under them) and anything
+ * blended are drawn in their own order after the buckets; a decal left to the CPU path draws the buckets first.
+ * The see-through track keeps its order (runs of the same material still share a draw, as mesh_part does).
+ */
+#define TRACK_TABLE_SIZE 4096 // A power of two
+#define TRACK_PROBES 16
+#define TRACK_BUCKETS 24
+#define TRACK_LATE 48
+
+typedef struct TrackMesh {
+    const Triangle *tris; // The key; NULL: unused
+    const Vertex *src;
+    u32 firstWords[2];    // The first triangle's first words when made (a cheap check against stale pointers)
+    u16 numTris;
+    u8 numVerts, failed;
+    u8 numRuns;
+    s16 boxMin[3], boxMax[3];
+    void *mesh;
+    MeshRun runs[MESH_MAX_RUNS];
+} TrackMesh;
+
+typedef struct TrackBucket {
+    GfxDrawState state;
+    GfxModelParams params;
+    s32 numParts, numTriangles;
+    GfxMeshPart parts[GFX_MAX_MESH_PARTS];
+} TrackBucket;
+
+static TrackMesh sTrackMeshes[TRACK_TABLE_SIZE];
+static u32 sTrackMeshCount, sTrackBytes, sTrackLoads;
+static s32 sNativeTrack; // This frame's DKR_NATIVE_TRACK (with GPU vertex maths)
+static TrackBucket sTrackBuckets[TRACK_BUCKETS];
+static s32 sTrackBucketCount;
+static TrackBucket sTrackLate[TRACK_LATE]; // In order, one part each unless merged with the one before
+static s32 sTrackLateCount;
+static u32 sTrackStats[5]; // Batches drawn by the GPU, left out, left to the CPU, meshes made, draws
+
+static COLD void track_drop_all(void) {
+    u32 i;
+    for (i = 0; i < TRACK_TABLE_SIZE; i++) {
+        if (sTrackMeshes[i].mesh != NULL) {
+            gfx_split_mesh_free(sTrackMeshes[i].mesh);
+        }
+    }
+    __builtin_memset(sTrackMeshes, 0, sizeof(sTrackMeshes));
+    sTrackMeshCount = 0;
+    sTrackBytes = 0;
+}
+
+/* Draws one bucket's parts as one draw. */
+static void track_draw_bucket(TrackBucket *b) {
+    u32 part;
+    if (b->numParts == 0) {
+        return;
+    }
+    part = walk_switch(WALK_DRAWS);
+    sky_draw_if_held();
+    sDepthDrawn |= b->state.depthWrite;
+    gfx_split_draw_meshes(&b->state, &b->params, b->parts, b->numParts);
+    prof_count(PROF_TRIANGLES, b->numTriangles);
+    prof_count(PROF_DRAWS, 1);
+    sMix.kinds[PORT_DRAW_TRACK].draws++;
+    sMix.kinds[PORT_DRAW_TRACK].tris += b->numTriangles;
+    sTrackStats[4]++;
+    walk_switch(part);
+    b->numParts = 0;
+    b->numTriangles = 0;
+}
+
+/* Draws what the sorted track holds back: the buckets, then the late parts in their order. */
+static NOINLINE void track_flush(void) {
+    s32 i;
+    if (!sTrackPending) {
+        return;
+    }
+    flush_batch();
+    for (i = 0; i < sTrackBucketCount; i++) {
+        track_draw_bucket(&sTrackBuckets[i]);
+    }
+    sTrackBucketCount = 0;
+    for (i = 0; i < sTrackLateCount; i++) {
+        track_draw_bucket(&sTrackLate[i]);
+    }
+    sTrackLateCount = 0;
+    sTrackPending = FALSE;
+}
+
+static void bucket_add(TrackBucket *b, void *mesh, s32 firstIndex, s32 numTriangles) {
+    GfxMeshPart *last = b->numParts > 0 ? &b->parts[b->numParts - 1] : NULL;
+    if (last != NULL && last->mesh == mesh && last->firstIndex + last->numTriangles * 3 == firstIndex) {
+        last->numTriangles += numTriangles;
+    } else {
+        last = &b->parts[b->numParts++];
+        last->mesh = mesh;
+        last->firstIndex = firstIndex;
+        last->numTriangles = numTriangles;
+    }
+    b->numTriangles += numTriangles;
+}
+
+static inline s32 bucket_is(const TrackBucket *b, const GfxDrawState *state, const GfxModelParams *params) {
+    return b->state.textures[0] == state->textures[0] && b->state.cullMode == state->cullMode &&
+           draw_states_equal(state, &b->state) && __builtin_memcmp(params, &b->params, sizeof(*params)) == 0;
+}
+
+/* Whether the order of these triangles among the opaque track's doesn't matter. */
+static inline s32 track_sortable(const GfxDrawState *state) {
+    return state->blend == GFX_BLEND_OPAQUE && state->depthTest && state->depthWrite && !state->decal;
+}
+
+/* Queues a run of a track mesh's triangles: in a bucket when sortable, else in order after them. */
+static void track_part(const GfxDrawState *state, const GfxModelParams *params, void *mesh, s32 firstIndex,
+                       s32 numTriangles) {
+    TrackBucket *b = NULL;
+    s32 i;
+    if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+        flush_batch(); // The CPU path's waiting triangles go first (they came first)
+    }
+    if (track_sortable(state)) {
+        for (i = 0; i < sTrackBucketCount; i++) {
+            if (bucket_is(&sTrackBuckets[i], state, params)) {
+                b = &sTrackBuckets[i];
+                break;
+            }
+        }
+        if (b == NULL) {
+            if (sTrackBucketCount == TRACK_BUCKETS) {
+                // Full: the fullest is drawn now (opaque, so early is fine) and takes the new material.
+                s32 best = 0;
+                for (i = 1; i < TRACK_BUCKETS; i++) {
+                    if (sTrackBuckets[i].numTriangles > sTrackBuckets[best].numTriangles) {
+                        best = i;
+                    }
+                }
+                b = &sTrackBuckets[best];
+                track_draw_bucket(b);
+            } else {
+                b = &sTrackBuckets[sTrackBucketCount++];
+                b->numParts = 0;
+                b->numTriangles = 0;
+            }
+            b->state = *state;
+            b->params = *params;
+        }
+    } else {
+        if (sTrackLateCount > 0 && bucket_is(&sTrackLate[sTrackLateCount - 1], state, params)) {
+            b = &sTrackLate[sTrackLateCount - 1];
+        } else {
+            if (sTrackLateCount == TRACK_LATE) {
+                track_flush();
+            }
+            b = &sTrackLate[sTrackLateCount++];
+            b->numParts = 0;
+            b->numTriangles = 0;
+            b->state = *state;
+            b->params = *params;
+        }
+    }
+    if (b->numParts == GFX_MAX_MESH_PARTS || b->numTriangles + numTriangles > MESH_BATCH_TRIANGLES) {
+        if (b >= sTrackLate) {
+            track_flush(); // Keeps the late parts' order
+            b = &sTrackLate[sTrackLateCount++];
+            b->numParts = 0;
+            b->numTriangles = 0;
+            b->state = *state;
+            b->params = *params;
+        } else {
+            track_draw_bucket(b);
+        }
+    }
+    bucket_add(b, mesh, firstIndex, numTriangles);
+    sTrackPending = TRUE;
+}
+
+/* The table entry for these triangles, made if need be; NULL if they are to be left to the walk. */
+static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Vertex *src, s32 numVerts) {
+    u32 h = (u32) (((size_t) tris >> 4) * 2654435761u) & (TRACK_TABLE_SIZE - 1), i;
+    TrackMesh *e = NULL;
+    PendingLoad pl;
+    MeshEntry built;
+    s32 corners, k;
+    u32 words[2];
+    __builtin_memcpy(words, tris, sizeof(words));
+    for (i = 0; i < TRACK_PROBES; i++) {
+        TrackMesh *c = &sTrackMeshes[(h + i) & (TRACK_TABLE_SIZE - 1)];
+        if (c->tris == tris) {
+            if (c->src == src && c->numTris == count && c->numVerts == numVerts && c->firstWords[0] == words[0] &&
+                c->firstWords[1] == words[1]) {
+                return c->failed ? NULL : c;
+            }
+            e = c; // Stale (memory reused): made again
+            if (e->mesh != NULL) {
+                gfx_split_mesh_free(e->mesh);
+                e->mesh = NULL;
+            }
+            break;
+        }
+        if (c->tris == NULL) {
+            e = c;
+            sTrackMeshCount++;
+            break;
+        }
+    }
+    if (e == NULL) {
+        return NULL; // Table crowded here: the walk draws it
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+    e->tris = tris;
+    e->src = src;
+    e->numTris = (u16) count;
+    e->numVerts = (u8) numVerts;
+    e->firstWords[0] = words[0];
+    e->firstWords[1] = words[1];
+    e->failed = TRUE;
+    if (count > MAX_BATCH_TRIANGLES || numVerts > MAX_VERTICES || !is_level_vertex(src)) {
+        return NULL;
+    }
+    for (k = 0; k < count; k++) {
+        if (tris[k].vi0 >= numVerts || tris[k].vi1 >= numVerts || tris[k].vi2 >= numVerts) {
+            return NULL; // Uses a vertex of an earlier load
+        }
+    }
+    if (sModelCount > 0) {
+        flush_model_batch(); // mesh_build works in the model batch's arrays
+    }
+    pl.src = src;
+    pl.dest = 0;
+    pl.count = numVerts;
+    if (!mesh_build(tris, count, &pl, &built, &corners)) {
+        return NULL;
+    }
+    e->mesh = gfxb_mesh_create(sModelVerts, corners, sModelIndices, count * 3);
+    if (e->mesh == NULL) {
+        e->tris = NULL; // Out of room: tried again later
+        sTrackMeshCount--;
+        return NULL;
+    }
+    sTrackBytes += corners * sizeof(GfxModelVertex) + count * 3 * sizeof(u16);
+    e->numRuns = built.numRuns;
+    __builtin_memcpy(e->runs, built.runs, sizeof(e->runs));
+    e->boxMin[0] = e->boxMax[0] = src[0].x;
+    e->boxMin[1] = e->boxMax[1] = src[0].y;
+    e->boxMin[2] = e->boxMax[2] = src[0].z;
+    for (i = 1; i < (u32) numVerts; i++) {
+        s16 c[3] = { src[i].x, src[i].y, src[i].z };
+        for (k = 0; k < 3; k++) {
+            e->boxMin[k] = c[k] < e->boxMin[k] ? c[k] : e->boxMin[k];
+            e->boxMax[k] = c[k] > e->boxMax[k] ? c[k] : e->boxMax[k];
+        }
+    }
+    e->failed = FALSE;
+    sTrackStats[3]++;
+    return e;
+}
+
+/*
+ * The PORT_TRACK_TAG at dl[-1]: draws the track batch whose vertex load and triangles follow and returns how many
+ * commands it used, or 0 to leave them to the walk.
+ */
+static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
+    u32 w0, w1;
+    s32 numVerts, count, textured, verdict, i;
+    const Vertex *src;
+    const Triangle *tris;
+    TrackMesh *e;
+    GfxDrawState state;
+    GfxModelParams params;
+    float(*m)[4];
+    u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
+
+    if (!sNativeTrack || remaining < 2 || g.billboard || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame) ||
+        UNLIKELY(gGfxSweep) || UNLIKELY(sSkipKinds != 0) || REF_ACTIVE()) {
+        return 0;
+    }
+    w0 = dl[0].words.w0;
+    w1 = dl[0].words.w1;
+    if ((w0 >> 24) != (u8) G_VTX || (w0 & 0x00010000)) {
+        return 0;
+    }
+    numVerts = ((w0 >> 19) & 0x1F) + 1;
+    src = (const Vertex *) seg_addr(w1);
+    w0 = dl[1].words.w0;
+    w1 = dl[1].words.w1;
+    if ((w0 >> 24) != (u8) G_TRIN) {
+        return 0;
+    }
+    tris = (const Triangle *) seg_addr(w1);
+    count = (w0 >> 4) & 0xFFF;
+    textured = (w0 >> 16) & 1;
+    m = g.matrices[g.curMatrix];
+    if (count <= 0 || (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
+        return 0;
+    }
+    e = track_find(tris, count, src, numVerts);
+    if (e == NULL) {
+        return 0;
+    }
+    model_params_matrix(m, &params);
+    verdict = gfxb_model_check(params.mtx, e->boxMin, e->boxMax);
+    if (verdict == GFX_MODEL_CPU) {
+        sTrackStats[2]++;
+        if (sTrackPending) {
+            // Whatever the walk draws next for the track must not come before what sorted triangles it may lie on.
+            track_flush();
+        }
+        return 0;
+    }
+    // The vertex slots this load would have filled: no longer what they held.
+    if (sAnyPending) {
+        forget_slots(0, numVerts);
+    }
+    g.vertexIndex = 0;
+    g.flatVerts &= ~((1ULL << numVerts) - 1);
+    sMix.kinds[sDrawKind].verts += (unsigned long) numVerts;
+    sObjTris[sDrawObj] += count;
+    if (verdict == GFX_MODEL_HIDDEN) {
+        sTrackStats[1]++;
+        return 2;
+    }
+    if (!sTriStateValid) {
+        build_draw_state(&sTriState, FALSE);
+        sTriStateValid = TRUE;
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    state.flat = 0;
+    model_params_rest(&state, g.fogMul, g.fogOffset, &params);
+    for (i = 0; i < e->numRuns; i++) {
+        state.cullMode = e->runs[i].doubleSided ? 0 : frontCull;
+        if (sDrawKind == PORT_DRAW_TRACK) {
+            track_part(&state, &params, e->mesh, e->runs[i].firstIndex, e->runs[i].numTriangles);
+        } else {
+            mesh_part(&state, &params, e->mesh, e->runs[i].firstIndex, e->runs[i].numTriangles);
+        }
+    }
+    sTrackStats[0]++;
+    return 2;
+}
+
+/* At the start of a frame: this frame's switch, and the table emptied for a new level or with the switch off. */
+static void track_frame_start(void) {
+    sNativeTrack = sNativeTrackSwitch && sGpuTransform;
+    if (sTrackMeshCount > 0 && (!sNativeTrack || sTrackLoads != gPortLevelLoads)) {
+        gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
+        track_drop_all();
+    }
+    sTrackLoads = gPortLevelLoads;
+    if (sNativeTrack && sFrameCount % 600 == 0) {
+        plat_log("native track: %u KB in %u meshes; batches %u GPU, %u left out, %u CPU; %u made, %u draws",
+                 (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (unsigned) sTrackStats[0],
+                 (unsigned) sTrackStats[1], (unsigned) sTrackStats[2], (unsigned) sTrackStats[3],
+                 (unsigned) sTrackStats[4]);
+        __builtin_memset(sTrackStats, 0, sizeof(sTrackStats));
+    }
 }
 
 /*
@@ -3888,6 +4284,10 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_mesh(dl, remaining);
                     dl += used;
                     remaining -= used;
+                } else if (w1 == PORT_TRACK_TAG) {
+                    s32 used = native_track(dl, remaining);
+                    dl += used;
+                    remaining -= used;
                 }
                 break;
             case OP(G_SPNOOP):
@@ -4468,10 +4868,12 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
-    sGpuTransform = (plat_old_3ds() || !gfx_split_active()) && gfxb_gpu_transform();
+    // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
+    sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch) && gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
+    track_frame_start();
     if (!sTrackMesh && !sModelMesh) {
         if (sMeshBytes > 0) {
             gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
@@ -4495,6 +4897,7 @@ void port_gfx_run_task(void *taskPtr) {
     gPlatGfxStage = "running a display list";
     walk_begin();
     run_dl((const Gfx *) task->t.data_ptr, -1);
+    track_flush();
     flush_batch();
     sky_draw_if_held();
     sDepthDrawn = FALSE;

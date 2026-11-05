@@ -397,6 +397,17 @@ int port_native_mesh_for(int isRacer) {
     return (mask >> (isRacer ? 0 : 1)) & 1;
 }
 
+unsigned int gPortLevelLoads;
+
+int port_native_track(void) {
+    static int epoch = -1, on;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        on = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+    }
+    return on;
+}
+
 void port_draw_kind_game(int kind, int object) {
     unsigned long long now;
     if (object >= 0 && object < PROF_OBJ_BUCKETS) {

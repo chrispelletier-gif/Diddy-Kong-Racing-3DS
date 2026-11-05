@@ -221,6 +221,9 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     }
 
     generate_track(geometry);
+#ifdef TARGET_PORT
+    gPortLevelLoads++;
+#endif
     PORT_LOAD_STEP("track");
 
     gWaveBlockCount = 0;
@@ -1961,12 +1964,14 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     s32 batchFlags;
     s32 textureFlags;
 #ifdef TARGET_PORT
+    s32 nativeTrack;
     if (port_portrait_active()) {
         return; // The portrait camera shows the model alone.
     }
     if (port_skip_game_kind(nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK)) {
         return;
     }
+    nativeTrack = port_native_track();
 #endif
     port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
@@ -2035,6 +2040,11 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             color = gCurrentLevelHeader2->pulseLightData->outColorValue;
             gDPSetPrimColor(gTrackDL++, 0, 0, color, color, color, color);
             material_set_blinking_lights(&gTrackDL, texture, batchFlags, texOffset);
+#ifdef TARGET_PORT
+            if (nativeTrack) {
+                gDPNoOpTag(gTrackDL++, PORT_TRACK_TAG);
+            }
+#endif
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, TRIN_ENABLE_TEXTURE);
             gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
@@ -2044,6 +2054,11 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             if (texture == NULL) {
                 batchFlags = FALSE;
             }
+#ifdef TARGET_PORT
+            if (nativeTrack) {
+                gDPNoOpTag(gTrackDL++, PORT_TRACK_TAG);
+            }
+#endif
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }

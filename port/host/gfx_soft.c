@@ -876,14 +876,32 @@ int gfxb_cpu_cull_ok(void) {
 }
 
 int gfxb_gpu_transform(void) {
-    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0;
 }
 
+/* No guard band to keep to here; DKR_HOST_BAND (a band in screen widths, e.g. 1.5) makes one up the way the 3DS's
+ * check works, so the PC frames also cover model draws left to the CPU path or left out. */
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
-    (void) mtx;
-    (void) boxMin;
-    (void) boxMax;
-    return GFX_MODEL_GPU; // No guard band to keep to
+    static float band = -1.0f;
+    int all = 31, any = 0, i;
+    if (band < 0.0f) {
+        const char *env = plat_getenv("DKR_HOST_BAND");
+        band = env != NULL ? (float) atof(env) : 0.0f;
+    }
+    if (band <= 0.0f) {
+        return GFX_MODEL_GPU;
+    }
+    for (i = 0; i < 8; i++) {
+        float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
+        float cx = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
+        float cy = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
+        float cw = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
+        int out = (cx > band * cw ? 1 : 0) | (cx < -band * cw ? 2 : 0) | (cy > band * cw ? 4 : 0) |
+                  (cy < -band * cw ? 8 : 0) | (cw <= 1.0f ? 16 : 0);
+        all &= out;
+        any |= out;
+    }
+    return (all & 15) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
 }
 
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
