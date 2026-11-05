@@ -8,6 +8,10 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
+#ifdef PICA_ALL
+int port_frames_native(void);
+void port_frames_gfx_done(void);
+#endif
 
 #define RCP_QUEUE_SIZE 8
 
@@ -94,6 +98,9 @@ static void gfx_thread(void *arg) {
         unsigned long long start;
         gPlatGfxStage = "waiting for a display list";
         task = worker_next(&sGfxWorker);
+#ifdef PICA_ALL
+        if (!port_frames_native()) // the native frame queue has no RSP to free
+#endif
         port_raise_event(OS_EVENT_SP);
         plat_set_frame_step(sGfxSteps[sGfxTasksFinished % GFX_STEP_RING]);
         start = plat_time_ns();
@@ -107,6 +114,11 @@ static void gfx_thread(void *arg) {
         sGfxTasksFinished++;
         plat_kbroadcast();
         plat_kunlock();
+#ifdef PICA_ALL
+        if (port_frames_native()) {
+            port_frames_gfx_done(); // the native frame queue (frames.c)
+        } else
+#endif
         port_raise_event(OS_EVENT_DP);
         task_done();
     }

@@ -10,6 +10,7 @@
 #include "video.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
 #endif
 
 /****  type define's for structures unique to audiomgr ****/
@@ -101,6 +102,9 @@ static ALDMAproc __amDmaNew(AMDMAState **state);
 static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo);
 static void __amHandleDoneMsg(AudioInfo *info);
 #ifdef PICA_ALL
+int port_frames_native(void);
+void port_frames_audio_wait(void);
+void port_frames_run_audio(void *task);
 int port_native_audio_on(void);
 void port_native_audio_frame(void);
 #endif
@@ -247,6 +251,15 @@ static void __amMain(UNUSED void *arg) {
     osScAddClient(gAudioSched, (OSScClient *) &audioStack, &__am.audioFrameMsgQ, OS_MESG_BLOCK);
 
     while (!done) {
+#ifdef PICA_ALL
+        if (port_frames_native()) {
+            // The native frame queue's beat, every other retrace (port/src/os/frames.c).
+            static AudioMsg sRetraceMsg;
+            sRetraceMsg.gen.type = OS_SC_RETRACE_MSG;
+            port_frames_audio_wait();
+            msg = &sRetraceMsg;
+        } else
+#endif
         (void) osRecvMesg(&__am.audioFrameMsgQ, (OSMesg *) &msg, OS_MESG_BLOCK);
         switch (msg->gen.type) {
             case OS_SC_RETRACE_MSG:
@@ -315,6 +328,9 @@ int port_native_audio_on(void) {
     if (sOn < 0) {
         // Lockstep runs (the host frame checks) keep the N64 pipeline: they wait on every RSP task.
         sOn = plat_switch("DKR_NATIVE_AUDIO", 1) != 0 && !port_lockstep_enabled();
+        if (sOn) {
+            plat_log("audio: native audio frames (no RSP task)");
+        }
     }
     return sOn;
 }
@@ -408,6 +424,13 @@ static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo) {
     t->list.t.yield_data_size = 0;
     t->unk6C = 1;
 
+#ifdef PICA_ALL
+    if (port_frames_native()) {
+        port_frames_run_audio(t); // no scheduler: mixed here, and the reply sent (port/src/os/frames.c)
+        curAcmdList ^= 1;
+        return 0;
+    }
+#endif
     ret = osSendMesg(osScGetCmdQ(gAudioSched), (OSMesg) t, OS_MESG_NOBLOCK);
 
     curAcmdList ^= 1; /* swap which acmd list you use each frame */
