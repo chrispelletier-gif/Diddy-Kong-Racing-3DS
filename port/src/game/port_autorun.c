@@ -2913,24 +2913,6 @@ void port_autorun_frame(s32 updateRate) {
     }
     obj = (get_game_mode() == GAMEMODE_INGAME) ? get_racer_object_by_port(PLAYER_ONE) : NULL;
     racer = (obj != NULL) ? obj->racer : NULL;
-    {
-        // What the player is doing, for bug reports (formatted only when one is made).
-        PlatGameNote note = { 0 };
-        if (racer != NULL) {
-            note.racing = 1;
-            note.lap = racer->lap + 1;
-            note.checkpoint = racer->nextCheckpoint;
-            note.bananas = racer->bananas;
-            note.boost = racer->boostTimer;
-            note.itemType = racer->balloon_type;
-            note.itemCount = racer->balloon_quantity;
-            note.shield = racer->shieldTimer;
-            note.magnet = racer->magnetTimer;
-            note.hit = racer->attackType;
-            note.paused = is_game_paused() != 0;
-        }
-        plat_set_game_note(&note);
-    }
     if (!port_autorun_active()) {
         return;
     }
