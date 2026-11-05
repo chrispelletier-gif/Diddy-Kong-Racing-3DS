@@ -7,6 +7,10 @@
 #include "textures_sprites.h"
 #include "tracks.h"
 #include <ultra64.h>
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 /************ .rodata ************/
 
@@ -2422,9 +2426,16 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
             model = particle->model;
             if (model->texture) {
                 mtx_cam_push(dList, mtx, &particle->trans, 1.0f, 0.0f);
-                material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
-                gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                if (port_native_batch(dList, model->texture, renderFlags, particle->textureFrame << 8, model->vertices, model->vertexCount, model->triangles, model->triangleCount, 1, 1)) {
+                    port_native_end();
+                } else
+#endif
+                {
+                    material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
+                    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
+                    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                }
                 mtx_pop(dList);
             }
         }
@@ -2450,9 +2461,16 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 temp = ((PointParticle *) particle)->modelFrame;
                 temp <<= 3;
                 tempvtx = &model->vertices[temp];
-                material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
-                gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempvtx), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                if (port_native_batch(dList, model->texture, renderFlags, particle->textureFrame << 8, tempvtx, model->vertexCount, model->triangles, model->triangleCount, 1, 1)) {
+                    port_native_end();
+                } else
+#endif
+                {
+                    material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
+                    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempvtx), model->vertexCount, 0);
+                    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                }
                 if (particle->brightness != 255) {
                     gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
                 }
@@ -2461,15 +2479,29 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
             gDPSetPrimColor((*dList)++, 0, 0, particle->brightness, particle->brightness, particle->brightness, alpha);
             if (particle->lineCreationPhase >= 2) {
                 model = particle->model;
-                material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
-                gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                if (port_native_batch(dList, model->texture, renderFlags, particle->textureFrame << 8, model->vertices, model->vertexCount, model->triangles, model->triangleCount, 1, 1)) {
+                    port_native_end();
+                } else
+#endif
+                {
+                    material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
+                    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
+                    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                }
             } else if (particle->lineCreationPhase > 0) {
                 model = particle->model;
-                material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
-                gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), 4, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(&model->triangles[model->triangleCount]), 1,
-                           TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                if (port_native_batch(dList, model->texture, renderFlags, particle->textureFrame << 8, model->vertices, 4, &model->triangles[model->triangleCount], 1, 1, 1)) {
+                    port_native_end();
+                } else
+#endif
+                {
+                    material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
+                    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), 4, 0);
+                    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(&model->triangles[model->triangleCount]), 1,
+                               TRIN_ENABLE_TEXTURE);
+                }
             }
             if (alpha != 255 || particle->brightness != 255) {
                 gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);

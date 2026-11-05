@@ -3414,6 +3414,17 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
+#ifdef PICA_ALL
+                if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
+                                      &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
+                                      gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
+                                      &gCurrShadowTris[gCurrShadowHeapData[i].triCount],
+                                      gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount, 1, 1)) {
+                    port_native_end();
+                    i++;
+                    continue;
+                }
+#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 // I hope we can clean this part up.
                 tri2 = triCount = gCurrShadowHeapData[i].triCount; // Fakematch
@@ -3464,6 +3475,17 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gCurrShadowTris = gShadowHeapTris[gWaterEffectIndex];
             gCurrShadowVerts = gShadowHeapVerts[gWaterEffectIndex];
             while (i < effect->meshEnd) {
+#ifdef PICA_ALL
+                if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
+                                      &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
+                                      gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
+                                      &gCurrShadowTris[gCurrShadowHeapData[i].triCount],
+                                      gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount, 1, 1)) {
+                    port_native_end();
+                    i++;
+                    continue;
+                }
+#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtxCount = gCurrShadowHeapData[i].vtxCount; // Fakematch
