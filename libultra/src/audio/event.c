@@ -21,6 +21,12 @@
 #include <libaudio.h>
 #include <os_internal.h>
 #include <ultraerror.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+/* The sound code's interrupt-disabled sections take the sound lock instead (port/src/os/audio_lock.c). */
+OSIntMask port_audio_set_mask(OSIntMask mask);
+#define osSetIntMask port_audio_set_mask
+#endif
 
 #ifdef TARGET_PORT
 /* Events thrown away because a player's queue was full, and handler runs that found their queue empty (the

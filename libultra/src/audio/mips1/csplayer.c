@@ -52,6 +52,11 @@ extern volatile u32 gPortAudioQueueEmpty;
 #include "cseqp.h"
 #include "cseq.h"
 #include "synthInternals.h"
+#ifdef PICA_ALL
+/* The sound code's interrupt-disabled sections take the sound lock instead (port/src/os/audio_lock.c). */
+OSIntMask port_audio_set_mask(OSIntMask mask);
+#define osSetIntMask port_audio_set_mask
+#endif
 
 /************ .rodata ************/
 const char D_800E6C20[] = "CSP: oh oh \n";
