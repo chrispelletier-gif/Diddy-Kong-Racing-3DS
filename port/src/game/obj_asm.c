@@ -307,13 +307,14 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
         return 0;
     }
     for (c = frame, n = 0; n < 256; c++, n++) {
-        u32 op = c->words.w0 >> 24;
-        if (op == (u8) G_DMADL) {
+        PortCmd pc;
+        s32 kind = port_cmd(c->words.w0, c->words.w1, &pc);
+        if (kind == PCMD_CALL && pc.count != 0) {
             dma = c;
-        } else if (op == (u8) G_VTX) {
-            vtxAddr = c->words.w1;
-            vtxCount = ((c->words.w0 >> 19) & 0x1F) + 1;
-        } else if (op == (u8) G_TRIN) {
+        } else if (kind == PCMD_VTX) {
+            vtxAddr = pc.addr;
+            vtxCount = pc.count;
+        } else if (kind == PCMD_TRI) {
             int capture;
             s32 id = port_nmat_key(dma != NULL ? (const void *) (uintptr_t) dma->words.w1 : NULL,
                                    (int) (0x10000000u | ((u32) (gSpriteOpaque != 0) << 27) | (u32) flags), 0, &capture);
@@ -335,11 +336,11 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
             g->words.w0 = vtxAddr;
             g->words.w1 = c->words.w1;
             g = (*dl)++;
-            g->words.w0 = vtxCount | ((c->words.w0 >> 16) & 1) << 16 | (1u << 17) | (1u << 18);
-            g->words.w1 = (c->words.w0 >> 4) & 0xFFF;
+            g->words.w0 = vtxCount | (pc.flag & 1) << 16 | (1u << 17) | (1u << 18);
+            g->words.w1 = pc.count;
             vtxAddr = 0;
             vtxCount = 0;
-        } else if (op == (u8) G_ENDDL) {
+        } else if (kind == PCMD_END) {
             break;
         }
     }

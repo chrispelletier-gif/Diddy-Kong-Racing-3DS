@@ -3434,21 +3434,22 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
         UNLIKELY(gGfxSweep) || UNLIKELY(sSkipKinds != 0) || REF_ACTIVE()) {
         return 0;
     }
-    w0 = dl[0].words.w0;
-    w1 = dl[0].words.w1;
-    if ((w0 >> 24) != (u8) G_VTX || (w0 & 0x00010000)) {
-        return 0;
+    {
+        PortCmd c;
+        if (port_cmd(dl[0].words.w0, dl[0].words.w1, &c) != PCMD_VTX || c.flag) {
+            return 0;
+        }
+        numVerts = c.count;
+        src = (const Vertex *) seg_addr(c.addr);
+        if (port_cmd(dl[1].words.w0, dl[1].words.w1, &c) != PCMD_TRI) {
+            return 0;
+        }
+        tris = (const Triangle *) seg_addr(c.addr);
+        count = c.count;
+        textured = c.flag;
     }
-    numVerts = ((w0 >> 19) & 0x1F) + 1;
-    src = (const Vertex *) seg_addr(w1);
-    w0 = dl[1].words.w0;
-    w1 = dl[1].words.w1;
-    if ((w0 >> 24) != (u8) G_TRIN) {
-        return 0;
-    }
-    tris = (const Triangle *) seg_addr(w1);
-    count = (w0 >> 4) & 0xFFF;
-    textured = (w0 >> 16) & 1;
+    (void) w0;
+    (void) w1;
     m = g.matrices[g.curMatrix];
     if (count <= 0 || (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
         return 0;
@@ -4030,26 +4031,27 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
     float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
 
     for (n = 0; n < 8 && n < remaining; n++) {
-        u32 w0 = dl[n].words.w0, w1 = dl[n].words.w1, op = w0 >> 24;
-        if (op == OP(G_VTX)) {
-            s32 c = ((w0 >> 19) & 0x1F) + 1;
-            s32 dest = (w0 & 0x00010000) ? next : 0;
+        PortCmd pc;
+        s32 kind = port_cmd(dl[n].words.w0, dl[n].words.w1, &pc);
+        if (kind == PCMD_VTX) {
+            s32 c = pc.count;
+            s32 dest = pc.flag ? next : 0;
             if (numLoads == NATIVE_MAX_LOADS) {
                 break;
             }
-            loads[numLoads].src = (const Vertex *) seg_addr(w1);
+            loads[numLoads].src = (const Vertex *) seg_addr(pc.addr);
             loads[numLoads].count = c;
             loads[numLoads].dest = dest;
             loads[numLoads].matrix = cur;
             numLoads++;
             next = dest + c;
             total = next > total ? next : total;
-        } else if (op == OP(G_MOVEWORD) && (w0 & 0xFF) == OP(G_MW_MVPMATRIX)) {
-            cur = (w1 >> 6) & 3;
-        } else if (op == OP(G_TRIN)) {
-            tris = (const Triangle *) seg_addr(w1);
-            count = (w0 >> 4) & 0xFFF;
-            textured = (w0 >> 16) & 1;
+        } else if (kind == PCMD_MVP) {
+            cur = pc.count;
+        } else if (kind == PCMD_TRI) {
+            tris = (const Triangle *) seg_addr(pc.addr);
+            count = pc.count;
+            textured = pc.flag;
             used = n + 1;
             break;
         } else {
@@ -4368,17 +4370,44 @@ static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s3
 
 static NOINLINE void texture_rectangle(u32 w0, u32 w1, s32 flip);
 
+/* A texture rectangle at dl in either form (G_TEXRECT and two G_RDPHALF words, or the three native words), as the
+ * rectangle's two words and its s/t and step words for texture_rectangle. FALSE if dl holds no rectangle. */
+static inline s32 read_rect(const Gfx *dl, u32 *w0, u32 *w1, u32 *half1, u32 *half2, s32 *flip) {
+    u32 a0 = dl[0].words.w0, op = a0 >> 24;
+    if (op == (u8) G_TEXRECT || op == (u8) G_TEXRECTFLIP) {
+        *w0 = a0;
+        *w1 = dl[0].words.w1;
+        *half1 = dl[1].words.w1;
+        *half2 = dl[2].words.w1;
+        *flip = op == (u8) G_TEXRECTFLIP;
+        return TRUE;
+    }
+#ifdef PORT_NATIVE_OPS
+    if (op == (u8) G_NOOP && (a0 & NOP_MARK) && ((a0 >> 19) & 15) == NOP_EXT && ((a0 >> 15) & 15) == NOPX_TEXRECT) {
+        u32 b1 = dl[0].words.w1, b2 = dl[1].words.w1, d1 = dl[1].words.w0 & 0x7FFF, d2 = dl[2].words.w0 & 0x7FFF;
+        u32 dsdx = ((b1 & 255) << 8) | (b2 & 255), dtdy = ((d2 & 1) << 15) | d1;
+        *w0 = ((b2 >> 20) & 0xFFF) << 12 | ((b2 >> 8) & 0xFFF);
+        *w1 = ((a0 >> 11) & 7) << 24 | ((b1 >> 20) & 0xFFF) << 12 | ((b1 >> 8) & 0xFFF);
+        *half1 = dl[2].words.w1;
+        *half2 = dsdx << 16 | dtdy;
+        *flip = (a0 >> 14) & 1;
+        return TRUE;
+    }
+#endif
+    return FALSE;
+}
+
 /* A rectangle recorded after PORT_NRECT_TAG | material: the game's G_TEXRECT and its two G_RDPHALF words, drawn with
  * the material's texture and tiles in place of a texture load. Returns the words used. */
 static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
     NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
-    u32 w0 = dl[0].words.w0, op = w0 >> 24;
-    s32 k;
-    if (op != (u8) G_TEXRECT && op != (u8) G_TEXRECTFLIP) {
+    u32 w0, w1, half1, half2;
+    s32 k, flip;
+    if (!read_rect(dl, &w0, &w1, &half1, &half2, &flip)) {
         return 0;
     }
-    g.rdpHalf1 = dl[1].words.w1;
-    g.rdpHalf2 = dl[2].words.w1;
+    g.rdpHalf1 = half1;
+    g.rdpHalf2 = half2;
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
@@ -4407,7 +4436,7 @@ static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
     sRectTiles[0] = mat->tiles[0];
     sRectTiles[1] = mat->tiles[1];
     sTriStateValid = FALSE;
-    texture_rectangle(w0, dl[0].words.w1, op == (u8) G_TEXRECTFLIP);
+    texture_rectangle(w0, w1, flip);
     sRectOverride = FALSE;
     sNDrawStats[0]++;
     return 3;
@@ -4978,8 +5007,51 @@ static s32 nop_from_n64(u32 w0, u32 w1, Gfx *out) {
             return TRUE;
         }
         case OP(G_LOADTLUT):
-            out->words.w0 = NOP_W0(NOP_LOADTLUT, (w1 >> 24) & 7);
+            out->words.w0 = NOPX_W0(NOPX_LOADTLUT, (w1 >> 24) & 7);
             out->words.w1 = (w1 >> 14) & 0x3FF;
+            return TRUE;
+        case OP(G_VTX):
+            out->words.w0 = NOPX_W0(NOPX_VTX, ((w0 >> 19) & 31) << 3 | ((w0 >> 16) & 1));
+            return TRUE;
+        case OP(G_TRIN):
+            out->words.w0 = NOPX_W0(NOPX_TRI, ((w0 >> 16) & 1) << 12 | ((w0 >> 4) & 0xFFF));
+            return TRUE;
+        case OP(G_MTX):
+            out->words.w0 = NOPX_W0(NOPX_MTX, (w0 >> 22) & 3);
+            return TRUE;
+        case OP(G_MOVEMEM):
+            if (((w0 >> 16) & 0xFF) != G_MV_VIEWPORT) {
+                return FALSE;
+            }
+            out->words.w0 = NOPX_W0(NOPX_VIEWPORT, 0);
+            return TRUE;
+        case OP(G_PERSPNORMALIZE):
+            out->words.w0 = (u32) G_NOOP << 24;
+            out->words.w1 = 0;
+            return TRUE;
+        case OP(G_MOVEWORD):
+            switch (w0 & 0xFF) {
+                case G_MW_SEGMENT:
+                    out->words.w0 = (u32) G_NOOP << 24;
+                    out->words.w1 = 0;
+                    return TRUE;
+                case G_MW_FOG:
+                    out->words.w0 = NOPX_W0(NOPX_FOG, 0);
+                    return TRUE;
+                case G_MW_BILLBOARD:
+                    out->words.w0 = NOPX_W0(NOPX_BILLBOARD, 0);
+                    return TRUE;
+                case G_MW_MVPMATRIX:
+                    out->words.w0 = NOPX_W0(NOPX_MVP, (w1 >> 6) & 3);
+                    return TRUE;
+                default: // The clip ratio and the rest: the renderer clips and lights by itself
+                    out->words.w0 = (u32) G_NOOP << 24;
+                    out->words.w1 = 0;
+                    return TRUE;
+            }
+        case OP(G_TEXTURE): // Texture scaling and tile on/off: the renderer reads the tiles and the combiner
+            out->words.w0 = (u32) G_NOOP << 24;
+            out->words.w1 = 0;
             return TRUE;
         default:
             return FALSE;
@@ -5010,8 +5082,20 @@ static NOINLINE void nop_static(const Gfx *list, s32 maxCommands) {
     sNopStaticCount++;
     for (c = (Gfx *) list, n = 0; maxCommands < 0 || n < maxCommands; c++, n++) {
         u32 op = c->words.w0 >> 24;
-        if (op == OP(G_ENDDL) || (op == OP(G_DL) && ((c->words.w0 >> 16) & G_DL_NOPUSH)) || n >= 1024) {
+        PortCmd pc;
+        s32 kind = port_cmd(c->words.w0, c->words.w1, &pc);
+        if (kind == PCMD_END || (kind == PCMD_CALL && pc.flag) || n >= 1024) {
+            if (op == OP(G_ENDDL)) {
+                c->words.w0 = NOPX_W0(NOPX_END, 0);
+                sNopStaticWords++;
+            }
             break;
+        }
+        if (op == OP(G_DL) || op == OP(G_DMADL)) {
+            // A call: a native call op (the called list is converted when it is first run)
+            c->words.w0 = NOPX_W0(NOPX_CALL, op == OP(G_DMADL) ? (1 << 13 | ((c->words.w0 >> 16) & 0xFF)) : 0);
+            sNopStaticWords++;
+            continue;
         }
         if (op == OP(G_TEXRECT) || op == OP(G_TEXRECTFLIP)) {
             c += 2; // Its G_RDPHALF words follow
@@ -5223,12 +5307,82 @@ static NOINLINE void native_op(u32 w0, u32 w1) {
         case NOP_LOADBLOCK:
             load_block((bits >> 16) & 7, (bits >> 4) & 0xFFF, (w1 >> 12) & 0xFFF, w1 & 0xFFF);
             break;
-        case NOP_LOADTLUT:
+        default:
+            break;
+    }
+}
+
+/*
+ * The NOP_EXT ops: lists, geometry, matrices, viewport and the moveword settings. Returns 1 when the list is done
+ * (its end, or a branch), else 0.
+ */
+static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
+    u32 bits = w0 & 0x7FFF;
+    switch ((w0 >> 15) & 15) {
+        case NOPX_LOADTLUT:
             load_tlut(bits & 7, w1 & 0x3FF);
+            sTriStateValid = FALSE;
+            break;
+        case NOPX_CALL:
+            if (UNLIKELY(bad_list_address(w1))) {
+                log_bad_list_address(w1, where);
+                return 1;
+            }
+            if (depth < DL_STACK_SIZE) {
+                s32 maxCommands = (bits >> 13) & 1 ? (s32) (bits & 0xFF) : -1;
+                nop_static((const Gfx *) seg_addr(w1), maxCommands);
+                run_command_list((const Gfx *) seg_addr(w1), maxCommands, depth + 1);
+            }
+            return (bits >> 14) & 1;
+        case NOPX_END:
+            return 1;
+        case NOPX_VTX: {
+            s32 count = ((bits >> 3) & 31) + 1;
+            if (bits & 1) {
+                if (g.billboard) {
+                    g.vertexIndex = 1;
+                }
+            } else {
+                g.vertexIndex = 0;
+            }
+            load_vertices((const Vertex *) seg_addr(w1), count, g.vertexIndex);
+            g.vertexIndex += count;
+            sMix.kinds[sDrawKind].verts += count;
+            break;
+        }
+        case NOPX_TRI:
+            draw_dkr_triangles((const Triangle *) seg_addr(w1), bits & 0xFFF, (bits >> 12) & 1);
+            g.vertexIndex = 0;
+            break;
+        case NOPX_VIEWPORT: {
+            const Vp *vp = (const Vp *) seg_addr(w1);
+            s32 i;
+            for (i = 0; i < 3; i++) {
+                g.vpScale[i] = vp->vp.vscale[i] * 0.25f;
+                g.vpTrans[i] = vp->vp.vtrans[i] * 0.25f;
+            }
+            sTriStateValid = FALSE;
+            break;
+        }
+        case NOPX_FOG:
+            sTriStateValid = FALSE;
+            g.fogMul = (s16) (w1 >> 16);
+            g.fogOffset = (s16) (w1 & 0xFFFF);
+            break;
+        case NOPX_BILLBOARD:
+            g.billboard = w1 & 1;
+            break;
+        case NOPX_MVP:
+            g.curMatrix = bits & 3;
+            break;
+        case NOPX_MTX:
+            load_matrix((const Mtx *) seg_addr(w1), bits & 3);
+            g.curMatrix = bits & 3;
             break;
         default:
             break;
     }
+    return 0;
 }
 #endif
 
@@ -5292,7 +5446,21 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             case OP(G_NOOP):
 #ifdef PORT_NATIVE_OPS
                 if (w0 & NOP_MARK) {
-                    native_op(w0, w1);
+                    if (((w0 >> 19) & 15) == NOP_EXT && ((w0 >> 15) & 15) == NOPX_TEXRECT && remaining >= 2) {
+                        u32 r0, r1;
+                        s32 flip;
+                        read_rect(dl - 1, &r0, &r1, &g.rdpHalf1, &g.rdpHalf2, &flip);
+                        dl += 2;
+                        remaining -= 2;
+                        sTriStateValid = FALSE;
+                        texture_rectangle(r0, r1, flip);
+                    } else if (((w0 >> 19) & 15) == NOP_EXT) {
+                        if (native_ext(w0, w1, dl - 1, depth)) {
+                            return;
+                        }
+                    } else {
+                        native_op(w0, w1);
+                    }
                     break;
                 }
 #endif

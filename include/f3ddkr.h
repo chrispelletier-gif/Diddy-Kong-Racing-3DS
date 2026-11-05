@@ -169,14 +169,17 @@
 #define TRIN_DISABLE_TEXTURE 0
 #define TRIN_ENABLE_TEXTURE 1
 
+#ifndef gSPPolygon
 #define gSPPolygon(dl, ptr, numTris, texEnabled) {                                                                                  \
     Gfx *_g = (Gfx *)(dl);                                                                                                          \
     _g->words.w0 = _SHIFTL((((numTris) - 1) << 4) | (texEnabled), 16, 8) | _SHIFTL(G_TRIN, 24, 8) | _SHIFTL(((numTris)*16), 0, 16); \
     _g->words.w1 = (unsigned int)(ptr);                                                                                             \
 }
+#endif
 
 #define numberOfGfxCommands(gfxCmds) (sizeof(gfxCmds) / sizeof(Gfx))
 
+#ifndef gDkrDmaDisplayList
 #define gDkrDmaDisplayList(pkt, address, numberOfCommands)                         \
 {                                                                                  \
     Gfx *_g = (Gfx *)(pkt);                                                        \
@@ -185,6 +188,7 @@
             _SHIFTL((numberOfCommands*8), 0, 16));                                 \
     _g->words.w1 = (unsigned int)(address);                                        \
 }
+#endif
 
 #ifndef gDPSetPrimColorRGBA
 #define gDPSetPrimColorRGBA(pkt, rgba)             \
