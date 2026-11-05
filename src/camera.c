@@ -12,6 +12,10 @@
 #include "tracks.h"
 #include "video.h"
 #include "weather.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 #define CAMERA_MODEL_STACK_SIZE 5
 
@@ -1220,14 +1224,24 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
-    // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
-    material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
-                                                              RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
+#ifdef PICA_ALL
+    if (port_native_draw()) {
+        port_native_sprite(dList, sprite->frames[frameID],
+                           sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
+                                                         RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
+                           !(flags & RENDER_Z_UPDATE));
+    } else
+#endif
+    {
+        // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
+        material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
+                                                                  RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
 
-    if (!(flags & RENDER_Z_UPDATE)) {
-        gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        if (!(flags & RENDER_Z_UPDATE)) {
+            gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        }
+        gSPDisplayList((*dList)++, sprite->frames[frameID]);
     }
-    gSPDisplayList((*dList)++, sprite->frames[frameID]);
 
     // Pop the model matrix stack and select the appropriate matrix index for rendering
     gModelMatrixStackPos--;

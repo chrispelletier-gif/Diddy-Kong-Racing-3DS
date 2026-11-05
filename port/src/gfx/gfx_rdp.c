@@ -3482,6 +3482,10 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
 }
 
 /* At the start of a frame: this frame's switch, and the table emptied for a new level or with the switch off. */
+#ifdef PICA_ALL
+static s32 sOpCountOn = -1;
+static u32 sOpCount[256];
+#endif
 static void track_frame_start(void) {
     sNativeTrack = sNativeTrackSwitch && sGpuTransform;
     if (sTrackMeshCount > 0 && (!sNativeTrack || sTrackLoads != gPortLevelLoads)) {
@@ -3494,6 +3498,32 @@ static void track_frame_start(void) {
         plat_log("native draws: %lu drawn, %lu materials captured, %lu dropped (material gone)", sNDrawStats[0],
                  sNDrawStats[1], sNDrawStats[2]);
         sNDrawStats[0] = sNDrawStats[1] = sNDrawStats[2] = 0;
+    }
+    if (sOpCountOn < 0) {
+        const char *e = plat_getenv("DKR_OPCOUNT");
+        sOpCountOn = (e != NULL && e[0] == '1');
+    }
+    if (sOpCountOn && sFrameCount % 600 == 0 && sFrameCount > 0) {
+        char line[1024];
+        s32 n = 0, i;
+        for (i = 0; i < 256; i++) {
+            if (sOpCount[i] >= 600 && n < 1000) {
+                u32 v = sOpCount[i] / 600, d = 1;
+                line[n++] = ' ';
+                line[n++] = "0123456789ABCDEF"[i >> 4];
+                line[n++] = "0123456789ABCDEF"[i & 15];
+                line[n++] = ':';
+                while (v / d >= 10) {
+                    d *= 10;
+                }
+                for (; d > 0; d /= 10) {
+                    line[n++] = (char) ('0' + (v / d) % 10);
+                }
+            }
+            sOpCount[i] = 0;
+        }
+        line[n] = 0;
+        plat_log("commands per frame by opcode:%s", line);
     }
     if (sFrameCount % 600 == 0 && sOpaqueStats[0] > 0) {
         plat_log("opaque sorting: %u batches held, %u draws", (unsigned) sOpaqueStats[0], (unsigned) sOpaqueStats[1]);
@@ -4251,6 +4281,38 @@ static NOINLINE void native_record_slots(const NMat *mat, const Vertex *vtx, s32
     sTriStateValid = FALSE;
 }
 
+/* A sprite tile (port_native_sprite): its vertices, if any, go where the frame's appending load would have put them
+ * (after a billboard's anchor, or after the slots loaded so far), and its two triangles use them. */
+static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris,
+                                          s32 count, s32 textured) {
+    Tile t0 = g.tiles[0], t1 = g.tiles[1];
+    u32 geometry = g.geometryMode;
+    g.tiles[0] = mat->tiles[0];
+    g.tiles[1] = mat->tiles[1];
+    g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    if (numVerts > 0) {
+        s32 dest = g.billboard ? 1 : g.vertexIndex;
+        if (dest + numVerts > MAX_VERTICES) {
+            numVerts = MAX_VERTICES - dest;
+        }
+        if (sAnyPending) {
+            if (g.billboard && dest > 0) {
+                resolve_slots(0, 1); // The billboard's anchor
+            }
+            forget_slots(dest, dest + numVerts);
+        }
+        load_vertices_now(vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard);
+    }
+    nmat_state(mat, &sTriState, textured);
+    sTriStateValid = TRUE;
+    draw_dkr_triangles(tris, count, textured);
+    g.vertexIndex = 0;
+    g.tiles[0] = t0;
+    g.tiles[1] = t1;
+    g.geometryMode = geometry;
+    sTriStateValid = FALSE;
+}
+
 /* The batch recorded after the tag at dl[-1]; returns the words of data used. */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
@@ -4279,7 +4341,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     start = (dl[1].words.w0 >> 8) & 0xFF;
     textured = (dl[1].words.w0 >> 16) & 1;
     count = (s32) dl[1].words.w1;
-    if (count <= 0 || numVerts <= 0 || numVerts > MAX_VERTICES) {
+    if (count <= 0 || numVerts > MAX_VERTICES || (numVerts <= 0 && !(dl[1].words.w0 & 0x40000))) {
         return 2;
     }
     if (!mat->valid) {
@@ -4298,6 +4360,11 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             }
             e->lastFrame = sFrameCount;
         }
+    }
+    if (dl[1].words.w0 & 0x40000) {
+        native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
+        sNDrawStats[0]++;
+        return 2;
     }
     if (sAnyPending) {
         forget_slots(0, numVerts);
@@ -4760,6 +4827,11 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         u32 op = w0 >> 24;
         u32 info = sOpInfo[op];
         STALL_MARK("command", w0, w1);
+#ifdef PICA_ALL
+        if (UNLIKELY(sOpCountOn > 0)) {
+            sOpCount[op]++;
+        }
+#endif
         dl++;
         remaining--;
         if (UNLIKELY(sTracing)) {

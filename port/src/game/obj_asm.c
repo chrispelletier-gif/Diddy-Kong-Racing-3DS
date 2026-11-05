@@ -271,6 +271,61 @@ int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture,
     return 1;
 }
 
+extern s32 gSpriteOpaque;
+void material_load_simple(Gfx **dList, s32 flags);
+
+/* A sprite frame (sprite_init_frame's list: per tile its texture's load commands, every fifth tile a vertex load, two
+ * triangles) as one draw record per tile, each tile's settings kept as a material. The anchor, matrix and billboard
+ * mode are the caller's, as for the frame's list. whitePrim: the primitive colour set to white after the settings, as
+ * the game does. */
+int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
+    const Gfx *c, *dma = NULL;
+    u32 vtxAddr = 0, vtxCount = 0;
+    s32 n;
+    if (!port_native_draw() || frame == NULL) {
+        return 0;
+    }
+    for (c = frame, n = 0; n < 256; c++, n++) {
+        u32 op = c->words.w0 >> 24;
+        if (op == (u8) G_DMADL) {
+            dma = c;
+        } else if (op == (u8) G_VTX) {
+            vtxAddr = c->words.w1;
+            vtxCount = ((c->words.w0 >> 19) & 0x1F) + 1;
+        } else if (op == (u8) G_TRIN) {
+            int capture;
+            s32 id = port_nmat_key(dma != NULL ? (const void *) (uintptr_t) dma->words.w1 : NULL,
+                                   (int) (0x10000000u | ((u32) (gSpriteOpaque != 0) << 27) | (u32) flags), 0, &capture);
+            Gfx *g;
+            if (capture) {
+                gForceFlags = TRUE;
+                material_load_simple(dl, flags);
+                if (dma != NULL) {
+                    *(*dl)++ = *dma;
+                }
+                gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+            }
+            if (whitePrim) {
+                gDPSetPrimColor((*dl)++, 0, 0, 255, 255, 255, 255);
+                whitePrim = FALSE;
+            }
+            gDPNoOpTag((*dl)++, PORT_NDRAW_TAG | id);
+            g = (*dl)++;
+            g->words.w0 = vtxAddr;
+            g->words.w1 = c->words.w1;
+            g = (*dl)++;
+            g->words.w0 = vtxCount | ((c->words.w0 >> 16) & 1) << 16 | (1u << 17) | (1u << 18);
+            g->words.w1 = (c->words.w0 >> 4) & 0xFFF;
+            vtxAddr = 0;
+            vtxCount = 0;
+        } else if (op == (u8) G_ENDDL) {
+            break;
+        }
+    }
+    port_native_end();
+    return 1;
+}
+
 /* After native batches: the renderer's settings are the last captured material's, so the next material_set sets
  * everything again. */
 void port_native_end(void) {
