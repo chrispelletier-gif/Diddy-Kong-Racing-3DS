@@ -4869,6 +4869,12 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     remaining -= used;
                 } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
                     nmat_capture(w1 & 0xFFFF);
+                } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
+                    u32 index = w1 & 3;
+                    __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
+                    g.curMatrix = index;
+                    dl++;
+                    remaining--;
 #endif
                 } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
                     s32 k;
