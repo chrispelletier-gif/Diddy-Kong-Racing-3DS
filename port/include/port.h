@@ -328,6 +328,9 @@ static inline s32 port_half_shift(s32 step) {
 /* A whole number added each frame: half of it at half step (odd amounts round toward zero). */
 #define PORT_HALF(x) (gPortHalfStep ? (x) / 2 : (x))
 void port_set_logic_rate(s32 updateRate);
+/* A kart held up by only one or two wheels levels out (src/racer.c update_racer_collision); DKR_CAR_SETTLE=0 is the
+   N64's, which can leave it riding on its side for good. */
+s32 port_car_settle(void);
 
 /*
  * What the game thread is doing (src/thread3_main.c sets it at each step of the main loop), and a line describing the

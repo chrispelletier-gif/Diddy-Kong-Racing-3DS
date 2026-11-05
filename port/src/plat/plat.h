@@ -154,6 +154,9 @@ extern volatile int gPlatSwitchEpoch;
 
 /* Scripted input (DKR_INPUT) for automated tests. Returns nonzero when a script is set. */
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY);
+/* The same for a script given as text (DKR_INPUT syntax). */
+int plat_input_script_text(const char *script, int poll, unsigned short *buttons, signed char *stickX,
+                           signed char *stickY);
 
 /* Lists the entries of a directory into names (maxNames entries of nameSize bytes). Returns the count. */
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames);
