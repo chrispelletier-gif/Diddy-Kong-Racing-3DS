@@ -22,17 +22,21 @@ static const struct {
 };
 
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY) {
-    const char *script = plat_getenv("DKR_INPUT");
+    // The whole game test run's menu pass and DKR_AUTORUN_MANUAL (port_autorun.c) press their own buttons.
+    if (port_autorun_input(buttons, stickX, stickY)) {
+        return 1;
+    }
+    return plat_input_script_text(plat_getenv("DKR_INPUT"), poll, buttons, stickX, stickY);
+}
+
+int plat_input_script_text(const char *script, int poll, unsigned short *buttons, signed char *stickX,
+                           signed char *stickY) {
     const char *p;
     char token[64];
     int bestPoll = -1;
     char best[64] = "";
     char *tok;
 
-    // The whole game test run's menu pass (port_autorun.c) presses its own buttons.
-    if (port_autorun_input(buttons, stickX, stickY)) {
-        return 1;
-    }
     if (script == NULL) {
         return 0;
     }

@@ -6957,6 +6957,14 @@ void update_racer_collision(Object *racerObj, Object_Racer *racer, s32 updateRat
     if (sp184 == 0) {
         racer->x_rotation_vel += temp_s16 & 0xFFFF & 0xFFFF & 0xFFFF;
     }
+#ifdef TARGET_PORT
+    // Not resting on enough wheels for the lines above to tilt it: level out (see port_car_settle).
+    if (racer->vehicleID == VEHICLE_CAR && racer->groundedWheels > 0 && racer->groundedWheels < 3 &&
+        port_car_settle()) {
+        racerObj->trans.rotation.x_rotation -= (racerObj->trans.rotation.x_rotation * updateRate) >> 5;
+        racer->x_rotation_vel -= (racer->x_rotation_vel * updateRate) >> 5;
+    }
+#endif
     if (racer->vehicleID != VEHICLE_LOOPDELOOP && racer->vehicleID != VEHICLE_PLANE &&
         racer->vehicleID != VEHICLE_CARPET && racer->vehicleID != VEHICLE_SMOKEY) {
         CLAMP(racer->x_rotation_vel, -0x3400, 0x3400);

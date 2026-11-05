@@ -53,6 +53,11 @@
  *   DKR_AUTORUN_QUICK_CHARACTER=n     Character (default Bumper, as the anti-aliasing benchmark).
  *   DKR_AUTORUN_QUICK_PASSES=n        Races per track (2).
  * Its files are quick_test_state.txt and quick_test_results.csv (with a "build" column).
+ * For reproducing a driving bug by hand on the host build (any mode):
+ *   DKR_AUTORUN_MANUAL=s              After s seconds of each race the AI lets go of the player's kart (and nothing
+ *                                     puts it back at a checkpoint), and DKR_MANUAL_INPUT drives it instead: a
+ *                                     DKR_INPUT style script whose step times are 60ths of a second from that moment.
+ *                                     Each frame logs a "man" line with the kart's speed, tilt and grounded wheels.
  *
  * The boss fights test races every boss once (Tricky, Bluey, Bubbler, Smokey and Wizpig, the first and the second
  * fight of each), with one character, about half an hour. Boss levels aren't on the tracks menu, so the full run
@@ -1823,8 +1828,25 @@ static const char *menu_pass_frame(s32 updateRate) {
     return NULL;
 }
 
-/* plat_input_script: the menu pass's buttons replace the player's while it runs. */
+/* DKR_AUTORUN_MANUAL: when the script takes over the player's kart, in 60ths of a second into the race (-1 never). */
+static s32 manual_start(void) {
+    const char *env = plat_getenv("DKR_AUTORUN_MANUAL");
+    return env != NULL ? port_atoi(env) * 60 : -1;
+}
+static s32 manual_now(void) {
+    s32 start = manual_start();
+    return start >= 0 && sEnabled > 0 && sPhase == PHASE_RACING && sRaceRetraces >= start;
+}
+/* plat_input_script: the menu pass's buttons replace the player's while it runs, and DKR_MANUAL_INPUT's once
+   DKR_AUTORUN_MANUAL lets go of the kart. */
 int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY) {
+    if (manual_now()) {
+        *buttons = 0;
+        *stickX = 0;
+        *stickY = 0;
+        return plat_input_script_text(plat_getenv("DKR_MANUAL_INPUT"), sRaceRetraces - manual_start(), buttons,
+                                      stickX, stickY);
+    }
     if (sEnabled <= 0 || sMode != MODE_WHOLE || sPhase != PHASE_RACING || sNext >= sNumRaces ||
         sRaces[sNext].kind != STOP_MENUS) {
         return 0;
@@ -1973,7 +1995,11 @@ s32 port_autorun_time_trial(void) {
 }
 
 /* Nonzero while the player's kart is driven by the AI. */
+static s32 manual_now(void);
 s32 port_autorun_drives(void) {
+    if (manual_now()) {
+        return FALSE;
+    }
     // Not in the menus, nor on a hub tour, where the kart is put in each place and turned round instead.
     return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED &&
            (sNext >= sNumRaces || (sRaces[sNext].kind != STOP_HUB && sRaces[sNext].kind != STOP_MENUS));
@@ -3013,6 +3039,15 @@ void port_autorun_frame(s32 updateRate) {
             sLastPosition[1] = obj->trans.y_position;
             sLastPosition[2] = obj->trans.z_position;
             progress = racer->courseCheckpoint;
+            if (manual_now()) {
+                port_log("man t=%d v=%.2f roll=%d xrv=%d zrv=%d pitch=%d yaw=%d wheels=%d mask=%x yv=%.2f "
+                         "pos=%.1f,%.1f,%.1f buoy=%.2f",
+                         (int) (sRaceRetraces - manual_start()), racer->velocity, (int) obj->trans.rotation.z_rotation,
+                         (int) racer->x_rotation_vel, (int) racer->z_rotation_vel, (int) obj->trans.rotation.x_rotation,
+                         (int) (u16) obj->trans.rotation.y_rotation, (int) racer->groundedWheels, (int) racer->unk1E3,
+                         obj->y_velocity, obj->trans.x_position, obj->trans.y_position, obj->trans.z_position,
+                         racer->buoyancy);
+            }
             {
                 // DKR_LOG_RACER: logs the kart's checkpoint, speed and place at each checkpoint and every half second,
                 // to compare two runs (30 and 60 fps physics, say).
@@ -3034,7 +3069,9 @@ void port_autorun_frame(s32 updateRate) {
                 sDriving = TRUE;
                 sRaceLevel = level_id();
             }
-            if (!sDriving) {
+            if (manual_now()) {
+                sStuckRetraces = 0;
+            } else if (!sDriving) {
                 // Not going yet: no time without progress.
             } else if (progress > sBestProgress) {
                 sBestProgress = progress;
