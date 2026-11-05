@@ -249,6 +249,7 @@ typedef struct BenchSwitch {
 #define PICA_ROWS                                                                                                      \
     { "PICA build: old renderer (no GPU vertex maths, track or lighting)",                                         \
       { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 1, 0, 1, 0 },                                      \
+        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 },  \
         { "PICA build: vertex lighting on the CPU", { "DKR_GPU_LIGHT", NULL, NULL }, 1, 0, 1, 0 },                     \
         { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 }
 static const BenchSwitch sSwitchesOld3ds[] = {
