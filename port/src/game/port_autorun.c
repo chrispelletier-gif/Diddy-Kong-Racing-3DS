@@ -250,7 +250,8 @@ typedef struct BenchSwitch {
 #define PICA_ROWS                                                                                                      \
     { "PICA build: GPU vertex maths, track and lighting on",                                                         \
       { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 0, 1, 1, 0 },                                      \
-        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 }
+        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 }, \
+        { "PICA build: textures in VRAM on", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 0 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. GPU maths is off by default and one row
  * turns it on (user 2026-11-05); the lighting and track rows only mattered with it on. */
 static const BenchSwitch sSwitchesOld3ds[] = {

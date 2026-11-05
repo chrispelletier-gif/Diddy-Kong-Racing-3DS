@@ -326,7 +326,9 @@ int plat_switch(const char *name, int fallback) {
     if (env == NULL) {
         // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
         // the user wants it off by default with one bench row turning it on (2026-11-05).
-        static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_TEX_VRAM", "DKR_NATIVE_DRAW" };
+        // DKR_TEX_VRAM off too: its uploads ran through the first seconds of each race on the Old 3DS (82-117 ms
+        // frames while "textures in VRAM" grew, issue #406) and race starts were 70-130 ms longer than before (#407).
+        static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_NATIVE_DRAW" };
         if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
             // One core on a New 3DS, so the PICA work's own gain shows; an Old 3DS needs both (user 2026-11-05).
             return plat_old_3ds() ? 1 : 0;
