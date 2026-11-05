@@ -126,6 +126,75 @@ int port_gpu_light_get(const Vertex *verts, const void *model, float out[4]) {
     return 1;
 }
 
+/*
+ * Native draws (port_drawtag.h PORT_NDRAW_TAG): the game side's table of materials, keyed by what material_set takes
+ * and the two settings it reads. Emptied with each level (the renderer's captures go with it: a key's first use in a
+ * level is always a capture) or when full.
+ */
+#define NMAT_KEYS 1024
+typedef struct NMatKey {
+    const void *tex;
+    s32 flags, texOffset, blocked;
+    s16 dirLight;
+    u8 used;
+} NMatKey;
+extern s32 gBlockedRenderFlags;
+extern s16 gUseDirectionalLighting;
+static NMatKey sNMatKeys[NMAT_KEYS];
+static u32 sNMatCount;
+static unsigned int sNMatLevel = 0xFFFFFFFFu;
+static int sNativeDraw;
+volatile unsigned char gPortNMatBad[NMAT_KEYS];
+
+static void nmat_level_check(void) {
+    if (sNMatLevel != gPortLevelLoads) {
+        sNMatLevel = gPortLevelLoads;
+        __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
+        sNMatCount = 0;
+        sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0;
+    }
+}
+
+int port_native_draw(void) {
+    nmat_level_check();
+    return sNativeDraw;
+}
+
+int port_nmat_key(const void *texture, int flags, int texOffset, int *capture) {
+    u32 h = (u32) ((((size_t) texture >> 3) ^ (u32) flags * 31u ^ (u32) texOffset * 131u ^
+                    (u32) gBlockedRenderFlags * 7u ^ (u32) gUseDirectionalLighting) * 2654435761u) % NMAT_KEYS, i;
+    nmat_level_check();
+    for (i = 0; i < 16; i++) {
+        u32 id = (h + i) % NMAT_KEYS;
+        NMatKey *k = &sNMatKeys[id];
+        if (!k->used) {
+            if (sNMatCount >= NMAT_KEYS * 3 / 4) {
+                break;
+            }
+            k->used = 1;
+            k->tex = texture;
+            k->flags = flags;
+            k->texOffset = texOffset;
+            k->blocked = gBlockedRenderFlags;
+            k->dirLight = gUseDirectionalLighting;
+            sNMatCount++;
+            gPortNMatBad[id] = 0;
+            *capture = 1;
+            return (int) id;
+        }
+        if (k->tex == texture && k->flags == flags && k->texOffset == texOffset && k->blocked == gBlockedRenderFlags &&
+            k->dirLight == gUseDirectionalLighting) {
+            *capture = gPortNMatBad[id] != 0;
+            gPortNMatBad[id] = 0;
+            return (int) id;
+        }
+    }
+    // Full: start again (every key is captured afresh).
+    __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
+    sNMatCount = 0;
+    return port_nmat_key(texture, flags, texOffset, capture);
+}
+
 static inline s32 normal_byte(s32 n, float k) {
     float f = n * k;
     return (s32) (f >= 0.0f ? f + 0.5f : f - 0.5f);

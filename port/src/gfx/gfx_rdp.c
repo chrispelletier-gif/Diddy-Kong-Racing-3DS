@@ -204,6 +204,7 @@ static GfxDrawState sTriState;
 static s32 sTriStateValid;
 static s32 sFrameCount;
 #ifdef PICA_ALL
+static unsigned long sNDrawStats[3]; // Native draws (PICA_ALL): drawn, materials captured, dropped
 static s32 sOpaquePending; // Sorted opaque CPU batches wait to be drawn (opaque_flush)
 static void opaque_flush(void);
 #define OPAQUE_FLUSH()                                                                                                 \
@@ -3489,6 +3490,11 @@ static void track_frame_start(void) {
     }
     sTrackLoads = gPortLevelLoads;
 #ifdef PICA_ALL
+    if (sFrameCount % 600 == 0 && (sNDrawStats[0] | sNDrawStats[1] | sNDrawStats[2]) != 0) {
+        plat_log("native draws: %lu drawn, %lu materials captured, %lu dropped (material gone)", sNDrawStats[0],
+                 sNDrawStats[1], sNDrawStats[2]);
+        sNDrawStats[0] = sNDrawStats[1] = sNDrawStats[2] = 0;
+    }
     if (sFrameCount % 600 == 0 && sOpaqueStats[0] > 0) {
         plat_log("opaque sorting: %u batches held, %u draws", (unsigned) sOpaqueStats[0], (unsigned) sOpaqueStats[1]);
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
@@ -4148,6 +4154,274 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
     return used;
 }
 
+#ifdef PICA_ALL
+/******************************** Native draws (NR0/NR1/NR2, PICA_ALL) ********************************/
+/*
+ * The game records a model batch as one PORT_NDRAW_TAG | material and two words of data (port_drawtag.h) instead of
+ * its N64 commands. A material is captured once: the first time the game uses it, it emits the material's own
+ * commands (forced in full) followed by PORT_NMAT_TAG | material, and the walk keeps the draw state, the two tiles and
+ * the fog bit those commands left. A native draw then uses that state with the current colours, fog and scissor, and
+ * the batch's vertices go through the native mesh path (each vertex transformed once, corners from cached tables).
+ * A material whose textures the cache has since dropped is marked bad and drawn again by the game's commands next
+ * time (gPortNMatBad).
+ */
+#define NMAT_MAX 1024
+typedef struct NMat {
+    GfxDrawState state;
+    Tile tiles[2];
+    u16 texEntry[2];
+    u8 texGen[2];
+    u8 valid, fog;
+} NMat;
+static NMat sNMats[NMAT_MAX];
+extern volatile unsigned char gPortNMatBad[];
+
+static s32 tex_entry_of(const GfxTexture *t) {
+    const u8 *base = (const u8 *) sTexCache, *p = (const u8 *) t;
+    if (t == NULL || p < base || p >= base + sizeof(sTexCache)) {
+        return -1;
+    }
+    return (s32) ((p - base) / sizeof(TexCacheEntry));
+}
+
+static COLD void nmat_capture(u32 id) {
+    NMat *m = &sNMats[id & (NMAT_MAX - 1)];
+    s32 k;
+    build_draw_state(&m->state, FALSE);
+    m->tiles[0] = g.tiles[0];
+    m->tiles[1] = g.tiles[1];
+    m->fog = (g.geometryMode & G_FOG) != 0;
+    m->valid = TRUE;
+    for (k = 0; k < 2; k++) {
+        s32 e = tex_entry_of(m->state.textures[k]);
+        if (m->state.textures[k] != NULL && e < 0) {
+            m->valid = FALSE; // Not a cache texture (an atlas page, a render target): left to the game's commands
+        }
+        m->texEntry[k] = (u16) (e < 0 ? 0 : e);
+        m->texGen[k] = e < 0 ? 0 : sTexCache[e].gen;
+    }
+    sNDrawStats[1]++;
+    if (!m->valid) {
+        gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+    }
+}
+
+/* The batch recorded after the tag at dl[-1]; returns the words of data used. */
+static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
+    struct {
+        const Vertex *src;
+        s32 count, dest, matrix;
+    } loads[2];
+    NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
+    s32 numLoads = 0, numVerts, start, textured, count, total, i, k, tex0, tex1, zeroTex1, cur = g.curMatrix;
+    const Vertex *vtx;
+    const Triangle *tris;
+    NativeMesh *mesh;
+    GfxDrawState state;
+    const Tile *tile0 = &mat->tiles[0], *tile1 = &mat->tiles[1];
+    TexAxis u0, v0, u1, v1;
+    Viewport vp;
+    u8 batchedKey = 0xFF, frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
+    u32 generation, stamp;
+    float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+
+    if (remaining < 2) {
+        return 0;
+    }
+    vtx = (const Vertex *) seg_addr(dl[0].words.w0);
+    tris = (const Triangle *) seg_addr(dl[0].words.w1);
+    numVerts = dl[1].words.w0 & 0xFF;
+    start = (dl[1].words.w0 >> 8) & 0xFF;
+    textured = (dl[1].words.w0 >> 16) & 1;
+    count = (s32) dl[1].words.w1;
+    if (!mat->valid) {
+        if (plat_getenv("NDBG")) plat_log("NDBG invalid mat %d frame %d", (int) id, (int) sFrameCount);
+        gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+        sNDrawStats[2]++;
+        return 2;
+    }
+    for (k = 0; k < 2; k++) {
+        if (mat->state.textures[k] != NULL) {
+            TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
+            if (!e->used || e->gen != mat->texGen[k]) {
+                mat->valid = FALSE;
+                gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+                sNDrawStats[2]++;
+                return 2;
+            }
+            e->lastFrame = sFrameCount;
+        }
+    }
+    // The loads render_mesh would have made (gSPVertexDKR, gSPSelectMatrixDKR).
+    if (start == numVerts) {
+        loads[0].src = vtx, loads[0].count = numVerts, loads[0].dest = 0, loads[0].matrix = cur;
+        numLoads = 1;
+    } else {
+        if (start > 0) {
+            loads[numLoads].src = vtx, loads[numLoads].count = start, loads[numLoads].dest = 0;
+            loads[numLoads].matrix = cur;
+            numLoads++;
+            loads[numLoads].src = vtx + start, loads[numLoads].count = numVerts - start, loads[numLoads].dest = start;
+        } else {
+            loads[numLoads].src = vtx, loads[numLoads].count = numVerts, loads[numLoads].dest = 0;
+        }
+        loads[numLoads].matrix = 2; // G_MTX_DKR_INDEX_2
+        numLoads++;
+        cur = 1; // G_MTX_DKR_INDEX_1 afterwards
+    }
+    total = numVerts;
+    if (total > MAX_VERTICES || count <= 0) {
+        return 2;
+    }
+    mesh = native_find(tris, count);
+    if (mesh == NULL) {
+        mesh = native_find(tris, count); // The tables were full and have just been emptied
+    }
+    if (sAnyPending) {
+        forget_slots(0, total);
+    }
+    if (mesh == NULL || mesh->maxVertex >= total) {
+        sNativeDeclined++;
+        if (plat_getenv("NDBG")) plat_log("NDBG decline mesh %p count %d total %d frame %d", (void *) mesh, (int) count, (int) total, (int) sFrameCount);
+        // No tables (out of room): the game's commands aren't there, so draw through the slots.
+        for (i = 0; i < numLoads; i++) {
+            load_vertices_now(loads[i].src, loads[i].count, loads[i].dest, g.matrices[loads[i].matrix], mat->fog,
+                              FALSE);
+        }
+        g.curMatrix = cur;
+        sTriStateValid = FALSE;
+        return 2;
+    }
+    for (i = 0; i < numLoads; i++) {
+        RspVertex *verts = &sNativeVerts[loads[i].dest];
+        const Vertex *src = loads[i].src;
+        s32 c = loads[i].count;
+        float(*m)[4] = g.matrices[loads[i].matrix];
+        transform_vertices(src, c, verts, m);
+        for (k = 0; k < c; k++) {
+            u32 rgba;
+            __builtin_memcpy(&rgba, &src[k].r, 4);
+            if (UNLIKELY(sLightOn)) {
+                u8 *cc = (u8 *) &rgba;
+                cc[0] = cc[1] = cc[2] = gfx_light_shade(src[k].r, src[k].g, src[k].b, sLight);
+            }
+            if (mat->fog) {
+                rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
+            }
+            verts[k].rgba = rgba;
+        }
+    }
+    g.curMatrix = cur;
+    g.vertexIndex = 0;
+    g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+    sMix.kinds[sDrawKind].verts += (unsigned long) total;
+    sObjTris[sDrawObj] += count;
+    sNDrawStats[0]++;
+
+    state = mat->state;
+    __builtin_memcpy(state.prim, g.prim, 4);
+    __builtin_memcpy(state.env, g.env, 4);
+    __builtin_memcpy(state.fog, g.fogColor, 4);
+    state.fogMul = g.fogMul;
+    state.fogOffset = g.fogOffset;
+    state.primLodFrac = g.primLodFrac;
+    __builtin_memcpy(state.scissor, g.scissor, sizeof(state.scissor));
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    viewport_init(&vp);
+    keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
+    tex0 = state.textures[0] != NULL;
+    tex1 = state.textures[1] != NULL;
+    if (tex0) {
+        const GfxTexture *tex = state.textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+    }
+    if (tex1) {
+        const GfxTexture *tex = state.textures[1];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    }
+    zeroTex1 = !tex1 && !sWalkLean;
+    state.flat = 0;
+    if (!opaque_sortable(&state)) {
+        OPAQUE_FLUSH();
+    }
+    sBatchGeneration++;
+    generation = sBatchGeneration;
+    stamp = ++sNativeStamp;
+    for (i = 0; i < count; i++) {
+        const u16 *tc = &mesh->triCorners[i * 3];
+        u8 batchKey;
+        u16 *out;
+        state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
+        if (sCpuCull && state.cullMode != 0) {
+            const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];
+            const RspVertex *b = &sNativeVerts[mesh->cornerVertex[tc[1]]];
+            const RspVertex *c = &sNativeVerts[mesh->cornerVertex[tc[2]]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue;
+            }
+            state.cullMode = 0;
+        }
+        batchKey = state.cullMode;
+        if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
+            out = &sBatchIndices[sBatchCount++ * 3];
+        } else {
+            out = batch_triangle(&state);
+            batchedKey = batchKey;
+            if (sBatchGeneration != generation) {
+                generation = sBatchGeneration;
+                stamp = ++sNativeStamp;
+            }
+        }
+        for (k = 0; k < 3; k++) {
+            u32 cn = tc[k];
+            const RspVertex *in;
+            GfxVertex *v;
+            TexCoords uv;
+            u16 index;
+            if (sNativeCornerStamp[cn] == stamp) {
+                out[k] = sNativeCornerIndex[cn];
+                continue;
+            }
+            index = (u16) sBatchVertices++;
+            sNativeCornerStamp[cn] = stamp;
+            sNativeCornerIndex[cn] = index;
+            out[k] = index;
+            v = &sBatchVerts[index];
+            in = &sNativeVerts[mesh->cornerVertex[cn]];
+            v->x = in->x * vp.scaleX + in->w * vp.transX;
+            v->y = in->y * vp.scaleY + in->w * vp.transY;
+            v->z = in->z;
+            v->w = in->w;
+            __builtin_memcpy(&v->r, &in->rgba, 4);
+            uv.texCoords = mesh->cornerUv[cn];
+            if (tex0) {
+                v->u0 = tex_axis_coord(&u0, uv.u);
+                v->v0 = tex_axis_coord(&v0, uv.v);
+            } else {
+                v->u0 = v->v0 = 0.0f;
+            }
+            if (tex1) {
+                v->u1 = tex_axis_coord(&u1, uv.u);
+                v->v1 = tex_axis_coord(&v1, uv.v);
+            } else if (zeroTex1) {
+                v->u1 = v->v1 = 0.0f;
+            }
+        }
+    }
+    sTriStateValid = FALSE;
+    return 2;
+}
+#endif
+
 /******************************** RDP rectangles ********************************/
 
 static void screen_to_clip(GfxVertex *v, float sx, float sy) {
@@ -4475,6 +4749,14 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_track(dl, remaining);
                     dl += used;
                     remaining -= used;
+#ifdef PICA_ALL
+                } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+                    s32 used = native_record(dl, remaining, w1 & 0xFFFF);
+                    dl += used;
+                    remaining -= used;
+                } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
+                    nmat_capture(w1 & 0xFFFF);
+#endif
                 } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
                     s32 k;
                     for (k = 0; k < 4; k++) {

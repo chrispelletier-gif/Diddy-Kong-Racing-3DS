@@ -55,6 +55,16 @@ extern unsigned int gPortLevelLoads;
  * normals (obj_asm.c), and PORT_LIGHT_TAG alone after it.
  */
 #define PORT_LIGHT_TAG 0x504C0000 /* "PL" */
+/*
+ * Native draws (PICA_ALL, DKR_NATIVE_DRAW): render_mesh records a batch as PORT_NDRAW_TAG | material followed by two
+ * data words (vertices and triangles; vertex count | split << 8 | textured << 16 and the triangle count) instead of its
+ * N64 commands. A material's first use (or after gPortNMatBad) emits its commands in full, then PORT_NMAT_TAG |
+ * material, for the renderer to keep their state.
+ */
+#define PORT_NDRAW_TAG 0x50420000 /* "PB" */
+#define PORT_NMAT_TAG 0x504D0000  /* "PM" */
+int port_native_draw(void);
+int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
 struct Vertex;
 int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);
 void port_gpu_light_clear(const struct Vertex *verts);

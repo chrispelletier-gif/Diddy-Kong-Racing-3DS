@@ -3237,6 +3237,50 @@ static inline void set_cpu_uniforms(void) {
  * matrix only keeps what is left of its offset.
  */
 static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, float su1, float sv1) {
+#ifdef PICA_ALL
+    // PICA_ALL: the camera solve in single precision (the camera is rounded to whole numbers anyway, and only the
+    // final offsets need double), with the 3x3 inverse's cofactors shared by the three unknowns.
+    float a[3][3], b[3], det, cof[3][3];
+    double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 };
+    static const int sCols[3] = { 0, 1, 3 };
+    int r, k;
+
+    for (r = 0; r < 4; r++) {
+        rows[0][r] = p->mtx[r][1];
+        rows[1][r] = -(double) p->mtx[r][0] * sScale3D;
+        rows[2][r] = 0.5 * ((double) p->mtx[r][2] - p->mtx[r][3]);
+        rows[3][r] = p->mtx[r][3];
+    }
+    for (k = 0; k < 3; k++) {
+        for (r = 0; r < 3; r++) {
+            a[k][r] = p->mtx[r][sCols[k]];
+        }
+        b[k] = -p->mtx[3][sCols[k]];
+    }
+    cof[0][0] = a[1][1] * a[2][2] - a[1][2] * a[2][1];
+    cof[0][1] = a[0][2] * a[2][1] - a[0][1] * a[2][2];
+    cof[0][2] = a[0][1] * a[1][2] - a[0][2] * a[1][1];
+    cof[1][0] = a[1][2] * a[2][0] - a[1][0] * a[2][2];
+    cof[1][1] = a[0][0] * a[2][2] - a[0][2] * a[2][0];
+    cof[1][2] = a[0][2] * a[1][0] - a[0][0] * a[1][2];
+    cof[2][0] = a[1][0] * a[2][1] - a[1][1] * a[2][0];
+    cof[2][1] = a[0][1] * a[2][0] - a[0][0] * a[2][1];
+    cof[2][2] = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+    det = a[0][0] * cof[0][0] + a[0][1] * cof[1][0] + a[0][2] * cof[2][0];
+    if (det > 1e-30f || det < -1e-30f) {
+        float inv = 1.0f / det;
+        for (k = 0; k < 3; k++) {
+            float c = (cof[k][0] * b[0] + cof[k][1] * b[1] + cof[k][2] * b[2]) * inv;
+            c = c < -60000.0f ? -60000.0f : c > 60000.0f ? 60000.0f : c;
+            cam[k] = floorf(c + 0.5f);
+        }
+    }
+    for (k = 0; k < 4; k++) {
+        double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
+        set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
+    }
+#else
+
     double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 }, a[3][3], b[3], det;
     static const int sCols[3] = { 0, 1, 3 };
     int r, k;
@@ -3273,6 +3317,7 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
         double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
         set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
     }
+#endif
     set_unif(UNIF_CAMOFF, (float) cam[0], (float) cam[1], (float) cam[2], 0.0f);
     set_unif(UNIF_TEXA, p->texScale[0] * su0, -p->texScale[1] * sv0, p->texScale[2] * su1, -p->texScale[3] * sv1);
     set_unif(UNIF_TEXC, 0.0f, 0.0f, 0.0f, 0.0f);

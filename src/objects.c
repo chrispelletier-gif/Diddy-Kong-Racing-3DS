@@ -4321,6 +4321,10 @@ void obj_tick_anims(void) {
  * Renders every triangle batch in an objects mesh.
  * If vertOffset is true, then draw in two passes, utilising the head matrix and vertex ID offset in the batch.
  */
+#ifdef PICA_ALL
+extern s16 gForceFlags;
+extern TextureHeader *gCurrentTextureHeader;
+#endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
     s32 i;
     s32 textureIndex;
@@ -4349,6 +4353,8 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
         // GPU vertex lighting (port_drawtag.h): the lit batches of a buffer whose colours hold normals get the light.
         float light[4];
         s32 lit = obj != NULL && port_gpu_light_get(obj->curVertData, objModel, light), lightOn = FALSE;
+        // Native draws (port_drawtag.h PORT_NDRAW_TAG): no N64 commands for the batches, only a record each.
+        s32 nativeDraw = obj != NULL && port_native_draw() && !gObjectTexAnim, anyNative = FALSE;
 #endif
 #endif
     while (i < objModel->numberOfBatches && !endLoop) {
@@ -4380,6 +4386,20 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     !(objModel->batches[i].flags & (flags & ~RENDER_SEMI_TRANSPARENT))) {
                     texToSetFlags |= RENDER_SEMI_TRANSPARENT;
                 }
+#ifdef PICA_ALL
+                if (nativeDraw) {
+                    // The material's commands only when the renderer hasn't kept them yet.
+                    s32 capture, id = port_nmat_key(texToSet, texToSetFlags, texOffset, &capture);
+                    if (capture) {
+                        gForceFlags = TRUE;
+                        gCurrentTextureHeader = NULL;
+                        material_set(&dList, texToSet, texToSetFlags, texOffset);
+                        gDPNoOpTag(dList++, PORT_NMAT_TAG | id);
+                    }
+                    textureIndex = id;
+                    anyNative = TRUE;
+                } else
+#endif
                 if (gObjectTexAnim == FALSE) {
                     material_set(&dList, texToSet, texToSetFlags, texOffset);
                 } else {
@@ -4407,6 +4427,19 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                         gDPNoOpTag(dList++, PORT_LIGHT_TAG);
                         lightOn = FALSE;
                     }
+                }
+#endif
+#ifdef PICA_ALL
+                if (nativeDraw) {
+                    gDPNoOpTag(dList++, PORT_NDRAW_TAG | textureIndex);
+                    dList->words.w0 = OS_K0_TO_PHYSICAL(vtx);
+                    dList->words.w1 = OS_K0_TO_PHYSICAL(tris);
+                    dList++;
+                    dList->words.w0 = (u32) numVertices | ((u32) offsetStartVertex << 8) | ((u32) texEnabled << 16);
+                    dList->words.w1 = (u32) numTris;
+                    dList++;
+                    i++;
+                    continue;
                 }
 #endif
                 if (nativeTag) {
@@ -4438,6 +4471,12 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
 #ifdef PICA_ALL
     if (lightOn) {
         gDPNoOpTag(dList++, PORT_LIGHT_TAG);
+    }
+    if (anyNative) {
+        // The renderer's settings are the last captured material's, not the last batch's: the next material_set
+        // sets everything again.
+        gForceFlags = TRUE;
+        gCurrentTextureHeader = NULL;
     }
 #endif
     }
