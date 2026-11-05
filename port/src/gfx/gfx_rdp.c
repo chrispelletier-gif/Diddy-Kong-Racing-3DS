@@ -4415,6 +4415,31 @@ static HOT void forget_covered_loads(u32 tmem, u32 bytes) {
     g.tmemValid = (g.tmemValid & ~covered) | (1ULL << first);
 }
 
+#ifdef PICA_ALL
+/* Stall finder (PICA_ALL test build): logs any command, or frame start/end step, that takes 40 ms or more. */
+static unsigned long long sStallT, sStallLimit;
+static u32 sStallW0, sStallW1;
+static const char *sStallWhat;
+static void stall_mark(const char *what, u32 w0, u32 w1) {
+    unsigned long long t = plat_ticks();
+    if (sStallLimit == 0) {
+        sStallLimit = plat_ticks_per_second() / 25;
+    }
+    if (sStallWhat != NULL && t - sStallT >= sStallLimit) {
+        plat_log("STALL %d ms in %s (command %08x %08x, kind %d), frame %d",
+                 (int) ((t - sStallT) * 1000 / plat_ticks_per_second()), sStallWhat, (unsigned) sStallW0,
+                 (unsigned) sStallW1, (int) sDrawKind, (int) sFrameCount);
+    }
+    sStallT = t;
+    sStallWhat = what;
+    sStallW0 = w0;
+    sStallW1 = w1;
+}
+#define STALL_MARK(what, w0, w1) stall_mark(what, w0, w1)
+#else
+#define STALL_MARK(what, w0, w1)
+#endif
+
 static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     // Commands left to run: a G_DMADL's count, or (no list is that long) as good as no limit, so that the loop tests
     // one count rather than the limit and the count.
@@ -4425,6 +4450,7 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         u32 w1 = dl->words.w1;
         u32 op = w0 >> 24;
         u32 info = sOpInfo[op];
+        STALL_MARK("command", w0, w1);
         dl++;
         remaining--;
         if (UNLIKELY(sTracing)) {
@@ -5035,6 +5061,8 @@ void port_gfx_run_task(void *taskPtr) {
         start_snapshot();
     }
 #endif
+    STALL_MARK(NULL, 0, 0);
+    STALL_MARK("frame set-up", 0, 0);
     REF_CALL(refb_start_frame());
     sTracing = sFrameCount == sTraceFrame;
     read_switches();
@@ -5068,18 +5096,24 @@ void port_gfx_run_task(void *taskPtr) {
         g.scissor[3] = GFX_SCREEN_HEIGHT;
     }
     gPlatGfxStage = "running a display list";
+    STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
     walk_begin();
     run_dl((const Gfx *) task->t.data_ptr, -1);
+    STALL_MARK("track flush", 0, 0);
     track_flush();
+    STALL_MARK("batch flush", 0, 0);
     flush_batch();
     sky_draw_if_held();
     sDepthDrawn = FALSE;
     kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
+    STALL_MARK("opaque flush", 0, 0);
     OPAQUE_FLUSH();
+    STALL_MARK("backend frame end", 0, 0);
     gfx_split_frame_end();
     walk_end();
+    STALL_MARK(NULL, 0, 0); // Not timed until the next frame starts
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(sRefActive)) {
         end_reference_frame();

@@ -245,16 +245,22 @@ typedef struct BenchSwitch {
  * The list ends with an empty entry, so it may be otherwise empty. */
 #ifdef PICA_ALL
 /* The off-GitHub "everything on the PICA200" test build: every race has the GPU route on (plat_common.c) and the
- * two-core renderer off; each row turns one part back to the shipped way. */
+ * two-core renderer off on a New 3DS (on on an Old 3DS); each row turns one part back to the shipped way. */
 #define PICA_ROWS                                                                                                      \
     { "PICA build: old renderer (no GPU vertex maths, track or lighting)",                                         \
       { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 1, 0, 1, 0 },                                      \
         { "PICA build: vertex lighting on the CPU", { "DKR_GPU_LIGHT", NULL, NULL }, 1, 0, 1, 0 },                     \
-        { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 },          \
-        { "PICA build: two-core renderer on", { "DKR_SPLIT_RENDER", NULL, NULL }, 0, 1, 1, 0 },                        \
-        { NULL, { NULL, NULL, NULL }, 0, 0 }
-static const BenchSwitch sSwitchesOld3ds[] = { PICA_ROWS };
-static const BenchSwitch sSwitchesNew3ds[] = { PICA_ROWS };
+        { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 }
+static const BenchSwitch sSwitchesOld3ds[] = {
+    PICA_ROWS,
+    { "PICA build: two-core renderer off", { "DKR_SPLIT_RENDER", NULL, NULL }, 1, 0, 1, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+static const BenchSwitch sSwitchesNew3ds[] = {
+    PICA_ROWS,
+    { "PICA build: two-core renderer on", { "DKR_SPLIT_RENDER", NULL, NULL }, 0, 1, 1, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
 #else
 static const BenchSwitch sSwitchesOld3ds[] = {
     // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
