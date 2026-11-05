@@ -4389,7 +4389,7 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
 #ifdef PICA_ALL
                 if (nativeDraw) {
                     // The material's commands only when the renderer hasn't kept them yet.
-                    s32 capture, id = port_nmat_key(texToSet, texToSetFlags, texOffset, &capture);
+                    int capture; s32 id = port_nmat_key(texToSet, texToSetFlags, texOffset, &capture);
                     if (capture) {
                         gForceFlags = TRUE;
                         gCurrentTextureHeader = NULL;

@@ -2063,7 +2063,7 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
 #ifdef PICA_ALL
             if (nativeDraw) {
                 // Native draw (port_drawtag.h PORT_NDRAW_TAG): the material's commands once, then a record.
-                s32 capture, id = port_nmat_key(texture, batchFlags, texOffset, &capture);
+                int capture; s32 id = port_nmat_key(texture, batchFlags, texOffset, &capture);
                 if (capture) {
                     gForceFlags = TRUE;
                     gCurrentTextureHeader = NULL;
