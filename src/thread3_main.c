@@ -403,6 +403,7 @@ void main_game_loop(void) {
     tempLogicUpdateRate = fb_update(gScreenStatus);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
+    port_game_note_frame();
     port_autorun_frame(tempLogicUpdateRate);
     port_race_hud_frame(tempLogicUpdateRate);
     {
