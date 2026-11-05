@@ -86,7 +86,7 @@ GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/in
                  -I$(ROOT)/libultra/src/os -I$(ROOT)/src/hasm -Iinclude -Isrc
 
 # The N64 compiler treats char as unsigned and plain C semantics for overflow/aliasing are relied upon.
-COMMON_FLAGS := -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
+COMMON_FLAGS := -DPORT_NATIVE_OPS=1 -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
 # DEBUG=asan: AddressSanitizer, plus the float to integer conversions that behave differently on ARM.
 SANITIZE_FLAGS := -fsanitize=address,float-cast-overflow
 ifeq ($(DEBUG),1)

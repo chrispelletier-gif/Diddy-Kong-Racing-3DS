@@ -186,21 +186,26 @@
     _g->words.w1 = (unsigned int)(address);                                        \
 }
 
+#ifndef gDPSetPrimColorRGBA
 #define gDPSetPrimColorRGBA(pkt, rgba)             \
 {                                                  \
     Gfx *_g = (Gfx *)(pkt);                        \
     _g->words.w0 = _SHIFTL(G_SETPRIMCOLOR, 24, 8); \
     _g->words.w1 = rgba;                           \
 }
+#endif
 
+#ifndef gDPSetEnvColorRGBA
 #define gDPSetEnvColorRGBA(pkt, rgba)             \
 {                                                 \
     Gfx *_g = (Gfx *)(pkt);                       \
     _g->words.w0 = _SHIFTL(G_SETENVCOLOR, 24, 8); \
     _g->words.w1 = rgba;                          \
 }
+#endif
 
 // DKR Uses these macros, from later gbi.h files
+#ifndef gDPSetOtherMode
 #define	gDPSetOtherMode(pkt, mode0, mode1)				\
 {									\
 	Gfx *_g = (Gfx *)(pkt);						\
@@ -208,6 +213,7 @@
 	_g->words.w0 = _SHIFTL(G_RDPSETOTHERMODE,24,8)|_SHIFTL(mode0,0,24);\
 	_g->words.w1 = (unsigned int)(mode1);				\
 }
+#endif
 
 #define	gsDPSetOtherMode(mode0, mode1)					\
 {{									\

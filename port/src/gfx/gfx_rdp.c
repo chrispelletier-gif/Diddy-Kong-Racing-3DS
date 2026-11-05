@@ -3506,6 +3506,12 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
 #ifdef PICA_ALL
 static s32 sOpCountOn = -1;
 static u32 sOpCount[256];
+static u32 sOpKind[PORT_DRAW_KINDS][256]; // DKR_OPCOUNT=1: also by draw kind (N64 commands only, not port tags)
+#endif
+#ifdef PORT_NATIVE_OPS
+void port_nop_static_forget(void);
+static u32 sNopStats[2];
+static u32 sNopStaticCount, sNopStaticWords;
 #endif
 static void track_frame_start(void) {
     sNativeTrack = sNativeTrackSwitch && sGpuTransform;
@@ -3513,6 +3519,16 @@ static void track_frame_start(void) {
         gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
         track_drop_all();
     }
+#ifdef PORT_NATIVE_OPS
+    if (sTrackLoads != gPortLevelLoads) {
+        port_nop_static_forget();
+    }
+    if (sFrameCount % 600 == 0 && sNopStats[0] > 0) {
+        plat_log("native ops: %u a frame, %u fixed lists converted (%u commands), %u table misses", (unsigned) (sNopStats[0] / 600),
+                 (unsigned) sNopStaticCount, (unsigned) sNopStaticWords, (unsigned) sNopStats[1]);
+        sNopStats[0] = 0;
+    }
+#endif
     sTrackLoads = gPortLevelLoads;
 #ifdef PICA_ALL
     if (sFrameCount % 600 == 0 && (sNDrawStats[0] | sNDrawStats[1] | sNDrawStats[2]) != 0) {
@@ -3545,6 +3561,22 @@ static void track_frame_start(void) {
         }
         line[n] = 0;
         plat_log("commands per frame by opcode:%s", line);
+        {
+            s32 k;
+            for (k = 0; k < PORT_DRAW_KINDS; k++) {
+                n = 0;
+                for (i = 0; i < 256; i++) {
+                    if (sOpKind[k][i] >= 300 && n < 1000) {
+                        n += plat_snprintf(line + n, sizeof(line) - n, " %02X:%u", (unsigned) i,
+                                           (unsigned) ((sOpKind[k][i] + 300) / 600));
+                    }
+                    sOpKind[k][i] = 0;
+                }
+                if (n > 0) {
+                    plat_log("  kind %d:%s", (int) k, line);
+                }
+            }
+        }
     }
     if (sFrameCount % 600 == 0 && sOpaqueStats[0] > 0) {
         plat_log("opaque sorting: %u batches held, %u draws", (unsigned) sOpaqueStats[0], (unsigned) sOpaqueStats[1]);
@@ -4719,9 +4751,12 @@ static NOINLINE void texture_rectangle(u32 w0, u32 w1, s32 flip) {
     draw_rect(ulx, uly, lrx, lry, s, t, s1, t1, flip, TRUE);
 }
 
+static NOINLINE void fill_rect_at(s32 ulx, s32 uly, s32 lrx, s32 lry);
 static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
-    s32 lrx = (w0 >> 14) & 0x3FF, lry = (w0 >> 2) & 0x3FF;
-    s32 ulx = (w1 >> 14) & 0x3FF, uly = (w1 >> 2) & 0x3FF;
+    fill_rect_at((w1 >> 14) & 0x3FF, (w1 >> 2) & 0x3FF, (w0 >> 14) & 0x3FF, (w0 >> 2) & 0x3FF);
+}
+
+static NOINLINE void fill_rect_at(s32 ulx, s32 uly, s32 lrx, s32 lry) {
     s16 rect[4];
     u32 cyc = cycle_type();
 
@@ -4843,6 +4878,159 @@ static COLD void log_bad_list_address(u32 addr, const Gfx *where) {
  * no test of the depth, which never changes within it: the compiler would otherwise unswitch the loop on it, into
  * two copies of the whole loop.
  */
+#ifdef PORT_NATIVE_OPS
+/*
+ * The game's fixed lists (its gs* tables: render modes, menu and HUD settings, and the texture and sprite lists made
+ * at load time while native ops were off) hold N64 commands. Each is turned into native ops once, in place, the
+ * first time a frame calls it: the same number of words, the syncs becoming no-ops. Lists inside the frame buffers
+ * (gDisplayLists) are the frame's own and are left alone.
+ */
+#define NOP_STATIC_SLOTS 4096
+static const Gfx *sNopStatic[NOP_STATIC_SLOTS];
+extern Gfx *gDisplayLists[];
+extern s32 gPortDlBytes;
+
+static s32 in_frame_buffers(const Gfx *dl) {
+    s32 k;
+    for (k = 0; k < PORT_DL_BUFFERS; k++) {
+        const u8 *b = (const u8 *) gDisplayLists[k];
+        if (b != NULL && (const u8 *) dl >= b && (const u8 *) dl < b + gPortDlBytes) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* One N64 state command as a native op; FALSE for any other command (left as it is). */
+static s32 nop_from_n64(u32 w0, u32 w1, Gfx *out) {
+    u32 op = w0 >> 24, k;
+    switch (op) {
+        case OP(G_RDPPIPESYNC):
+        case OP(G_RDPLOADSYNC):
+        case OP(G_RDPTILESYNC):
+        case OP(G_RDPFULLSYNC):
+            out->words.w0 = (u32) G_NOOP << 24;
+            out->words.w1 = 0;
+            return TRUE;
+        case OP(G_SETGEOMETRYMODE):
+            out->words.w0 = NOP_W0(NOP_GEOM_SET, 0);
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_CLEARGEOMETRYMODE):
+            out->words.w0 = NOP_W0(NOP_GEOM_CLR, 0);
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_SETOTHERMODE_H):
+        case OP(G_SETOTHERMODE_L):
+            out->words.w0 = NOP_W0(op == OP(G_SETOTHERMODE_H) ? NOP_OMH : NOP_OML, w0 & 0xFFFF);
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_RDPSETOTHERMODE):
+            out->words.w0 = NOP_W0(NOP_OMALL, 0);
+            out->words.w1 = port_nop_intern(0, w0 & 0x00FFFFFF, w1);
+            return TRUE;
+        case OP(G_SETCOMBINE):
+            out->words.w0 = NOP_W0(NOP_COMBINE, 0);
+            out->words.w1 = port_nop_intern(1, w0 & 0x00FFFFFF, w1);
+            return TRUE;
+        case OP(G_SETPRIMCOLOR):
+            out->words.w0 = NOP_W0(NOP_PRIM, w0 & 0xFFFF);
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_SETENVCOLOR):
+        case OP(G_SETBLENDCOLOR):
+        case OP(G_SETFOGCOLOR):
+        case OP(G_SETFILLCOLOR):
+            k = (op == OP(G_SETENVCOLOR)) ? 0 : (op == OP(G_SETBLENDCOLOR)) ? 1 : (op == OP(G_SETFOGCOLOR)) ? 2 : 3;
+            out->words.w0 = NOP_W0(NOP_COLOR, k);
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_SETSCISSOR): {
+            u32 x0 = (w0 >> 12) & 0xFFF, y0 = w0 & 0xFFF, x1 = (w1 >> 12) & 0xFFF, y1 = w1 & 0xFFF;
+            out->words.w0 = NOP_W0(NOP_SCISSOR, ((w1 >> 24) & 3) << 17 | x0 << 5 | y0 >> 7);
+            out->words.w1 = (y0 & 127) << 25 | x1 << 12 | y1;
+            return TRUE;
+        }
+        case OP(G_FILLRECT):
+            out->words.w0 = NOP_W0(NOP_FILLRECT, (w0 >> 2) & 0x3FF);
+            out->words.w1 = ((w1 >> 14) & 0x3FF) << 20 | ((w1 >> 2) & 0x3FF) << 10 | ((w0 >> 14) & 0x3FF);
+            return TRUE;
+        case OP(G_SETCIMG):
+        case OP(G_SETZIMG):
+        case OP(G_SETTIMG):
+            k = (op == OP(G_SETCIMG)) ? 0 : (op == OP(G_SETZIMG)) ? 1 : 2;
+            out->words.w0 = NOP_W0(NOP_IMAGE, k << 17 | ((w0 >> 21) & 7) << 14 | ((w0 >> 19) & 3) << 12 | (w0 & 0xFFF));
+            out->words.w1 = w1;
+            return TRUE;
+        case OP(G_SETTILE):
+            out->words.w0 = NOP_W0(NOP_TILE, ((w1 >> 18) & 3) << 17 | ((w1 >> 24) & 7) << 14 | ((w0 >> 9) & 0x1FF) << 5 |
+                                                 ((w0 >> 19) & 3) << 3 | ((w0 >> 21) & 7));
+            out->words.w1 = (w1 & 0xF) << 27 | ((w1 >> 4) & 0xF) << 23 | ((w1 >> 8) & 3) << 21 |
+                            ((w1 >> 10) & 0xF) << 17 | ((w1 >> 14) & 0xF) << 13 | ((w1 >> 20) & 0xF) << 9 | (w0 & 0x1FF);
+            return TRUE;
+        case OP(G_SETTILESIZE):
+        case OP(G_LOADTILE):
+        case OP(G_LOADBLOCK): {
+            u32 a = (w0 >> 12) & 0xFFF, b = w0 & 0xFFF, c = (w1 >> 12) & 0xFFF, d = w1 & 0xFFF;
+            u32 id = (op == OP(G_SETTILESIZE)) ? NOP_TILESIZE : (op == OP(G_LOADTILE)) ? NOP_LOADTILE : NOP_LOADBLOCK;
+            out->words.w0 = NOP_W0(id, ((w1 >> 24) & 7) << 16 | a << 4 | ((b >> 8) & 15));
+            out->words.w1 = (b & 255) << 24 | c << 12 | d;
+            return TRUE;
+        }
+        case OP(G_LOADTLUT):
+            out->words.w0 = NOP_W0(NOP_LOADTLUT, (w1 >> 24) & 7);
+            out->words.w1 = (w1 >> 14) & 0x3FF;
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static NOINLINE void nop_static(const Gfx *list, s32 maxCommands) {
+    u32 h = ((u32) (uintptr_t) list >> 3) * 2654435761u;
+    u32 i, slot;
+    Gfx *c;
+    s32 n;
+    if (!gPortNativeOps || in_frame_buffers(list)) {
+        return;
+    }
+    for (i = 0; i < 16; i++) {
+        slot = (h + i) & (NOP_STATIC_SLOTS - 1);
+        if (sNopStatic[slot] == list) {
+            return;
+        }
+        if (sNopStatic[slot] == NULL) {
+            break;
+        }
+    }
+    if (i == 16 || sNopStaticCount >= NOP_STATIC_SLOTS / 2) {
+        return; // Full: drawn from the N64 commands, as ever
+    }
+    sNopStatic[slot] = list;
+    sNopStaticCount++;
+    for (c = (Gfx *) list, n = 0; maxCommands < 0 || n < maxCommands; c++, n++) {
+        u32 op = c->words.w0 >> 24;
+        if (op == OP(G_ENDDL) || (op == OP(G_DL) && ((c->words.w0 >> 16) & G_DL_NOPUSH)) || n >= 1024) {
+            break;
+        }
+        if (op == OP(G_TEXRECT) || op == OP(G_TEXRECTFLIP)) {
+            c += 2; // Its G_RDPHALF words follow
+            n += 2;
+            continue;
+        }
+        if (nop_from_n64(c->words.w0, c->words.w1, c)) {
+            sNopStaticWords++;
+        }
+    }
+}
+
+/* A level load may free and reuse the memory of converted lists: they're forgotten then. */
+void port_nop_static_forget(void) {
+    __builtin_memset(sNopStatic, 0, sizeof(sNopStatic));
+    sNopStaticCount = 0;
+}
+#endif
+
 static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 depth) {
     u32 op = w0 >> 24;
     if (UNLIKELY(bad_list_address(w1))) {
@@ -4851,6 +5039,9 @@ static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 
     }
     if (depth < DL_STACK_SIZE) {
         s32 maxCommands = (op == OP(G_DMADL)) ? (s32) ((w0 >> 16) & 0xFF) : -1;
+#ifdef PORT_NATIVE_OPS
+        nop_static((const Gfx *) seg_addr(w1), maxCommands);
+#endif
         run_command_list((const Gfx *) seg_addr(w1), maxCommands, depth + 1);
     }
     return op == OP(G_DL) && ((w0 >> 16) & G_DL_NOPUSH);
@@ -4870,6 +5061,176 @@ static HOT void forget_covered_loads(u32 tmem, u32 bytes) {
     }
     g.tmemValid = (g.tmemValid & ~covered) | (1ULL << first);
 }
+
+
+/* The texture loads, for the N64 commands and the native ops (native_op). */
+static void load_block(u32 tile, u32 uls, u32 lastTexel, u32 dxt) {
+    Tile *t = &g.tiles[tile & 7];
+    u32 texels = lastTexel + 1;
+    TmemLoad *load = &g.tmem[(t->tmem / 8) & 63];
+    u32 bytes;
+    switch (g.timg.siz) {
+        case G_IM_SIZ_4b: bytes = texels / 2; break;
+        case G_IM_SIZ_8b: bytes = texels; break;
+        case G_IM_SIZ_16b: bytes = texels * 2; break;
+        default: bytes = texels * 4; break;
+    }
+    load->addr = g.timg.addr + ((uls << g.timg.siz) >> 1);
+    load->size = bytes;
+    load->rowStride = 0;
+    load->lineSwapped = (dxt == 0);
+    load->valid = TRUE;
+    forget_covered_loads(t->tmem, bytes);
+}
+
+static void load_tile(u32 tile, u32 uls10_2, u32 ult10_2, u32 lrt10_2) {
+    Tile *t = &g.tiles[tile & 7];
+    u32 uls = uls10_2 >> 2, ult = ult10_2 >> 2, lrt = lrt10_2 >> 2;
+    TmemLoad *load = &g.tmem[(t->tmem / 8) & 63];
+    u32 bpp4 = 2 << g.timg.siz; // bits per texel / 2
+    u32 stride = g.timg.width * bpp4 / 4;
+    load->addr = g.timg.addr + ult * stride + uls * bpp4 / 4;
+    load->rowStride = stride;
+    load->size = (lrt - ult + 1) * stride;
+    load->lineSwapped = FALSE;
+    load->valid = TRUE;
+    forget_covered_loads(t->tmem, load->size);
+}
+
+static void load_tlut(u32 tile, u32 countMinus1) {
+    // TLUT entries sit from TMEM word 256, one per word: the tile's address says which entry this is.
+    g.tlutAddr = g.timg.addr;
+    g.tlutCount = countMinus1 + 1;
+    g.tlutFirst = (s32) (g.tiles[tile & 7].tmem & 0x1FF) - 256;
+}
+
+#ifdef PORT_NATIVE_OPS
+/*
+ * Native renderer ops (include/port_nops.h): the game's draw-state calls as the renderer's own ops. The pairs too
+ * wide for one op (combiners, whole other modes) sit in a table the game fills (port_nop_intern) and the op names.
+ */
+#define NOP_TABLE_SIZE 512
+static u32 sNopTable[2][NOP_TABLE_SIZE][2];
+static volatile u32 sNopCount[2];
+int gPortNativeOps;
+// sNopStats (above): native ops applied, table lookups that missed (full table)
+
+/* Game thread: the table entry for a pair, added if new. Entries are written before the count that publishes them,
+ * and the frame that names one reaches the renderer through the frame queue's lock after it. */
+unsigned int port_nop_intern(int table, unsigned int a, unsigned int b) {
+    u32 n = sNopCount[table & 1], i;
+    u32 (*t)[2] = sNopTable[table & 1];
+    for (i = 0; i < n; i++) {
+        if (t[i][0] == a && t[i][1] == b) {
+            return i;
+        }
+    }
+    if (n == NOP_TABLE_SIZE) {
+        sNopStats[1]++;
+        return 0;
+    }
+    t[n][0] = a;
+    t[n][1] = b;
+    __atomic_store_n(&sNopCount[table & 1], n + 1, __ATOMIC_RELEASE);
+    return n;
+}
+
+static NOINLINE void native_op(u32 w0, u32 w1) {
+    u32 bits = w0 & 0x7FFFF;
+    sTriStateValid = FALSE;
+    sNopStats[0]++;
+    switch ((w0 >> 19) & 15) {
+        case NOP_GEOM_SET:
+            g.geometryMode |= w1;
+            break;
+        case NOP_GEOM_CLR:
+            g.geometryMode &= ~w1;
+            break;
+        case NOP_OMH:
+            set_other_mode(&g.omH, (bits >> 8) & 0xFF, bits & 0xFF, w1);
+            break;
+        case NOP_OML:
+            set_other_mode(&g.omL, (bits >> 8) & 0xFF, bits & 0xFF, w1);
+            break;
+        case NOP_OMALL:
+            g.omH = sNopTable[0][w1 & (NOP_TABLE_SIZE - 1)][0] & 0x00FFFFFF;
+            g.omL = sNopTable[0][w1 & (NOP_TABLE_SIZE - 1)][1];
+            break;
+        case NOP_COMBINE:
+            g.combineW0 = sNopTable[1][w1 & (NOP_TABLE_SIZE - 1)][0] & 0x00FFFFFF;
+            g.combineW1 = sNopTable[1][w1 & (NOP_TABLE_SIZE - 1)][1];
+            decode_combiner();
+            break;
+        case NOP_PRIM:
+            unpack_rgba(w1, g.prim);
+            g.primLodFrac = bits & 0xFF;
+            break;
+        case NOP_COLOR:
+            switch (bits & 3) {
+                case 0: unpack_rgba(w1, g.env); break;
+                case 1: unpack_rgba(w1, g.blendColor); break;
+                case 2: unpack_rgba(w1, g.fogColor); break;
+                default: g.fillColor = w1; break;
+            }
+            break;
+        case NOP_SCISSOR:
+            g.scissor[0] = ((bits >> 5) & 0xFFF) >> 2;
+            g.scissor[1] = (((bits & 31) << 7) | (w1 >> 25)) >> 2;
+            g.scissor[2] = ((w1 >> 12) & 0xFFF) >> 2;
+            g.scissor[3] = (w1 & 0xFFF) >> 2;
+            break;
+        case NOP_FILLRECT:
+            fill_rect_at((w1 >> 20) & 0x3FF, (w1 >> 10) & 0x3FF, w1 & 0x3FF, bits & 0x3FF);
+            break;
+        case NOP_IMAGE:
+            switch ((bits >> 17) & 3) {
+                case 0: g.colorImage = seg_addr(w1); break;
+                case 1: g.depthImage = seg_addr(w1); break;
+                default:
+                    g.timg.fmt = (bits >> 14) & 7;
+                    g.timg.siz = (bits >> 12) & 3;
+                    g.timg.width = (bits & 0xFFF) + 1;
+                    g.timg.addr = seg_addr(w1);
+                    break;
+            }
+            break;
+        case NOP_TILE: {
+            Tile *t = &g.tiles[(bits >> 14) & 7];
+            t->fmt = bits & 7;
+            t->siz = (bits >> 3) & 3;
+            t->line = (bits >> 5) & 0x1FF;
+            t->cmt = (bits >> 17) & 3;
+            t->tmem = w1 & 0x1FF;
+            t->palette = (w1 >> 9) & 0xF;
+            t->maskt = (w1 >> 13) & 0xF;
+            t->shiftt = (w1 >> 17) & 0xF;
+            t->cms = (w1 >> 21) & 3;
+            t->masks = (w1 >> 23) & 0xF;
+            t->shifts = (w1 >> 27) & 0xF;
+            break;
+        }
+        case NOP_TILESIZE: {
+            Tile *t = &g.tiles[(bits >> 16) & 7];
+            t->uls = (bits >> 4) & 0xFFF;
+            t->ult = ((bits & 15) << 8) | (w1 >> 24);
+            t->lrs = (w1 >> 12) & 0xFFF;
+            t->lrt = w1 & 0xFFF;
+            break;
+        }
+        case NOP_LOADTILE:
+            load_tile((bits >> 16) & 7, (bits >> 4) & 0xFFF, ((bits & 15) << 8) | (w1 >> 24), w1 & 0xFFF);
+            break;
+        case NOP_LOADBLOCK:
+            load_block((bits >> 16) & 7, (bits >> 4) & 0xFFF, (w1 >> 12) & 0xFFF, w1 & 0xFFF);
+            break;
+        case NOP_LOADTLUT:
+            load_tlut(bits & 7, w1 & 0x3FF);
+            break;
+        default:
+            break;
+    }
+}
+#endif
 
 #ifdef PICA_ALL
 /* Stall finder (PICA_ALL test build): logs any command, or frame start/end step, that takes 40 ms or more. */
@@ -4910,6 +5271,9 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
 #ifdef PICA_ALL
         if (UNLIKELY(sOpCountOn > 0)) {
             sOpCount[op]++;
+            if (op != 0xC0 && (u32) sDrawKind < PORT_DRAW_KINDS) {
+                sOpKind[sDrawKind][op]++;
+            }
         }
 #endif
         dl++;
@@ -4926,6 +5290,12 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
 
         switch (op) {
             case OP(G_NOOP):
+#ifdef PORT_NATIVE_OPS
+                if (w0 & NOP_MARK) {
+                    native_op(w0, w1);
+                    break;
+                }
+#endif
                 if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
                     kind_switch(w1);
                 } else if (w1 == PORT_NATIVE_TAG) {
@@ -5169,51 +5539,17 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 break;
             }
 
-            case OP(G_LOADBLOCK): {
-                Tile *t = &g.tiles[(w1 >> 24) & 7];
-                u32 texels = ((w1 >> 12) & 0xFFF) + 1;
-                u32 dxt = w1 & 0xFFF;
-                TmemLoad *load = &g.tmem[(t->tmem / 8) & 63];
-                u32 bytes;
-                switch (g.timg.siz) {
-                    case G_IM_SIZ_4b: bytes = texels / 2; break;
-                    case G_IM_SIZ_8b: bytes = texels; break;
-                    case G_IM_SIZ_16b: bytes = texels * 2; break;
-                    default: bytes = texels * 4; break;
-                }
-                load->addr = g.timg.addr + (((w0 >> 12) & 0xFFF) << g.timg.siz >> 1);
-                load->size = bytes;
-                load->rowStride = 0;
-                load->lineSwapped = (dxt == 0);
-                load->valid = TRUE;
-                forget_covered_loads(t->tmem, bytes);
+            case OP(G_LOADBLOCK):
+                load_block((w1 >> 24) & 7, (w0 >> 12) & 0xFFF, ((w1 >> 12) & 0xFFF), w1 & 0xFFF);
                 break;
-            }
 
-            case OP(G_LOADTILE): {
-                Tile *t = &g.tiles[(w1 >> 24) & 7];
-                u32 uls = ((w0 >> 12) & 0xFFF) >> 2, ult = (w0 & 0xFFF) >> 2;
-                u32 lrs = ((w1 >> 12) & 0xFFF) >> 2, lrt = (w1 & 0xFFF) >> 2;
-                TmemLoad *load = &g.tmem[(t->tmem / 8) & 63];
-                u32 bpp4 = 2 << g.timg.siz; // bits per texel / 2
-                u32 stride = g.timg.width * bpp4 / 4;
-                load->addr = g.timg.addr + ult * stride + uls * bpp4 / 4;
-                load->rowStride = stride;
-                load->size = (lrt - ult + 1) * stride;
-                load->lineSwapped = FALSE;
-                load->valid = TRUE;
-                forget_covered_loads(t->tmem, load->size);
-                (void) lrs;
+            case OP(G_LOADTILE):
+                load_tile((w1 >> 24) & 7, (w0 >> 12) & 0xFFF, w0 & 0xFFF, w1 & 0xFFF);
                 break;
-            }
 
-            case OP(G_LOADTLUT): {
-                // TLUT entries sit from TMEM word 256, one per word: the tile's address says which entry this is.
-                g.tlutAddr = g.timg.addr;
-                g.tlutCount = ((w1 >> 14) & 0x3FF) + 1;
-                g.tlutFirst = (s32) (g.tiles[(w1 >> 24) & 7].tmem & 0x1FF) - 256;
+            case OP(G_LOADTLUT):
+                load_tlut((w1 >> 24) & 7, (w1 >> 14) & 0x3FF);
                 break;
-            }
 
             default:
                 break;

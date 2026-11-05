@@ -116,6 +116,9 @@ FadeTransition D_800DD424 = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FAD
 #define DL_BUFFERS 2
 #endif
 Gfx *gDisplayLists[DL_BUFFERS];
+#ifdef TARGET_PORT
+s32 gPortDlBytes; // Each of gDisplayLists' size: the renderer leaves lists inside them alone (gfx_rdp.c nop_static)
+#endif
 Gfx *gCurrDisplayList;
 UNUSED s32 D_801211FC;
 Mtx *gMatrixHeap[DL_BUFFERS];
@@ -1473,6 +1476,9 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
 #endif
         totalSize = ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))) + ((gNumHudMatPerPlayer[num] * sizeof(Mtx))) +
                     ((gNumHudVertsPerPlayer[num] * sizeof(Vertex))) + ((gNumHudTrisPerPlayer[num] * sizeof(Triangle)));
+#ifdef TARGET_PORT
+        gPortDlBytes = totalSize;
+#endif
         gDisplayLists[0] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[0], COLOUR_TAG_RED);
         gDisplayLists[1] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[1], COLOUR_TAG_YELLOW);
 #ifdef TARGET_PORT
@@ -1549,6 +1555,9 @@ void default_alloc_displaylist_heap(void) {
                 (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)) +
                 (gNumHudTrisPerPlayer[numberOfPlayers] * sizeof(Triangle));
 
+#ifdef TARGET_PORT
+    gPortDlBytes = totalSize;
+#endif
     gDisplayLists[0] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_RED);
     gMatrixHeap[0] = (Mtx *) ((u8 *) gDisplayLists[0] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[0] = (Vertex *) ((u8 *) gMatrixHeap[0] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));

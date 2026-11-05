@@ -152,6 +152,11 @@ static void nmat_level_check(void) {
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
         sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
+#ifdef PORT_NATIVE_OPS
+        // The game's draw-state calls write native ops with native draws (include/port_nops.h; DKR_NATIVE_OPS=0: N64
+        // commands with native draws still on).
+        gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
+#endif
     }
 }
 
