@@ -3,6 +3,16 @@
 #include "math_util.h"
 #include "printf.h"
 #include "thread0_epc.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#endif
+#ifdef PICA_ALL
+// The heap's own lock instead of the global interrupt mask (port/src/os/audio_lock.c, DKR_NATIVE_HEAP_LOCK).
+u32 port_heap_lock(void);
+void port_heap_unlock(u32 flags);
+#define interrupts_disable port_heap_lock
+#define interrupts_enable port_heap_unlock
+#endif
 
 #ifndef _ALIGN16
 #define _ALIGN16(a) (((u32) (a) & ~0xF) + 0x10)

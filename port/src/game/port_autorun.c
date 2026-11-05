@@ -244,16 +244,17 @@ typedef struct BenchSwitch {
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
 #ifdef PICA_ALL
-/* The off-GitHub "every N64 layer native" test build (plat_common.c defaults): native draws on, GPU vertex maths off,
- * two-core renderer off on a New 3DS (on on an Old 3DS); each row flips one part. The native scheduler is chosen at
- * start-up (DKR_NATIVE_SCHED in env.txt), so it has no row. */
+/* The off-GitHub "every N64 layer native" test build (plat_common.c defaults): native draws on, GPU vertex maths and
+ * textures in VRAM off, two-core renderer on on both consoles. */
+/* The bench after the OS-layer stages (user 2026-11-05 22:51): GPU vertex maths and textures in VRAM are settled
+ * (both stay off: no gain on either console, runs 9/10 and the New 3DS runs 5/6), so their rows are gone and the
+ * usual races (the new renderer at its best settings) race the old renderer at its best: the game builds its N64
+ * display lists again and the walk draws them in their order (DKR_NATIVE_DRAW 0, DKR_OPAQUE_SORT 0), as before the
+ * PICA stages. The OS-layer stages (frame queue, sound, music, input, ROM reads, locks) are set at launch, so both
+ * kinds of race have them. */
 #define PICA_ROWS                                                                                                      \
-    { "PICA build: GPU vertex maths, track and lighting on",                                                         \
-      { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 0, 1, 1, 0 },                                      \
-        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 }, \
-        { "PICA build: textures in VRAM on", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 0 }
-/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. GPU maths is off by default and one row
- * turns it on (user 2026-11-05); the lighting and track rows only mattered with it on. */
+    { "old renderer (N64 display lists, drawn in order)", { "DKR_NATIVE_DRAW", "DKR_OPAQUE_SORT", NULL }, 1, 0, 1, 0 }
+/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
     { NULL, { NULL, NULL, NULL }, 0, 0 },

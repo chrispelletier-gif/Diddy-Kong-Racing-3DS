@@ -77,12 +77,6 @@ u32 *asset_table_load(u32 assetIndex) {
 
 #if VERSION >= VERSION_79
     OSMesg msg = NULL;
-#ifdef PICA_ALL
-    if (port_native_rom_reads_on()) {
-        dmacopy_internal(romOffset, ramAddress, numBytes); // a copy from memory: no DMA engine to share
-        return;
-    }
-#endif
     osRecvMesg(&gDmaMutex, &msg, OS_MESG_BLOCK);
 #endif
 

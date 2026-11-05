@@ -1866,11 +1866,13 @@ static void opaque_flush(void) {
     walk_switch(part);
 }
 
+static s32 sOpaqueSortSwitch = 1; // DKR_OPAQUE_SORT (PICA_ALL; 0 for the bench's old renderer row)
+
 /* Holds the CPU batch in a bucket; FALSE if it is to be drawn now. */
 static s32 opaque_hold(void) {
     OpaqueBucket *b = NULL;
     s32 i, k;
-    if (!opaque_sortable(&sBatchState) || sDrawKind == PORT_DRAW_SKY || REF_ACTIVE() || UNLIKELY(sTracing) ||
+    if (!sOpaqueSortSwitch || !opaque_sortable(&sBatchState) || sDrawKind == PORT_DRAW_SKY || REF_ACTIVE() || UNLIKELY(sTracing) ||
         UNLIKELY(sSkyLast) || (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas)) {
         return FALSE;
     }
@@ -2123,6 +2125,9 @@ static void read_switches(void) {
     // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
     // that have none. The frames are the same either way.
     sWalkLean = plat_switch("DKR_WALK_LEAN", plat_old_3ds()) != 0;
+#ifdef PICA_ALL
+    sOpaqueSortSwitch = plat_switch("DKR_OPAQUE_SORT", 1) != 0;
+#endif
     // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
     // that cost the walk a few milliseconds a frame.
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;

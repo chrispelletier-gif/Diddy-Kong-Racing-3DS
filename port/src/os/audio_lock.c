@@ -17,45 +17,80 @@
 
 #ifdef PICA_ALL
 
-static PlatSem *volatile sLock;
-static s32 sNative = -1;
-static __thread int sHeld;
+typedef struct {
+    const char *swName, *logLine;
+    PlatSem *volatile lock;
+    s32 native;
+} OwnLock;
 
-static int native(void) {
-    if (sNative < 0) {
-        s32 on = plat_switch("DKR_NATIVE_AUDIO_LOCK", 1) != 0 && !port_lockstep_enabled();
-        if (on && sLock == NULL) {
+static OwnLock sSoundLock = { "DKR_NATIVE_AUDIO_LOCK", "audio: own sound lock (no interrupt mask)", NULL, -1 };
+static OwnLock sHeapLock = { "DKR_NATIVE_HEAP_LOCK", "memory: own heap lock (no interrupt mask)", NULL, -1 };
+static __thread int sSoundHeld, sHeapHeld;
+
+static int lock_native(OwnLock *l) {
+    if (l->native < 0) {
+        s32 on = plat_switch(l->swName, 1) != 0 && !port_lockstep_enabled();
+        if (on && l->lock == NULL) {
             PlatSem *lock = plat_sem_create(1);
             PlatSem *expected = NULL;
-            if (!__atomic_compare_exchange_n(&sLock, &expected, lock, FALSE, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                // Another thread made it first; this spare semaphore is never used.
-            }
+            // Another thread may make it first; the spare semaphore is then never used.
+            __atomic_compare_exchange_n(&l->lock, &expected, lock, FALSE, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         }
         if (on) {
-            plat_log("audio: own sound lock (no interrupt mask)");
+            plat_log("%s", l->logLine);
         }
-        sNative = on;
+        l->native = on;
     }
-    return sNative;
+    return l->native;
+}
+
+/* osSetIntMask semantics on an own lock: a mask without the CPU interrupts takes it (once per thread), any other
+   releases it; the value returned says whether this thread held it before. */
+static OSIntMask lock_set(OwnLock *l, int *held, OSIntMask mask) {
+    OSIntMask prev = *held ? OS_IM_NONE : OS_IM_ALL;
+    if ((mask & OS_IM_CPU) == 0 || mask == OS_IM_NONE) {
+        if (!*held) {
+            plat_sem_wait(l->lock);
+            *held = TRUE;
+        }
+    } else if (*held) {
+        *held = FALSE;
+        plat_sem_post(l->lock);
+    }
+    return prev;
 }
 
 /* osSetIntMask for the sound code. */
 OSIntMask port_audio_set_mask(OSIntMask mask) {
-    OSIntMask prev;
-    if (!native()) {
+    if (!lock_native(&sSoundLock)) {
         return osSetIntMask(mask);
     }
-    prev = sHeld ? OS_IM_NONE : OS_IM_ALL;
-    if ((mask & OS_IM_CPU) == 0 || mask == OS_IM_NONE) {
-        if (!sHeld) {
-            plat_sem_wait(sLock);
-            sHeld = TRUE;
-        }
-    } else if (sHeld) {
-        sHeld = FALSE;
-        plat_sem_post(sLock);
+    return lock_set(&sSoundLock, &sSoundHeld, mask);
+}
+
+/*
+ * The heap lock (DKR_NATIVE_HEAP_LOCK, on by default; off in lockstep runs). The game's memory pools (memory.c) guard
+ * their slot tables with interrupts_disable()/interrupts_enable(), which in the port is the same global lock as above,
+ * so every allocation or free by the game thread or the background level loader also held back retraces. The pools
+ * take no other lock inside these sections, so this lock is a leaf: it can't deadlock with the sound lock.
+ */
+u32 port_heap_lock(void) {
+    extern u32 interrupts_disable(void);
+    if (!lock_native(&sHeapLock)) {
+        return interrupts_disable();
     }
-    return prev;
+    return lock_set(&sHeapLock, &sHeapHeld, OS_IM_NONE);
+}
+
+void port_heap_unlock(u32 flags) {
+    extern void interrupts_enable(u32 flags);
+    if (!lock_native(&sHeapLock)) {
+        interrupts_enable(flags);
+        return;
+    }
+    if (flags != OS_IM_NONE) {
+        lock_set(&sHeapLock, &sHeapHeld, OS_IM_ALL);
+    }
 }
 
 #endif
