@@ -2126,7 +2126,7 @@ static void read_switches(void) {
     // that have none. The frames are the same either way.
     sWalkLean = plat_switch("DKR_WALK_LEAN", plat_old_3ds()) != 0;
 #ifdef PICA_ALL
-    sOpaqueSortSwitch = plat_switch("DKR_OPAQUE_SORT", 1) != 0;
+    sOpaqueSortSwitch = plat_switch("DKR_OPAQUE_SORT", 1) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
 #endif
     // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
     // that cost the walk a few milliseconds a frame.
@@ -4365,8 +4365,13 @@ static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
         }
     }
     sRectOverride = TRUE;
-    sRectTex[0] = mat->state.textures[0];
-    sRectTex[1] = mat->state.textures[1];
+    // The texture with the filter the other mode sets now, which need not be the one it had when the material was
+    // captured (a scaled rectangle may be drawn bilinear where the same texture was first drawn point sampled; the
+    // two share one decoded GPU copy, see texture_with_filter).
+    for (k = 0; k < 2; k++) {
+        sRectTex[k] = mat->state.textures[k] != NULL ? texture_with_filter(&sTexCache[mat->texEntry[k]], tex_filter())
+                                                     : NULL;
+    }
     sRectTiles[0] = mat->tiles[0];
     sRectTiles[1] = mat->tiles[1];
     sTriStateValid = FALSE;

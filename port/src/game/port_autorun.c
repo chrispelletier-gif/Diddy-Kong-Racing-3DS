@@ -249,11 +249,13 @@ typedef struct BenchSwitch {
 /* The bench after the OS-layer stages (user 2026-11-05 22:51): GPU vertex maths and textures in VRAM are settled
  * (both stay off: no gain on either console, runs 9/10 and the New 3DS runs 5/6), so their rows are gone and the
  * usual races (the new renderer at its best settings) race the old renderer at its best: the game builds its N64
- * display lists again and the walk draws them in their order (DKR_NATIVE_DRAW 0, DKR_OPAQUE_SORT 0), as before the
+ * display lists again and the walk draws them in their order (DKR_OLD_RENDERER 1: native draws and opaque sorting off), as before the
  * PICA stages. The OS-layer stages (frame queue, sound, music, input, ROM reads, locks) are set at launch, so both
- * kinds of race have them. */
+ * kinds of race have them. Textures in VRAM with each (Old 3DS runs 9 and 10 disagreed; user 23:00: VRAM with new and with old renderer). */
 #define PICA_ROWS                                                                                                      \
-    { "old renderer (N64 display lists, drawn in order)", { "DKR_NATIVE_DRAW", "DKR_OPAQUE_SORT", NULL }, 1, 0, 1, 0 }
+    { "old renderer (N64 display lists, drawn in order)", { "DKR_OLD_RENDERER", NULL, NULL }, 0, 1, 1, 0 },           \
+        { "new renderer, textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 0 },                              \
+        { "old renderer, textures in VRAM", { "DKR_OLD_RENDERER", "DKR_TEX_VRAM", NULL }, 0, 1, 1, 0 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,

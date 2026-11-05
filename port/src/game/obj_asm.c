@@ -151,7 +151,7 @@ static void nmat_level_check(void) {
         sNMatLevel = gPortLevelLoads;
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
-        sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0;
+        sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
     }
 }
 
