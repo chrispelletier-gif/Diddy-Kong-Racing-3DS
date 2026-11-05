@@ -4206,6 +4206,51 @@ static COLD void nmat_capture(u32 id) {
     }
 }
 
+/* A material's state with this moment's colours, fog and scissor. */
+static inline void nmat_state(const NMat *mat, GfxDrawState *state, s32 textured) {
+    *state = mat->state;
+    __builtin_memcpy(state->prim, g.prim, 4);
+    __builtin_memcpy(state->env, g.env, 4);
+    __builtin_memcpy(state->fog, g.fogColor, 4);
+    state->fogMul = g.fogMul;
+    state->fogOffset = g.fogOffset;
+    state->primLodFrac = g.primLodFrac;
+    __builtin_memcpy(state->scissor, g.scissor, sizeof(state->scissor));
+    if (!textured) {
+        state->textures[0] = NULL;
+        state->textures[1] = NULL;
+    }
+}
+
+/* A recorded batch drawn the way its commands would have been (vertex slots, draw_dkr_triangles), with the
+ * material's tiles, fog bit and state in place meanwhile: for geometry made anew each frame (shadows, water, particles,
+ * billboards), whose triangles the native mesh tables would have to be remade for every frame. */
+static NOINLINE void native_record_slots(const NMat *mat, const Vertex *vtx, s32 numVerts, s32 start,
+                                         const Triangle *tris, s32 count, s32 textured) {
+    Tile t0 = g.tiles[0], t1 = g.tiles[1];
+    u32 geometry = g.geometryMode;
+    g.tiles[0] = mat->tiles[0];
+    g.tiles[1] = mat->tiles[1];
+    g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    if (start == numVerts) {
+        load_vertices_now(vtx, numVerts, 0, g.matrices[g.curMatrix], mat->fog, g.billboard);
+    } else {
+        if (start > 0) {
+            load_vertices_now(vtx, start, 0, g.matrices[g.curMatrix], mat->fog, g.billboard);
+        }
+        load_vertices_now(vtx + start, numVerts - start, start, g.matrices[2], mat->fog, FALSE);
+        g.curMatrix = 1;
+    }
+    nmat_state(mat, &sTriState, textured);
+    sTriStateValid = TRUE;
+    draw_dkr_triangles(tris, count, textured);
+    g.vertexIndex = 0;
+    g.tiles[0] = t0;
+    g.tiles[1] = t1;
+    g.geometryMode = geometry;
+    sTriStateValid = FALSE;
+}
+
 /* The batch recorded after the tag at dl[-1]; returns the words of data used. */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
@@ -4234,6 +4279,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     start = (dl[1].words.w0 >> 8) & 0xFF;
     textured = (dl[1].words.w0 >> 16) & 1;
     count = (s32) dl[1].words.w1;
+    if (count <= 0 || numVerts <= 0 || numVerts > MAX_VERTICES) {
+        return 2;
+    }
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
@@ -4250,6 +4298,14 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             }
             e->lastFrame = sFrameCount;
         }
+    }
+    if (sAnyPending) {
+        forget_slots(0, numVerts);
+    }
+    if ((dl[1].words.w0 & 0x20000) || g.billboard) {
+        native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
+        sNDrawStats[0]++;
+        return 2;
     }
     // The loads render_mesh would have made (gSPVertexDKR, gSPSelectMatrixDKR).
     if (start == numVerts) {
@@ -4276,18 +4332,10 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (mesh == NULL) {
         mesh = native_find(tris, count); // The tables were full and have just been emptied
     }
-    if (sAnyPending) {
-        forget_slots(0, total);
-    }
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
-        // No tables (out of room): the game's commands aren't there, so draw through the slots.
-        for (i = 0; i < numLoads; i++) {
-            load_vertices_now(loads[i].src, loads[i].count, loads[i].dest, g.matrices[loads[i].matrix], mat->fog,
-                              FALSE);
-        }
-        g.curMatrix = cur;
-        sTriStateValid = FALSE;
+        native_record_slots(mat, vtx, numVerts, start, tris, count, textured); // No tables: through the slots
+        sNDrawStats[0]++;
         return 2;
     }
     for (i = 0; i < numLoads; i++) {
@@ -4316,18 +4364,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
-    state = mat->state;
-    __builtin_memcpy(state.prim, g.prim, 4);
-    __builtin_memcpy(state.env, g.env, 4);
-    __builtin_memcpy(state.fog, g.fogColor, 4);
-    state.fogMul = g.fogMul;
-    state.fogOffset = g.fogOffset;
-    state.primLodFrac = g.primLodFrac;
-    __builtin_memcpy(state.scissor, g.scissor, sizeof(state.scissor));
-    if (!textured) {
-        state.textures[0] = NULL;
-        state.textures[1] = NULL;
-    }
+    nmat_state(mat, &state, textured);
     viewport_init(&vp);
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;

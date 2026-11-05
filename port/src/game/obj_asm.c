@@ -195,6 +195,45 @@ int port_nmat_key(const void *texture, int flags, int texOffset, int *capture) {
     return port_nmat_key(texture, flags, texOffset, capture);
 }
 
+extern s16 gForceFlags;
+extern TextureHeader *gCurrentTextureHeader;
+void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset);
+
+/* One batch as a native draw record (the material's commands first when the renderer hasn't kept them). dynamic:
+ * vertices or triangles made anew each frame (drawn through the renderer's vertex slots). Returns 0 with native draws
+ * off, for the caller's own commands. */
+int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
+                      const void *tris, int numTris, int textured, int dynamic) {
+    int capture;
+    s32 id;
+    Gfx *g;
+    if (!port_native_draw() || numVerts <= 0 || numVerts > 64 || numTris <= 0) {
+        return 0;
+    }
+    id = port_nmat_key(texture, flags, texOffset, &capture);
+    if (capture) {
+        gForceFlags = TRUE;
+        gCurrentTextureHeader = NULL;
+        material_set(dl, (TextureHeader *) texture, flags, texOffset);
+        gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+    }
+    gDPNoOpTag((*dl)++, PORT_NDRAW_TAG | id);
+    g = (*dl)++;
+    g->words.w0 = OS_K0_TO_PHYSICAL(verts);
+    g->words.w1 = OS_K0_TO_PHYSICAL(tris);
+    g = (*dl)++;
+    g->words.w0 = (u32) numVerts | ((u32) numVerts << 8) | ((u32) (textured != 0) << 16) | ((u32) (dynamic != 0) << 17);
+    g->words.w1 = (u32) numTris;
+    return 1;
+}
+
+/* After native batches: the renderer's settings are the last captured material's, so the next material_set sets
+ * everything again. */
+void port_native_end(void) {
+    gForceFlags = TRUE;
+    gCurrentTextureHeader = NULL;
+}
+
 static inline s32 normal_byte(s32 n, float k) {
     float f = n * k;
     return (s32) (f >= 0.0f ? f + 0.5f : f - 0.5f);

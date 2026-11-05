@@ -64,6 +64,10 @@ extern unsigned int gPortLevelLoads;
 #define PORT_NDRAW_TAG 0x50420000 /* "PB" */
 #define PORT_NMAT_TAG 0x504D0000  /* "PM" */
 int port_native_draw(void);
+
+int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
+                      const void *tris, int numTris, int textured, int dynamic);
+void port_native_end(void);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
 struct Vertex;
 int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);
