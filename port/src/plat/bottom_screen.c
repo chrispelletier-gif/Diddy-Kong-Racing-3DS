@@ -3193,15 +3193,16 @@ static void draw_challenge(const RaceHud *hud) {
     draw_item(hud);
     if (hud->mode == RACE_HUD_MODE_EGGS) {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5, "Carrying", HINT, 1);
+        /* The egg centred under the label, its instruction in two wrapped lines beneath it, the hint at the foot. */
         if (me != NULL && me->carrying) {
-            picture_scaled(&sEgg, MIDDLE_X0 + 8, LOWER_Y0 + 20, 1, 1);
-            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26, "Get it", YELLOW, 1);
-            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26 + line_pitch(), "to your", YELLOW, 1);
-            text(FONT_SMALL, MIDDLE_X0 + 46, LOWER_Y0 + 26 + 2 * line_pitch(), "nest", YELLOW, 1);
+            picture_scaled(&sEgg, (MIDDLE_X0 + MIDDLE_X1 - sEgg.width) / 2, LOWER_Y0 + 20, 1, 1);
+            wrapped_centred(MIDDLE_X0, MIDDLE_X1,
+                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEgg.height, "Get it to", YELLOW),
+                            "your nest", YELLOW);
         } else {
-            text(FONT_SMALL, MIDDLE_X0 + 8, LOWER_Y0 + 26, "No egg", DIM, 1);
+            text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 40, "No egg", DIM, 1);
         }
-        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 70, "Drop it if hit", DIM, 1);
+        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 6, "Drop it if hit", DIM, 1);
     } else {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5,
                      hud->mode == RACE_HUD_MODE_BATTLE ? "Your health" : "Carrying", HINT, 1);
