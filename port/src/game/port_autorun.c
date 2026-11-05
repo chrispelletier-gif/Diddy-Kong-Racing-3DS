@@ -243,6 +243,19 @@ typedef struct BenchSwitch {
  * models by distance, sooner with more players on screen (objects.c); DKR_RACER_LOD=n uses the distances of n + 1
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
+#ifdef PICA_ALL
+/* The off-GitHub "everything on the PICA200" test build: every race has the GPU route on (plat_common.c) and the
+ * two-core renderer off; each row turns one part back to the shipped way. */
+#define PICA_ROWS                                                                                                      \
+    { "PICA build: old renderer (no GPU vertex maths, track or lighting)",                                         \
+      { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 1, 0, 1, 0 },                                      \
+        { "PICA build: vertex lighting on the CPU", { "DKR_GPU_LIGHT", NULL, NULL }, 1, 0, 1, 0 },                     \
+        { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 },          \
+        { "PICA build: two-core renderer on", { "DKR_SPLIT_RENDER", NULL, NULL }, 0, 1, 1, 0 },                        \
+        { NULL, { NULL, NULL, NULL }, 0, 0 }
+static const BenchSwitch sSwitchesOld3ds[] = { PICA_ROWS };
+static const BenchSwitch sSwitchesNew3ds[] = { PICA_ROWS };
+#else
 static const BenchSwitch sSwitchesOld3ds[] = {
     // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
     // at 30 against 96/92/94%), so DKR_RACER_LOD=2 is the Old 3DS default (src/objects.c) and its rows are gone.
@@ -302,6 +315,7 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
+#endif
 /*
  * New 3DS: the shelved switches bench ("Shelved switches" in the Test run menu, 2026-11-01; the user asked whether
  * anything shelved earlier is worth another look now that the profiler times every part, the renderer runs on two

@@ -1,5 +1,7 @@
 #ifndef PORT_PLAT_H
 #define PORT_PLAT_H
+/* Off-GitHub test build: everything on the PICA200 (local branch local/pica-all only). */
+#define PICA_ALL 1
 
 /*
  * Platform abstraction used by the N64 OS emulation layer.

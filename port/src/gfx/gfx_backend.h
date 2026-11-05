@@ -188,8 +188,17 @@ typedef struct GfxModelParams {
     float texOffset[4];
     short fogMul, fogOffset; // With fog, the alpha is the fog factor clamp(z / w * fogMul + fogOffset, 0, 255)
     unsigned char fog;
-    unsigned char pad[3];
+    unsigned char pad[3];   // pad[0]: lit (PICA_ALL GPU vertex lighting): the colours are normals, lit with light
+    float light[4];         // Light direction (x, y, z, over 127-unit normals) and ambient, as gfx_light_shade takes them
 } GfxModelParams;
+
+/* GPU vertex lighting (off-GitHub PICA_ALL build): the grey of a vertex whose colour holds its normal (signed bytes). */
+static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
+    float d = (signed char) r * l[0] + (signed char) g * l[1] + (signed char) b * l[2];
+    float v = l[3] + (d > 0.0f ? d : 0.0f);
+    v = v > 1.0f ? 1.0f : v;
+    return (unsigned char) (v * 255.0f);
+}
 
 /* What gfxb_model_check says about a model draw whose model space box is boxMin..boxMax. */
 enum { GFX_MODEL_CPU, GFX_MODEL_GPU, GFX_MODEL_HIDDEN };
@@ -230,6 +239,9 @@ static inline void gfx_model_to_vertex(GfxVertex *out, const GfxModelVertex *in,
     out->g = in->g;
     out->b = in->b;
     out->a = in->a;
+    if (p->pad[0]) {
+        out->r = out->g = out->b = gfx_light_shade(in->r, in->g, in->b, p->light);
+    }
     if (p->fog) {
         float w = (out->w != 0.0f) ? out->w : 0.0001f;
         float fog = (out->z / w) * p->fogMul + p->fogOffset;

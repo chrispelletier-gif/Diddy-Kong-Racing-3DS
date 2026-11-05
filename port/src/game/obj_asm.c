@@ -12,6 +12,8 @@
 #include "camera.h"
 #include "math_util.h"
 #include "port.h"
+#include "plat/plat.h"
+#include "port_drawtag.h"
 
 extern s32 D_8011D644; // Scratch buffer of interpolated animation offsets, 3 s16 per animated vertex.
 
@@ -26,6 +28,172 @@ static inline void store_shade(Vertex *v, s32 value) {
     v->b = second >> 8;
     v->a = second & 0xFF;
 }
+
+#ifdef PICA_ALL
+/*
+ * GPU vertex lighting (off-GitHub "everything on the PICA200" test build, DKR_GPU_LIGHT): the two simple shading
+ * routines below store each vertex's normal (signed bytes, 127 = 1) in its colour instead of the lit grey, and note
+ * the light (direction scaled so that n . L + ambient is the grey over 255) for that vertex buffer. render_mesh then
+ * tags the buffer's lit batches with it (PORT_LIGHT_TAG) and the renderer lights the vertices: the GPU's vertex shader
+ * for GPU-transformed draws, the CPU (gfx_light_shade) otherwise. A buffer is only marked while there is room in the
+ * table; otherwise it is shaded on the CPU as before.
+ */
+#define GPU_LIGHTS 512
+#define GPU_LIGHT_PROBES 8
+typedef struct GpuLight {
+    const Vertex *verts;
+    const ObjectModel *model;
+    unsigned int level;
+    float l[4];
+    float scale; // Normal units a stored byte step is worth (8192 / 127 for unit normals)
+    u8 fresh;    // The colours don't hold this model's normals yet
+    s32 check[2];   // Two stored vertices (first and last lit) and what their colours held, to catch a buffer
+    u32 checkRgba[2]; // reused by another object of the same model
+} GpuLight;
+
+static u32 vertex_rgba(const Vertex *v) {
+    return ((u32) v->r << 24) | ((u32) v->g << 16) | ((u32) v->b << 8) | v->a;
+}
+static GpuLight sGpuLights[GPU_LIGHTS];
+static unsigned int sGpuLightLevel = 0xFFFFFFFFu;
+static int sGpuLightOn;
+
+static GpuLight *gpu_light_find(const Vertex *verts, int add) {
+    unsigned int h = (unsigned int) (((size_t) verts >> 3) * 2654435761u) % GPU_LIGHTS, i;
+    GpuLight *freeSlot = NULL;
+    if (sGpuLightLevel != gPortLevelLoads) {
+        __builtin_memset(sGpuLights, 0, sizeof(sGpuLights));
+        sGpuLightLevel = gPortLevelLoads;
+        sGpuLightOn = plat_switch("DKR_GPU_LIGHT", 0) != 0;
+    }
+    for (i = 0; i < GPU_LIGHT_PROBES; i++) {
+        GpuLight *e = &sGpuLights[(h + i) % GPU_LIGHTS];
+        if (e->verts == verts) {
+            return e;
+        }
+        if (e->verts == NULL && freeSlot == NULL) {
+            freeSlot = e;
+        }
+    }
+    if (add && freeSlot != NULL) {
+        freeSlot->verts = verts;
+        return freeSlot;
+    }
+    return NULL;
+}
+
+/* The light slot for this object's vertices if they are to be lit on the GPU, else NULL (shade on the CPU). */
+static GpuLight *gpu_light_take(Object *obj, ObjectModel *model) {
+    GpuLight *e;
+    (void) gpu_light_find(NULL, 0); // Level / switch check
+    if (!sGpuLightOn) {
+        return NULL;
+    }
+    e = gpu_light_find(obj->curVertData, 1);
+    if (e != NULL) {
+        // The colours keep the normals from frame to frame (animation only moves the positions), so they are only
+        // stored when the buffer is new to the table or its model changed.
+        e->fresh = e->model != model || e->level != gPortLevelLoads ||
+                   vertex_rgba(&obj->curVertData[e->check[0]]) != e->checkRgba[0] ||
+                   vertex_rgba(&obj->curVertData[e->check[1]]) != e->checkRgba[1];
+        e->model = model;
+        e->level = gPortLevelLoads;
+    }
+    return e;
+}
+
+void port_gpu_light_clear(const Vertex *verts) {
+    GpuLight *e = gpu_light_find(verts, 0);
+    if (e != NULL && verts != NULL) {
+        e->verts = NULL;
+        e->model = NULL;
+    }
+}
+
+int port_gpu_light_get(const Vertex *verts, const void *model, float out[4]) {
+    GpuLight *e;
+    if (verts == NULL) {
+        return 0;
+    }
+    e = gpu_light_find(verts, 0);
+    if (e == NULL || e->model != model || !sGpuLightOn) {
+        return 0;
+    }
+    out[0] = e->l[0];
+    out[1] = e->l[1];
+    out[2] = e->l[2];
+    out[3] = e->l[3];
+    return 1;
+}
+
+static inline s32 normal_byte(s32 n, float k) {
+    float f = n * k;
+    return (s32) (f >= 0.0f ? f + 0.5f : f - 0.5f);
+}
+
+/* Normals into the colours of the batches the routines light (as their loops walk them), scaled so the largest
+ * component is 127 (not all models' normals are unit length); gl->scale gets the scale's inverse. */
+static void store_normals(ObjectModel *model, Object *obj, GpuLight *gl) {
+    TriangleBatchInfo *batch, *batchEnd = model->batches + model->numberOfBatches;
+    Vec3s *normals;
+    Vertex *verts;
+    s32 count, pass, biggest = 1, first = -1, last = 0;
+    float k = 0.0f;
+    for (pass = 0; pass < 2; pass++) {
+    batch = model->batches;
+    normals = model->normals;
+    verts = obj->curVertData;
+    do {
+        count = batch[1].verticesOffset - batch->verticesOffset;
+        if (batch->miscData == BATCH_VTX_COL) {
+            verts += count;
+            if (batch->flags & 0x8000) {
+                normals += count;
+            }
+        } else {
+            while (count-- > 0) {
+                if (pass == 0) {
+                    s32 c[3] = { normals->x, normals->y, normals->z }, q;
+                    for (q = 0; q < 3; q++) {
+                        s32 m = c[q] < 0 ? -c[q] : c[q];
+                        biggest = m > biggest ? m : biggest;
+                    }
+                } else {
+                    verts->r = (u8) (s8) normal_byte(normals->x, k);
+                    verts->g = (u8) (s8) normal_byte(normals->y, k);
+                    verts->b = (u8) (s8) normal_byte(normals->z, k);
+                    verts->a = 0xFF;
+                    last = verts - obj->curVertData;
+                    first = first < 0 ? last : first;
+                }
+                verts++;
+                normals++;
+            }
+        }
+        batch++;
+    } while (batch < batchEnd);
+    k = 127.0f / (float) biggest;
+    }
+    gl->scale = (float) biggest / 127.0f;
+    gl->check[0] = first < 0 ? 0 : first;
+    gl->check[1] = last;
+    gl->checkRgba[0] = vertex_rgba(&obj->curVertData[gl->check[0]]);
+    gl->checkRgba[1] = vertex_rgba(&obj->curVertData[gl->check[1]]);
+}
+
+/* The light, from the routine's direction and factor c (grey = ambient + (n . dir) * c over 255). */
+static void gpu_light_set(ObjectModel *model, Object *obj, GpuLight *gl, s32 dirX, s32 dirY, s32 dirZ, float c,
+                          float ambient) {
+    if (gl->fresh) {
+        store_normals(model, obj, gl);
+    }
+    c *= gl->scale / 255.0f;
+    gl->l[0] = dirX * c;
+    gl->l[1] = dirY * c;
+    gl->l[2] = dirZ * c;
+    gl->l[3] = ambient / 255.0f;
+}
+#endif
 
 /**
  * Updates the vertices of an animated object model for the object's current animation and frame.
@@ -227,6 +395,16 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
     dirX = shading->shadowDirX;
     dirY = shading->shadowDirY;
     dirZ = shading->shadowDirZ;
+#ifdef PICA_ALL
+    {
+        GpuLight *gl = gpu_light_take(obj, model);
+        if (gl != NULL) {
+            // value = base + (n . dir) * base / 2^27
+            gpu_light_set(model, obj, gl, dirX, dirY, dirZ, (float) base / 134217728.0f, (float) base);
+            return;
+        }
+    }
+#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;
@@ -297,6 +475,16 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
     dirX = (s32) dir.f[0];
     dirY = (s32) dir.f[1];
     dirZ = (s32) dir.f[2];
+#ifdef PICA_ALL
+    {
+        GpuLight *gl = gpu_light_take(obj, model);
+        if (gl != NULL) {
+            // value = ambient + (n . dir) * diffuse / 2^28
+            gpu_light_set(model, obj, gl, dirX, dirY, dirZ, (float) diffuse / 268435456.0f, (float) ambient);
+            return;
+        }
+    }
+#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;

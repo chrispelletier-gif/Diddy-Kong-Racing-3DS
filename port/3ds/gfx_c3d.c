@@ -3091,7 +3091,7 @@ static void wait_for_gpu(int measure) {
  * have been drawn, then "passed". If the console hangs meanwhile, the next start finds "testing", writes "hung" and
  * leaves GPU vertex maths off (DKR_GPU_TRANSFORM is ignored) until TRANSFORM_TEST_VERSION changes with a new shader.
  */
-#define TRANSFORM_TEST_VERSION 1
+#define TRANSFORM_TEST_VERSION 2 /* 2: PICA_ALL test build, vertex lighting */
 #define TRANSFORM_TEST_FRAMES 30
 
 static shaderProgram_s sProgramT;
@@ -3102,7 +3102,7 @@ static int sTransformOn;     // This frame is drawn with transform.v.pica
 static int sTransformTestFrame = -1; // The first frame drawn with it this run, until it is known to work
 static int sEyeUniformP, sEyeUniformT; // The eye uniform of each program
 
-enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_COUNT };
+enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_LIGHT, UNIF_COUNT };
 static int sUnifLoc[UNIF_COUNT];
 static float sUnifVal[UNIF_COUNT][4];
 static int sUnifKnown; // sUnifVal holds what citro3d has
@@ -3123,7 +3123,7 @@ static void transform_marker_write(const char *what) {
 
 /* At start-up: finds the transform program's uniforms and reads what happened in earlier runs. */
 static void init_transform(void) {
-    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp" };
+    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp", "lightv" };
     char path[256], text[32];
     int i, got;
 
@@ -3214,6 +3214,7 @@ static void PLAT_COLD set_cpu_uniforms_now(void) {
     set_unif(UNIF_TEXC, 0.0f, 0.0f, 1.0f, 1.0f);
     set_unif(UNIF_TEXB, 0.0f, 0.0f, 0.0f, 0.0f);
     set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_LIGHT, 0.0f, 0.0f, 0.0f, 0.0f);
     sUnifKnown = 1;
     sUnifModel = 0;
 }
@@ -3279,9 +3280,15 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
              1.0f - p->texOffset[3] * sv1);
     if (p->fog) {
         // The shader has z' = (z - w) / 2, so z / w = 2 z' / w + 1.
-        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, 0.0f);
+        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, p->pad[0] ? 1.0f : 0.0f);
     } else {
-        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, p->pad[0] ? 1.0f : 0.0f);
+    }
+    // GPU vertex lighting (PICA_ALL): fogp.w = 1 lights the vertex colours (normals) with lightv.
+    if (p->pad[0]) {
+        set_unif(UNIF_LIGHT, p->light[0], p->light[1], p->light[2], p->light[3]);
+    } else {
+        set_unif(UNIF_LIGHT, 0.0f, 0.0f, 0.0f, 0.0f);
     }
     sUnifKnown = 1;
     sUnifModel = 1;
@@ -4605,7 +4612,37 @@ PLAT_HOT static void apply_combiner(const GfxDrawState *state) {
         }
     } else if (!sCompiled || memcmp(&in.combiner, &sLast.combiner, sizeof(in.combiner)) != 0 ||
                in.fogStage != sLast.fogStage || in.boost != sLast.boost) {
+#ifdef PICA_ALL
+        // TEV program cache (PICA_ALL test build): the combiners compiled lately, looked up by their inputs, so
+        // alternating between a few combiners doesn't compile them again each time.
+        enum { TEV_CACHE = 16 };
+        static struct {
+            GfxCombiner combiner;
+            unsigned char fogStage, boost, used;
+            TevProgram prog;
+        } sTevCache[TEV_CACHE];
+        static unsigned int sTevNext;
+        unsigned int t;
+        for (t = 0; t < TEV_CACHE; t++) {
+            if (sTevCache[t].used && sTevCache[t].fogStage == in.fogStage && sTevCache[t].boost == in.boost &&
+                memcmp(&sTevCache[t].combiner, &in.combiner, sizeof(in.combiner)) == 0) {
+                break;
+            }
+        }
+        if (t < TEV_CACHE) {
+            sProg = sTevCache[t].prog;
+        } else {
+            compile_combiner(state, &sProg, in.boost);
+            t = sTevNext++ % TEV_CACHE;
+            sTevCache[t].combiner = in.combiner;
+            sTevCache[t].fogStage = in.fogStage;
+            sTevCache[t].boost = in.boost;
+            sTevCache[t].used = 1;
+            sTevCache[t].prog = sProg;
+        }
+#else
         compile_combiner(state, &sProg, in.boost);
+#endif
         sCompiled = 1;
     }
     sLast = in;

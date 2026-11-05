@@ -20,6 +20,8 @@
 .fvec texc
 .fvec texb
 .fvec fogp    ; Fog factor = clamp(z / w * fogp.x + fogp.y, 0, 1) replaces the colour's alpha when fogp.z = 1
+.fvec lightv  ; GPU vertex lighting (fogp.w = 1): grey = clamp(lightv.w + max(n . lightv.xyz, 0), 0, 1), with the
+              ; colour's bytes the normal as signed bytes (127 = 1)
 
 ; Constants
 .constf consts(0.00392156862745098, 0.0, 1.0, 0.0001)
@@ -27,6 +29,9 @@
 .alias zeros consts.yyyy
 .alias ones consts.zzzz
 .alias tiny consts.wwww
+.constf lconsts(127.5, -256.0, 0.0, 0.0)
+.alias half_byte lconsts.xxxx
+.alias minus_256 lconsts.yyyy
 
 ; Outputs
 .out outpos position
@@ -59,6 +64,18 @@
 
 	; Colour, the alpha replaced by the fog factor when fogp.z is 1
 	mul r3, rgba_scale, inclr
+
+	; Lit colour, used when fogp.w is 1: the normal from the colour's bytes (above 127 are negative)
+	slt r8, half_byte, inclr
+	mul r8, minus_256, r8
+	add r8, inclr, r8
+	dp3 r9, lightv, r8
+	max r9, zeros, r9
+	add r9, lightv.wwww, r9
+	min r9, ones, r9
+	add r10, r9, -r3
+	mul r10, fogp.wwww, r10
+	add r3.xyz, r3, r10
 	add r4, r2, -r3.wwww
 	mul r4, fogp.zzzz, r4
 	add r3.w, r3, r4

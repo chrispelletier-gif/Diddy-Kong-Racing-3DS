@@ -49,6 +49,15 @@ int port_native_mesh_for(int isRacer);
 #define PORT_TRACK_TAG 0x50540000 /* "PT" */
 int port_native_track(void);
 extern unsigned int gPortLevelLoads;
+/*
+ * GPU vertex lighting (off-GitHub PICA_ALL test build, DKR_GPU_LIGHT): render_mesh puts PORT_LIGHT_TAG | 1 and then
+ * four no-ops whose second words are the light's floats (x, y, z, ambient) before a batch whose vertex colours hold
+ * normals (obj_asm.c), and PORT_LIGHT_TAG alone after it.
+ */
+#define PORT_LIGHT_TAG 0x504C0000 /* "PL" */
+struct Vertex;
+int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);
+void port_gpu_light_clear(const struct Vertex *verts);
 #define port_draw_tag(dl, kind)                                                                                        \
     do {                                                                                                               \
         gDPNoOpTag(dl, PORT_DRAW_TAG | (kind));                                                                        \

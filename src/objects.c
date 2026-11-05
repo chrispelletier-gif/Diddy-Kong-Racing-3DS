@@ -4345,6 +4345,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     {
         // Native model meshes (port_drawtag.h, DKR_NATIVE_MESH): tag each batch's vertices and triangles.
         s32 nativeTag = obj != NULL && port_native_mesh_for(obj->behaviorId == BHV_RACER);
+#ifdef PICA_ALL
+        // GPU vertex lighting (port_drawtag.h): the lit batches of a buffer whose colours hold normals get the light.
+        float light[4];
+        s32 lit = obj != NULL && port_gpu_light_get(obj->curVertData, objModel, light), lightOn = FALSE;
+#endif
 #endif
     while (i < objModel->numberOfBatches && !endLoop) {
         if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
@@ -4383,6 +4388,27 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                                        texToSet->numberOfCommands);
                 }
 #ifdef TARGET_PORT
+#ifdef PICA_ALL
+                {
+                    s32 want = lit && objModel->batches[i].miscData != BATCH_VTX_COL;
+                    if (want && !lightOn) {
+                        s32 k;
+                        gDPNoOpTag(dList++, PORT_LIGHT_TAG | 1);
+                        for (k = 0; k < 4; k++) {
+                            union {
+                                float f;
+                                u32 u;
+                            } bits;
+                            bits.f = light[k];
+                            gDPNoOpTag(dList++, bits.u);
+                        }
+                        lightOn = TRUE;
+                    } else if (!want && lightOn) {
+                        gDPNoOpTag(dList++, PORT_LIGHT_TAG);
+                        lightOn = FALSE;
+                    }
+                }
+#endif
                 if (nativeTag) {
                     gDPNoOpTag(dList++, PORT_NATIVE_TAG);
                 }
@@ -4409,6 +4435,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
         }
     }
 #ifdef TARGET_PORT
+#ifdef PICA_ALL
+    if (lightOn) {
+        gDPNoOpTag(dList++, PORT_LIGHT_TAG);
+    }
+#endif
     }
 #endif
     if (i >= objModel->numberOfBatches) {
@@ -8085,6 +8116,9 @@ void calc_dynamic_lighting_for_object_1(Object *object, ObjectModel *model, s16 
     vertices = object->curVertData;
     normals = model->normals;
     normIdx = 0;
+#ifdef PICA_ALL
+    port_gpu_light_clear(vertices); // Shaded on the CPU
+#endif
 
     direction.x = -(object->shading->lightDirX << 3);
     direction.y = -(object->shading->lightDirY << 3);

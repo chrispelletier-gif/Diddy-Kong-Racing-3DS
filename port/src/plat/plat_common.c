@@ -320,6 +320,22 @@ int plat_switch(const char *name, int fallback) {
         }
     }
     env = plat_getenv(name);
+#ifdef PICA_ALL
+    // The "everything on the PICA200" test build (kept off GitHub): the GPU route's switches on unless env.txt or
+    // the switch bench says otherwise.
+    if (env == NULL) {
+        static const char *const sOn[] = { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_MODEL_MESH", "DKR_TEX_VRAM",
+                                            "DKR_GPU_LIGHT" };
+        if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
+            return 0; // One core, so the PICA work's own gain shows
+        }
+        for (i = 0; i < (int) (sizeof(sOn) / sizeof(sOn[0])); i++) {
+            if (strcmp(sOn[i], name) == 0) {
+                return 1;
+            }
+        }
+    }
+#endif
     return env != NULL ? atoi(env) : fallback;
 }
 

@@ -203,6 +203,18 @@ static s32 sDepthDrawn;  // Something wrote depth since the last depth clear (so
 static GfxDrawState sTriState;
 static s32 sTriStateValid;
 static s32 sFrameCount;
+#ifdef PICA_ALL
+static s32 sOpaquePending; // Sorted opaque CPU batches wait to be drawn (opaque_flush)
+static void opaque_flush(void);
+#define OPAQUE_FLUSH()                                                                                                 \
+    do {                                                                                                               \
+        if (sOpaquePending) {                                                                                          \
+            opaque_flush();                                                                                            \
+        }                                                                                                              \
+    } while (0)
+#else
+#define OPAQUE_FLUSH() ((void) 0)
+#endif
 
 /*
  * Where the display list walk's time goes while the profiler is on (P26; the profile.h PROF_PART_WALK parts). The
@@ -666,9 +678,11 @@ static void tex_memo_forget(void);
 /* Frees a cache entry's textures. */
 static void free_entry(TexCacheEntry *e) {
     if (e->hasOtherFilter) {
+        OPAQUE_FLUSH();
         gfx_split_texture_free(&e->otherFilter);
         e->hasOtherFilter = FALSE;
     }
+    OPAQUE_FLUSH();
     gfx_split_texture_free(&e->tex);
     plat_free((void *) e->tex.pixels);
     e->atlasState[0] = e->atlasState[1] = 0; // Its place in a page is not given out again (see atlas_place)
@@ -959,6 +973,7 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     e->tex.backendData = NULL;
     e->tex.atlas = 0;
     e->atlasState[0] = e->atlasState[1] = 0;
+    OPAQUE_FLUSH();
     gfx_split_texture_upload(&e->tex);
     prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
     walk_switch(WALK_TEXTURES);
@@ -1219,6 +1234,7 @@ static void atlas_reset_kind(s32 kind) {
     for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
         AtlasPage *page = &sAtlas[p];
         if (page->used) {
+            OPAQUE_FLUSH();
             gfx_split_texture_free(&page->tex);
             page->tex.backendData = NULL;
             __builtin_memset(page->pixels, 0, ATLAS_SIZE * ATLAS_SIZE * 4);
@@ -1354,6 +1370,7 @@ static inline void atlas_upload(GfxTexture *tex) {
     AtlasPage *page = (AtlasPage *) tex; // tex is a page's first member
     if (page->dirty) {
         page->dirty = FALSE;
+        OPAQUE_FLUSH();
         gfx_split_texture_upload(tex);
     }
 }
@@ -1720,6 +1737,7 @@ static COLD NOINLINE void sky_draw_held(void) {
     s32 i;
     for (i = 0; i < sSky.numBatches; i++) {
         const SkyBatch *b = &sSky.batches[i];
+        OPAQUE_FLUSH();
         gfx_split_draw_indexed(&b->state, &sSky.verts[b->firstVertex], b->numVertices, &sSky.indices[b->firstIndex],
                                b->numTriangles);
         prof_count(PROF_TRIANGLES, b->numTriangles);
@@ -1785,6 +1803,90 @@ static COLD NOINLINE s32 sky_hold(void) {
 }
 
 /* Draws the batch of transformed triangles. */
+/* Whether a draw's order among the frame's other opaque draws doesn't matter (opaque, depth tested and written, not a
+ * decal, not flat on the screen). */
+static inline s32 opaque_sortable(const GfxDrawState *st) {
+    return st->blend == GFX_BLEND_OPAQUE && st->depthTest && st->depthWrite && !st->decal && !st->flat;
+}
+
+#ifdef PICA_ALL
+/*
+ * Opaque batch sorting (PICA_ALL test build, the brief's billboard and particle batching): batches drawn by the CPU
+ * path whose order doesn't matter (opaque_sortable: alpha-tested tree billboards, solid particles, props) are held in
+ * buckets by draw state and drawn as one draw per state when anything whose order does matter comes (a blended or
+ * decal draw, a clear, a texture change, the frame's end). Blended particles keep their order.
+ */
+#define OPAQUE_BUCKETS 8
+typedef struct OpaqueBucket {
+    GfxDrawState state;
+    s32 numVerts, numTris;
+    GfxVertex verts[MAX_BATCH_VERTICES];
+    u16 indices[MAX_BATCH_TRIANGLES * 3];
+} OpaqueBucket;
+static OpaqueBucket sOpaque[OPAQUE_BUCKETS];
+static s32 sOpaqueCount;
+static u32 sOpaqueStats[2]; // Batches held, draws made
+
+static void opaque_draw(OpaqueBucket *b) {
+    if (b->numTris == 0) {
+        return;
+    }
+    gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
+    prof_count(PROF_DRAWS, 1);
+    sOpaqueStats[1]++;
+    b->numVerts = 0;
+    b->numTris = 0;
+}
+
+static void opaque_flush(void) {
+    s32 i;
+    u32 part = walk_switch(WALK_DRAWS);
+    sOpaquePending = FALSE;
+    for (i = 0; i < sOpaqueCount; i++) {
+        opaque_draw(&sOpaque[i]);
+    }
+    sOpaqueCount = 0;
+    walk_switch(part);
+}
+
+/* Holds the CPU batch in a bucket; FALSE if it is to be drawn now. */
+static s32 opaque_hold(void) {
+    OpaqueBucket *b = NULL;
+    s32 i, k;
+    if (!opaque_sortable(&sBatchState) || sDrawKind == PORT_DRAW_SKY || REF_ACTIVE() || UNLIKELY(sTracing) ||
+        UNLIKELY(sSkyLast) || (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas)) {
+        return FALSE;
+    }
+    for (i = 0; i < sOpaqueCount; i++) {
+        if (sOpaque[i].state.textures[0] == sBatchState.textures[0] && draw_states_equal(&sOpaque[i].state, &sBatchState)) {
+            b = &sOpaque[i];
+            break;
+        }
+    }
+    if (b != NULL && (b->numVerts + sBatchVertices > MAX_BATCH_VERTICES || b->numTris + sBatchCount > MAX_BATCH_TRIANGLES)) {
+        opaque_draw(b);
+    }
+    if (b == NULL) {
+        if (sOpaqueCount == OPAQUE_BUCKETS) {
+            opaque_flush();
+        }
+        b = &sOpaque[sOpaqueCount++];
+        b->state = sBatchState;
+        b->numVerts = 0;
+        b->numTris = 0;
+    }
+    __builtin_memcpy(&b->verts[b->numVerts], sBatchVerts, sBatchVertices * sizeof(GfxVertex));
+    for (k = 0; k < sBatchCount * 3; k++) {
+        b->indices[b->numTris * 3 + k] = (u16) (sBatchIndices[k] + b->numVerts);
+    }
+    b->numVerts += sBatchVertices;
+    b->numTris += sBatchCount;
+    sOpaquePending = TRUE;
+    sOpaqueStats[0]++;
+    return TRUE;
+}
+#endif
+
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
@@ -1804,6 +1906,18 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
             atlas_upload(sBatchState.textures[0]);
         }
+#ifdef PICA_ALL
+        if (opaque_hold()) {
+            prof_count(PROF_TRIANGLES, sBatchCount);
+            sMix.kinds[sDrawKind].tris += sBatchCount;
+            walk_switch(part);
+            sBatchCount = 0;
+            sBatchVertices = 0;
+            sBatchGeneration++;
+            return;
+        }
+        OPAQUE_FLUSH();
+#endif
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
@@ -2075,6 +2189,11 @@ static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anc
     return flat;
 }
 
+/* GPU vertex lighting (PICA_ALL test build, port_drawtag.h PORT_LIGHT_TAG): while on, the vertices' colours hold
+ * normals, lit with sLight (gfx_light_shade, or the GPU's vertex shader for model draws). */
+static u8 sLightOn;
+static float sLight[4];
+
 /* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
 static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
                                            s32 billboard) {
@@ -2111,6 +2230,11 @@ static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 des
         RspVertex *v = &verts[i];
         u32 word = fogFlat;
         __builtin_memcpy(&v->rgba, &src[i].r, 4);
+        if (UNLIKELY(sLightOn)) {
+            u8 grey = gfx_light_shade(src[i].r, src[i].g, src[i].b, sLight);
+            u8 *c = (u8 *) &v->rgba;
+            c[0] = c[1] = c[2] = grey;
+        }
         if (fog) {
             word |= fog_factor(v, fogMul, fogOffset);
         }
@@ -2151,7 +2275,9 @@ typedef struct PendingLoad {
     u8 fog;    // G_FOG was set
     u8 slots;  // Slots still waiting for it
     u8 boxed;  // box holds the vertices' box
+    u8 lit;    // sLightOn when loaded, with light
     s16 boxMin[3], boxMax[3];
+    float light[4];
 } PendingLoad;
 static PendingLoad sLoads[PENDING_LOADS];
 static u32 sNextLoad;
@@ -2163,6 +2289,11 @@ static COLD void resolve_load(u32 l) {
     PendingLoad *pl = &sLoads[l];
     s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
     s32 i = pl->dest, end = pl->dest + pl->count;
+    u8 lightOn = sLightOn;
+    float light[4];
+    __builtin_memcpy(light, sLight, sizeof(light));
+    sLightOn = pl->lit;
+    __builtin_memcpy(sLight, pl->light, sizeof(sLight));
     g.fogMul = pl->fogMul;
     g.fogOffset = pl->fogOffset;
     while (i < end) {
@@ -2178,6 +2309,8 @@ static COLD void resolve_load(u32 l) {
         i = run;
     }
     pl->slots = 0;
+    sLightOn = lightOn;
+    __builtin_memcpy(sLight, light, sizeof(sLight));
     g.fogMul = fogMul;
     g.fogOffset = fogOffset;
 }
@@ -2243,6 +2376,8 @@ static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
         pl->fogOffset = g.fogOffset;
         pl->fog = fog;
         pl->boxed = FALSE;
+        pl->lit = sLightOn;
+        __builtin_memcpy(pl->light, sLight, sizeof(pl->light));
         pl->slots = count;
         for (i = dest; i < (u32) end; i++) {
             sSlotLoad[i] = l;
@@ -2447,6 +2582,9 @@ static COLD void flush_model_batch(void) {
     part = walk_switch(WALK_DRAWS);
     sky_draw_if_held(); // (DKR_SKY_LAST) Model draws are rare enough to just draw the held sky first
     sDepthDrawn |= sModelState.depthWrite;
+    if (!opaque_sortable(&sModelState)) {
+        OPAQUE_FLUSH();
+    }
     gfx_split_draw_model(&sModelState, &sModelParams, sModelVerts, sModelVertices, sModelIndices, sModelCount);
     prof_count(PROF_TRIANGLES, sModelCount);
     prof_count(PROF_DRAWS, 1);
@@ -2692,6 +2830,9 @@ static COLD void flush_mesh_batch(void) {
     part = walk_switch(WALK_DRAWS);
     sky_draw_if_held();
     sDepthDrawn |= sModelState.depthWrite;
+    if (!opaque_sortable(&sModelState)) {
+        OPAQUE_FLUSH();
+    }
     gfx_split_draw_meshes(&sModelState, &sModelParams, sMeshParts, sMeshPartCount);
     prof_count(PROF_TRIANGLES, sMeshTriangles);
     prof_count(PROF_DRAWS, 1);
@@ -2857,6 +2998,7 @@ static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffs
     params->fogMul = params->fog ? fogMul : 0;
     params->fogOffset = params->fog ? fogOffset : 0;
     params->pad[0] = params->pad[1] = params->pad[2] = 0;
+    params->light[0] = params->light[1] = params->light[2] = params->light[3] = 0.0f;
 }
 
 /*
@@ -2911,6 +3053,10 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     state.flat = 0;
     // Fog worked out when the vertices came uses that time's settings, as load_vertices_now does
     model_params_rest(&state, pl->fog ? pl->fogMul : g.fogMul, pl->fog ? pl->fogOffset : g.fogOffset, &params);
+    if (pl->lit) {
+        params.pad[0] = 1;
+        __builtin_memcpy(params.light, pl->light, sizeof(params.light));
+    }
 
     if ((sTrackMesh || sModelMesh) && !REF_ACTIVE() && mesh_triangles(tris, count, pl, &state, &params, frontCull)) {
         return TRUE;
@@ -3047,6 +3193,9 @@ static void track_draw_bucket(TrackBucket *b) {
     part = walk_switch(WALK_DRAWS);
     sky_draw_if_held();
     sDepthDrawn |= b->state.depthWrite;
+    if (!opaque_sortable(&b->state)) {
+        OPAQUE_FLUSH();
+    }
     gfx_split_draw_meshes(&b->state, &b->params, b->parts, b->numParts);
     prof_count(PROF_TRIANGLES, b->numTriangles);
     prof_count(PROF_DRAWS, 1);
@@ -3339,6 +3488,12 @@ static void track_frame_start(void) {
         track_drop_all();
     }
     sTrackLoads = gPortLevelLoads;
+#ifdef PICA_ALL
+    if (sFrameCount % 600 == 0 && sOpaqueStats[0] > 0) {
+        plat_log("opaque sorting: %u batches held, %u draws", (unsigned) sOpaqueStats[0], (unsigned) sOpaqueStats[1]);
+        sOpaqueStats[0] = sOpaqueStats[1] = 0;
+    }
+#endif
     if (sNativeTrack && sFrameCount % 600 == 0) {
         plat_log("native track: %u KB in %u meshes; batches %u GPU, %u left out, %u CPU; %u made, %u draws",
                  (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (unsigned) sTrackStats[0],
@@ -3848,6 +4003,10 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
         for (k = 0; k < c; k++) {
             u32 rgba;
             __builtin_memcpy(&rgba, &src[k].r, 4);
+            if (UNLIKELY(sLightOn)) {
+                u8 *c = (u8 *) &rgba;
+                c[0] = c[1] = c[2] = gfx_light_shade(src[k].r, src[k].g, src[k].b, sLight);
+            }
             if (fog) {
                 rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
             }
@@ -4138,11 +4297,13 @@ static NOINLINE void fill_rectangle(u32 w0, u32 w1) {
                 // depth there. (The 3DS's memory fill clears the whole buffer anyway, see gfxb_clear_depth.)
                 rect[3] = GFX_SCREEN_HEIGHT;
             }
+            OPAQUE_FLUSH();
             gfx_split_clear_depth(rect);
             REF_CALL(refb_clear_depth(rect));
         } else {
             u32 c = rgba5551_to_8888(g.fillColor >> 16);
             sky_draw_if_held();
+            OPAQUE_FLUSH();
             gfx_split_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255);
             REF_CALL(refb_clear_color(rect, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, 255));
         }
@@ -4288,6 +4449,17 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_track(dl, remaining);
                     dl += used;
                     remaining -= used;
+                } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
+                    s32 k;
+                    for (k = 0; k < 4; k++) {
+                        u32 bits = dl[k].words.w1;
+                        __builtin_memcpy(&sLight[k], &bits, 4);
+                    }
+                    sLightOn = TRUE;
+                    dl += 4;
+                    remaining -= 4;
+                } else if (w1 == PORT_LIGHT_TAG) {
+                    sLightOn = FALSE;
                 }
                 break;
             case OP(G_SPNOOP):
@@ -4868,6 +5040,7 @@ void port_gfx_run_task(void *taskPtr) {
     read_switches();
     prewarm_textures();
     forget_all_loads();
+    sLightOn = FALSE;
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
     sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch) && gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
@@ -4904,6 +5077,7 @@ void port_gfx_run_task(void *taskPtr) {
     kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
+    OPAQUE_FLUSH();
     gfx_split_frame_end();
     walk_end();
 #ifdef PORT_GFX_REFERENCE
