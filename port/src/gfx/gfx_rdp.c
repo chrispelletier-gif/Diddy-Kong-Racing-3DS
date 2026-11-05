@@ -1448,6 +1448,14 @@ static inline s32 scissor_right(u32 cyc) {
     return right;
 }
 
+
+#ifdef PICA_ALL
+/* A native rectangle being drawn (PORT_NRECT_TAG): its material's textures and tiles stand in for TMEM's. */
+static s32 sRectOverride;
+static GfxTexture *sRectTex[2];
+static Tile sRectTiles[2];
+#endif
+
 /* Builds the draw state for the current RSP/RDP state. Out of line: one copy, for triangles and rectangles. */
 static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
     u32 cyc = cycle_type();
@@ -1546,6 +1554,14 @@ static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
         s->scissor[2] = scissor_right(cyc);
     }
 
+#ifdef PICA_ALL
+    if (isRect && sRectOverride) {
+        // A native rectangle (PORT_NRECT_TAG): its material's textures, not what TMEM holds now.
+        s->textures[0] = (usesTex0 || cyc == G_CYC_COPY) ? sRectTex[0] : NULL;
+        s->textures[1] = usesTex1 ? sRectTex[1] : NULL;
+        return;
+    }
+#endif
     if (usesTex0 || cyc == G_CYC_COPY) {
         s->textures[0] = lookup_texture(isRect ? (g.rdpHalf1 >> 0) & 7 : 0, NULL);
     }
@@ -4313,6 +4329,48 @@ static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s3
     sTriStateValid = FALSE;
 }
 
+static NOINLINE void texture_rectangle(u32 w0, u32 w1, s32 flip);
+
+/* A rectangle recorded after PORT_NRECT_TAG | material: the game's G_TEXRECT and its two G_RDPHALF words, drawn with
+ * the material's texture and tiles in place of a texture load. Returns the words used. */
+static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
+    NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
+    u32 w0 = dl[0].words.w0, op = w0 >> 24;
+    s32 k;
+    if (op != (u8) G_TEXRECT && op != (u8) G_TEXRECTFLIP) {
+        return 0;
+    }
+    g.rdpHalf1 = dl[1].words.w1;
+    g.rdpHalf2 = dl[2].words.w1;
+    if (!mat->valid) {
+        gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+        sNDrawStats[2]++;
+        return 3;
+    }
+    for (k = 0; k < 2; k++) {
+        if (mat->state.textures[k] != NULL) {
+            TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
+            if (!e->used || e->gen != mat->texGen[k]) {
+                mat->valid = FALSE;
+                gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+                sNDrawStats[2]++;
+                return 3;
+            }
+            e->lastFrame = sFrameCount;
+        }
+    }
+    sRectOverride = TRUE;
+    sRectTex[0] = mat->state.textures[0];
+    sRectTex[1] = mat->state.textures[1];
+    sRectTiles[0] = mat->tiles[0];
+    sRectTiles[1] = mat->tiles[1];
+    sTriStateValid = FALSE;
+    texture_rectangle(w0, dl[0].words.w1, op == (u8) G_TEXRECTFLIP);
+    sRectOverride = FALSE;
+    sNDrawStats[0]++;
+    return 3;
+}
+
 /* The batch recorded after the tag at dl[-1]; returns the words of data used. */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
@@ -4549,6 +4607,12 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     Tile *tile = &g.tiles[g.rdpHalf1 & 7];
     Tile *tile1 = &g.tiles[(g.rdpHalf1 + 1) & 7];
 
+#ifdef PICA_ALL
+    if (sRectOverride) {
+        tile = &sRectTiles[0];
+        tile1 = &sRectTiles[1];
+    }
+#endif
     build_draw_state(&state, TRUE);
     if (!textured) {
         state.textures[0] = NULL;
@@ -4869,6 +4933,10 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     remaining -= used;
                 } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
                     nmat_capture(w1 & 0xFFFF);
+                } else if ((w1 & 0xFFFF0000) == PORT_NRECT_TAG && remaining >= 3) {
+                    s32 used = native_rect(dl, w1 & 0xFFFF);
+                    dl += used;
+                    remaining -= used;
                 } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
                     u32 index = w1 & 3;
                     __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));

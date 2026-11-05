@@ -1,3 +1,7 @@
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 #include "rcp_dkr.h"
 #include "camera.h"
 #include "macros.h"
@@ -777,7 +781,10 @@ void texrect_draw(Gfx **dList, DrawTexture *element, s32 xPos, s32 yPos, u8 red,
                 t = -(uly << 3);
                 uly = 0;
             }
-            gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+#ifdef PICA_ALL
+            if (port_native_rect(dList, tex) < 0)
+#endif
+                gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
             gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, 1024, 1024);
         }
     }

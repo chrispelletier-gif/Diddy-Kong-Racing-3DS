@@ -342,6 +342,24 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
     return 1;
 }
 
+/* A texture rectangle's texture as a native material: on first use its load commands, then PORT_NRECT_TAG; the
+ * caller's G_TEXRECT follows. Returns the id, or -1 with native draws off (the caller sends the load itself). */
+int port_native_rect(Gfx **dl, const void *texture) {
+    const TextureHeader *tex = (const TextureHeader *) texture;
+    int capture;
+    s32 id;
+    if (!port_native_draw() || tex == NULL) {
+        return -1;
+    }
+    id = port_nmat_key(texture, 0x08000000, 0, &capture);
+    if (capture) {
+        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+    }
+    gDPNoOpTag((*dl)++, PORT_NRECT_TAG | id);
+    return id;
+}
+
 /* After native batches: the renderer's settings are the last captured material's, so the next material_set sets
  * everything again. */
 void port_native_end(void) {

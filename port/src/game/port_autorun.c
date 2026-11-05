@@ -1400,6 +1400,7 @@ static void init(void) {
         for (i = 1; i < SWITCH_RACES; i++) {
             hash_text(config_name(i)); // A new switch starts a new run.
         }
+        hash_text(plat_build_version()); // So does a new build: its numbers aren't comparable with the last one's.
     } else if (sMode == MODE_QUICK) {
         hash_text("quick test");
         for (i = 0; i < (s32) ARRAY_COUNT(quickNames); i++) {

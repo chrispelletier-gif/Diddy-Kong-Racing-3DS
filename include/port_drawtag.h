@@ -66,6 +66,10 @@ extern unsigned int gPortLevelLoads;
 /* A matrix load as floats (PICA_ALL native draws): PORT_MTXF_TAG | index, then a word whose w0 is the address of 16
  * floats (an MtxF written where the game's fixed point Mtx would have been). */
 #define PORT_MTXF_TAG 0x50580000 /* "PX" */
+/* A texture rectangle without its texture load (PICA_ALL native draws): PORT_NRECT_TAG | material, then the game's
+ * G_TEXRECT and its two G_RDPHALF words. */
+#define PORT_NRECT_TAG 0x50520000 /* "PR" */
+int port_native_rect(Gfx **dl, const void *tex);
 int port_native_draw(void);
 
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
