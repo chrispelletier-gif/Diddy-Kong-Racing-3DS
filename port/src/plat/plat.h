@@ -150,6 +150,7 @@ const char *plat_getenv(const char *name);
 /* Out of line: a switch's name comparisons are not to be inlined into the renderer's code (plat_fov_tan_scale reads
  * one, from the vertex load's billboard placing). */
 int plat_switch(const char *name, int fallback) PLAT_NOINLINE;
+void plat_trace(const char *name, const char *fmt, ...);
 void plat_override_switch(const char *name, int value);
 void plat_clear_switch_overrides(void);
 extern volatile int gPlatSwitchEpoch;

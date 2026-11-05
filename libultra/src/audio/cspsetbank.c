@@ -19,6 +19,10 @@
  *====================================================================*/
 
 #include <libaudio.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_music_post(void *seqp, ALEvent *evt);
+#endif
 
 void alCSPSetBank(ALCSPlayer *seqp, ALBank *b)
 {
@@ -27,6 +31,11 @@ void alCSPSetBank(ALCSPlayer *seqp, ALBank *b)
     evt.type = AL_SEQP_BANK_EVT;
     evt.msg.spbank.bank = b;
 
+    #ifdef PICA_ALL
+    if (port_music_post(seqp, &evt)) {
+        return; // the native music player (port/src/audio/music.c)
+    }
+#endif
     alEvtqPostEvent(&seqp->evtq, &evt, 0);
 }
 

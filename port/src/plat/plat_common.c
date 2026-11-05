@@ -547,3 +547,23 @@ void plat_set_60fps_setting(int on) {
 float plat_camera_near(void) {
     return plat_aspect_scale() > 1.0f ? 2.5f : 10.0f;
 }
+
+/* A line to the file named by environment variable `name` (one trace file per run, opened on the first call; nothing
+ * when the variable is unset). Used by DKR_SYNTH_TRACE (voices.c). */
+void plat_trace(const char *name, const char *fmt, ...) {
+    static int sInit;
+    static FILE *sFile;
+    va_list ap;
+
+    if (!sInit) {
+        const char *path = plat_getenv(name);
+        sInit = 1;
+        sFile = (path != NULL && path[0] != '\0') ? fopen(path, "w") : NULL;
+    }
+    if (sFile == NULL) {
+        return;
+    }
+    va_start(ap, fmt);
+    vfprintf(sFile, fmt, ap);
+    va_end(ap);
+}

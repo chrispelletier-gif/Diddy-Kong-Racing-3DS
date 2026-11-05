@@ -37,6 +37,10 @@
  */
 
 #include <libaudio.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_music_player_new(ALCSPlayer *player, ALSeqpConfig *c);
+#endif
 #include <os_internal.h>
 #include <ultraerror.h>
 #ifdef TARGET_PORT
@@ -74,6 +78,12 @@ void alCSPNew(ALCSPlayer *seqp, ALSeqpConfig *c)
     ALVoiceState        *voices;
     
     ALHeap *hp = c->heap;    
+
+#ifdef PICA_ALL
+    if (port_music_player_new(seqp, c)) {
+        return; // the native music player (port/src/audio/music.c)
+    }
+#endif
 
     /*
      * initialize member variables

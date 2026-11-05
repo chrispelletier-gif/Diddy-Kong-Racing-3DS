@@ -357,6 +357,19 @@ static void handle_param(ALSynth *drvr, s32 voice, ALParam *p) {
     PVoice *pv = &sPVoices[voice];
     Event ev;
 
+    // DKR_SYNTH_TRACE=<file>: every voice change, to compare two runs of the music player (lockstep).
+    if (p->type == AL_FILTER_START_VOICE_ALT) {
+        ALStartParamAlt *a = (ALStartParamAlt *) p;
+        plat_trace("DKR_SYNTH_TRACE", "%ld v%d start %p u%d p%.6f vol%d pan%d fx%d n%ld\n", (long) p->delta,
+                   (int) voice, (void *) a->wave, (int) a->unity, (double) a->pitch, (int) a->volume, (int) a->pan,
+                   (int) a->fxMix, (long) a->samples);
+    } else if (p->type == AL_FILTER_SET_PITCH) {
+        plat_trace("DKR_SYNTH_TRACE", "%ld v%d pitch %.6f\n", (long) p->delta, (int) voice, (double) p->data.f);
+    } else {
+        plat_trace("DKR_SYNTH_TRACE", "%ld v%d t%d %ld %ld\n", (long) p->delta, (int) voice, (int) p->type,
+                   (long) p->data.i, (long) p->moredata.i);
+    }
+
     bzero(&ev, sizeof(ev));
     ev.time = p->delta;
     ev.voice = (u8) voice;
