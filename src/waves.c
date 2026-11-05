@@ -11,6 +11,10 @@
 #include "tracks.h"
 #include "types.h"
 #include <ultra64.h>
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 /************ .data ************/
 
@@ -977,6 +981,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
     s32 i;
     TextureHeader *tex1;
     TextureHeader *tex2;
+#ifdef PICA_ALL
+    s32 waveMat = -1;
+#endif
 
     if (viewportID != VIEWPORT_LAYOUT_2_PLAYERS || gWavePlayerCount != 2) {
         viewportID = 0;
@@ -1025,6 +1032,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                 gDPSetEnvColor(gWaveDL++, 255, 255, 255, 0);
             }
         }
+#ifdef PICA_ALL
+        waveMat = port_native_material_here(&gWaveDL, gWaveTexture, gWaveController.xlu);
+#endif
         if (gWaveController.doubleDensity) {
             transform.scale = 0.5f;
         } else {
@@ -1058,15 +1068,29 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                                 tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS]
                                                      [j * (gWaveController.subdivisions << 1)];
 
-                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                                if (waveMat >= 0) {
+                                    port_native_record(&gWaveDL, waveMat, vtx, numVerts << 1, tri, numTris, 1, 1);
+                                } else
+#endif
+                                {
+                                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
+                                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                                }
 
                                 var_t0 += gWaveController.subdivisions + 1;
                             }
                         } else {
-                            gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
-                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip * 2]), 2,
-                                       TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                            if (waveMat >= 0) {
+                                port_native_record(&gWaveDL, waveMat, &D_8012A028[gWaveVertexFlip], 4, &D_800E3090[gWaveVertexFlip * 2], 2, 1, 1);
+                            } else
+#endif
+                            {
+                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
+                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip * 2]), 2,
+                                           TRIN_ENABLE_TEXTURE);
+                            }
                         }
                         mtx_pop(&gWaveDL);
                         sp104 >>= 8;
@@ -1083,14 +1107,26 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
                     tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][j * (gWaveController.subdivisions << 1)];
 
-                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                    if (waveMat >= 0) {
+                        port_native_record(&gWaveDL, waveMat, vtx, numVerts << 1, tri, numTris, 1, 1);
+                    } else
+#endif
+                    {
+                        gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
+                        gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                    }
 
                     var_t0 += gWaveController.subdivisions + 1;
                 }
                 mtx_pop(&gWaveDL);
             }
         }
+#ifdef PICA_ALL
+        if (waveMat >= 0) {
+            port_native_end();
+        }
+#endif
         if (gWaveController.xlu) {
             gSPSetGeometryMode(gWaveDL++, G_FOG);
             gDPSetPrimColor(gWaveDL++, 0, 0, 255, 255, 255, 255);

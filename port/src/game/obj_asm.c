@@ -206,7 +206,6 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
                       const void *tris, int numTris, int textured, int dynamic) {
     int capture;
     s32 id;
-    Gfx *g;
     if (!port_native_draw() || numVerts <= 0 || numVerts > 64 || numTris <= 0) {
         return 0;
     }
@@ -217,6 +216,14 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
         material_set(dl, (TextureHeader *) texture, flags, texOffset);
         gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
     }
+    port_native_record(dl, id, verts, numVerts, tris, numTris, textured, dynamic);
+    return 1;
+}
+
+/* The draw record itself, for a material id from port_native_batch's key or port_native_material_here. */
+void port_native_record(Gfx **dl, int id, const void *verts, int numVerts, const void *tris, int numTris, int textured,
+                        int dynamic) {
+    Gfx *g;
     gDPNoOpTag((*dl)++, PORT_NDRAW_TAG | id);
     g = (*dl)++;
     g->words.w0 = OS_K0_TO_PHYSICAL(verts);
@@ -224,7 +231,19 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
     g = (*dl)++;
     g->words.w0 = (u32) numVerts | ((u32) numVerts << 8) | ((u32) (textured != 0) << 16) | ((u32) (dynamic != 0) << 17);
     g->words.w1 = (u32) numTris;
-    return 1;
+}
+
+/* The settings the caller has just sent, kept as a material (caught again every time: for code that sets its own
+ * settings once and then draws many batches, like the water). Returns the id, or -1 with native draws off. */
+int port_native_material_here(Gfx **dl, const void *key, int keyFlags) {
+    int capture;
+    s32 id;
+    if (!port_native_draw()) {
+        return -1;
+    }
+    id = port_nmat_key(key, (int) (0x20000000u | (u32) keyFlags), 0, &capture);
+    gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+    return id;
 }
 
 void gfx_init_basic_xlu(Gfx **dList, u32 index, u32 primitiveColor, u32 environmentColor);
@@ -235,7 +254,6 @@ int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture,
                           const void *tris, int numTris) {
     int capture;
     s32 id;
-    Gfx *g;
     TextureHeader *tex = (TextureHeader *) texture;
     if (!port_native_draw() || tex == NULL || numVerts <= 0 || numVerts > 64 || numTris <= 0) {
         return 0;
@@ -249,13 +267,7 @@ int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture,
         gDPSetPrimColorRGBA((*dl)++, prim);
         gDPSetEnvColorRGBA((*dl)++, env);
     }
-    gDPNoOpTag((*dl)++, PORT_NDRAW_TAG | id);
-    g = (*dl)++;
-    g->words.w0 = OS_K0_TO_PHYSICAL(verts);
-    g->words.w1 = OS_K0_TO_PHYSICAL(tris);
-    g = (*dl)++;
-    g->words.w0 = (u32) numVerts | ((u32) numVerts << 8) | (1u << 16) | (1u << 17);
-    g->words.w1 = (u32) numTris;
+    port_native_record(dl, id, verts, numVerts, tris, numTris, 1, 1);
     return 1;
 }
 

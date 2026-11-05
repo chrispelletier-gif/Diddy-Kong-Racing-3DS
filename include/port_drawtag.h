@@ -68,6 +68,9 @@ int port_native_draw(void);
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);
 void port_native_end(void);
+void port_native_record(Gfx **dl, int id, const void *verts, int numVerts, const void *tris, int numTris, int textured,
+                        int dynamic);
+int port_native_material_here(Gfx **dl, const void *key, int keyFlags);
 int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
                           const void *tris, int numTris);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);

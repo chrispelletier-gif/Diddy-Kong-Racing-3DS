@@ -4,6 +4,7 @@
 #ifdef TARGET_PORT
 #include "plat/options.h"
 #include "plat/plat.h"
+#include "port_drawtag.h"
 #include "plat/save_backups.h"
 #endif
 #endif
@@ -15639,7 +15640,6 @@ void render_track_selection_viewport_border(ObjectModel *objMdl) {
                 texEnabled = TRUE;
                 texOffset = objMdl->batches[i].texOffset << 14;
             }
-            material_set(&sMenuCurrDisplayList, tex, flags, texOffset);
 #ifdef TARGET_PORT
             // The copy goes in this frame's vertex heap (300 vertices in menus), which nothing else bounds; a frame
             // that would not fit is drawn unwidened.
@@ -15665,6 +15665,14 @@ void render_track_selection_viewport_border(ObjectModel *objMdl) {
             }
 #endif
 
+#ifdef PICA_ALL
+            if (port_native_batch(&sMenuCurrDisplayList, tex, flags, texOffset, verts, numVerts, tris, numTris,
+                                  texEnabled, 1)) {
+                port_native_end();
+                continue;
+            }
+#endif
+            material_set(&sMenuCurrDisplayList, tex, flags, texOffset);
             gSPVertexDKR(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);
             gSPPolygon(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(tris), numTris, texEnabled);
         }
