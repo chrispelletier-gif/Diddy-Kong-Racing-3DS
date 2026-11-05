@@ -33,6 +33,7 @@
 #include "weather.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -1944,6 +1945,10 @@ void render_level_geometry_and_objects(void) {
  * Since opaque and transparent are done in two separate runs, it will skip over the other.
  * Has a special case for the flashing lights in Spaceport Alpha, too.
  */
+#ifdef PICA_ALL
+extern s16 gForceFlags;
+extern TextureHeader *gCurrentTextureHeader;
+#endif
 void render_level_segment(s32 segmentId, s32 nonOpaque) {
     LevelModelSegment *segment;
     s32 i;
@@ -1965,6 +1970,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     s32 textureFlags;
 #ifdef TARGET_PORT
     s32 nativeTrack;
+#ifdef PICA_ALL
+    s32 nativeDraw, anyNative = FALSE;
+#endif
     if (port_portrait_active()) {
         return; // The portrait camera shows the model alone.
     }
@@ -1972,6 +1980,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         return;
     }
     nativeTrack = port_native_track();
+#ifdef PICA_ALL
+    nativeDraw = port_native_draw();
+#endif
 #endif
     port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
@@ -2049,6 +2060,28 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, TRIN_ENABLE_TEXTURE);
             gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
         } else {
+#ifdef PICA_ALL
+            if (nativeDraw) {
+                // Native draw (port_drawtag.h PORT_NDRAW_TAG): the material's commands once, then a record.
+                s32 capture, id = port_nmat_key(texture, batchFlags, texOffset, &capture);
+                if (capture) {
+                    gForceFlags = TRUE;
+                    gCurrentTextureHeader = NULL;
+                    material_set(&gTrackDL, texture, batchFlags, texOffset);
+                    gDPNoOpTag(gTrackDL++, PORT_NMAT_TAG | id);
+                }
+                gDPNoOpTag(gTrackDL++, PORT_NDRAW_TAG | id);
+                gTrackDL->words.w0 = OS_K0_TO_PHYSICAL(vertices);
+                gTrackDL->words.w1 = OS_K0_TO_PHYSICAL(triangles);
+                gTrackDL++;
+                gTrackDL->words.w0 = (u32) numberVertices | ((u32) numberVertices << 8) |
+                                     ((u32) (texture != NULL) << 16);
+                gTrackDL->words.w1 = (u32) numberTriangles;
+                gTrackDL++;
+                anyNative = TRUE;
+                continue;
+            }
+#endif
             material_set(&gTrackDL, texture, batchFlags, texOffset);
             batchFlags = TRUE;
             if (texture == NULL) {
@@ -2063,6 +2096,13 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
     }
+#ifdef PICA_ALL
+    if (anyNative) {
+        // The renderer's settings are the last captured material's: the next material_set sets everything again.
+        gForceFlags = TRUE;
+        gCurrentTextureHeader = NULL;
+    }
+#endif
 }
 
 /**

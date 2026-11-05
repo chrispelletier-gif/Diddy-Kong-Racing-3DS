@@ -4235,7 +4235,6 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     textured = (dl[1].words.w0 >> 16) & 1;
     count = (s32) dl[1].words.w1;
     if (!mat->valid) {
-        if (plat_getenv("NDBG")) plat_log("NDBG invalid mat %d frame %d", (int) id, (int) sFrameCount);
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
         return 2;
@@ -4282,7 +4281,6 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     }
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
-        if (plat_getenv("NDBG")) plat_log("NDBG decline mesh %p count %d total %d frame %d", (void *) mesh, (int) count, (int) total, (int) sFrameCount);
         // No tables (out of room): the game's commands aren't there, so draw through the slots.
         for (i = 0; i < numLoads; i++) {
             load_vertices_now(loads[i].src, loads[i].count, loads[i].dest, g.matrices[loads[i].matrix], mat->fog,
