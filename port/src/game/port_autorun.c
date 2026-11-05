@@ -244,16 +244,15 @@ typedef struct BenchSwitch {
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
 #ifdef PICA_ALL
-/* The off-GitHub "everything on the PICA200" test build: every race has the GPU route on (plat_common.c) and the
- * two-core renderer off on a New 3DS (on on an Old 3DS); each row turns one part back to the shipped way. */
+/* The off-GitHub "every N64 layer native" test build (plat_common.c defaults): native draws on, GPU vertex maths off,
+ * two-core renderer off on a New 3DS (on on an Old 3DS); each row flips one part. The native scheduler is chosen at
+ * start-up (DKR_NATIVE_SCHED in env.txt), so it has no row. */
 #define PICA_ROWS                                                                                                      \
-    { "PICA build: old renderer (no GPU vertex maths, track or lighting)",                                         \
-      { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 1, 0, 1, 0 },                                      \
-        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 },  \
-        { "PICA build: vertex lighting on the CPU", { "DKR_GPU_LIGHT", NULL, NULL }, 1, 0, 1, 0 },                     \
-        { "PICA build: track drawn by the game's commands", { "DKR_NATIVE_TRACK", NULL, NULL }, 1, 0, 1, 0 }
-/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row; the GPU maths row stays until the
- * native work is finished (user 2026-11-05). */
+    { "PICA build: GPU vertex maths, track and lighting on",                                                         \
+      { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_GPU_LIGHT" }, 0, 1, 1, 0 },                                      \
+        { "PICA build: native draws off (game builds N64 commands)", { "DKR_NATIVE_DRAW", NULL, NULL }, 1, 0, 1, 0 }
+/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. GPU maths is off by default and one row
+ * turns it on (user 2026-11-05); the lighting and track rows only mattered with it on. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
     { NULL, { NULL, NULL, NULL }, 0, 0 },

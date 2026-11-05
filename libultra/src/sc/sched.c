@@ -140,6 +140,11 @@ static u32      logArray[SC_LOG_LEN/sizeof(u32)];
  **********************************************************************/
 #ifdef TARGET_PORT
 static OSSched *sPortSched;
+#ifdef PICA_ALL
+int port_lockstep_enabled(void);
+OSMesgQueue *gPortSchedPumpQ; /* The interrupt queue, when the scheduler is native (port_sched_pump) */
+static PlatSem *sPumpLock;
+#endif
 
 static const char *port_task_name(OSScTask *t) {
     if (t == NULL) {
@@ -200,6 +205,15 @@ void osCreateScheduler(OSSched *sc, void *stack, OSPri priority,
     osCreateLog(l, logArray, sizeof(logArray));
 #endif
 
+#ifdef PICA_ALL
+    // Not in lockstep (host frame checks), which takes turns between N64 threads and so needs the scheduler's.
+    if (plat_switch("DKR_NATIVE_SCHED", 1) && !port_lockstep_enabled()) {
+        sPumpLock = plat_sem_create(1);
+        gPortSchedPumpQ = &sc->interruptQ;
+        port_log("scheduler: native (no scheduler thread)");
+        return;
+    }
+#endif
     osCreateThread(&sc->thread, SCHED_THREAD_ID, __scMain, (void *)sc, stack, priority);
     osStartThread(&sc->thread);
 }
@@ -265,18 +279,63 @@ UNUSED void scGetAudioTaskTimers(f32 *timer0, f32 *timer1, f32 *timer2) {
 /***********************************************************************
  * Scheduler implementation
  **********************************************************************/
+#ifdef PICA_ALL
+static void sched_handle(OSSched *sc, OSMesg msg);
+
+/*
+ * Native scheduler (DKR_NATIVE_SCHED, PICA_ALL, on by default there): no scheduler thread. Whoever posts to the
+ * interrupt queue (the retrace, the RCP workers' done events, the game sending its display list task) then runs the
+ * scheduler's handlers itself (port_sched_pump), so no message waits for another thread to be woken. One poster at a
+ * time runs them; one that finds them running leaves its message in the queue, and the runner takes it before it
+ * stops. The command queue is still only read at each retrace, as before.
+ */
+void port_sched_pump(void) {
+    OSSched *sc = sPortSched;
+    OSMesg msg;
+    if (sc == NULL || gPortSchedPumpQ == NULL) {
+        return;
+    }
+    for (;;) {
+        if (!plat_sem_try_wait(sPumpLock)) {
+            return;
+        }
+        while (osRecvMesg(&sc->interruptQ, &msg, OS_MESG_NOBLOCK) == 0) {
+            sched_handle(sc, msg);
+        }
+        plat_sem_post(sPumpLock);
+        if (sc->interruptQ.validCount == 0) {
+            return; // Else a message came in after the last look and its poster found the handlers busy
+        }
+    }
+}
+#endif
+
 static void __scMain(void *arg)
 {
     OSMesg msg = NULL;
     OSSched *sc = (OSSched *)arg;
-    OSScClient *client;
-    s32 state = 0;
-    OSScTask *sp = NULL;
-    OSScTask *dp = NULL;
     
     while (1) {
         
         osRecvMesg(&sc->interruptQ, (OSMesg *)&msg, OS_MESG_BLOCK);
+#ifdef PICA_ALL
+        sched_handle(sc, msg);
+    }
+}
+
+static void sched_handle(OSSched *sc, OSMesg msg) {
+    OSScClient *client;
+    s32 state = 0;
+    OSScTask *sp = NULL;
+    OSScTask *dp = NULL;
+    {
+#else
+    {
+        OSScClient *client;
+        s32 state = 0;
+        OSScTask *sp = NULL;
+        OSScTask *dp = NULL;
+#endif
 
 #ifdef SC_LOGGING 
         if (++count % 1024 == 0)
@@ -317,6 +376,9 @@ static void __scMain(void *arg)
                 break;
         }
     }
+#ifndef PICA_ALL
+    }
+#endif
 }
 
 void func_80079760(OSSched *sc) {

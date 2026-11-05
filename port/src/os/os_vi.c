@@ -29,6 +29,15 @@ void port_vi_retrace(void) {
         port_post_mesg(sViEventQueue, sViEventMsg);
     }
     plat_intlock_unlock();
+#ifdef PICA_ALL
+    {
+        extern OSMesgQueue *gPortSchedPumpQ;
+        void port_sched_pump(void);
+        if (sViEventQueue == gPortSchedPumpQ) {
+            port_sched_pump();
+        }
+    }
+#endif
 }
 
 static void vi_thread(void *arg) {

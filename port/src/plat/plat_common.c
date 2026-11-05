@@ -324,8 +324,9 @@ int plat_switch(const char *name, int fallback) {
     // The "everything on the PICA200" test build (kept off GitHub): the GPU route's switches on unless env.txt or
     // the switch bench says otherwise.
     if (env == NULL) {
-        static const char *const sOn[] = { "DKR_GPU_TRANSFORM", "DKR_NATIVE_TRACK", "DKR_MODEL_MESH", "DKR_TEX_VRAM",
-                                            "DKR_GPU_LIGHT", "DKR_NATIVE_DRAW" };
+        // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
+        // the user wants it off by default with one bench row turning it on (2026-11-05).
+        static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_TEX_VRAM", "DKR_NATIVE_DRAW" };
         if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
             // One core on a New 3DS, so the PICA work's own gain shows; an Old 3DS needs both (user 2026-11-05).
             return plat_old_3ds() ? 1 : 0;
