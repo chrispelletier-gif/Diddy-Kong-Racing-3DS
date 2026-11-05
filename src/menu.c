@@ -2321,6 +2321,21 @@ void func_8007FFEC(s32 numberOfPanels) {
     gWoodPanelAllocCount = numberOfPanels;
 }
 
+
+/* A menu panel drawn as a native record, with the settings just sent kept as its material (native draws on);
+ * returns FALSE for the caller's own commands. */
+static s32 menu_panel_native(Gfx **dList, TextureHeader *tex, s32 texEnabled, Vertex *verts, Triangle *tris) {
+#ifdef PICA_ALL
+    s32 mat = port_native_material_here(dList, tex, texEnabled);
+    if (mat >= 0) {
+        port_native_record(dList, mat, verts, 20, tris, 10, texEnabled, 1);
+        port_native_end();
+        return TRUE;
+    }
+#endif
+    return FALSE;
+}
+
 /**
  * Resize the UV's of the menu panels.
  */
@@ -2416,8 +2431,13 @@ void func_80080580(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s
             i = FALSE; // texEnabled
         }
         gDPPipeSync((*dList)++);
-        gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[gWoodPanelCount].vertices[gMenuTrisFlip]), 20, 0);
-        gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[gWoodPanelCount].triangles[gMenuTrisFlip]), 10, i);
+        if (!menu_panel_native(dList, tex, i, gMenuGeometry[gWoodPanelCount].vertices[gMenuTrisFlip],
+                               gMenuGeometry[gWoodPanelCount].triangles[gMenuTrisFlip])) {
+            gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[gWoodPanelCount].vertices[gMenuTrisFlip]), 20,
+                         0);
+            gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[gWoodPanelCount].triangles[gMenuTrisFlip]), 10,
+                       i);
+        }
         rendermode_reset(dList);
     } else {
         gMenuGeometry[gWoodPanelCount].unk18[gMenuTrisFlip] = 0;
@@ -2453,8 +2473,11 @@ void func_80080BC8(Gfx **dList) {
                 gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(&dMenuHudDrawModes[0]), 2);
             }
             gDPPipeSync((*dList)++);
-            gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[i].vertices[gMenuTrisFlip]), 20, 0);
-            gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[i].triangles[gMenuTrisFlip]), 10, var_t0);
+            if (!menu_panel_native(dList, tex, var_t0, gMenuGeometry[i].vertices[gMenuTrisFlip],
+                                   gMenuGeometry[i].triangles[gMenuTrisFlip])) {
+                gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[i].vertices[gMenuTrisFlip]), 20, 0);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(gMenuGeometry[i].triangles[gMenuTrisFlip]), 10, var_t0);
+            }
         }
     }
     gWoodPanelCount = 0;
@@ -10302,9 +10325,16 @@ s32 func_8008F618(Gfx **dList, Mtx **mtx) {
             flags = RENDER_VTX_ALPHA | RENDER_Z_UPDATE;
         }
 
-        material_set(dList, bgTexture, flags, 0);
-        gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempVertices), 4, 0);
-        gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(tempTriangles), 2, hasTexture);
+#ifdef PICA_ALL
+        if (port_native_batch(dList, bgTexture, flags, 0, tempVertices, 4, tempTriangles, 2, hasTexture, 1)) {
+            port_native_end();
+        } else
+#endif
+        {
+            material_set(dList, bgTexture, flags, 0);
+            gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempVertices), 4, 0);
+            gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(tempTriangles), 2, hasTexture);
+        }
         prevIndex = gTrackSelectBgData[index];
         if (curIndex != prevIndex) {
             yPos -= (gTrackSelectViewportY >> 3);

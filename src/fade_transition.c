@@ -10,6 +10,10 @@
 #include "textures_sprites.h"
 #include "types.h"
 #include "video.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 /************ .data ************/
 
@@ -585,14 +589,46 @@ void transition_update_shape(s32 updateRate) {
     }
 }
 
+/* One shape batch of a transition: a native draw record with native draws on (mat from fade_material), else the
+ * vertex and triangle commands. */
+static void fade_draw(Gfx **dList, s32 mat, Vertex *v, s32 numVerts, Triangle *t, s32 numTris) {
+#ifdef PICA_ALL
+    if (mat >= 0) {
+        port_native_record(dList, mat, v, numVerts, t, numTris, 0, 1);
+        return;
+    }
+#endif
+    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(v), numVerts, 0);
+    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(t), numTris, TRIN_DISABLE_TEXTURE);
+}
+
+/* The transition shape settings just sent, kept as a native material: its id, or -1 with native draws off. */
+static s32 fade_material(Gfx **dList) {
+#ifdef PICA_ALL
+    return port_native_material_here(dList, dTransitionShapeSettings, 0);
+#else
+    return -1;
+#endif
+}
+
+static void fade_end(s32 mat) {
+#ifdef PICA_ALL
+    if (mat >= 0) {
+        port_native_end();
+    }
+#endif
+}
+
 /**
  * Renders a transition effect on screen that will close in from both sides horizonally.
  */
 void transition_render_barndoor_hor(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx) {
+    s32 mat;
     rendermode_reset(dList);
     gSPDisplayList((*dList)++, dTransitionShapeSettings);
-    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(sTransitionVtx[sTransitionTaskNum]), 12, 0);
-    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(sTransitionTris[sTransitionTaskNum]), 8, TRIN_DISABLE_TEXTURE);
+    mat = fade_material(dList);
+    fade_draw(dList, mat, (Vertex *) sTransitionVtx[sTransitionTaskNum], 12, (Triangle *) sTransitionTris[sTransitionTaskNum], 8);
+    fade_end(mat);
     rendermode_reset(dList);
 }
 
@@ -601,10 +637,12 @@ void transition_render_barndoor_hor(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex
  * Codewise, exactly the same as above, but uses a different vertex layout to make the difference.
  */
 void transition_render_barndoor_vert(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx) {
+    s32 mat;
     rendermode_reset(dList);
     gSPDisplayList((*dList)++, dTransitionShapeSettings);
-    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(sTransitionVtx[sTransitionTaskNum]), 12, 0);
-    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(sTransitionTris[sTransitionTaskNum]), 8, TRIN_DISABLE_TEXTURE);
+    mat = fade_material(dList);
+    fade_draw(dList, mat, (Vertex *) sTransitionVtx[sTransitionTaskNum], 12, (Triangle *) sTransitionTris[sTransitionTaskNum], 8);
+    fade_end(mat);
     rendermode_reset(dList);
 }
 
@@ -776,6 +814,7 @@ void transition_render_circle(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx
     Triangle *trisToRender;
     Gfx *gfx;
     s32 i;
+    s32 mat;
 
     rendermode_reset(dList);
     gfx = *dList;
@@ -783,13 +822,14 @@ void transition_render_circle(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx
     vertsToRender = (Vertex *) sTransitionVtx[sTransitionTaskNum];
     trisToRender = (Triangle *) sTransitionTris[sTransitionTaskNum];
     gSPDisplayList(gfx++, dTransitionShapeSettings);
+    mat = fade_material(&gfx);
 
     for (i = 0; i < 4; i++) {
-        gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(vertsToRender), NUM_OF_VERTS, 0);
-        gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(trisToRender), NUM_OF_TRIS, TRIN_DISABLE_TEXTURE);
+        fade_draw(&gfx, mat, vertsToRender, NUM_OF_VERTS, trisToRender, NUM_OF_TRIS);
         vertsToRender += NUM_OF_VERTS;
         trisToRender += NUM_OF_TRIS;
     }
+    fade_end(mat);
 
     *dList = gfx;
     rendermode_reset(dList);
@@ -803,11 +843,13 @@ void transition_render_waves(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx)
     s32 i;
     Vertex *v;
     Triangle *t;
+    s32 mat;
     rendermode_reset(dList);
     gfx = *dList;
     v = (Vertex *) sTransitionVtx[sTransitionTaskNum];
     t = (Triangle *) sTransitionTris[sTransitionTaskNum];
     gSPDisplayList(gfx++, dTransitionShapeSettings);
+    mat = fade_material(&gfx);
     /*
     i == 0 -> Left third wave?
     i == 1 -> Middle third wave?
@@ -818,17 +860,16 @@ void transition_render_waves(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx)
     */
     for (i = 0; i < 6; i++) {
         if (i == 1 || i == 4) { // Is middle third?
-            gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(v), 14, 0);
-            gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(t), 12, TRIN_DISABLE_TEXTURE);
+            fade_draw(&gfx, mat, v, 14, t, 12);
             v += 14;
             t += 12;
         } else {
-            gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(v), 16, 0);
-            gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(t), 14, TRIN_DISABLE_TEXTURE);
+            fade_draw(&gfx, mat, v, 16, t, 14);
             v += 16;
             t += 14;
         }
     }
+    fade_end(mat);
     *dList = gfx;
     rendermode_reset(dList);
 }
@@ -837,10 +878,12 @@ void transition_render_waves(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx)
  * Renders a transition effect on screen that will close in from the opposite corners of the screen.
  */
 void transition_render_barndoor_diag(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx) {
+    s32 mat;
     rendermode_reset(dList);
     gSPDisplayList((*dList)++, dTransitionShapeSettings);
-    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(sTransitionVtx[sTransitionTaskNum]), 10, 0);
-    gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(sTransitionTris[sTransitionTaskNum]), 6, TRIN_DISABLE_TEXTURE);
+    mat = fade_material(dList);
+    fade_draw(dList, mat, (Vertex *) sTransitionVtx[sTransitionTaskNum], 10, (Triangle *) sTransitionTris[sTransitionTaskNum], 6);
+    fade_end(mat);
     rendermode_reset(dList);
 }
 

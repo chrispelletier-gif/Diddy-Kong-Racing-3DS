@@ -68,6 +68,7 @@ int port_native_draw(void);
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);
 void port_native_end(void);
+void port_nmat_texture_freed(const void *start, const void *end);
 int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim);
 void port_native_record(Gfx **dl, int id, const void *verts, int numVerts, const void *tris, int numTris, int textured,
                         int dynamic);

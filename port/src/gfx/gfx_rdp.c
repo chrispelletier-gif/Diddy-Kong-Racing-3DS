@@ -4347,6 +4347,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
+        if (UNLIKELY(sTracing)) {
+            plat_log("NDRAW %03lX dropped: not captured", (unsigned long) id);
+        }
         return 2;
     }
     for (k = 0; k < 2; k++) {
@@ -4356,6 +4359,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 mat->valid = FALSE;
                 gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
                 sNDrawStats[2]++;
+                if (UNLIKELY(sTracing)) {
+                    plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
+                }
                 return 2;
             }
             e->lastFrame = sFrameCount;

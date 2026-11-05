@@ -160,6 +160,22 @@ int port_native_draw(void) {
     return sNativeDraw;
 }
 
+/* The game freed texture memory [start, end): the materials made with it are caught again on their next use, as the
+ * memory may hold another texture by then (or the same one loaded again at the same place, which the renderer has
+ * forgotten). */
+void port_nmat_texture_freed(const void *start, const void *end) {
+    u32 i;
+    if (!sNativeDraw) {
+        return;
+    }
+    for (i = 0; i < NMAT_KEYS; i++) {
+        NMatKey *k = &sNMatKeys[i];
+        if (k->used && (const u8 *) k->tex >= (const u8 *) start && (const u8 *) k->tex < (const u8 *) end) {
+            gPortNMatBad[i] = 1;
+        }
+    }
+}
+
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture) {
     u32 h = (u32) ((((size_t) texture >> 3) ^ (u32) flags * 31u ^ (u32) texOffset * 131u ^
                     (u32) gBlockedRenderFlags * 7u ^ (u32) gUseDirectionalLighting) * 2654435761u) % NMAT_KEYS, i;
