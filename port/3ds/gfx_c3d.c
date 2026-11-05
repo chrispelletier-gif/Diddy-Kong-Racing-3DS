@@ -3383,7 +3383,9 @@ static void read_switches(void) {
     // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
     sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
     // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
-    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
+                       plat_switch("DKR_NATIVE_TRACK", 0) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());

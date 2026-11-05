@@ -210,6 +210,8 @@ void port_autorun_request(s32 start);
 s32 port_autorun_switch_count(void);
 s32 port_autorun_shelved_count(void);
 void port_autorun_frame(s32 updateRate);
+/* Publishes what the player's kart is doing (plat_set_game_note) once a frame; in every build, tilt steering needs it. */
+void port_game_note_frame(void);
 /* Sets up a one player tracks mode race as the menus would, and returns the menu result that starts it (menu.c). */
 s32 port_autorun_setup_race(s32 levelId, s32 character, s32 vehicle);
 /* The same for a level in its adventure form: a hub, a battle arena, a race with silver coins (menu.c). */
@@ -328,6 +330,9 @@ static inline s32 port_half_shift(s32 step) {
 /* A whole number added each frame: half of it at half step (odd amounts round toward zero). */
 #define PORT_HALF(x) (gPortHalfStep ? (x) / 2 : (x))
 void port_set_logic_rate(s32 updateRate);
+/* A kart held up by only one or two wheels levels out (src/racer.c update_racer_collision); DKR_CAR_SETTLE=0 is the
+   N64's, which can leave it riding on its side for good. */
+s32 port_car_settle(void);
 
 /*
  * What the game thread is doing (src/thread3_main.c sets it at each step of the main loop), and a line describing the

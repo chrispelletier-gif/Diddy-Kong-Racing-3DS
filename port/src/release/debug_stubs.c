@@ -75,3 +75,9 @@ int port_native_mesh_for(int isRacer) {
     (void) isRacer;
     return 0;
 }
+
+unsigned int gPortLevelLoads;
+
+int port_native_track(void) {
+    return 0; // NR4 stays off in a player's build until the switch bench puts it on by default
+}

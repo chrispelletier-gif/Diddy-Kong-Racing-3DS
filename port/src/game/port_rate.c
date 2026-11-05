@@ -30,3 +30,14 @@ void port_set_logic_rate(s32 updateRate) {
         gPortSkipTick = FALSE;
     }
 }
+
+/*
+ * The kart stuck on two wheels (0.2 alpha report): update_racer_collision tilts a kart only from wheels 0 and 1 (roll)
+ * and 0 and 2 (pitch). When those are all in the air and the kart rests on the others, say reversing and turning up
+ * a ramp's edge, nothing ever changes its tilt, so it drives on one or two wheels until it falls off something.
+ * On (the default), a kart car on one or two wheels eases its roll and pitch toward level, as the game already does
+ * for its other vehicles (racer.c, func_80046524), until enough wheels land to tilt it from the ground again.
+ */
+s32 port_car_settle(void) {
+    return plat_switch("DKR_CAR_SETTLE", 1) != 0;
+}

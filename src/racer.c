@@ -6957,6 +6957,14 @@ void update_racer_collision(Object *racerObj, Object_Racer *racer, s32 updateRat
     if (sp184 == 0) {
         racer->x_rotation_vel += temp_s16 & 0xFFFF & 0xFFFF & 0xFFFF;
     }
+#ifdef TARGET_PORT
+    // Not resting on enough wheels for the lines above to tilt it: level out (see port_car_settle).
+    if (racer->vehicleID == VEHICLE_CAR && racer->groundedWheels > 0 && racer->groundedWheels < 3 &&
+        port_car_settle()) {
+        racerObj->trans.rotation.x_rotation -= (racerObj->trans.rotation.x_rotation * updateRate) >> 5;
+        racer->x_rotation_vel -= (racer->x_rotation_vel * updateRate) >> 5;
+    }
+#endif
     if (racer->vehicleID != VEHICLE_LOOPDELOOP && racer->vehicleID != VEHICLE_PLANE &&
         racer->vehicleID != VEHICLE_CARPET && racer->vehicleID != VEHICLE_SMOKEY) {
         CLAMP(racer->x_rotation_vel, -0x3400, 0x3400);
@@ -8674,11 +8682,18 @@ void func_80059208(Object *obj, Object_Racer *racer, s32 updateRate) {
     diffX = -(((obj->trans.x_position * diffX) + (diffZ * obj->trans.z_position) + ftemp) / divisor);
     unusedFtemp = ftemp;
     CLAMP(diffX, -5.0f, 5.0f)
-    racer->unk1BA += (s32) diffX;
+    // The racer's place across the course (and its height, below) closes in by a whole step each frame. At 60 fps that
+    // would be twice per 30 fps frame, so off the course line (Tricky's tunnel) it runs off twice as far and the
+    // course direction worked out from it turns round, giving "wrong way" after the tunnel. One step per 30 fps frame.
+    if (PORT_TICK()) { //!@Delta
+        racer->unk1BA += (s32) diffX;
+    }
 
     diffY = (obj->trans.y_position - tempY) / divisor;
     CLAMP(diffY, -100.0f, 100.0f)
-    racer->unk1BC += (s32) diffY;
+    if (PORT_TICK()) { //!@Delta
+        racer->unk1BC += (s32) diffY;
+    }
 }
 
 /**
