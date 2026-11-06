@@ -412,10 +412,8 @@ void main_game_loop(void) {
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
 #if PICA_ALL
     {
-        static s32 sSlowHistory, sHold, sAdapt = -1;
-        if (sAdapt < 0) {
-            sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", 1) != 0;
-        }
+        static s32 sSlowHistory, sHold;
+        s32 sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", 1) != 0; // Each frame: the switch bench changes it
         sSlowHistory = (sSlowHistory << 1) & 0xFF;
         if (sAdapt && tempLogicUpdateRate > plat_frame_retraces()) {
             sSlowHistory |= 1;
@@ -425,7 +423,7 @@ void main_game_loop(void) {
         } else if (sHold > 0) {
             sHold--;
         }
-        gPortRacerLodBoost = sHold > 0;
+        gPortRacerLodBoost = sAdapt && sHold > 0;
     }
 #endif
     port_game_note_frame();

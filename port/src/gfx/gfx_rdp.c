@@ -3785,6 +3785,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         if (sTriReject && !flat &&
             (vertex_outcode(&g.verts[idx[0]], &vp) & vertex_outcode(&g.verts[idx[1]], &vp) &
              vertex_outcode(&g.verts[idx[2]], &vp)) != 0) {
+            sWalkRejectedTris++;
             continue;
         }
         if (sCpuCull && state.cullMode != 0 && !flat) {
@@ -4701,6 +4702,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         u16 *out;
         if (sTriReject && (sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
                            sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
+            sWalkRejectedTris++;
             continue;
         }
         state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
