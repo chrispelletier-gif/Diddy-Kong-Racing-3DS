@@ -265,11 +265,17 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "textures in RAM (old default)", { "DKR_TEX_VRAM", NULL, NULL }, 1, 0, 1, 1 },
     // The v27 game thread cuts (bench #436: scene 0.2-1.3 ms less on all three tracks) stay on; DKR_BOX_S64,
     // DKR_WAVES_OLD and DKR_TEXSCROLL_OLD still turn them off.
+    // v28: native draws' vertex maths on the system core with the backend (DKR_NATIVE_REMOTE=3; PC walk -31%, frames
+    // identical). These rows race it all on the game core (0), and the draws whose order matters left there (1).
+    { "native draws' vertices on the game core (old)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 0, 1, 1 },
+    { "only opaque native draws on the system core", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
 static const BenchSwitch sSwitchesNew3ds[] = {
     { "textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 1 },
+    // v28: the Old 3DS default, native draws' vertex maths on the renderer's second thread (DKR_NATIVE_REMOTE=3).
+    { "native draws' vertices on the second renderer thread", { "DKR_NATIVE_REMOTE", NULL, NULL }, 0, 3, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

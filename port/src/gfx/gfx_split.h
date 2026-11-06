@@ -25,6 +25,10 @@ void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *param
 void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                            int numParts);
 void gfx_split_mesh_free(void *mesh);
+void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes);
+void gfx_split_call_commit(void *payload);
+/* closeFn is run on the backend thread before any record but a call of keepFn (see gfx_split.c). */
+void gfx_split_set_hooks(void (*closeFn)(void), void (*keepFn)(void *));
 
 /* Since the last call: the walk's time waiting for the backend, the backend's busy time and frames, and how often the
  * backend was woken (the profiler's "two-core renderer" line). */

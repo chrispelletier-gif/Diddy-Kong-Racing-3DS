@@ -1844,64 +1844,174 @@ static OpaqueBucket sOpaque[OPAQUE_BUCKETS];
 static s32 sOpaqueCount;
 static u32 sOpaqueStats[2]; // Batches held, draws made
 
+/*
+ * v28 (DKR_NATIVE_REMOTE, PICA_ALL, on an Old 3DS): the buckets live on the two-core renderer's backend thread. The
+ * walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its vertices, matrix and
+ * tables) and each flush, in order with its draws, and the backend runs the same bucket code on them, so the frame's
+ * draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back faces and the
+ * corners, about half of the walk's time) then runs on the system core instead of the busy game core. sRemote is set
+ * at a frame's start only, with the queue drained, so one thread at a time runs the bucket code; the walk's
+ * sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
+ */
+static s32 sRemote;
+static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
+static s32 sEngPending;
+static u32 sEngStats[2];  // sOpaqueStats of the backend's
+#define ENG_PENDING (*(sRemote ? &sEngPending : &sOpaquePending))
+
 static void opaque_draw(OpaqueBucket *b) {
     if (b->numTris == 0) {
         return;
     }
 
-    gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
-    prof_count(PROF_DRAWS, 1);
-    sOpaqueStats[1]++;
+    if (sRemote) {
+        gfxb_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris); // On the backend thread
+        sEngStats[1]++;
+    } else {
+        gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
+        prof_count(PROF_DRAWS, 1);
+        sOpaqueStats[1]++;
+    }
     b->numVerts = 0;
     b->numTris = 0;
 }
 
-static void opaque_flush(void) {
+/* Draws the buckets (by whichever thread has them). */
+static void opaque_flush_now(void) {
     s32 i;
-    u32 part = walk_switch(WALK_DRAWS);
-    sOpaquePending = FALSE;
+    u32 part = sRemote ? 0 : walk_switch(WALK_DRAWS);
+    ENG_PENDING = FALSE;
     for (i = 0; i < sOpaqueCount; i++) {
         opaque_draw(&sOpaque[i]);
     }
     sOpaqueCount = 0;
-    walk_switch(part);
+    if (!sRemote) {
+        walk_switch(part);
+    }
+}
+
+/* A queued call (gfx_split_call_reserve), or one made here when it can't be queued: payload bytes for fn. */
+static void (*sRemoteNowFn)(void *);
+static u8 *sRemoteScratch;
+static u32 sRemoteScratchBytes;
+static void *remote_begin(void (*fn)(void *), u32 bytes) {
+    void *p = gfx_split_call_reserve(fn, bytes);
+    if (p != NULL) {
+        return p;
+    }
+    // Too big for the queue: made here once the backend has caught up (it then waits, so the buckets are free).
+    gfx_split_drain();
+    if (bytes > sRemoteScratchBytes) {
+        plat_free(sRemoteScratch);
+        sRemoteScratch = (u8 *) plat_malloc(bytes);
+        sRemoteScratchBytes = sRemoteScratch != NULL ? bytes : 0;
+        if (sRemoteScratch == NULL) {
+            plat_log("native remote: no memory for a %lu byte call", (unsigned long) bytes);
+            return NULL;
+        }
+    }
+    sRemoteNowFn = fn;
+    return sRemoteScratch;
+}
+
+static void remote_end(void *p) {
+    if (sRemoteNowFn != NULL) {
+        void (*fn)(void *) = sRemoteNowFn;
+        sRemoteNowFn = NULL;
+        fn(p);
+    } else {
+        gfx_split_call_commit(p);
+    }
+}
+
+static void opaque_flush_call(void *p) {
+    (void) p;
+    if (sEngPending) {
+        opaque_flush_now();
+    }
+}
+
+/* The walk's flush (OPAQUE_FLUSH): queued when the buckets are the backend's. */
+static void opaque_flush(void) {
+    if (sRemote) {
+        void *p = remote_begin(opaque_flush_call, 0);
+        sOpaquePending = FALSE;
+        if (p != NULL) {
+            remote_end(p);
+        }
+        return;
+    }
+    opaque_flush_now();
 }
 
 static s32 sOpaqueSortSwitch = 1; // DKR_OPAQUE_SORT (PICA_ALL; 0 for the bench's old renderer row)
 
-/* Holds the CPU batch in a bucket; FALSE if it is to be drawn now. */
-static s32 opaque_hold(void) {
+/* Adds a batch to the bucket of its state (by whichever thread has the buckets). */
+static void opaque_append(const GfxDrawState *st, const GfxVertex *verts, s32 numVerts, const u16 *indices,
+                          s32 numTris) {
     OpaqueBucket *b = NULL;
     s32 i, k;
-    if (!sOpaqueSortSwitch || !opaque_sortable(&sBatchState) || sDrawKind == PORT_DRAW_SKY || REF_ACTIVE() || UNLIKELY(sTracing) ||
-        UNLIKELY(sSkyLast) || (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas)) {
-        return FALSE;
-    }
     for (i = 0; i < sOpaqueCount; i++) {
-        if (sOpaque[i].state.textures[0] == sBatchState.textures[0] && draw_states_equal(&sOpaque[i].state, &sBatchState)) {
+        if (sOpaque[i].state.textures[0] == st->textures[0] && draw_states_equal(&sOpaque[i].state, st)) {
             b = &sOpaque[i];
             break;
         }
     }
-    if (b != NULL && (b->numVerts + sBatchVertices > MAX_BATCH_VERTICES || b->numTris + sBatchCount > MAX_BATCH_TRIANGLES)) {
+    if (b != NULL && (b->numVerts + numVerts > MAX_BATCH_VERTICES || b->numTris + numTris > MAX_BATCH_TRIANGLES)) {
         opaque_draw(b);
     }
     if (b == NULL) {
         if (sOpaqueCount == OPAQUE_BUCKETS) {
-            opaque_flush();
+            opaque_flush_now();
         }
         b = &sOpaque[sOpaqueCount++];
-        b->state = sBatchState;
+        b->state = *st;
         b->numVerts = 0;
         b->numTris = 0;
     }
-    __builtin_memcpy(&b->verts[b->numVerts], sBatchVerts, sBatchVertices * sizeof(GfxVertex));
-    for (k = 0; k < sBatchCount * 3; k++) {
-        b->indices[b->numTris * 3 + k] = (u16) (sBatchIndices[k] + b->numVerts);
+    __builtin_memcpy(&b->verts[b->numVerts], verts, numVerts * sizeof(GfxVertex));
+    for (k = 0; k < numTris * 3; k++) {
+        b->indices[b->numTris * 3 + k] = (u16) (indices[k] + b->numVerts);
     }
-    b->numVerts += sBatchVertices;
-    b->numTris += sBatchCount;
-    sOpaquePending = TRUE;
+    b->numVerts += numVerts;
+    b->numTris += numTris;
+    ENG_PENDING = TRUE;
+}
+
+/* A held batch on the backend thread: its state, counts, vertices and indices. */
+typedef struct OpaqueAppendCall {
+    GfxDrawState state;
+    s32 numVerts, numTris;
+} OpaqueAppendCall;
+
+static void opaque_append_call(void *p) {
+    OpaqueAppendCall *c = (OpaqueAppendCall *) p;
+    const GfxVertex *verts = (const GfxVertex *) ((u8 *) p + ((sizeof(OpaqueAppendCall) + 7) & ~7u));
+    opaque_append(&c->state, verts, c->numVerts, (const u16 *) (verts + c->numVerts), c->numTris);
+}
+
+/* Holds the CPU batch in a bucket; FALSE if it is to be drawn now. */
+static s32 opaque_hold(void) {
+    if (!sOpaqueSortSwitch || !opaque_sortable(&sBatchState) || sDrawKind == PORT_DRAW_SKY || REF_ACTIVE() || UNLIKELY(sTracing) ||
+        UNLIKELY(sSkyLast) || (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas)) {
+        return FALSE;
+    }
+    if (sRemote) {
+        u32 head = (sizeof(OpaqueAppendCall) + 7) & ~7u, vertBytes = sBatchVertices * sizeof(GfxVertex);
+        u8 *p = (u8 *) remote_begin(opaque_append_call, head + vertBytes + sBatchCount * 3 * sizeof(u16));
+        if (p != NULL) {
+            OpaqueAppendCall *c = (OpaqueAppendCall *) p;
+            c->state = sBatchState;
+            c->numVerts = sBatchVertices;
+            c->numTris = sBatchCount;
+            __builtin_memcpy(p + head, sBatchVerts, vertBytes);
+            __builtin_memcpy(p + head + vertBytes, sBatchIndices, sBatchCount * 3 * sizeof(u16));
+            remote_end(p);
+        }
+        sOpaquePending = TRUE;
+    } else {
+        opaque_append(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
+    }
     sOpaqueStats[0]++;
     return TRUE;
 }
@@ -1924,7 +2034,7 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
         }
     }
     if (sOpaqueCount == OPAQUE_BUCKETS) {
-        opaque_flush();
+        opaque_flush_now();
     }
     b = &sOpaque[sOpaqueCount++];
     b->state = *st;
@@ -2116,6 +2226,8 @@ static s32 sNativeOnceAFrame; // DKR_NATIVE_ONCE (PICA_ALL): a mesh's triangles 
 static s32 sNativeBucket; // DKR_NATIVE_BUCKET (PICA_ALL): opaque native draws written straight into their bucket
 static s32 sNativeVfp; // DKR_NATIVE_VFP (PICA_ALL): native draws transform with VFP vectors when DKR_VFP_VECTORS is on
 static s32 sFastOutcode; // DKR_FAST_OUTCODE (PICA_ALL): screen edge bits from sign bits, see vertex_outcode
+static u32 sNativeTableLimit = 2048 * 3 / 4, sNativePoolLimit = 640 * 1024; // DKR_NATIVE_BIG (see NATIVE_TABLE_SIZE)
+static s32 sScreenOnce; // DKR_SCREEN_ONCE (PICA_ALL v28): native corners reuse the screen x/y of the edge test
 static s32 sAxisFast;  // DKR_AXIS_FAST (PICA_ALL): native corners' first texture coordinates without the axis calls
 static s32 sNMatFast;   // DKR_NMAT_FAST (PICA_ALL): a native draw's fixed set-up cost cut (see native_record)
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
@@ -2195,6 +2307,13 @@ static void read_switches(void) {
     sNativeVfp = plat_switch("DKR_NATIVE_VFP", 1) != 0;
     sFastOutcode = plat_switch("DKR_FAST_OUTCODE", 1) != 0;
     sAxisFast = plat_switch("DKR_AXIS_FAST", 1) != 0;
+    sScreenOnce = plat_switch("DKR_SCREEN_ONCE", 1) != 0;
+    sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
+    {
+        s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
+        sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
+        sNativePoolLimit = big ? 640 * 1024 : 160 * 1024;
+    }
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
 #endif
 }
@@ -3647,9 +3766,11 @@ static void track_frame_start(void) {
             }
         }
     }
-    if (sFrameCount % 600 == 0 && sOpaqueStats[0] > 0) {
-        plat_log("opaque sorting: %u batches held, %u draws", (unsigned) sOpaqueStats[0], (unsigned) sOpaqueStats[1]);
+    if (sFrameCount % 600 == 0 && sOpaqueStats[0] + sEngStats[0] > 0) {
+        plat_log("opaque sorting: %u batches held, %u draws%s", (unsigned) (sOpaqueStats[0] + sEngStats[0]),
+                 (unsigned) (sOpaqueStats[1] + sEngStats[1]), sRemote ? " (on the backend thread)" : "");
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
+        sEngStats[0] = sEngStats[1] = 0; // Read without a lock, as the other profiler counts
     }
 #endif
     if (sNativeTrack && sFrameCount % 600 == 0) {
@@ -3936,8 +4057,12 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
  * triangles change (or memory reused by another) gets new tables. The result is the same draw the walk would make
  * (the same vertices, culling and batches), so frames are identical; anything unusual leaves the tag unused.
  */
-#define NATIVE_TABLE_SIZE 512          // Meshes remembered (a power of two); full at three quarters, then all forgotten
-#define NATIVE_POOL_BYTES (160 * 1024) // Their tables; full, all are forgotten
+#define NATIVE_TABLE_SIZE 2048         // Meshes remembered (a power of two); full at three quarters, then all forgotten
+#define NATIVE_POOL_BYTES (640 * 1024) // Their tables; full, all are forgotten
+/* v28 (DKR_NATIVE_BIG, PICA_ALL): four times the meshes and room. A Whale Bay race draws ~590 different triangle lists
+ * in 700 frames (shadows and water among them), more than the old 384, so every ~100 frames all were forgotten and
+ * remade (a burst of ~150 table builds in one frame). DKR_NATIVE_BIG=0 keeps the old limits within the bigger table. */
+
 #define NATIVE_MAX_CORNERS 1024
 #define NATIVE_MAX_LOADS 4
 
@@ -3953,17 +4078,20 @@ typedef struct NativeMesh {
     u8 *cornerVertex;
     u32 *cornerUv;  // As TexCoords.texCoords
     u16 *triCorners; // Three a triangle
+    u8 *backface;    // Each triangle's BACKFACE_DRAW flag (DKR_NATIVE_REMOTE copies these)
     const Vertex *boxSrc; // DKR_TRI_REJECT: the vertices boxMin/boxMax were taken from (the track's don't move)
     u32 boxLoads;         // gPortLevelLoads then
     s16 boxMin[3], boxMax[3];
 } NativeMesh;
 
 static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
+_Static_assert(NATIVE_TABLE_SIZE == 2048 && NATIVE_POOL_BYTES == 640 * 1024, "read_switches sets the limits from these");
 static u32 sNativeMeshCount;
 static u8 *sNativePool;
 static u32 sNativePoolUsed;
 static RspVertex sNativeVerts[MAX_VERTICES];
 static u8 sNativeOut[MAX_VERTICES]; // Their screen edges (vertex_outcode), for DKR_TRI_REJECT
+static float sNativeSx[MAX_VERTICES], sNativeSy[MAX_VERTICES]; // Their screen x and y (DKR_SCREEN_ONCE)
 static u16 sNativeCornerIndex[NATIVE_MAX_CORNERS];
 static u32 sNativeCornerStamp[NATIVE_MAX_CORNERS];
 static u32 sNativeStamp;
@@ -3992,7 +4120,7 @@ static void *native_alloc(u32 bytes) {
             return NULL;
         }
     }
-    if (sNativePoolUsed + bytes > NATIVE_POOL_BYTES) {
+    if (sNativePoolUsed + bytes > sNativePoolLimit) {
         return NULL;
     }
     p = sNativePool + sNativePoolUsed;
@@ -4006,6 +4134,7 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     u8 *cornerVertex;
     u32 *cornerUv;
     u16 *triCorners;
+    u8 *backface;
     if (reuse) {
         // The same number of triangles changed in place (a racer's face, a scrolled texture: only their texture
         // coordinates move): the tables are remade where they are, instead of taking new room every time, which
@@ -4013,14 +4142,16 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
         cornerVertex = e->cornerVertex;
         cornerUv = e->cornerUv;
         triCorners = e->triCorners;
+        backface = e->backface;
     } else {
         e->copy = (Triangle *) native_alloc(count * sizeof(Triangle));
         cornerVertex = (u8 *) native_alloc(count * 3);
         cornerUv = (u32 *) native_alloc(count * 3 * sizeof(u32));
         triCorners = (u16 *) native_alloc(count * 3 * sizeof(u16));
+        backface = (u8 *) native_alloc(count);
         e->capTris = (u16) count;
     }
-    if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL) {
+    if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL || backface == NULL) {
         return FALSE;
     }
     __builtin_memcpy(e->copy, tris, count * sizeof(Triangle));
@@ -4030,6 +4161,7 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     for (i = 0; i < (u32) count; i++) {
         const Triangle *t = &tris[i];
         const TexCoords *c = &t->uv0;
+        backface[i] = t->flags & BACKFACE_DRAW;
         for (k = 0; k < 3; k++) {
             u8 vi = t->verticesArray[1 + k];
             u32 uv = c[k].texCoords, q;
@@ -4054,6 +4186,7 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     e->cornerVertex = cornerVertex;
     e->cornerUv = cornerUv;
     e->triCorners = triCorners;
+    e->backface = backface;
     e->numTris = (u16) count;
     e->numCorners = (u16) n;
     e->usable = n <= NATIVE_MAX_CORNERS;
@@ -4163,7 +4296,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
             return e->usable ? e : NULL;
         }
     }
-    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= NATIVE_TABLE_SIZE * 3 / 4) {
+    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= sNativeTableLimit) {
         native_forget_all();
         return NULL;
     }
@@ -4676,6 +4809,370 @@ static inline s32 native_dynamic_ok(s32 start, s32 numVerts, s32 cur) {
     return TRUE;
 }
 
+/*
+ * A native draw's inputs, queued for the backend thread (DKR_NATIVE_REMOTE, see sRemote): what native_record's
+ * vertex maths and corner loop read, copied, since the walk goes on (its tables, the game's vertices) while the
+ * backend works. Followed by cornerUv[numCorners], the vertices[total] (the game's, or with NP_DONE the walk's
+ * finished ones), triCorners[count * 3], cornerVertex[numCorners] and each triangle's BACKFACE_DRAW flag[count].
+ * A draw whose order matters (NP_ORDERED: blended, decals) goes into the backend's own batch (sEngBatch), as the
+ * walk's would have, held open across such draws and closed (drawn) by any other record (gfx_split_set_hooks).
+ */
+enum {
+    NP_FOG = 1, NP_LIGHT = 2, NP_CULL = 4, NP_REJECT = 8, NP_SCREEN = 16, NP_FAST_OUTCODE = 32, NP_VFP = 64,
+    NP_ZERO_TEX1 = 128, NP_AXIS_FAST = 256, NP_ORDERED = 512, NP_DONE = 1024
+};
+typedef struct NativePiece {
+    GfxDrawState state;
+    float m[2][4][4];
+    Viewport vp;
+    TexAxis axes[4]; // u0, v0, u1, v1
+    float fogMul, fogOffset, keepSign, light[4];
+    u16 total, count, numCorners, split; // split: the vertices of the first load, when there are two
+    u16 flags;
+    u8 numLoads, frontCull, kind, pad[3];
+} NativePiece;
+
+#define NP_ALIGN(n) (((n) + 7u) & ~7u)
+static RspVertex sEngVerts[MAX_VERTICES];
+static u8 sEngOut[MAX_VERTICES];
+static float sEngSx[MAX_VERTICES], sEngSy[MAX_VERTICES];
+static u16 sEngCornerIndex[NATIVE_MAX_CORNERS];
+static u32 sEngCornerStamp[NATIVE_MAX_CORNERS];
+static u32 sEngStamp;
+static volatile u32 sEngTris[PROF_KINDS], sEngRejected, sEngRejectedTris; // Totals; the walk takes what is new
+static u32 sEngTrisTaken[PROF_KINDS], sEngRejectedTaken, sEngRejectedTrisTaken;
+/* The backend's batch for ordered native draws, as the walk's sBatch* for them. */
+static GfxDrawState sEngBatchState;
+static s32 sEngBatchCount, sEngBatchVertices;
+static u32 sEngBatchGeneration;
+static GfxVertex sEngBatchVerts[MAX_BATCH_VERTICES];
+static u16 sEngBatchIndices[MAX_BATCH_TRIANGLES * 3];
+
+/* Draws the backend's batch, as flush_cpu_batch would have drawn the walk's (the buckets first). */
+static void eng_close(void) {
+    if (sEngBatchCount > 0) {
+        if (sEngPending) {
+            opaque_flush_now();
+        }
+        gfxb_draw_indexed(&sEngBatchState, sEngBatchVerts, sEngBatchVertices, sEngBatchIndices, sEngBatchCount);
+        sEngBatchCount = 0;
+        sEngBatchVertices = 0;
+        sEngBatchGeneration++;
+    }
+}
+
+/* batch_triangle's for the backend's batch. */
+static u16 *eng_batch_triangle(const GfxDrawState *state) {
+    if (sEngBatchCount > 0 && (sEngBatchCount + 1 > MAX_BATCH_TRIANGLES || sEngBatchVertices + 3 > MAX_BATCH_VERTICES ||
+                               !draw_states_equal(state, &sEngBatchState))) {
+        eng_close();
+    }
+    if (sEngBatchCount == 0) {
+        sEngBatchState = *state;
+    }
+    return &sEngBatchIndices[sEngBatchCount++ * 3];
+}
+
+/* native_record's work from its vertex maths on, on the backend thread: the same sums in the same order. */
+static NOINLINE HOT void native_piece_run(void *payload) {
+    const NativePiece *np = (const NativePiece *) payload;
+    const u8 *at = (const u8 *) payload + NP_ALIGN(sizeof(NativePiece));
+    u32 flags = np->flags, stamp, generation = 0;
+    s32 total = np->total, count = np->count, i, k, l, directTris = 0, ordered = (flags & NP_ORDERED) != 0;
+    const u32 *cornerUv = (const u32 *) at;
+    const u8 *vertBytes = at + np->numCorners * 4u;
+    const u16 *triCorners =
+        (const u16 *) (vertBytes + (u32) total * ((flags & NP_DONE) ? sizeof(RspVertex) : sizeof(Vertex)));
+    const u8 *cornerVertex = (const u8 *) (triCorners + count * 3);
+    const u8 *triFlags = cornerVertex + np->numCorners;
+    const RspVertex *V = (flags & NP_DONE) ? (const RspVertex *) vertBytes : sEngVerts;
+    GfxDrawState state = np->state;
+    const Viewport vp = np->vp;
+    const TexAxis u0 = np->axes[0], v0 = np->axes[1], u1 = np->axes[2], v1 = np->axes[3];
+    s32 tex0 = state.textures[0] != NULL, tex1 = state.textures[1] != NULL, axisFast = (flags & NP_AXIS_FAST) != 0;
+    s32 zeroTex1 = (flags & NP_ZERO_TEX1) != 0, screenOnce = (flags & NP_SCREEN) != 0, reject = (flags & NP_REJECT) != 0;
+    s32 cpuCull = (flags & NP_CULL) != 0;
+    float su0 = u0.scale, ou0 = u0.offset, sv0 = v0.scale, ov0 = v0.offset, keepSign = np->keepSign;
+    u8 batchedKey = 0xFF, frontCull = np->frontCull;
+    GfxVertex *vbase = NULL;
+    s32 *vcount = NULL;
+    OpaqueBucket *bucket = NULL;
+
+    if (!(flags & NP_DONE)) {
+        const Vertex *src = (const Vertex *) vertBytes;
+        for (l = 0; l < np->numLoads; l++) {
+            s32 first = l == 0 ? 0 : np->split, c = np->numLoads == 1 ? total : (l == 0 ? np->split : total - np->split);
+            RspVertex *verts = &sEngVerts[first];
+            const Vertex *in = src + first;
+#ifdef HAVE_VFP_VECTORS
+            if (flags & NP_VFP) {
+                transform_vertices_vfp(in, c, verts, (float(*)[4]) np->m[l]);
+            } else
+#endif
+            {
+                transform_vertices(in, c, verts, (float(*)[4]) np->m[l]);
+            }
+            for (k = 0; k < c; k++) {
+                u32 rgba;
+                __builtin_memcpy(&rgba, &in[k].r, 4);
+                if (UNLIKELY(flags & NP_LIGHT)) {
+                    u8 *cc = (u8 *) &rgba;
+                    cc[0] = cc[1] = cc[2] = gfx_light_shade(in[k].r, in[k].g, in[k].b, np->light);
+                }
+                if (flags & NP_FOG) {
+                    rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], np->fogMul, np->fogOffset) << 24);
+                }
+                verts[k].rgba = rgba;
+            }
+        }
+    }
+    if (reject) {
+        // vertex_outcode's (DKR_SCREEN_ONCE: keeping the screen x and y for the corners)
+        u32 all = 0x1F;
+        s32 fast = (flags & NP_FAST_OUTCODE) != 0;
+        for (i = 0; i < total; i++) {
+            const RspVertex *v = &V[i];
+            float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
+            u32 oc = fast ? float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |
+                                (float_sign(y + w) << 3) | ((float_sign(1e-3f - w) ^ 1u) << 4)
+                          : (x > w ? 1u : 0u) | (x < -w ? 2u : 0u) | (y > w ? 4u : 0u) | (y < -w ? 8u : 0u) |
+                                (w <= 1e-3f ? 16u : 0u);
+            if (screenOnce) {
+                sEngSx[i] = x;
+                sEngSy[i] = y;
+            }
+            sEngOut[i] = (u8) oc;
+            all &= oc;
+        }
+        if (all != 0) {
+            sEngRejected++;
+            sEngRejectedTris += (u32) count;
+            return;
+        }
+    }
+    if (ordered) {
+        // native_record's OPAQUE_FLUSH for a draw whose order matters; its triangles join the batch
+        if (sEngPending) {
+            opaque_flush_now();
+        }
+        vbase = sEngBatchVerts;
+        vcount = &sEngBatchVertices;
+        generation = sEngBatchGeneration;
+    } else {
+        eng_close(); // native_record's flush_batch
+    }
+    stamp = ++sEngStamp;
+    for (i = 0; i < count; i++) {
+        const u16 *tc = &triCorners[i * 3];
+        u8 batchKey;
+        u16 *out;
+        if (reject && (sEngOut[cornerVertex[tc[0]]] & sEngOut[cornerVertex[tc[1]]] & sEngOut[cornerVertex[tc[2]]]) != 0) {
+            sEngRejectedTris++;
+            continue;
+        }
+        state.cullMode = triFlags[i] ? 0 : frontCull;
+        if (cpuCull && state.cullMode != 0) {
+            const RspVertex *a = &V[cornerVertex[tc[0]]];
+            const RspVertex *b = &V[cornerVertex[tc[1]]];
+            const RspVertex *c = &V[cornerVertex[tc[2]]];
+            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+                        a->w * (b->x * c->y - c->x * b->y);
+            if (!(det * keepSign > 0.0f)) {
+                continue;
+            }
+            state.cullMode = 0;
+        }
+        batchKey = state.cullMode;
+        if (ordered) {
+            if (batchKey == batchedKey && sEngBatchCount > 0 && sEngBatchCount < MAX_BATCH_TRIANGLES &&
+                sEngBatchVertices + 3 <= MAX_BATCH_VERTICES) {
+                out = &sEngBatchIndices[sEngBatchCount++ * 3];
+            } else {
+                out = eng_batch_triangle(&state);
+                batchedKey = batchKey;
+                if (sEngBatchGeneration != generation) {
+                    generation = sEngBatchGeneration;
+                    stamp = ++sEngStamp;
+                }
+            }
+        } else {
+            if (batchKey != batchedKey || bucket->numTris >= MAX_BATCH_TRIANGLES ||
+                bucket->numVerts + 3 > MAX_BATCH_VERTICES) {
+                if (batchKey != batchedKey) {
+                    bucket = opaque_bucket_find(&state);
+                    batchedKey = batchKey;
+                }
+                if (bucket->numTris >= MAX_BATCH_TRIANGLES || bucket->numVerts + 3 > MAX_BATCH_VERTICES) {
+                    opaque_draw(bucket);
+                }
+                if (bucket->numTris == 0) {
+                    sEngStats[0]++;
+                }
+                vbase = bucket->verts;
+                vcount = &bucket->numVerts;
+                stamp = ++sEngStamp;
+                ENG_PENDING = TRUE;
+            }
+            out = &bucket->indices[bucket->numTris++ * 3];
+        }
+        directTris++;
+        for (k = 0; k < 3; k++) {
+            u32 cn = tc[k];
+            const RspVertex *in;
+            GfxVertex *v;
+            TexCoords uv;
+            u16 index;
+            if (sEngCornerStamp[cn] == stamp) {
+                out[k] = sEngCornerIndex[cn];
+                continue;
+            }
+            index = (u16) (*vcount)++;
+            sEngCornerStamp[cn] = stamp;
+            sEngCornerIndex[cn] = index;
+            out[k] = index;
+            v = &vbase[index];
+            in = &V[cornerVertex[cn]];
+            if (screenOnce) {
+                v->x = sEngSx[cornerVertex[cn]];
+                v->y = sEngSy[cornerVertex[cn]];
+            } else {
+                v->x = in->x * vp.scaleX + in->w * vp.transX;
+                v->y = in->y * vp.scaleY + in->w * vp.transY;
+            }
+            v->z = in->z;
+            v->w = in->w;
+            __builtin_memcpy(&v->r, &in->rgba, 4);
+            uv.texCoords = cornerUv[cn];
+            if (axisFast) {
+                v->u0 = (float) uv.u * su0 - ou0;
+                v->v0 = (float) uv.v * sv0 - ov0;
+            } else if (tex0) {
+                v->u0 = tex_axis_coord(&u0, uv.u);
+                v->v0 = tex_axis_coord(&v0, uv.v);
+            } else {
+                v->u0 = v->v0 = 0.0f;
+            }
+            if (tex1) {
+                v->u1 = tex_axis_coord(&u1, uv.u);
+                v->v1 = tex_axis_coord(&v1, uv.v);
+            } else if (zeroTex1) {
+                v->u1 = v->v1 = 0.0f;
+            }
+        }
+    }
+    if (directTris > 0) {
+        sEngTris[np->kind] += (u32) directTris;
+    }
+}
+
+/* Whether a native draw whose order matters can go to the backend's batch: the walk's batch would have drawn it
+ * without anything of its own (flush_cpu_batch: no sky hold, trace, atlas page or no-texture kind). */
+static inline s32 ordered_remote_ok(const GfxDrawState *st) {
+    return !opaque_sortable(st) && sDrawKind != PORT_DRAW_SKY && !REF_ACTIVE() && !UNLIKELY(sTracing) &&
+           !UNLIKELY(sSkyLast) && (st->textures[0] == NULL || !st->textures[0]->atlas) &&
+           !(UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1);
+}
+
+/* Counts the backend's native draws' triangles and rejects with the walk's (the profiler's), a frame late. */
+static void native_remote_take(void) {
+    s32 k;
+    u32 n;
+    for (k = 0; k < PROF_KINDS; k++) {
+        n = sEngTris[k];
+        if (n != sEngTrisTaken[k]) {
+            prof_count(PROF_TRIANGLES, n - sEngTrisTaken[k]);
+            sMix.kinds[k].tris += n - sEngTrisTaken[k];
+            sEngTrisTaken[k] = n;
+        }
+    }
+    n = sEngRejected;
+    sWalkRejected += n - sEngRejectedTaken;
+    sEngRejectedTaken = n;
+    n = sEngRejectedTris;
+    sWalkRejectedTris += n - sEngRejectedTrisTaken;
+    sEngRejectedTrisTaken = n;
+}
+
+/* The material's texture axes, as native_record works them out (and keeps them, DKR_NMAT_FAST). */
+static inline void nmat_axes(NMat *mat, const GfxDrawState *state, s32 textured, TexAxis ax[4]) {
+    if (sNMatFast && mat->axReady) {
+        ax[0] = mat->axes[0], ax[1] = mat->axes[1], ax[2] = mat->axes[2], ax[3] = mat->axes[3];
+        return;
+    }
+    if (state->textures[0] != NULL) {
+        const GfxTexture *tex = state->textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&ax[0], mat->tiles[0].shifts, mat->tiles[0].uls, tex->width, shift);
+        tex_axis_init(&ax[1], mat->tiles[0].shiftt, mat->tiles[0].ult, tex->height, shift);
+    }
+    if (state->textures[1] != NULL) {
+        const GfxTexture *tex = state->textures[1];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(&ax[2], mat->tiles[1].shifts, mat->tiles[1].uls, tex->width, shift);
+        tex_axis_init(&ax[3], mat->tiles[1].shiftt, mat->tiles[1].ult, tex->height, shift);
+    }
+    if (sNMatFast && textured) {
+        mat->axes[0] = ax[0], mat->axes[1] = ax[1], mat->axes[2] = ax[2], mat->axes[3] = ax[3];
+        mat->axReady = TRUE;
+    }
+}
+
+/* Queues a native draw for the backend thread (see NativePiece). matrices: the loads' matrix numbers. done: the
+ * walk's finished vertices (sNativeVerts) instead of the game's. */
+static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *state, const TexAxis ax[4],
+                                        const Vertex *vtx, s32 total, s32 count, const NativeMesh *mesh,
+                                        s32 numLoads, s32 split, const s32 matrices[2], u8 frontCull, s32 ordered,
+                                        s32 done) {
+    u32 numCorners = mesh->numCorners, vertBytes = (u32) total * (done ? sizeof(RspVertex) : sizeof(Vertex));
+    u32 bytes = NP_ALIGN(sizeof(NativePiece)) + numCorners * 4u + vertBytes + (u32) count * 6u + numCorners +
+                (u32) count;
+    u8 *p = (u8 *) remote_begin(native_piece_run, bytes), *at;
+    NativePiece *np = (NativePiece *) p;
+    s32 i, tex0 = state->textures[0] != NULL;
+    if (p == NULL) {
+        return;
+    }
+    np->state = *state;
+    if (!done) {
+        for (i = 0; i < numLoads; i++) {
+            __builtin_memcpy(np->m[i], g.matrices[matrices[i]], sizeof(np->m[i]));
+        }
+    }
+    viewport_init(&np->vp);
+    np->axes[0] = ax[0], np->axes[1] = ax[1], np->axes[2] = ax[2], np->axes[3] = ax[3];
+    np->fogMul = g.fogMul;
+    np->fogOffset = g.fogOffset;
+    np->keepSign = (np->vp.scaleX * np->vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
+    __builtin_memcpy(np->light, sLight, sizeof(np->light));
+    np->total = (u16) total;
+    np->count = (u16) count;
+    np->numCorners = (u16) numCorners;
+    np->split = (u16) split;
+    np->numLoads = (u8) numLoads;
+    np->frontCull = frontCull;
+    np->kind = (u8) sDrawKind;
+    np->flags = (mat->fog ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
+                (sTriReject ? NP_REJECT : 0) | (sTriReject && sScreenOnce ? NP_SCREEN : 0) |
+                (sFastOutcode ? NP_FAST_OUTCODE : 0) | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
+                (sAxisFast && tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
+                (done ? NP_DONE : 0);
+#ifdef HAVE_VFP_VECTORS
+    np->flags |= sVfpVectors && sNativeVfp ? NP_VFP : 0;
+#endif
+    at = p + NP_ALIGN(sizeof(NativePiece));
+    __builtin_memcpy(at, mesh->cornerUv, numCorners * 4u);
+    at += numCorners * 4u;
+    __builtin_memcpy(at, done ? (const void *) sNativeVerts : (const void *) vtx, vertBytes);
+    at += vertBytes;
+    __builtin_memcpy(at, mesh->triCorners, (u32) count * 6u);
+    at += (u32) count * 6u;
+    __builtin_memcpy(at, mesh->cornerVertex, numCorners);
+    at += numCorners;
+    __builtin_memcpy(at, mesh->backface, (u32) count);
+    remote_end(p);
+    sOpaquePending = TRUE;
+}
+
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
@@ -4683,7 +5180,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     } loads[2];
     NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
     s32 numLoads = 0, numVerts, start, textured, count, total, i, k, tex0, tex1, zeroTex1, cur = g.curMatrix, dynamic;
-    s32 direct, directTris = 0, *vcount = NULL, axisFast;
+    s32 direct, directTris = 0, *vcount = NULL, axisFast, screenOnce;
     float su0 = 0.0f, ou0 = 0.0f, sv0 = 0.0f, ov0 = 0.0f;
     GfxVertex *vbase;
     OpaqueBucket *bucket = NULL;
@@ -4801,6 +5298,30 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
+    if (sRemote && sBatchCount == 0 && sModelCount == 0 && sMeshPartCount == 0) {
+        // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
+        // waiting, the walk works out the screen edges first (below), as a draw wholly off the screen leaves it be.
+        s32 ordered;
+        nmat_state(mat, &state, textured);
+        state.flat = 0;
+        direct = sNativeBucket && opaque_direct_ok(&state); // Always the backend's with its buckets
+        ordered = !direct && (sNativeRemote & 2) && ordered_remote_ok(&state);
+        if (direct || ordered) {
+            TexAxis ax[4];
+            s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
+            nmat_axes(mat, &state, textured, ax);
+            g.curMatrix = cur;
+            g.vertexIndex = 0;
+            g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+            sMix.kinds[sDrawKind].verts += (unsigned long) total;
+            sObjTris[sDrawObj] += count;
+            sNDrawStats[0]++;
+            native_remote_send(mat, &state, ax, vtx, total, count, mesh, numLoads, loads[0].count, matrices, frontCull,
+                               ordered, FALSE);
+            sTriStateValid = FALSE;
+            return 2;
+        }
+    }
     for (i = 0; i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
@@ -4837,7 +5358,29 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sNDrawStats[0]++;
 
     viewport_init(&vp);
-    if (sTriReject) {
+    screenOnce = sTriReject && sScreenOnce;
+    if (screenOnce) {
+        // v28 (DKR_SCREEN_ONCE): the screen x and y each vertex's edges are found from are kept for its corners,
+        // which worked them out again (the same sums, so the same values).
+        u32 all = 0x1F;
+        for (i = 0; i < total; i++) {
+            const RspVertex *v = &sNativeVerts[i];
+            float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
+            u32 oc = sFastOutcode ? float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |
+                                        (float_sign(y + w) << 3) | ((float_sign(1e-3f - w) ^ 1u) << 4)
+                                  : (x > w ? 1u : 0u) | (x < -w ? 2u : 0u) | (y > w ? 4u : 0u) | (y < -w ? 8u : 0u) |
+                                        (w <= 1e-3f ? 16u : 0u);
+            sNativeSx[i] = x;
+            sNativeSy[i] = y;
+            sNativeOut[i] = (u8) oc;
+            all &= oc;
+        }
+        if (all != 0) {
+            sWalkRejected++;
+            sWalkRejectedTris += (u32) count;
+            return 2;
+        }
+    } else if (sTriReject) {
         // Each vertex's edges once (DKR_TRI_REJECT); a batch wholly past one edge is done here.
         u32 all = 0x1F;
         for (i = 0; i < total; i++) {
@@ -4886,6 +5429,16 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         su0 = u0.scale, ou0 = u0.offset, sv0 = v0.scale, ov0 = v0.offset;
     }
     direct = sNativeBucket && opaque_direct_ok(&state);
+    if (direct && sRemote) {
+        // A batch was waiting (see above): it is drawn, and the backend takes the finished vertices.
+        TexAxis ax[4] = {u0, v0, u1, v1};
+        s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
+        flush_batch();
+        native_remote_send(mat, &state, ax, vtx, total, count, mesh, numLoads, loads[0].count, matrices, frontCull,
+                           FALSE, TRUE);
+        sTriStateValid = FALSE;
+        return 2;
+    }
     if (direct) {
         // Opaque triangles go straight into their bucket (DKR_NATIVE_BUCKET), as opaque_hold would have copied
         // them there from the batch; whatever the batch holds is drawn (or held) first, keeping the order.
@@ -4966,8 +5519,13 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             out[k] = index;
             v = &vbase[index];
             in = &sNativeVerts[mesh->cornerVertex[cn]];
-            v->x = in->x * vp.scaleX + in->w * vp.transX;
-            v->y = in->y * vp.scaleY + in->w * vp.transY;
+            if (screenOnce) {
+                v->x = sNativeSx[mesh->cornerVertex[cn]];
+                v->y = sNativeSy[mesh->cornerVertex[cn]];
+            } else {
+                v->x = in->x * vp.scaleX + in->w * vp.transX;
+                v->y = in->y * vp.scaleY + in->w * vp.transY;
+            }
             v->z = in->z;
             v->w = in->w;
             __builtin_memcpy(&v->r, &in->rgba, 4);
@@ -6395,6 +6953,22 @@ void port_gfx_run_task(void *taskPtr) {
     REF_CALL(refb_start_frame());
     sTracing = sFrameCount == sTraceFrame;
     read_switches();
+#ifdef PICA_ALL
+    {
+        // The buckets change threads only with the queue empty (see sRemote).
+        static s32 hooked;
+        s32 remote = sNativeRemote != 0 && gfx_split_active();
+        if (remote && !hooked) {
+            gfx_split_set_hooks(eng_close, native_piece_run);
+            hooked = TRUE;
+        }
+        if (remote != sRemote) {
+            gfx_split_drain();
+            sRemote = remote;
+        }
+        native_remote_take();
+    }
+#endif
     prewarm_textures();
     forget_all_loads();
     sLightOn = FALSE;
