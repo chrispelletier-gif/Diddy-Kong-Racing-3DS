@@ -273,7 +273,9 @@ typedef struct BenchSwitch {
         { "pieces checked every draw", { "DKR_NATIVE_ONCE", NULL, NULL }, 1, 0, 0, 1 },                             \
         { "screen edges by compares", { "DKR_FAST_OUTCODE", NULL, NULL }, 1, 0, 0, 1 },                             \
         { "texture coordinates by calls", { "DKR_AXIS_FAST", NULL, NULL }, 1, 0, 0, 1 },                            \
-        { "every command timed (stall finder)", { "DKR_STALL_EACH", NULL, NULL }, 0, 1, 1, 1 }
+        { "every command timed (stall finder)", { "DKR_STALL_EACH", NULL, NULL }, 0, 1, 1, 1 },                     \
+        /* v25 (user 2026-11-06: felt smoother): textures copied to VRAM, read for the frame to frame columns. */     \
+        { "textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 1 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
@@ -1366,7 +1368,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart),
-                  aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges);
+                  (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges);
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -2119,10 +2121,22 @@ typedef struct BenchGroup {
     s32 pacedRaces; // Races with the frame pacing columns (results written before they were added have none).
     double low1, paced[4];
     s32 flashes, flashRaces; // Picture flashes (the frame history's watch), in races whose results have the column
+    s32 steadyRaces; // Races with the steadiness columns (jitter_ms, pace_changes; 2026-11-06)
+    double jitter, paceChanges;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
 static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+
+/* The switch bench's steadiness cells: the frame to frame change (ms) and the pace changes a race ("-" without). */
+static const char *steady_cells(const BenchGroup *g) {
+    static char cell[48];
+    if (g->steadyRaces == 0) {
+        return "- | -";
+    }
+    plat_snprintf(cell, sizeof(cell), "%.2f | %.0f", g->jitter / g->steadyRaces, g->paceChanges / g->steadyRaces);
+    return cell;
+}
 
 /* The switch bench's flashes cell: picture flashes in how many races ("-" for results without the column). */
 static const char *flash_cell(const BenchGroup *g) {
@@ -2278,6 +2292,11 @@ static void bench_summary(char *out, s32 size) {
             g->flashRaces++;
             g->flashes += port_atoi(fields[gapsColumn + 9]);
         }
+        if (numFields > gapsColumn + 12) {
+            g->steadyRaces++;
+            g->jitter += parse_decimal(fields[gapsColumn + 11]);
+            g->paceChanges += parse_decimal(fields[gapsColumn + 12]);
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -2317,8 +2336,9 @@ static void bench_summary(char *out, s32 size) {
                                "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
-                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit | flashes |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|\n",
+                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | frame to frame ms "
+                               "| pace changes | limit | flashes |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -2351,14 +2371,14 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
-                        (int) g->worstGpu, (int) g->worstFrame, sLimitNames[limit], flash_cell(g));
+                        (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g));
                     continue;
                 }
                 length += plat_snprintf(

@@ -121,6 +121,21 @@ void host_bottom_preview(const char *dir) {
         kind[40] = BS_GRAPH_LOGIC;
         bs_set_frame_graph(height, kind, BS_GRAPH_FRAMES);
     }
+    bs_set_overlay("SUMMARY 1/4  tap: page\n"
+                   "29.2/30 fps held back by renderer CPU\n"
+                   "on time  95%  1 late   5%  later   0%\n"
+                   "worst  52 ms (budget 33) hitches 1\n"
+                   "steady: frame to frame 1.8 ms\n"
+                   "time a frame, budget 33.3 ms:\n"
+                   " game    27.4  82% logic 17.6 scene 9.8\n"
+                   " render  21.4  64% textures 0.4\n"
+                   " GPU     12.1  36%  sound 2.0\n"
+                   "waiting: game 4.0 render 9.2\n"
+                   "idle: game core  6% render core 22%\n"
+                   "tris 3120 draws 412 tex loads 3\n"
+                   "graph: grn logic cyan build yel render\n"
+                   "org tex red gpu grey retrace; tap: freeze");
+    save(dir, "2a_monitor_summary");
     bs_set_overlay("DRAW KINDS 2/4  tap: page\n"
                    "a frame:   tris drw  rdp   bld waste\n"
                    "menus/oth     2   1  0.19  0.28   0%\n"
