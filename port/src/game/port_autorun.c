@@ -263,13 +263,25 @@ typedef struct BenchSwitch {
         { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 1 },                    \
         /* v22: a native draw's fixed set-up cut (gfx_rdp.c DKR_NMAT_FAST: texture axes kept per material, the */     \
         /* racers' changing faces updated in place instead of filling the tables and having all of them remade). */ \
-        { "no native draw set-up cut", { "DKR_NMAT_FAST", NULL, NULL }, 1, 0, 1, 1 }
+        { "no native draw set-up cut", { "DKR_NMAT_FAST", NULL, NULL }, 1, 0, 0, 1 },                              \
+        /* v23 (gfx_rdp.c), each turned off; a last race turns all of v22 and v23 off together: moving parts */      \
+        /* (shadows, water, particles) through the fast path, opaque pieces written straight into their bucket, */   \
+        /* a piece's triangles checked once a frame, screen edges from sign bits, texture coordinates without the */ \
+        /* axis calls. The last row times every command again, as v22 and older did (its cost). */                  \
+        { "moving parts on the old path", { "DKR_NATIVE_DYNAMIC", NULL, NULL }, 1, 0, 0, 1 },                       \
+        { "no straight-to-bucket writes", { "DKR_NATIVE_BUCKET", NULL, NULL }, 1, 0, 0, 1 },                        \
+        { "pieces checked every draw", { "DKR_NATIVE_ONCE", NULL, NULL }, 1, 0, 0, 1 },                             \
+        { "screen edges by compares", { "DKR_FAST_OUTCODE", NULL, NULL }, 1, 0, 0, 1 },                             \
+        { "texture coordinates by calls", { "DKR_AXIS_FAST", NULL, NULL }, 1, 0, 0, 1 },                            \
+        { "every command timed (stall finder)", { "DKR_STALL_EACH", NULL, NULL }, 0, 1, 1, 1 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
     { "old game code (N64 collision, interactions, memcpy)",
       { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 1 },
+    // v23: the native path's vertex transform had been left scalar; VFP vectors are on only on the Old 3DS.
+    { "native draws with scalar maths", { "DKR_NATIVE_VFP", NULL, NULL }, 1, 0, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
