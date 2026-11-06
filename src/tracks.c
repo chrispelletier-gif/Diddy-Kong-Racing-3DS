@@ -34,6 +34,7 @@
 #ifdef TARGET_PORT
 #include "port.h"
 #include "plat/plat.h"
+#include "port_track_cells.h"
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -2743,6 +2744,10 @@ s32 get_level_segment_waves(s32 levelSegmentIndex, f32 xIn, f32 zIn, WaterProper
             var_a1 <<= 1;
         }
 
+#ifdef TARGET_PORT
+        const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, currentSegment);
+        u64 portNeed = port_cells_all(var_s1);
+#endif
         for (batchNum = 0; batchNum < currentSegment->numberOfBatches; batchNum++) {
             surfaceType = gCurrentLevelModel->textures[currentSegment->batches[batchNum].textureIndex].surfaceType;
             currentFaceOffset = currentSegment->batches[batchNum].facesOffset;
@@ -2752,6 +2757,11 @@ s32 get_level_segment_waves(s32 levelSegmentIndex, f32 xIn, f32 zIn, WaterProper
                 (currentSegment->batches[batchNum].flags & (RENDER_HIDDEN | RENDER_NO_COLLISION))) {
                 currentFaceOffset = nextFaceOffset;
             }
+#ifdef TARGET_PORT
+            if (PORT_CELLS_SKIP(portCells, batchNum, portNeed)) {
+                currentFaceOffset = nextFaceOffset;
+            }
+#endif
             for (faceNum = currentFaceOffset; faceNum < nextFaceOffset; faceNum++) {
                 if (var_s1 == (currentSegment->unk10[faceNum] & var_s1)) {
                     tri = &currentSegment->triangles[faceNum];
@@ -2938,12 +2948,21 @@ s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut) {
     }
 
     yOutCount = 0;
+#ifdef TARGET_PORT
+    const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, currentSegment);
+    u64 portNeed = port_cells_all(var_s1);
+#endif
     for (batchNum = 0; batchNum < currentSegment->numberOfBatches; batchNum++) {
         do {
         } while (0); // fakematch
         currentFaceOffset = currentSegment->batches[batchNum].facesOffset;
         nextFaceOffset = currentSegment->batches[batchNum + 1].facesOffset;
         currentVerticesOffset = currentSegment->batches[batchNum].verticesOffset;
+#ifdef TARGET_PORT
+        if (PORT_CELLS_SKIP(portCells, batchNum, portNeed)) {
+            continue;
+        }
+#endif
         for (faceNum = currentFaceOffset; faceNum < nextFaceOffset; faceNum++) {
             if (var_s1 == (currentSegment->unk10[faceNum] & var_s1)) {
                 tri = &currentSegment->triangles[faceNum];
@@ -3060,6 +3079,9 @@ void generate_track(s32 modelId) {
         func_8002C71C(&gCurrentLevelModel->segments[k]);
         j = (s32) align16(((u8 *) (gCurrentLevelModel->segments[k].unk32 * 2)) + j);
     }
+#ifdef TARGET_PORT
+    port_cells_build(gCurrentLevelModel);
+#endif
     temp_s4 = j - (s32) gCurrentLevelModel;
     if (temp_s4 > LEVEL_MODEL_MAX_SIZE) {
         rmonPrintf("ERROR!! TrackMem overflow .. %d\n", temp_s4);
@@ -3684,7 +3706,16 @@ void func_8002DE30(Object *obj) {
                                            obj->trans.x_position - 16.0f, obj->trans.z_position - 16.0f,
                                            obj->trans.x_position + 16.0f, obj->trans.z_position + 16.0f);
         block = &gCurrentLevelModel->segments[blockId];
+#ifdef TARGET_PORT
+        const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, block);
+        u64 portNeed = port_cells_any(var_t3);
+#endif
         for (i = 0; i < block->numberOfBatches && !foundResult; i++) {
+#ifdef TARGET_PORT
+            if (PORT_CELLS_SKIP(portCells, i, portNeed)) {
+                continue;
+            }
+#endif
             if (!(block->batches[i].flags & (RENDER_HIDDEN | RENDER_DECAL | RENDER_WATER | RENDER_NO_SHADOW))) {
                 batchFlags = (block->batches[i].flags >> 19) & 7;
                 vertices = &block->vertices[block->batches[i].verticesOffset];
@@ -3860,7 +3891,16 @@ void func_8002E904(LevelModelSegment *arg0, s32 arg1, s32 arg2) {
     spD0[3].x = gNewShadowObj->trans.x_position + gNewShadowWidth;
     spD0[3].y = gNewShadowObj->trans.z_position - gNewShadowLength;
 
+#ifdef TARGET_PORT
+    const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, arg0);
+    u64 portNeed = port_cells_any(arg1);
+#endif
     for (spAC = 0; spAC < arg0->numberOfBatches; spAC++) {
+#ifdef TARGET_PORT
+        if (PORT_CELLS_SKIP(portCells, spAC, portNeed)) {
+            continue;
+        }
+#endif
         if ((arg2 && (arg0->batches[spAC].flags & RENDER_WATER)) ||
             (!arg2 && !(arg0->batches[spAC].flags & FLAGS_8002E904))) {
             curFacesOffset = arg0->batches[spAC].facesOffset;

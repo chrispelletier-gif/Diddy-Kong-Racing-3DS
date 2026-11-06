@@ -4,6 +4,9 @@
 #include "PR/R4300.h"
 #include "textures_sprites.h"
 #include "types.h"
+#ifdef TARGET_PORT
+#include "port_track_cells.h"
+#endif
 
 /*******************************/
 
@@ -125,8 +128,17 @@ s32 generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets,
         // Insert the segment pointer encoded with MSB = 0 to differentiate from collision facets
         gCollisionCandidates[j] = COLLISION_SEGMENT_ENTRY(seg);
         j++;
+#ifdef TARGET_PORT
+        const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, seg);
+        u64 portNeed = port_cells_any(grid_mask[i]);
+#endif
 
         for (batchIndex = 0; batchIndex < seg->numberOfBatches; batchIndex++) {
+#ifdef TARGET_PORT
+            if (PORT_CELLS_SKIP(portCells, batchIndex, portNeed)) {
+                continue;
+            }
+#endif
             // Skip batches marked as non-collidable
             if (seg->batches[batchIndex].flags & RENDER_NO_COLLISION) {
                 continue;

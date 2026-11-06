@@ -4793,6 +4793,95 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
  * Go through each object and detect potential interactions between each.
  * Add candidates to a list and calcualte their distances.
  */
+#ifdef TARGET_PORT
+/*
+ * Native rewrite of the pair loops below (DKR_NATIVE_INTERACT, default on; 0 = the original). Same calls in the same
+ * order with the same arguments: for each object that pushes (flag 0004), the original tests every other interactive
+ * object's flags and kind before anything else. Those (SOLID/TANGIBLE, 0020, unk11) never change during the loops
+ * (the pair functions only set PUSHING and COLLIDED, and set no kind), so the candidates are listed once, in list
+ * order, and only positions, which the pair functions do move, are read as they go.
+ */
+static s32 port_native_interact(void) {
+    static s32 sEpoch = -1, sOn;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sOn = plat_switch("DKR_NATIVE_INTERACT", 1);
+    }
+    return sOn;
+}
+
+static void process_object_interactions_native(Object **objList, s32 count) {
+    // Candidates of the 0004 loop: SOLID or TANGIBLE and unk11 != 2. kind 3 = unk11 3 (func_80016748), else the
+    // distance test, with its radius.
+    static u16 sPairIdx[257];
+    static u8 sPairKind[257];
+    static f32 sPairRadius[257];
+    static u16 sKind3Idx[257];
+    s32 pairs = 0, kind3 = 0;
+    s32 i, k;
+    Object *obj;
+    Object *obj2;
+    ObjectInteraction *objInteract;
+    ObjectInteraction *objInteract2;
+    f32 xDiff;
+    f32 zDiff;
+
+    for (i = 0; i < count; i++) {
+        objInteract2 = objList[i]->interactObj;
+        if (objInteract2->unk11 == 3) {
+            sKind3Idx[kind3++] = i;
+        }
+        if (objInteract2->flags & (INTERACT_FLAGS_SOLID | INTERACT_FLAGS_TANGIBLE)) {
+            if (objInteract2->unk11 == 3) {
+                sPairIdx[pairs] = i;
+                sPairKind[pairs] = 3;
+                pairs++;
+            } else if (objInteract2->unk11 != 2) {
+                sPairIdx[pairs] = i;
+                sPairKind[pairs] = 0;
+                sPairRadius[pairs] = (objInteract2->flags & INTERACT_FLAGS_UNK_0020) ? 0x400000 : 0x40000;
+                pairs++;
+            }
+        }
+    }
+
+    gCollisionObjectCount = 0;
+    for (i = 0; i < count; i++) {
+        obj = objList[i];
+        objInteract = obj->interactObj;
+        if (objInteract->unk11 == 2 && gCollisionObjectCount < 20) {
+            gCollisionObjects[gCollisionObjectCount] = obj;
+            gCollisionObjectCount++;
+        }
+        if (objInteract->flags & INTERACT_FLAGS_UNK_0004) {
+            for (k = 0; k < pairs; k++) {
+                s32 j = sPairIdx[k];
+                if (j != i) {
+                    obj2 = objList[j];
+                    if (sPairKind[k] == 3) {
+                        func_80016748(obj, obj2);
+                    } else {
+                        xDiff = obj->trans.x_position - obj2->trans.x_position;
+                        zDiff = obj->trans.z_position - obj2->trans.z_position;
+                        if (((xDiff * xDiff) + (zDiff * zDiff)) < sPairRadius[k]) {
+                            func_800159C8(obj, obj2);
+                        }
+                    }
+                }
+            }
+        }
+        if (objInteract->flags & INTERACT_FLAGS_UNK_0100) {
+            for (k = 0; k < kind3; k++) {
+                s32 j = sKind3Idx[k];
+                if (j != i) {
+                    func_80016748(obj, objList[j]);
+                }
+            }
+        }
+    }
+}
+#endif
+
 void process_object_interactions(void) {
     Object *obj2;
     Object *obj;
@@ -4823,6 +4912,12 @@ void process_object_interactions(void) {
         }
     }
 
+#ifdef TARGET_PORT
+    if (port_native_interact()) {
+        process_object_interactions_native(objList, objsWithInteractives);
+        goto port_done;
+    }
+#endif
     gCollisionObjectCount = 0;
 
     for (i = 0; i < objsWithInteractives; i++) {
@@ -4869,6 +4964,9 @@ void process_object_interactions(void) {
         }
     }
 
+#ifdef TARGET_PORT
+port_done:
+#endif
     for (i = 0; i < objsWithInteractives; i++) {
         obj = objList[i];
         objInteract = obj->interactObj;
