@@ -3862,6 +3862,14 @@ void set_temp_model_transforms(Object *obj) {
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
                             s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
+#if PICA_ALL
+                            {
+                                extern s32 gPortRacerLodBoost;
+                                if (gPortRacerLodBoost) {
+                                    bias = 3; // The frame rate is dropping: 4-player distances (src/thread3_main.c)
+                                }
+                            }
+#endif
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }

@@ -2081,6 +2081,8 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
+static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
+static s32 sTriReject;  // DKR_TRI_REJECT (PICA_ALL): a triangle wholly past one edge of the screen is not written
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
@@ -2149,6 +2151,10 @@ static void read_switches(void) {
     // The switch bench's texture cost row: these kinds (a bit each, as DKR_SKIP_KINDS) are drawn without textures.
     sNoTexKinds = (u32) plat_switch("DKR_NOTEX_KINDS", 0);
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
+#ifdef PICA_ALL
+    sTriReject = plat_switch("DKR_TRI_REJECT", 1) != 0;
+    sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
+#endif
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -2416,6 +2422,13 @@ static NOINLINE HOT void load_vertices(const Vertex *src, s32 count, s32 dest) {
 typedef struct Viewport {
     float scaleX, transX, scaleY, transY;
 } Viewport;
+
+/* Which edges of the screen (and the plane just in front of the camera) a finished vertex lies past, a bit each, as
+ * command_off_screen tests them: a triangle whose three corners share a bit draws no pixel (DKR_TRI_REJECT). */
+static inline u32 vertex_outcode(const RspVertex *v, const Viewport *vp) {
+    float w = v->w, x = v->x * vp->scaleX + w * vp->transX, y = v->y * vp->scaleY + w * vp->transY;
+    return (x > w ? 1u : 0u) | (x < -w ? 2u : 0u) | (y > w ? 4u : 0u) | (y < -w ? 8u : 0u) | (w <= 1e-3f ? 16u : 0u);
+}
 
 static void viewport_init(Viewport *vp) {
     const float halfW = GFX_SCREEN_WIDTH / 2.0f, halfH = GFX_SCREEN_HEIGHT / 2.0f;
@@ -3769,6 +3782,11 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         if (UNLIKELY(sAuditFrame) && !flat) {
             audit_triangle(idx, state.cullMode != 0, keepSign, &vp);
         }
+        if (sTriReject && !flat &&
+            (vertex_outcode(&g.verts[idx[0]], &vp) & vertex_outcode(&g.verts[idx[1]], &vp) &
+             vertex_outcode(&g.verts[idx[2]], &vp)) != 0) {
+            continue;
+        }
         if (sCpuCull && state.cullMode != 0 && !flat) {
             // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
             const RspVertex *a = &g.verts[idx[0]], *b = &g.verts[idx[1]], *c = &g.verts[idx[2]];
@@ -3877,6 +3895,9 @@ typedef struct NativeMesh {
     u8 *cornerVertex;
     u32 *cornerUv;  // As TexCoords.texCoords
     u16 *triCorners; // Three a triangle
+    const Vertex *boxSrc; // DKR_TRI_REJECT: the vertices boxMin/boxMax were taken from (the track's don't move)
+    u32 boxLoads;         // gPortLevelLoads then
+    s16 boxMin[3], boxMax[3];
 } NativeMesh;
 
 static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
@@ -3884,6 +3905,7 @@ static u32 sNativeMeshCount;
 static u8 *sNativePool;
 static u32 sNativePoolUsed;
 static RspVertex sNativeVerts[MAX_VERTICES];
+static u8 sNativeOut[MAX_VERTICES]; // Their screen edges (vertex_outcode), for DKR_TRI_REJECT
 static u16 sNativeCornerIndex[NATIVE_MAX_CORNERS];
 static u32 sNativeCornerStamp[NATIVE_MAX_CORNERS];
 static u32 sNativeStamp;
@@ -3968,6 +3990,7 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count) {
     e->numCorners = (u16) n;
     e->usable = n <= NATIVE_MAX_CORNERS;
     e->tris = tris;
+    e->boxSrc = NULL;
     return TRUE;
 }
 
@@ -4442,6 +4465,54 @@ static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
     return 3;
 }
 
+/* The box of a mesh's vertices, for box_off_screen. */
+static COLD void native_mesh_box(NativeMesh *mesh, const Vertex *vtx, s32 numVerts) {
+    s32 i, k;
+    for (k = 0; k < 3; k++) {
+        mesh->boxMin[k] = 0x7FFF;
+        mesh->boxMax[k] = -0x8000;
+    }
+    for (i = 0; i < numVerts; i++) {
+        const s16 *c = &vtx[i].x;
+        for (k = 0; k < 3; k++) {
+            mesh->boxMin[k] = c[k] < mesh->boxMin[k] ? c[k] : mesh->boxMin[k];
+            mesh->boxMax[k] = c[k] > mesh->boxMax[k] ? c[k] : mesh->boxMax[k];
+        }
+    }
+    mesh->boxSrc = vtx;
+    mesh->boxLoads = gPortLevelLoads;
+}
+
+/* DKR_BOX_CHECK=1 (PC): a remembered track box is checked against its vertices each frame. */
+static COLD void box_check(NativeMesh *mesh, const Vertex *vtx, s32 numVerts) {
+    s16 mn[3], mx[3];
+    __builtin_memcpy(mn, mesh->boxMin, sizeof(mn));
+    __builtin_memcpy(mx, mesh->boxMax, sizeof(mx));
+    native_mesh_box(mesh, vtx, numVerts);
+    if (__builtin_memcmp(mn, mesh->boxMin, sizeof(mn)) != 0 || __builtin_memcmp(mx, mesh->boxMax, sizeof(mx)) != 0) {
+        plat_log("box check: track batch %p moved (%d %d %d / %d %d %d -> %d %d %d / %d %d %d)", (const void *) vtx,
+                 mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], mesh->boxMin[0], mesh->boxMin[1], mesh->boxMin[2],
+                 mesh->boxMax[0], mesh->boxMax[1], mesh->boxMax[2]);
+    }
+}
+
+/* TRUE if the box's eight corners, through matrix m, all lie past the same edge of the screen (vertex_outcode). */
+static s32 box_off_screen(const s16 *bmin, const s16 *bmax, float (*m)[4]) {
+    Viewport vp;
+    RspVertex c;
+    u32 all = 0x1F;
+    s32 i;
+    viewport_init(&vp);
+    for (i = 0; i < 8 && all != 0; i++) {
+        float x = (i & 1) ? bmax[0] : bmin[0], y = (i & 2) ? bmax[1] : bmin[1], z = (i & 4) ? bmax[2] : bmin[2];
+        c.x = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
+        c.y = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
+        c.w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
+        all &= vertex_outcode(&c, &vp);
+    }
+    return all != 0;
+}
+
 /* The batch recorded after the tag at dl[-1]; returns the words of data used. */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
@@ -4540,6 +4611,25 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         sNDrawStats[0]++;
         return 2;
     }
+    if (sTriReject && numLoads == 1 && sDrawKind == PORT_DRAW_TRACK && !UNLIKELY(sTracing)) {
+        // The track's batches keep their vertices (DKR_TRI_REJECT): one past an edge of the screen as a whole is
+        // left out before its vertices are transformed, by its box's eight corners.
+        if (UNLIKELY(mesh->boxSrc != vtx || mesh->boxLoads != gPortLevelLoads)) {
+            native_mesh_box(mesh, vtx, total);
+        } else if (UNLIKELY(sBoxCheck)) {
+            box_check(mesh, vtx, total);
+        }
+        if (box_off_screen(mesh->boxMin, mesh->boxMax, g.matrices[loads[0].matrix])) {
+            g.curMatrix = cur;
+            g.vertexIndex = 0;
+            g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+            sObjTris[sDrawObj] += count;
+            sNDrawStats[0]++;
+            sWalkRejected++;
+            sWalkRejectedTris += (u32) count;
+            return 2;
+        }
+    }
     for (i = 0; i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
@@ -4566,8 +4656,22 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
-    nmat_state(mat, &state, textured);
     viewport_init(&vp);
+    if (sTriReject) {
+        // Each vertex's edges once (DKR_TRI_REJECT); a batch wholly past one edge is done here.
+        u32 all = 0x1F;
+        for (i = 0; i < total; i++) {
+            u32 oc = vertex_outcode(&sNativeVerts[i], &vp);
+            sNativeOut[i] = (u8) oc;
+            all &= oc;
+        }
+        if (all != 0) {
+            sWalkRejected++;
+            sWalkRejectedTris += (u32) count;
+            return 2;
+        }
+    }
+    nmat_state(mat, &state, textured);
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
@@ -4595,6 +4699,10 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
         u16 *out;
+        if (sTriReject && (sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
+                           sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
+            continue;
+        }
         state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
         if (sCpuCull && state.cullMode != 0) {
             const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];

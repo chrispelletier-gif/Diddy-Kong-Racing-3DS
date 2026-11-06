@@ -117,6 +117,10 @@ FadeTransition D_800DD424 = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FAD
 #endif
 Gfx *gDisplayLists[DL_BUFFERS];
 #ifdef TARGET_PORT
+/* PICA_ALL (DKR_RACER_LOD_ADAPT, default on): nonzero while the game is missing its frame rate cap, so the other
+ * karts use their simpler models at the 4-player distances (src/objects.c). On after two slow frames within eight,
+ * off again after five seconds without one. The game's own retrace count decides, so lockstep runs never change. */
+s32 gPortRacerLodBoost;
 s32 gPortDlBytes; // Each of gDisplayLists' size: the renderer leaves lists inside them alone (gfx_rdp.c nop_static)
 #endif
 Gfx *gCurrDisplayList;
@@ -406,6 +410,24 @@ void main_game_loop(void) {
     tempLogicUpdateRate = fb_update(gScreenStatus);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
+#if PICA_ALL
+    {
+        static s32 sSlowHistory, sHold, sAdapt = -1;
+        if (sAdapt < 0) {
+            sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", 1) != 0;
+        }
+        sSlowHistory = (sSlowHistory << 1) & 0xFF;
+        if (sAdapt && tempLogicUpdateRate > plat_frame_retraces()) {
+            sSlowHistory |= 1;
+        }
+        if (__builtin_popcount(sSlowHistory) >= 2) {
+            sHold = 150; // Five seconds at 30 fps
+        } else if (sHold > 0) {
+            sHold--;
+        }
+        gPortRacerLodBoost = sHold > 0;
+    }
+#endif
     port_game_note_frame();
     port_autorun_frame(tempLogicUpdateRate);
     port_race_hud_frame(tempLogicUpdateRate);
