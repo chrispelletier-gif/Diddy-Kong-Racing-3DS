@@ -259,7 +259,10 @@ typedef struct BenchSwitch {
         /* v18: off-screen triangles and track batches dropped before their work (gfx_rdp.c DKR_TRI_REJECT), and */ \
         /* the other karts' simpler models while frames are being missed (src/thread3_main.c). Rows turn them off. */ \
         { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 0 },                            \
-        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 0 }
+        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 0 },                   \
+        /* v19: the game logic thread's native code (collision cells, interaction lists, block memcpy) turned off. */ \
+        { "old game code (N64 collision, interactions, memcpy)",                                                    \
+          { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 0 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,

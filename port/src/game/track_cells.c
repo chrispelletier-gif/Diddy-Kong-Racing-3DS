@@ -110,7 +110,7 @@ void port_game_native_frame(void) {
     if (sFrameEpoch != gPlatSwitchEpoch) {
         sFrameEpoch = gPlatSwitchEpoch;
 #ifdef __arm__
-        gPortOldMemcpy = plat_switch("DKR_OLD_MEMCPY", 0);
+        gPortOldMemcpy = plat_switch("DKR_NATIVE_MEMCPY", 1) == 0 || plat_switch("DKR_OLD_MEMCPY", 0) != 0;
 #endif
     }
 }
