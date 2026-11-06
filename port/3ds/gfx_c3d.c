@@ -3440,7 +3440,13 @@ static void read_switches(void) {
                        plat_switch("DKR_NATIVE_TRACK", 0) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
+#ifdef PICA_ALL
+    // Off in the PICA_ALL build (user 2026-11-06): test run #430 (4x, 800 pixels) spent 80-100% of its frames at the
+    // low resolution after only 0-6 slow anti-aliased frames in 600, the doubled holds keeping it there.
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+#else
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
+#endif
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
