@@ -258,14 +258,15 @@ typedef struct BenchSwitch {
     /* The old renderer row is gone too (user 2026-11-06: settled by many runs; DKR_OLD_RENDERER=1 still works). */ \
         /* v18: off-screen triangles and track batches dropped before their work (gfx_rdp.c DKR_TRI_REJECT), and */ \
         /* the other karts' simpler models while frames are being missed (src/thread3_main.c). Rows turn them off. */ \
-        { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 0 },                            \
-        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 0 }
+        /* Every row races 1 lap (user 2026-11-06), so the usual races do too and the start weighs more. */          \
+        { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 1 },                            \
+        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 1 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
     PICA_ROWS,
     { "old game code (N64 collision, interactions, memcpy)",
-      { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 0 },
+      { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
