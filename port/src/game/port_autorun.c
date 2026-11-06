@@ -544,6 +544,10 @@ static volatile s32 sRequest;
 static s32 sQuitPending;
 static double sFpsSum;
 static s32 sFpsCount;
+// Since the game started, for the issue's summary: adaptive anti-aliasing's frames and those at the low resolution,
+// the frame to frame period changes summed (ms) with the frames they cover, and the pace changes.
+static unsigned long long sSumAaFrames, sSumAaLow, sSumFrames, sSumPaceChanges;
+static double sSumJitterMs;
 static s32 sPhase;
 static Race sRaces[MAX_RACES];
 static s32 sNumRaces;
@@ -570,7 +574,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
-static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart;
+static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -1004,6 +1008,16 @@ static s32 pct(u32 part, u32 whole) {
     return whole ? (s32) (((unsigned long long) part * 100 + whole / 2) / whole) : 0;
 }
 
+/* The race's share of adaptive anti-aliasing frames drawn at the low resolution; -1 if it wasn't in use. */
+static s32 aa_low_pct(s32 none) {
+    u32 frames = gPlatCounters[PLAT_COUNTER_AA_FRAMES] - sAaFramesStart;
+    u32 low = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES] - sAaLowStart;
+    if (none || frames == 0) {
+        return -1;
+    }
+    return (s32) (low * 100ull / frames);
+}
+
 static const char *aa_label(void) {
     s32 aa = plat_antialias();
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
@@ -1023,6 +1037,11 @@ static const char *graphics_setup(void) {
     if (gfx_split_active()) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/split");
+    }
+    if (plat_wide800_active()) {
+        // At 800 pixels across, 4x and 2x both draw twice the height (aa_label says 2x for either).
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/800px");
     }
     return text;
 }
@@ -1295,7 +1314,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
-                  "paced_20fps_pct,paced_slower_pct,flashes\n",
+                  "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1338,13 +1357,16 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // After the mode's own column, so the columns before keep their places in older results files.
     // Then the frame pacing: the 1% low, and the share of game frames that took one retrace, two, three or more (measured
     // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u\n",
+    // Then (2026-11-06) what adaptive anti-aliasing did (the share of its frames at the low resolution, -1 when it
+    // was not in use), the average change in period between consecutive frames, and how often the pace changed.
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames),
-                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart));
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart),
+                  aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges);
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -1455,6 +1477,8 @@ static void init(void) {
     sProblems = 0;
     sFpsSum = 0.0;
     sFpsCount = 0;
+    sSumAaFrames = sSumAaLow = sSumFrames = sSumPaceChanges = 0;
+    sSumJitterMs = 0.0;
     sReportedAt = -1;
     sReportWaitNs = 0;
     sLastReportNs = plat_time_ns();
@@ -2081,7 +2105,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 13) // The whole game run has three columns of its own; then the flashes
+#define MAX_FIELDS (COL_COUNT + 16) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -2706,6 +2730,26 @@ static void send_results(const char *why) {
                                 aa_label(), 60 / plat_frame_retraces(),
                                 plat_render_ahead());
     }
+    if (length > 0 && length < (s32) sizeof(summary) && sSumFrames > 0) {
+        // Steadiness and what adaptive anti-aliasing did, which the frame rate alone hides (2026-11-06: #430 drew
+        // most of its frames without anti-aliasing at a steady 60).
+        length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                "Frame steadiness: frame to frame change %.2f ms on average, pace changes (60/30/20 fps) "
+                                "%.1f a minute.\n",
+                                sSumJitterMs / (double) sSumFrames,
+                                sSumPaceChanges * 60.0 / ((double) sSumFrames / (60.0 / plat_frame_retraces())));
+    }
+    if (length > 0 && length < (s32) sizeof(summary)) {
+        if (sSumAaFrames > 0) {
+            length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                    "Adaptive anti-aliasing: **%d%% of its frames at the low resolution** "
+                                    "(aa_low_pct column per race).\n",
+                                    (int) (sSumAaLow * 100 / sSumAaFrames));
+        } else {
+            length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                    "Adaptive anti-aliasing: not in use.\n");
+        }
+    }
     if (length > 0 && length < (s32) sizeof(summary) - 2048) {
         // Kept to 2 KB, so the mode's own tables below still fit.
         length += hitch_summary(summary + length, 2048);
@@ -2797,6 +2841,11 @@ static void end_race(const char *outcome, s32 position) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
             sFpsCount++;
         }
+        sSumAaFrames += gPlatCounters[PLAT_COUNTER_AA_FRAMES] - sAaFramesStart;
+        sSumAaLow += gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES] - sAaLowStart;
+        sSumFrames += sRaceStats.gameFrames;
+        sSumJitterMs += sRaceStats.jitterUs / 1000.0 * sRaceStats.gameFrames;
+        sSumPaceChanges += sRaceStats.paceChanges;
     } else {
         char what[64];
         plat_snprintf(what, sizeof(what), "%s after %d s", outcome, (int) (sRaceRetraces / 60));
@@ -2997,6 +3046,8 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
+                sAaFramesStart = gPlatCounters[PLAT_COUNTER_AA_FRAMES];
+                sAaLowStart = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES];
                 set_phase(PHASE_RACING);
             } else if (plat_time_ns() - sPhaseStartNs > 120000000000ULL) {
                 // The game left the level, or never started the race (a boss's speech is far shorter than this).

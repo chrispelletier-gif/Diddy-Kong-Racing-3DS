@@ -959,6 +959,10 @@ int plat_antialias(void) {
     return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
 }
 
+int plat_wide800_active(void) {
+    return s800;
+}
+
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
 void plat_3ds_set_screen_setting(int which, int on) {
     static const char *const sKeys[3] = { "widescreen", "wide800", "stereo3d" };
@@ -2996,8 +3000,10 @@ static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
     }
     budget = 1000.0f / 60.0f * (float) plat_frame_retraces();
     sAdaptSeen++;
+    gPlatCounters[PLAT_COUNTER_AA_FRAMES]++;
     if (slot->adaptAa == 2) {
         sAdaptLow++;
+        gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES]++;
         if (sAdaptHold > 0 && --sAdaptHold == 0) {
             sAdaptProbe = ADAPT_PROBE;
         }

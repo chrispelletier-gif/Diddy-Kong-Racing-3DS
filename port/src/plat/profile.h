@@ -116,6 +116,8 @@ typedef struct ProfStats {
     unsigned int hitches;         /* Game frames that took longer than 50 ms. */
     unsigned int low1FrameUs;     /* The 1% low: 99 in 100 game frames came at least this soon (0: no frames). */
     unsigned int pacedFrames[4];  /* Game frames by the time they took: one retrace (60 fps), two (30), three (20), more. */
+    unsigned int jitterUs;        /* The average change in period from one game frame to the next (steadiness). */
+    unsigned int paceChanges;     /* Game frames whose pace (one, two, three retraces or more) differs from the one before. */
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
     unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
 } ProfStats;

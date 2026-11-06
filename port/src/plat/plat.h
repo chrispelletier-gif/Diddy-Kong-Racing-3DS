@@ -264,6 +264,8 @@ int plat_test_results_busy(void);
 enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
 void plat_set_gpu_config(int aa);
 int plat_antialias(void);
+/* Nonzero while the screen shows 800 pixels across (the results' graphics column). */
+int plat_wide800_active(void);
 /*
  * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
  * 3DS's 400x240 top screen. Read by the game thread each frame (src/camera.c); the 3DS Settings menu sets it, the host
@@ -326,6 +328,8 @@ enum PlatCounter {
     PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
     PLAT_COUNTER_TEXTURE_FAILED, /* Textures the GPU had no memory for (drawn white instead). */
     PLAT_COUNTER_FLASHES,        /* Picture flashes seen in the frame history (a few frames unlike those around). */
+    PLAT_COUNTER_AA_FRAMES,      /* Frames drawn while adaptive anti-aliasing was in use (anti-aliased or not). */
+    PLAT_COUNTER_AA_LOW_FRAMES,  /* Of those, frames adaptive anti-aliasing drew at the low resolution. */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];

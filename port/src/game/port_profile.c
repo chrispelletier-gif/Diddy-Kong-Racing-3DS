@@ -75,6 +75,10 @@ typedef struct Window {
     u32 worstBuildUs;
     u32 hitches;
     u32 pacedFrames[4];
+    // Frame to frame steadiness: the sum of the changes in period between consecutive game frames, how many were
+    // summed, the last period and its pace bucket, and how often the pace (60/30/20/slower) changed.
+    unsigned long long jitterSumUs;
+    u32 jitterCount, lastPeriodUs, lastPace, paceChanges;
     u32 periodBins[PERIOD_BINS]; // Game frame periods in half milliseconds, the last bin taking all longer ones.
 } Window;
 
@@ -233,6 +237,9 @@ void prof_window_start(int window) {
     }
     bzero(w->pacedFrames, sizeof(w->pacedFrames));
     bzero(w->periodBins, sizeof(w->periodBins));
+    w->jitterSumUs = 0;
+    w->jitterCount = w->lastPeriodUs = w->paceChanges = 0;
+    w->lastPace = 0xFF;
     w->startRenderedFrames = sRenderedFrames;
     w->startGameFrames = sGameFrames;
     w->startNs = plat_time_ns();
@@ -289,6 +296,8 @@ void prof_window_read(int window, ProfStats *out) {
     for (i = 0; i < 4; i++) {
         out->pacedFrames[i] = w->pacedFrames[i];
     }
+    out->jitterUs = w->jitterCount ? (unsigned int) (w->jitterSumUs / w->jitterCount) : 0;
+    out->paceChanges = w->paceChanges;
     if (sMaxCleared[window] == sMaxClearRequest[window]) {
         out->worstRenderUs = sRenderMaxUs[window];
         out->worstGpuUs = sGpuMaxUs[window];
@@ -1032,7 +1041,18 @@ void prof_game_mark(int mark, int updateRate) {
                 }
                 if (periodUs != 0) {
                     win->periodBins[periodUs / PERIOD_BIN_US < PERIOD_BINS ? periodUs / PERIOD_BIN_US : PERIOD_BINS - 1]++;
-                    win->pacedFrames[periodUs < PACED_60_US ? 0 : periodUs < PACED_30_US ? 1 : periodUs < PACED_20_US ? 2 : 3]++;
+                    u32 pace = periodUs < PACED_60_US ? 0 : periodUs < PACED_30_US ? 1 : periodUs < PACED_20_US ? 2 : 3;
+                    win->pacedFrames[pace]++;
+                    if (win->lastPeriodUs != 0) {
+                        win->jitterSumUs += periodUs > win->lastPeriodUs ? periodUs - win->lastPeriodUs
+                                                                         : win->lastPeriodUs - periodUs;
+                        win->jitterCount++;
+                    }
+                    if (win->lastPace != 0xFF && pace != win->lastPace) {
+                        win->paceChanges++;
+                    }
+                    win->lastPeriodUs = periodUs;
+                    win->lastPace = pace;
                 }
             }
             record_frame(periodUs, sBuildUs, updateRate, now);

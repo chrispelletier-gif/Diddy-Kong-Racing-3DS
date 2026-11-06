@@ -238,6 +238,10 @@ int plat_antialias(void) {
     return sAntialias;
 }
 
+int plat_wide800_active(void) {
+    return 0;
+}
+
 static void *thread_entry(void *arg) {
     PlatThread *thread = (PlatThread *) arg;
     thread->func(thread->arg);
