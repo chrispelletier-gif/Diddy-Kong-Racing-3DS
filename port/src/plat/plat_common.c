@@ -309,7 +309,7 @@ static volatile struct {
 } sSwitchOverrides[MAX_SWITCH_OVERRIDES];
 volatile int gPlatSwitchEpoch;
 
-int plat_switch(const char *name, int fallback) {
+static int switch_read(const char *name, int fallback) {
     const char *env;
     int i;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
@@ -341,6 +341,44 @@ int plat_switch(const char *name, int fallback) {
     }
 #endif
     return env != NULL ? atoi(env) : fallback;
+}
+
+/* v27: a switch's answer kept per thread, by the name's address and the fallback, until the bench changes the
+ * overrides (gPlatSwitchEpoch). env.txt is read once, so nothing else can change an answer. The game thread asked
+ * ~3,500 times a frame (set_temp_model_transforms, plat_render_ahead), each a scan of the overrides and env.txt:
+ * 3.6% of its time on PC. DKR_SWITCH_CACHE=0 (env.txt only) reads every time, as before. */
+#define SWITCH_CACHE_SLOTS 64
+typedef struct {
+    const char *name;
+    int fallback, value, epoch;
+} SwitchCacheEntry;
+static __thread SwitchCacheEntry sSwitchCache[SWITCH_CACHE_SLOTS];
+static volatile int sSwitchCacheOn = -1;
+
+int plat_switch(const char *name, int fallback) {
+    SwitchCacheEntry *e;
+    int epoch;
+    if (sSwitchCacheOn <= 0) {
+        if (sSwitchCacheOn == 0) {
+            return switch_read(name, fallback);
+        }
+        {
+            const char *env = plat_getenv("DKR_SWITCH_CACHE");
+            sSwitchCacheOn = env == NULL || atoi(env) != 0;
+        }
+        if (!sSwitchCacheOn) {
+            return switch_read(name, fallback);
+        }
+    }
+    epoch = gPlatSwitchEpoch + 1; // + 1: an empty slot (epoch 0) never matches
+    e = &sSwitchCache[((unsigned long) name >> 2) % SWITCH_CACHE_SLOTS];
+    if (e->name != name || e->fallback != fallback || e->epoch != epoch) {
+        e->value = switch_read(name, fallback);
+        e->name = name;
+        e->fallback = fallback;
+        e->epoch = epoch;
+    }
+    return e->value;
 }
 
 void plat_override_switch(const char *name, int value) {

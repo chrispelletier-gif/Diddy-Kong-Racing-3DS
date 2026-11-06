@@ -2426,6 +2426,63 @@ s32 block_visible(LevelModelSegmentBoundingBox *bb) {
     f32 dirX, dirY, dirZ, dirW;
     f32 x, y, z;
 
+#ifdef TARGET_PORT
+    // v27: the same sums with 32-bit conversions. The original keeps the running sum in an s64, so every step is a
+    // float to 64-bit integer conversion and back: library calls on the 3DS (no VFP instruction), 4 each for up to
+    // 24 corners of every segment box, every frame (3.4% of the game thread on PC). A float inside the s32 range
+    // truncates to the same integer either way, and an integer converts to the same float whatever its type, so
+    // the answer is the same; outside that range the original's s64 steps are kept. DKR_BOX_S64=1 is the old code.
+    if (!plat_switch("DKR_BOX_S64", 0)) {
+#define BOX_TRUNC(f) (((f) > -2147483648.0f && (f) < 2147483648.0f) ? (s64) (s32) (f) : (s64) (f))
+#define BOX_FLOAT(l) (((l) >= -2147483647LL - 1 && (l) <= 2147483647LL) ? (f32) (s32) (l) : (f32) (l))
+        for (j = 0; j < 3; j++) {
+            dirX = D_8011D0F8[j].x;
+            dirY = D_8011D0F8[j].y;
+            dirZ = D_8011D0F8[j].z;
+            dirW = D_8011D0F8[j].w;
+            {
+                // Each step (multiply, add, truncate) never lowers the result when one of its terms grows, so some
+                // corner passes exactly when the corner with the larger term on each axis does: one corner a plane
+                // instead of up to eight. Anything not a number takes the eight corners, as the original.
+                f32 ax = bb->x2 * dirX, bx = bb->x1 * dirX, ay = bb->y2 * dirY, by = bb->y1 * dirY;
+                f32 az = bb->z2 * dirZ, bz = bb->z1 * dirZ;
+                if (ax == ax && bx == bx && ay == ay && by == by && az == az && bz == bz && dirW == dirW) {
+                    f32 f = ax > bx ? ax : bx;
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + (ay > by ? ay : by);
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + (az > bz ? az : bz);
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + dirW;
+                    sp48 = BOX_TRUNC(f);
+                    if (sp48 > 0) {
+                        continue;
+                    }
+                    return FALSE;
+                }
+            }
+            for (i = 0, isVisible = FALSE; i < 8 && !isVisible; i++) {
+                f32 f = ((i & 1) ? bb->x1 : bb->x2) * dirX;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + ((i & 2) ? bb->y1 : bb->y2) * dirY;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + ((i & 4) ? bb->z1 : bb->z2) * dirZ;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + dirW;
+                sp48 = BOX_TRUNC(f);
+                if (sp48 > 0) {
+                    isVisible = TRUE;
+                }
+            }
+            if (i == 8 && !isVisible) {
+                return FALSE;
+            }
+        }
+#undef BOX_TRUNC
+#undef BOX_FLOAT
+        goto visible;
+    }
+#endif
     for (j = 0; j < 3; j++) {
         dirX = D_8011D0F8[j].x;
         dirY = D_8011D0F8[j].y;
@@ -2457,6 +2514,9 @@ s32 block_visible(LevelModelSegmentBoundingBox *bb) {
             return FALSE;
         }
     }
+#ifdef TARGET_PORT
+visible:
+#endif
     // From here until the "return TRUE" goes completely unused, functionally.
     x = (bb->x2 + bb->x1) >> 1;
     y = (bb->y2 + bb->y1) >> 1;

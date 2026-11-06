@@ -146,8 +146,8 @@ static unsigned int sNMatLevel = 0xFFFFFFFFu;
 static int sNativeDraw;
 volatile unsigned char gPortNMatBad[NMAT_KEYS];
 
-static void nmat_level_check(void) {
-    if (sNMatLevel != gPortLevelLoads) {
+static void nmat_level_reset(void) {
+    {
         sNMatLevel = gPortLevelLoads;
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
@@ -157,6 +157,13 @@ static void nmat_level_check(void) {
         // commands with native draws still on).
         gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
 #endif
+    }
+}
+
+/* v27: the check inline (called for every batch), the reset out of line. */
+static inline __attribute__((always_inline)) void nmat_level_check(void) {
+    if (sNMatLevel != gPortLevelLoads) {
+        nmat_level_reset();
     }
 }
 

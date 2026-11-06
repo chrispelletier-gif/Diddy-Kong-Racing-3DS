@@ -277,6 +277,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 1 },
     // v23: the native path's vertex transform had been left scalar; VFP vectors are on only on the Old 3DS.
     { "native draws with scalar maths", { "DKR_NATIVE_VFP", NULL, NULL }, 1, 0, 0, 1 },
+    // v27 game thread cuts, all turned off: segment boxes tested without 64-bit maths and on one corner a plane,
+    // the water's vertex loop and segment lookups, texture scrolling's batch lists (switch answers cached and the
+    // divide-free timer are env.txt-only: DKR_SWITCH_CACHE=0, DKR_TIME_DIVIDE=1).
+    { "old game thread code (v27 cuts off)", { "DKR_BOX_S64", "DKR_WAVES_OLD", "DKR_TEXSCROLL_OLD" }, 0, 1, 0, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

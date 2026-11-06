@@ -528,6 +528,34 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
+#if PICA_ALL
+    // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
+    // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
+    // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
+    // divide. DKR_TIME_DIVIDE=1 (env.txt) is the old way.
+    static int sDivide = -1;
+    static __thread unsigned long long sSecondTicks, sSeconds;
+    static __thread int sHaveSecond;
+    unsigned long long rest;
+    if (sDivide < 0) {
+        const char *env = plat_getenv("DKR_TIME_DIVIDE");
+        sDivide = env != NULL && atoi(env) != 0;
+    }
+    if (!sDivide) {
+        if (!sHaveSecond || ticks < sSecondTicks || ticks - sSecondTicks >= 4ULL * SYSCLOCK_ARM11) {
+            sSeconds = ticks / SYSCLOCK_ARM11;
+            sSecondTicks = sSeconds * SYSCLOCK_ARM11;
+            sHaveSecond = 1;
+        }
+        while (ticks - sSecondTicks >= SYSCLOCK_ARM11) {
+            sSecondTicks += SYSCLOCK_ARM11;
+            sSeconds++;
+        }
+        rest = ticks - sSecondTicks;
+        // 1e9 / SYSCLOCK_ARM11 in 32.32 fixed point (3.7298 ns a tick).
+        return sSeconds * 1000000000ULL + ((rest * 16019311343ULL) >> 32);
+    }
+#endif
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 

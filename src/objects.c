@@ -2578,11 +2578,21 @@ void gParticlePtrList_flush(void) {
         search_indx = -1;
         searchObj = gParticlePtrList[i];
 
+#ifdef TARGET_PORT
+        // v27: the last match, looked for from the end (the original scans the whole list and keeps the last one).
+        for (j = gObjectCount - 1; j >= 0; j--) {
+            if (searchObj == gObjPtrList[j]) {
+                search_indx = j;
+                break;
+            }
+        }
+#else
         for (j = 0; j < gObjectCount; j++) {
             if (searchObj == gObjPtrList[j]) {
                 search_indx = j;
             }
         }
+#endif
 
         // if object found
         if (search_indx != -1) {

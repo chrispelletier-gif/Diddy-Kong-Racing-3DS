@@ -1,4 +1,8 @@
 #include "object_functions.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 #include "audio.h"
 #include "audio_spatial.h"
@@ -5578,6 +5582,93 @@ void obj_loop_texscroll(Object *obj, s32 updateRate) {
     t1 = ((t1 >> 2) & 0xFFFFFFFFFFFFFFFF); // fake
 
     curBlock = levelModel->segments;
+#ifdef TARGET_PORT
+    // v27: the batches with this texture, found once per level and texture instead of every frame for every scroller
+    // (each scan walks every batch of the level). The batches are fixed once the level is loaded; the same batches
+    // in the same order. DKR_TEXSCROLL_OLD=1 scans every frame as before.
+    if (!plat_switch("DKR_TEXSCROLL_OLD", 0)) {
+#define TEXSCROLL_LISTS 8
+#define TEXSCROLL_BATCHES 64
+        static struct {
+            LevelModel *model;
+            unsigned int level;
+            s32 textureIndex, count; // count -1: more batches than the list holds (scanned)
+            u16 seg[TEXSCROLL_BATCHES], batch[TEXSCROLL_BATCHES];
+        } sLists[TEXSCROLL_LISTS];
+        static s32 sNext;
+        s32 l, n;
+        for (l = 0; l < TEXSCROLL_LISTS; l++) {
+            if (sLists[l].model == levelModel && sLists[l].level == gPortLevelLoads &&
+                sLists[l].textureIndex == texScroll->textureIndex) {
+                break;
+            }
+        }
+        if (l == TEXSCROLL_LISTS) {
+            l = sNext;
+            sNext = (sNext + 1) % TEXSCROLL_LISTS;
+            sLists[l].model = levelModel;
+            sLists[l].level = gPortLevelLoads;
+            sLists[l].textureIndex = texScroll->textureIndex;
+            n = 0;
+            for (i = 0; i < levelModel->numberOfSegments && n >= 0; i++) {
+                curBatch = curBlock[i].batches;
+                for (j = 0; j < curBlock[i].numberOfBatches; j++) {
+                    if (curBatch[j].textureIndex == texScroll->textureIndex) {
+                        if (n == TEXSCROLL_BATCHES || i > 0xFFFF || j > 0xFFFF) {
+                            n = -1;
+                            break;
+                        }
+                        sLists[l].seg[n] = (u16) i;
+                        sLists[l].batch[n] = (u16) j;
+                        n++;
+                    }
+                }
+            }
+            sLists[l].count = n;
+        }
+        if (sLists[l].count >= 0) {
+            for (n = 0; n < sLists[l].count; n++) {
+                i = sLists[l].seg[n];
+                j = sLists[l].batch[n];
+                curBatch = curBlock[i].batches;
+                for (tri = curBatch[j].facesOffset; tri < curBatch[j + 1].facesOffset; tri++) {
+                    curTriangle = &curBlock[i].triangles[tri];
+                    if (!(curTriangle->flags & TRI_FLAG_80)) {
+                        if (vShift < curTriangle->uv0.v) {
+                            curTriangle->uv0.v -= vShift;
+                            curTriangle->uv1.v -= vShift;
+                            curTriangle->uv2.v -= vShift;
+                        }
+                        if (curTriangle->uv0.v < 0) {
+                            curTriangle->uv0.v += vShift;
+                            curTriangle->uv1.v += vShift;
+                            curTriangle->uv2.v += vShift;
+                        }
+                        if (uShift < curTriangle->uv0.u) {
+                            curTriangle->uv0.u -= uShift;
+                            curTriangle->uv1.u -= uShift;
+                            curTriangle->uv2.u -= uShift;
+                        }
+                        if (curTriangle->uv0.u < 0) {
+                            curTriangle->uv0.u += uShift;
+                            curTriangle->uv1.u += uShift;
+                            curTriangle->uv2.u += uShift;
+                        }
+                        curTriangle->uv0.v += t1;
+                        curTriangle->uv1.v += t1;
+                        curTriangle->uv2.v += t1;
+                        curTriangle->uv0.u += t0;
+                        curTriangle->uv1.u += t0;
+                        curTriangle->uv2.u += t0;
+                    }
+                }
+            }
+            return;
+        }
+#undef TEXSCROLL_LISTS
+#undef TEXSCROLL_BATCHES
+    }
+#endif
     for (i = 0; i < levelModel->numberOfSegments; i++) {
         curBatch = curBlock[i].batches;
         for (j = 0; j < curBlock[i].numberOfBatches; j++) {
