@@ -269,9 +269,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    { "textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 1 },
-    // v28: the Old 3DS default, native draws' vertex maths on the renderer's second thread (DKR_NATIVE_REMOTE=3).
-    { "native draws' vertices on the second renderer thread", { "DKR_NATIVE_REMOTE", NULL, NULL }, 0, 3, 1, 1 },
+    // Bench #438 (v28): native draws' vertex maths on the second renderer thread cost the New 3DS 1.5-2.7 ms of
+    // renderer time on two tracks (its second thread shares the game's core), and textures in VRAM were mixed again
+    // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
