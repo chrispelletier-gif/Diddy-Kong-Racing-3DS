@@ -12,10 +12,12 @@
  * bytes with the ARM11's load and store multiple (both 4-byte aligned), else words, which leaves the same bytes behind
  * (a forward copy to a lower address can't overwrite bytes it hasn't read yet).
  */
+int gPortOldMemcpy; // DKR_OLD_MEMCPY=1: the N64's byte at a time copy (set each frame, port_game_native_frame)
+
 void* memcpy(void* s1, const void* s2, size_t n) {
     unsigned char* d = (unsigned char*)s1;
     const unsigned char* s = (const unsigned char*)s2;
-    if (s < d && d < s + n) {
+    if (gPortOldMemcpy || (s < d && d < s + n)) {
         while (n > 0) {
             *d++ = *s++;
             n--;

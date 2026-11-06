@@ -99,3 +99,18 @@ u64 port_cells_all(s32 mask) {
     }
     return (u64) (rows & -rows) << (__builtin_ctz(cols) * 8);
 }
+
+#ifdef __arm__
+extern int gPortOldMemcpy;
+#endif
+
+/* Once a frame, after the game logic: picks up the switches that live outside the game's own code. */
+void port_game_native_frame(void) {
+    static s32 sFrameEpoch = -1;
+    if (sFrameEpoch != gPlatSwitchEpoch) {
+        sFrameEpoch = gPlatSwitchEpoch;
+#ifdef __arm__
+        gPortOldMemcpy = plat_switch("DKR_OLD_MEMCPY", 0);
+#endif
+    }
+}

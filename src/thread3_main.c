@@ -59,6 +59,7 @@ static s32 sPortPauseRequest;
 // Game state hash after each logic step, for checking native rewrites (port/host/state_hash.c; nothing on the 3DS).
 __attribute__((weak)) void port_state_hash(void) {
 }
+void port_game_native_frame(void); // port/src/game/track_cells.c
 #endif
 
 /************ .rodata ************/
@@ -547,6 +548,7 @@ void mode_game(s32 updateRate) {
         obj_update(updateRate);
         prof_logic_end();
         port_state_hash();
+        port_game_native_frame();
 #else
         obj_update(updateRate);
 #endif
