@@ -2083,6 +2083,7 @@ static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's sh
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
 static s32 sTriReject;  // DKR_TRI_REJECT (PICA_ALL): a triangle wholly past one edge of the screen is not written
+static s32 sNMatFast;   // DKR_NMAT_FAST (PICA_ALL): a native draw's fixed set-up cost cut (see native_record)
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
@@ -2153,6 +2154,7 @@ static void read_switches(void) {
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
 #ifdef PICA_ALL
     sTriReject = plat_switch("DKR_TRI_REJECT", 1) != 0;
+    sNMatFast = plat_switch("DKR_NMAT_FAST", 1) != 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
 #endif
 }
@@ -3944,15 +3946,24 @@ static void *native_alloc(u32 bytes) {
 }
 
 /* Lists the corners of the triangles into e (whose slot is reserved). Returns FALSE when out of room. */
-static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count) {
+static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32 reuse) {
     u32 i, k, n = 0;
     u8 *cornerVertex;
     u32 *cornerUv;
     u16 *triCorners;
-    e->copy = (Triangle *) native_alloc(count * sizeof(Triangle));
-    cornerVertex = (u8 *) native_alloc(count * 3);
-    cornerUv = (u32 *) native_alloc(count * 3 * sizeof(u32));
-    triCorners = (u16 *) native_alloc(count * 3 * sizeof(u16));
+    if (reuse) {
+        // The same number of triangles changed in place (a racer's face, a scrolled texture: only their texture
+        // coordinates move): the tables are remade where they are, instead of taking new room every time, which
+        // filled the pool every few seconds and had every mesh's tables remade (DKR_NMAT_FAST).
+        cornerVertex = e->cornerVertex;
+        cornerUv = e->cornerUv;
+        triCorners = e->triCorners;
+    } else {
+        e->copy = (Triangle *) native_alloc(count * sizeof(Triangle));
+        cornerVertex = (u8 *) native_alloc(count * 3);
+        cornerUv = (u32 *) native_alloc(count * 3 * sizeof(u32));
+        triCorners = (u16 *) native_alloc(count * 3 * sizeof(u16));
+    }
     if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL) {
         return FALSE;
     }
@@ -3995,6 +4006,62 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count) {
     return TRUE;
 }
 
+/* Whether the triangles are still those the tables were made from, compared a word at a time in place
+ * (DKR_NMAT_FAST): the library memcmp is a call into code otherwise not in the instruction cache, made for every batch. */
+static inline s32 native_tris_same(const Triangle *a, const Triangle *b, s32 count) {
+    const u32 *wa = (const u32 *) a, *wb = (const u32 *) b;
+    u32 i, n = (u32) count * (sizeof(Triangle) / 4), diff = 0;
+    _Static_assert(sizeof(Triangle) % 4 == 0 && _Alignof(Triangle) >= 4, "triangles are compared as words");
+#pragma GCC unroll 1
+    for (i = 0; i < n; i++) {
+        diff |= wa[i] ^ wb[i];
+    }
+    return diff == 0;
+}
+
+/* Triangles whose texture coordinates alone changed (a racer's blinking face, a scrolled texture), each corner
+ * still having one texture coordinate: the corners' coordinates are updated in place, without listing the corners
+ * again (DKR_NMAT_FAST). FALSE, changing nothing that matters, if the tables must be made again. Two corners that now
+ * have the same coordinate stay two, which only costs a vertex. */
+static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
+    u32 i, k, n = e->numCorners;
+    if (!e->usable || n > NATIVE_MAX_CORNERS) {
+        return FALSE;
+    }
+    for (i = 0; i < (u32) count; i++) {
+        if (tris[i].vertices != e->copy[i].vertices) {
+            return FALSE;
+        }
+    }
+    ++sNativeStamp;
+    for (i = 0; i < (u32) count; i++) {
+        const TexCoords *c = &tris[i].uv0;
+        for (k = 0; k < 3; k++) {
+            u32 q = e->triCorners[i * 3 + k];
+            if (sNativeCornerStamp[q] != sNativeStamp) {
+                sNativeCornerStamp[q] = sNativeStamp;
+                sNativeCornerIndex[q] = 0;
+                e->cornerUv[q] = c[k].texCoords;
+            } else if (e->cornerUv[q] != c[k].texCoords) {
+                return FALSE; // One corner now has two coordinates (cornerUv is remade by native_build)
+            }
+        }
+    }
+    e->minU = e->minV = 0x7FFF;
+    e->maxU = e->maxV = -0x8000;
+    for (i = 0; i < (u32) count; i++) {
+        const TexCoords *c = &tris[i].uv0;
+        for (k = 0; k < 3; k++) {
+            e->minU = c[k].u < e->minU ? c[k].u : e->minU;
+            e->maxU = c[k].u > e->maxU ? c[k].u : e->maxU;
+            e->minV = c[k].v < e->minV ? c[k].v : e->minV;
+            e->maxV = c[k].v > e->maxV ? c[k].v : e->maxV;
+        }
+    }
+    __builtin_memcpy(e->copy, tris, count * sizeof(Triangle));
+    return TRUE;
+}
+
 /* The tables of these triangles, made if need be; NULL if they can't be. */
 static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count) {
     u32 h = (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1), probes;
@@ -4008,11 +4075,16 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count) {
             break;
         }
         if (e->tris == tris && e->numTris == count) {
-            if (__builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
+            if (sNMatFast ? native_tris_same(e->copy, tris, count)
+                          : __builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
                 return e->usable ? e : NULL;
             }
-            // Changed: new tables (the old ones' room is only won back when all are forgotten)
-            if (!native_build(e, tris, count)) {
+            if (sNMatFast && e->copy != NULL && native_uv_update(e, tris, count)) {
+                return e->usable ? e : NULL;
+            }
+            // Changed: new tables (the old ones' room is only won back when all are forgotten, unless they are
+            // remade in place)
+            if (!native_build(e, tris, count, sNMatFast && e->copy != NULL)) {
                 native_forget_all();
                 return NULL;
             }
@@ -4023,7 +4095,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count) {
         native_forget_all();
         return NULL;
     }
-    if (!native_build(e, tris, count)) {
+    if (!native_build(e, tris, count, FALSE)) {
         native_forget_all();
         return NULL;
     }
@@ -4281,6 +4353,8 @@ typedef struct NMat {
     u16 texEntry[2];
     u8 texGen[2];
     u8 valid, fog;
+    u8 axReady; // axes[] hold the texture axes for its tiles and textures (DKR_NMAT_FAST)
+    TexAxis axes[4]; // u0, v0, u1, v1
 } NMat;
 static NMat sNMats[NMAT_MAX];
 extern volatile unsigned char gPortNMatBad[];
@@ -4301,6 +4375,7 @@ static COLD void nmat_capture(u32 id) {
     m->tiles[1] = g.tiles[1];
     m->fog = (g.geometryMode & G_FOG) != 0;
     m->valid = TRUE;
+    m->axReady = FALSE;
     for (k = 0; k < 2; k++) {
         s32 e = tex_entry_of(m->state.textures[k]);
         if (m->state.textures[k] != NULL && e < 0) {
@@ -4676,17 +4751,26 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
-    if (tex0) {
-        const GfxTexture *tex = state.textures[0];
-        float shift = texel_centre_shift(tex);
-        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
-        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
-    }
-    if (tex1) {
-        const GfxTexture *tex = state.textures[1];
-        float shift = texel_centre_shift(tex);
-        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
-        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+    if (sNMatFast && mat->axReady) {
+        // The material's tiles and textures are its own, so their axes are worked out once (DKR_NMAT_FAST).
+        u0 = mat->axes[0], v0 = mat->axes[1], u1 = mat->axes[2], v1 = mat->axes[3];
+    } else {
+        if (tex0) {
+            const GfxTexture *tex = state.textures[0];
+            float shift = texel_centre_shift(tex);
+            tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+            tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+        }
+        if (tex1) {
+            const GfxTexture *tex = state.textures[1];
+            float shift = texel_centre_shift(tex);
+            tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+            tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+        }
+        if (sNMatFast && textured) {
+            mat->axes[0] = u0, mat->axes[1] = v0, mat->axes[2] = u1, mat->axes[3] = v1;
+            mat->axReady = TRUE;
+        }
     }
     zeroTex1 = !tex1 && !sWalkLean;
     state.flat = 0;

@@ -260,7 +260,10 @@ typedef struct BenchSwitch {
         /* the other karts' simpler models while frames are being missed (src/thread3_main.c). Rows turn them off. */ \
         /* Every row races 1 lap (user 2026-11-06), so the usual races do too and the start weighs more. */          \
         { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 1 },                            \
-        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 1 }
+        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 1 },                    \
+        /* v22: a native draw's fixed set-up cut (gfx_rdp.c DKR_NMAT_FAST: texture axes kept per material, the */     \
+        /* racers' changing faces updated in place instead of filling the tables and having all of them remade). */ \
+        { "no native draw set-up cut", { "DKR_NMAT_FAST", NULL, NULL }, 1, 0, 1, 1 }
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
