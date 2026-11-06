@@ -255,7 +255,7 @@ typedef struct BenchSwitch {
 /* Textures in VRAM never beat the usual races with the new renderer (Old 3DS #417 and #419, New 3DS #418), so it stays
  * off and its two rows are gone (user 2026-11-06: remove redundant tests). */
 #define PICA_ROWS                                                                                                      \
-    { "old renderer (N64 display lists, drawn in order)", { "DKR_OLD_RENDERER", NULL, NULL }, 0, 1, 1, 0 },           \
+    /* The old renderer row is gone too (user 2026-11-06: settled by many runs; DKR_OLD_RENDERER=1 still works). */ \
         /* v18: off-screen triangles and track batches dropped before their work (gfx_rdp.c DKR_TRI_REJECT), and */ \
         /* the other karts' simpler models while frames are being missed (src/thread3_main.c). Rows turn them off. */ \
         { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 0 },                            \

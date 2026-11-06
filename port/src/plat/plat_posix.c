@@ -54,8 +54,13 @@ unsigned long long plat_render_idle_ns(void) {
     return 0;
 }
 
+/* DKR_HOST_OLD3DS=1: the PC build takes the Old 3DS defaults (plat_switch defaults that ask plat_old_3ds). */
 int plat_old_3ds(void) {
-    return 0;
+    static int sOld = -1;
+    if (sOld < 0) {
+        sOld = plat_getenv("DKR_HOST_OLD3DS") != NULL;
+    }
+    return sOld;
 }
 
 unsigned long long plat_screen_busy_ns(void) {
