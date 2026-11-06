@@ -19,6 +19,16 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
+/* v28: textures in VRAM by default on the Old 3DS in the PICA_ALL build (benches #432/#436: steadier frames on
+ * Whale Bay, even elsewhere); off elsewhere, as before. DKR_TEX_VRAM=0/1 still decides. */
+static int tex_vram_default(void) {
+#ifdef PICA_ALL
+    return plat_old_3ds();
+#else
+    return 0;
+#endif
+}
+
 /* The display transfer converts the RGBA8 target to the screen's RGB8 and, with anti-aliasing, averages each 2x2 (or
  * 2x1) block of pixels. */
 #define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
@@ -3470,7 +3480,7 @@ static void read_switches(void) {
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s, draws timed in "
              "parts %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
-             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
+             plat_switch("DKR_TEX_VRAM", tex_vram_default()) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
              sDrawParts ? "on" : "off");
     plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
@@ -4139,7 +4149,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     set_texture_filter(t, tex, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
     gpu_flush(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
-    if (!t->toVram && plat_switch("DKR_TEX_VRAM", 0)) {
+    if (!t->toVram && plat_switch("DKR_TEX_VRAM", tex_vram_default())) {
         t->toVram = 1; // Copied over by promote_textures.
         sToVram++;
     }

@@ -254,38 +254,22 @@ typedef struct BenchSwitch {
  * kinds of race have them. Textures in VRAM with each (Old 3DS runs 9 and 10 disagreed; user 23:00: VRAM with new and with old renderer). */
 /* Textures in VRAM never beat the usual races with the new renderer (Old 3DS #417 and #419, New 3DS #418), so it stays
  * off and its two rows are gone (user 2026-11-06: remove redundant tests). */
-#define PICA_ROWS                                                                                                      \
-    /* The old renderer row is gone too (user 2026-11-06: settled by many runs; DKR_OLD_RENDERER=1 still works). */ \
-        /* v18: off-screen triangles and track batches dropped before their work (gfx_rdp.c DKR_TRI_REJECT), and */ \
-        /* the other karts' simpler models while frames are being missed (src/thread3_main.c). Rows turn them off. */ \
-        /* Every row races 1 lap (user 2026-11-06), so the usual races do too and the start weighs more. */          \
-        { "no off-screen triangle drop", { "DKR_TRI_REJECT", NULL, NULL }, 1, 0, 1, 1 },                            \
-        { "no kart detail drop while slow", { "DKR_RACER_LOD_ADAPT", NULL, NULL }, 1, 0, 1, 1 },                    \
-        /* Old 3DS bench #432 (v25) settled v22's set-up cut and v23's moving parts, bucket writes, sign-bit */      \
-        /* edges and axis cut (on; all off together cost 0.3 fps, 0.7 ms rdp). Checking a piece once a frame */      \
-        /* (v23) came out slightly behind checking every draw, so it races again. The stall finder row times */      \
-        /* every command, as v22 and older did (its cost). */                                                       \
-        { "pieces checked every draw", { "DKR_NATIVE_ONCE", NULL, NULL }, 1, 0, 0, 1 },                             \
-        { "every command timed (stall finder)", { "DKR_STALL_EACH", NULL, NULL }, 0, 1, 1, 1 },                     \
-        /* v25 (user 2026-11-06: felt smoother): textures copied to VRAM, read for the frame to frame columns. */     \
-        { "textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 1 }
+/* Benches #432/#436 (Old 3DS) and #435 (New 3DS), v26-v27: the off-screen triangle drop, the kart detail drop, the
+ * native code's vertex vectors and game code are kept (no row beat them); checking pieces once a frame made no
+ * difference and the stall finder only costs, so their rows are gone (user rule: drop settled rows). Textures in
+ * VRAM: steadier on Whale Bay in both Old 3DS runs (frame to frame 2.0-2.2 ms against 2.3-3.8), even elsewhere, so
+ * v28 makes it the Old 3DS default and its row races the old way; on the New 3DS it was even, and races again. */
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    PICA_ROWS,
-    { "old game code (N64 collision, interactions, memcpy)",
-      { "DKR_NATIVE_CELLS", "DKR_NATIVE_INTERACT", "DKR_NATIVE_MEMCPY" }, 1, 0, 1, 1 },
-    // v23: the native path's vertex transform had been left scalar; VFP vectors are on only on the Old 3DS.
-    { "native draws with scalar maths", { "DKR_NATIVE_VFP", NULL, NULL }, 1, 0, 0, 1 },
-    // v27 game thread cuts, all turned off: segment boxes tested without 64-bit maths and on one corner a plane,
-    // the water's vertex loop and segment lookups, texture scrolling's batch lists (switch answers cached and the
-    // divide-free timer are env.txt-only: DKR_SWITCH_CACHE=0, DKR_TIME_DIVIDE=1).
-    { "old game thread code (v27 cuts off)", { "DKR_BOX_S64", "DKR_WAVES_OLD", "DKR_TEXSCROLL_OLD" }, 0, 1, 0, 1 },
+    { "textures in RAM (old default)", { "DKR_TEX_VRAM", NULL, NULL }, 1, 0, 1, 1 },
+    // The v27 game thread cuts (bench #436: scene 0.2-1.3 ms less on all three tracks) stay on; DKR_BOX_S64,
+    // DKR_WAVES_OLD and DKR_TEXSCROLL_OLD still turn them off.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
 static const BenchSwitch sSwitchesNew3ds[] = {
-    PICA_ROWS,
+    { "textures in VRAM", { "DKR_TEX_VRAM", NULL, NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
