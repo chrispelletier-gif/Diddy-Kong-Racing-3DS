@@ -347,7 +347,9 @@ static int switch_read(const char *name, int fallback) {
  * overrides (gPlatSwitchEpoch). env.txt is read once, so nothing else can change an answer. The game thread asked
  * ~3,500 times a frame (set_temp_model_transforms, plat_render_ahead), each a scan of the overrides and env.txt:
  * 3.6% of its time on PC. DKR_SWITCH_CACHE=0 (env.txt only) reads every time, as before. */
-#define SWITCH_CACHE_SLOTS 64
+/* v29: 256 slots in pairs, the name's address hashed (64 direct slots by the address had busy names share one: the
+ * renderer read DKR_SPLIT_RENDER from env.txt every frame). */
+#define SWITCH_CACHE_SLOTS 256
 typedef struct {
     const char *name;
     int fallback, value, epoch;
@@ -371,8 +373,20 @@ int plat_switch(const char *name, int fallback) {
         }
     }
     epoch = gPlatSwitchEpoch + 1; // + 1: an empty slot (epoch 0) never matches
-    e = &sSwitchCache[((unsigned long) name >> 2) % SWITCH_CACHE_SLOTS];
-    if (e->name != name || e->fallback != fallback || e->epoch != epoch) {
+    {
+        unsigned h = (unsigned) (((unsigned long) name >> 2) * 2654435761u) >> 24; // 8 bits: SWITCH_CACHE_SLOTS
+        SwitchCacheEntry *a = &sSwitchCache[h & ~1u], *b = a + 1;
+        if (a->name == name && a->fallback == fallback && a->epoch == epoch) {
+            return a->value;
+        }
+        if (b->name == name && b->fallback == fallback && b->epoch == epoch) {
+            return b->value;
+        }
+        // A miss replaces the older answer of the pair (b): the newer one moves up to a.
+        *b = *a;
+        e = a;
+    }
+    {
         e->value = switch_read(name, fallback);
         e->name = name;
         e->fallback = fallback;

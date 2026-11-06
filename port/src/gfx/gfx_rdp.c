@@ -2226,6 +2226,8 @@ static s32 sNativeOnceAFrame; // DKR_NATIVE_ONCE (PICA_ALL): a mesh's triangles 
 static s32 sNativeBucket; // DKR_NATIVE_BUCKET (PICA_ALL): opaque native draws written straight into their bucket
 static s32 sNativeVfp; // DKR_NATIVE_VFP (PICA_ALL): native draws transform with VFP vectors when DKR_VFP_VECTORS is on
 static s32 sFastOutcode; // DKR_FAST_OUTCODE (PICA_ALL): screen edge bits from sign bits, see vertex_outcode
+static s32 sPresetOn = 1;      // DKR_SPRITE_AXES (v29): sprite tiles take their material's axes
+static s32 sNativeHashHigh = 1; // DKR_NATIVE_HASH (v29), see native_find
 static u32 sNativeTableLimit = 2048 * 3 / 4, sNativePoolLimit = 640 * 1024; // DKR_NATIVE_BIG (see NATIVE_TABLE_SIZE)
 static s32 sScreenOnce; // DKR_SCREEN_ONCE (PICA_ALL v28): native corners reuse the screen x/y of the edge test
 static s32 sAxisFast;  // DKR_AXIS_FAST (PICA_ALL): native corners' first texture coordinates without the axis calls
@@ -2308,6 +2310,8 @@ static void read_switches(void) {
     sFastOutcode = plat_switch("DKR_FAST_OUTCODE", 1) != 0;
     sAxisFast = plat_switch("DKR_AXIS_FAST", 1) != 0;
     sScreenOnce = plat_switch("DKR_SCREEN_ONCE", 1) != 0;
+    sNativeHashHigh = plat_switch("DKR_NATIVE_HASH", 1) != 0;
+    sPresetOn = plat_switch("DKR_SPRITE_AXES", 1) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
     {
         s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
@@ -3835,6 +3839,9 @@ void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris) {
     sWalkRejectedTris = 0;
 }
 
+/* v29: set by native_record_append around its draw_dkr_triangles call (DKR_NMAT_FAST, the material's axes ready). */
+static const TexAxis *sPresetAxes;
+
 static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
@@ -3893,17 +3900,24 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
     // Texture coordinates are only worked out for the textures the draw uses; the others are left at zero.
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
-    if (tex0) {
-        const GfxTexture *tex = state.textures[0];
-        float shift = texel_centre_shift(tex);
-        tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
-        tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+    if (sPresetAxes != NULL) {
+        // A native material's own axes, worked out from these tiles and textures already (native_record_append).
+        u0 = sPresetAxes[0], v0 = sPresetAxes[1], u1 = sPresetAxes[2], v1 = sPresetAxes[3];
+    } else {
+        if (tex0) {
+            const GfxTexture *tex = state.textures[0];
+            float shift = texel_centre_shift(tex);
+            tex_axis_init(&u0, tile0->shifts, tile0->uls, tex->width, shift);
+            tex_axis_init(&v0, tile0->shiftt, tile0->ult, tex->height, shift);
+        }
+        if (tex1) {
+            const GfxTexture *tex = state.textures[1];
+            float shift = texel_centre_shift(tex);
+            tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
+            tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
+        }
     }
     if (tex1) {
-        const GfxTexture *tex = state.textures[1];
-        float shift = texel_centre_shift(tex);
-        tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
-        tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
     } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
         s32 minU = 0x7FFF, maxU = -0x8000, minV = 0x7FFF, maxV = -0x8000;
         GfxTexture *page;
@@ -4254,7 +4268,11 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
 
 /* The tables of these triangles, made if need be; NULL if they can't be. */
 static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic) {
-    u32 h = (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1), probes;
+    // v29 (DKR_NATIVE_HASH=0: the old low bits): triangle lists are 16-byte aligned, so the product's low bits only
+    // ever started a search in a quarter of the table; its top bits are spread over all of it.
+    u32 h = sNativeHashHigh ? (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11)
+                            : (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1),
+        probes;
     NativeMesh *e;
     if (count <= 0 || count > 0xFFFF) {
         return NULL;
@@ -4664,7 +4682,9 @@ static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s3
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
+    sPresetAxes = sNMatFast && sPresetOn && textured && mat->axReady ? mat->axes : NULL;
     draw_dkr_triangles(tris, count, textured);
+    sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
     g.tiles[1] = t1;
