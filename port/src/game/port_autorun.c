@@ -262,13 +262,9 @@ typedef struct BenchSwitch {
 /* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
  * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    { "textures in RAM (old default)", { "DKR_TEX_VRAM", NULL, NULL }, 1, 0, 1, 1 },
-    // The v27 game thread cuts (bench #436: scene 0.2-1.3 ms less on all three tracks) stay on; DKR_BOX_S64,
-    // DKR_WAVES_OLD and DKR_TEXSCROLL_OLD still turn them off.
-    // v28: native draws' vertex maths on the system core with the backend (DKR_NATIVE_REMOTE=3; PC walk -31%, frames
-    // identical). These rows race it all on the game core (0), and the draws whose order matters left there (1).
-    { "native draws' vertices on the game core (old)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 0, 1, 1 },
-    { "only opaque native draws on the system core", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 1, 1, 1 },
+    // Bench #437 (v28): native draws' vertex maths on the system core (DKR_NATIVE_REMOTE=3) saved 1.4-3.0 ms of
+    // renderer time on the game core (frames at 30: Whale Bay 91 -> 97%, Windmill Plains 93 -> 98%), more than
+    // opaque draws alone; it stays the default and its rows went, as did textures in RAM (even again).
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
