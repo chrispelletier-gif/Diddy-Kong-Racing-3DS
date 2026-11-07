@@ -290,7 +290,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // v33: a texture freed at a frame's start (objects' textures mid-race, stale ones at loads) goes through the
     // backend's queue instead of the walk waiting for the backend to catch up (DKR_TEX_FREE_QUEUE): half of #457's
     // Whale Bay hitches after the start had such a free in the frame (renderer 49-54 ms). Raced the old way.
-    { "texture frees wait for the renderer (old)", { "DKR_TEX_FREE_QUEUE", NULL, NULL }, 1, 0, 1, 1 },
+    // Benches #459/#460 (v33, lean): the queue was even with the old way (all three tracks at 29.9 fps, none at
+    // 20 fps with the profiler's readout off), so it stays on and its row went. No Old 3DS rows left.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -432,6 +433,8 @@ static s32 sMode; // enum Mode
 static s32 config_count(void);
 static const char *config_name(s32 config);
 
+static void lean_apply(void);
+
 /* Sets the race's settings: config -1 puts back the player's render settings and every switch's own value. */
 static void apply_config(s32 config) {
     s32 i, k;
@@ -468,9 +471,7 @@ static void apply_config(s32 config) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
-        // v33 (user 2026-11-07): profiled as little as the results need, as close to a player's build as can be
-        // (port_profile.c DKR_PROF_LEAN). DKR_BENCH_FULL_PROFILE=1 keeps the profiler's log lines and frame history.
-        plat_override_switch("DKR_PROF_LEAN", plat_getenv("DKR_BENCH_FULL_PROFILE") == NULL);
+        lean_apply(); // The lean bench only (v34; DKR_BENCH_FULL_PROFILE=1 keeps the profiler's lines and frame history)
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
         plat_override_switch("BENCH_WIDESCREEN", 2);
         plat_override_switch("BENCH_AA", PLAT_AA_2X);
@@ -522,7 +523,7 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
 enum Request {
     REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
-    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED
+    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED, REQUEST_SWITCH_LEAN, REQUEST_QUICK_LEAN
 };
 
 typedef struct ModeInfo {
@@ -563,6 +564,12 @@ static const char *config_name(s32 config) {
 
 static s32 sEnabled = -1;
 static s32 sShort;          // The whole game run's short variant, or the switch bench's shelved switches
+/* v34 (user 2026-11-07: a separate option from the normal switch bench): the lean switch bench and quick test profile
+ * only what the results need, as close to a player's build as can be (port_profile.c DKR_PROF_LEAN). */
+static s32 sLeanRun;
+static void lean_apply(void) {
+    plat_override_switch("DKR_PROF_LEAN", sLeanRun && plat_getenv("DKR_BENCH_FULL_PROFILE") == NULL);
+}
 static s32 sReportedAt = -1; // The whole game run: the stop before which the last progress report went out
 static unsigned long long sLastReportNs;
 static unsigned long long sReportWaitNs; // When the run started waiting for a report to go out, or 0
@@ -964,9 +971,9 @@ static void save_state_recorded(s32 running, s32 recorded) {
     char text[200];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n"
-                  "short=%d\nreported=%d\n",
+                  "short=%d\nreported=%d\nlean=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
-                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt);
+                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt, (int) sLeanRun);
     io_queue(state_file(), text, NULL, FALSE);
 }
 
@@ -1067,6 +1074,10 @@ static const char *graphics_setup(void) {
     if (gfx_split_active()) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/split");
+    }
+    if (plat_switch("DKR_PROF_LEAN", 0)) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/lean"); // v34: profiled lean (port_profile.c)
     }
     if (plat_wide800_active()) {
         // At 800 pixels across, 4x and 2x both draw twice the height (aa_label says 2x for either).
@@ -1440,6 +1451,7 @@ s32 port_autorun_enabled(void) {
                 if (state_value(text, "active", 0) != 0) {
                     sMode = mode;
                     sShort = state_value(text, "short", 0);
+                    sLeanRun = state_value(text, "lean", 0);
                 }
             }
         }
@@ -1627,10 +1639,12 @@ s32 port_autorun_shelved_count(void) {
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
  * boss fights (4), the switch bench (5), the whole game run (6, or 7 for its short variant) or the shelved switches
- * bench (8), or stop whichever is going (0), at the next game frame.
+ * bench (8), the lean switch bench (9) or lean quick test (10), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 8   ? REQUEST_SWITCH_SHELVED
+    sRequest = start == 10  ? REQUEST_QUICK_LEAN
+               : start == 9 ? REQUEST_SWITCH_LEAN
+               : start == 8 ? REQUEST_SWITCH_SHELVED
                : start == 7 ? REQUEST_WHOLE_SHORT
                : start == 6 ? REQUEST_WHOLE
                : start == 5 ? REQUEST_SWITCH
@@ -2060,6 +2074,8 @@ s32 port_autorun_title(void) {
     save_state(sNext);
     if (race->config >= 0) {
         apply_config(race->config); // The renderer switches while the race loads.
+    } else {
+        lean_apply(); // The lean quick test's (v34)
     }
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
@@ -2774,8 +2790,8 @@ static void send_results(const char *why) {
     static char summary[8192];
     s32 length;
     io_flush(); // The summaries and the attached files read the results back.
-    plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sMode == MODE_BENCH    ? "GPU benchmark "
+    plat_snprintf(title, sizeof(title), "[3DS test run] %s%srun %d: %d of %d races, %d problems (%s)",
+                  sLeanRun ? "lean " : "", sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? (sShort ? "shelved switches " : "switch bench ")
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
@@ -2868,6 +2884,8 @@ static void turn_off(const char *why) {
     if (is_bench()) {
         apply_config(-1); // Back to the player's settings.
     }
+    sLeanRun = 0;
+    plat_override_switch("DKR_PROF_LEAN", 0); // Frame history back for bug reports
     sMode = MODE_FULL;
     prof_set_status(NULL);
 }
@@ -2936,8 +2954,10 @@ static void handle_request(void) {
     sRequest = REQUEST_NONE;
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
          request == REQUEST_SWITCH || request == REQUEST_SWITCH_SHELVED || request == REQUEST_WHOLE ||
-         request == REQUEST_WHOLE_SHORT) &&
+         request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN) &&
         !port_autorun_active()) {
+        sLeanRun = request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN;
+        request = request == REQUEST_SWITCH_LEAN ? REQUEST_SWITCH : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK : request;
         sShort = request == REQUEST_WHOLE_SHORT || (request == REQUEST_SWITCH_SHELVED && !plat_old_3ds());
         if (request == REQUEST_SWITCH_SHELVED) {
             if (plat_old_3ds()) {
@@ -2946,7 +2966,7 @@ static void handle_request(void) {
             }
             request = REQUEST_SWITCH;
         }
-        if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1) {
+        if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1 && !sLeanRun) { // (The lean one races the usual settings)
             plat_status("Switch bench: no switches to test right now");
             return;
         }
