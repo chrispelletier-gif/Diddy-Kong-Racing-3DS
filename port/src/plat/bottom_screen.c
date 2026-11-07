@@ -721,6 +721,11 @@ static int ui_advance(const UiFont *u, unsigned char c) {
     return c <= 0x20 || c >= 0x7F ? u->space : u->glyphs[c - 0x21].advance;
 }
 
+/* Twice the middle of a capital letter, from the text's top: the capitals' band is what the eye centres on. */
+static int ui_cap_middle2(const UiFont *u) {
+    return u->glyphs['H' - 0x21].y + u->base;
+}
+
 static int text_width_as_is(int font, const char *text) {
     int width = 0;
     char prev = 0;
@@ -859,8 +864,9 @@ static int text_fit_as_is(int font, int x0, int x1, int y, const char *s, Colour
         small = ui_font_kind(UI_SM);
         width = ui_width(small, s);
         if (width <= room) {
-            return ui_draw(small, centred ? x0 + (room - width) / 2 : x0, y + u->base - small->base, s, colour, shadow,
-                           x1);
+            // Its capitals on the same middle line as the bigger font's would have been.
+            return ui_draw(small, centred ? x0 + (room - width) / 2 : x0,
+                           y + (ui_cap_middle2(u) - ui_cap_middle2(small)) / 2, s, colour, shadow, x1);
         }
     }
     // Neither fits: as much as fits, then "...".
@@ -883,8 +889,8 @@ static int text_fit_as_is(int font, int x0, int x1, int y, const char *s, Colour
         width = small != NULL ? ui_width(small, cut) : text_width_as_is(font, cut);
     }
     if (small != NULL) {
-        return ui_draw(small, centred ? x0 + (room - width) / 2 : x0, y + u->base - small->base, cut, colour, shadow,
-                       x1 + 1);
+        return ui_draw(small, centred ? x0 + (room - width) / 2 : x0,
+                       y + (ui_cap_middle2(u) - ui_cap_middle2(small)) / 2, cut, colour, shadow, x1 + 1);
     }
     return text_clipped_as_is(font, centred ? x0 + (room - width) / 2 : x0, y, cut, colour, shadow, x1 + 1);
 }
@@ -1433,7 +1439,10 @@ static void stepper(int x0, int x1, int y, const char *value) {
     arrow(0, x1 - 4 - arrowWidth, arrowY);
     // Round-ended chips (Glass, Dock) keep the text clear of the arrows; a value too long shrinks, then is cut.
     int inset = (sStyle == 1 || sStyle == 3) ? 8 : 6;
-    text_fit_centred(FONT_SMALL, x0 + arrowWidth + inset, x1 - arrowWidth - inset, y + 6, value, YELLOW, 1);
+    // The value's capitals centred on the chip's middle line, whatever the look's font height (the game's font: y + 6).
+    const UiFont *u = ui_font(FONT_SMALL);
+    int textY = u != NULL ? y + 10 - (ui_cap_middle2(u) + 1) / 2 : y + 6;
+    text_fit_centred(FONT_SMALL, x0 + arrowWidth + inset, x1 - arrowWidth - inset, textY, value, YELLOW, 1);
 }
 
 /*
