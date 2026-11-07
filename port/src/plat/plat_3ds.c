@@ -690,8 +690,77 @@ int plat_sem_try_wait(PlatSem *sem) {
     return LightSemaphore_TryAcquire(&sem->sem, 1) == 0;
 }
 
+/*
+ * libctru's GSP event thread (gspInit: priority 0x1A, the process's own core, a 4 KB stack) is what wakes a thread
+ * waiting for a retrace (gspWaitForVBlank), runs citro3d's next GPU command list when one ends and its swap at a frame's
+ * end. 0x1A is also the walk's priority (PRIO_RCP), and on an Old 3DS the walk shares that core: 3DS threads of equal
+ * priority never preempt each other, so a retrace that came while the walk ran reached the VI thread only when the
+ * walk next waited. When that was the retrace that ends a frame, the game's frame ran late (lean quick test #462:
+ * five 38.7-39 ms frames each followed by a 28 ms one in an EverFrost Peak race, the worst frame of nearly every race
+ * 39 ms). DKR_GSP_PRIO (v35, roadmap P50): 1 (default on an Old 3DS) raises that thread to 0x18, above the VI thread
+ * and the walk; 0x18-0x3F sets that priority; 0 leaves libctru's 0x1A (old). Read again every 64 retraces (the bench
+ * changes it), and found by wrapping threadCreate (-Wl,--wrap=threadCreate): gspInit is its only caller with that
+ * priority, core and stack.
+ */
+#define GSP_EVENT_PRIO 0x1A
+static Thread sGspEventThread;
+static int sGspPrio = -1;
+
+Thread __real_threadCreate(ThreadFunc entry, void *arg, size_t stack_size, int prio, int core_id, bool detached);
+__attribute__((used)) Thread __wrap_threadCreate(ThreadFunc entry, void *arg, size_t stack_size, int prio, int core_id,
+                                                 bool detached) {
+    Thread thread = __real_threadCreate(entry, arg, stack_size, prio, core_id, detached);
+    if (sGspEventThread == NULL && prio == GSP_EVENT_PRIO && core_id == -2 && stack_size == 0x1000) {
+        sGspEventThread = thread;
+    }
+    return thread;
+}
+
+static void gsp_priority_update(void) {
+    int want;
+    if (sGspEventThread == NULL) {
+        return;
+    }
+    want = plat_switch("DKR_GSP_PRIO", plat_old_3ds());
+    want = want == 0 ? GSP_EVENT_PRIO : want == 1 ? 0x18 : want < 0x18 ? 0x18 : want > 0x3F ? 0x3F : want;
+    if (want != sGspPrio) {
+        Result res = svcSetThreadPriority(threadGetHandle(sGspEventThread), want);
+        sGspPrio = want;
+        plat_log("GPU events thread: priority 0x%X%s", want, R_FAILED(res) ? " (refused)" : "");
+    }
+}
+
+/*
+ * Retraces that reached the VI thread late (v35): more than 3 ms after the time the ones before put them at. Counted
+ * (late_retraces in the test run's results) and each put in the flight recorder, to see whether anything still
+ * holds them up. The time is set again by every retrace that came within 1 ms (the screen's rate is not exactly
+ * VBLANK_US), and after a pause (the HOME menu, a load) of more than 8 retraces.
+ */
+#define VBLANK_US 16714u
+static u64 sVblankRefTick;
+
 void plat_wait_vblank(void) {
+    static unsigned int calls;
+    u64 now;
     gspWaitForVBlank();
+    now = svcGetSystemTick();
+    if (sVblankRefTick != 0) {
+        u32 sinceUs = (u32) ((now - sVblankRefTick) / (SYSCLOCK_ARM11 / 1000000));
+        u32 n = (sinceUs + VBLANK_US / 2) / VBLANK_US;
+        s32 lateUs = (s32) sinceUs - (s32) ((n != 0 ? n : 1) * VBLANK_US);
+        if (n > 8 || lateUs < 1000) {
+            sVblankRefTick = now;
+        } else if (lateUs > 3000) {
+            gPlatCounters[PLAT_COUNTER_LATE_RETRACES]++;
+            rec_event("retrace %.1f ms late (GPU events thread priority 0x%X)", lateUs / 1000.0,
+                      sGspPrio >= 0 ? sGspPrio : GSP_EVENT_PRIO);
+        }
+    } else {
+        sVblankRefTick = now;
+    }
+    if ((calls++ & 63) == 0) {
+        gsp_priority_update();
+    }
 }
 
 const char *const *plat_rom_search_dirs(void) {

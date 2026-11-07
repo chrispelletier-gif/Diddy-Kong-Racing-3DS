@@ -291,7 +291,11 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // backend's queue instead of the walk waiting for the backend to catch up (DKR_TEX_FREE_QUEUE): half of #457's
     // Whale Bay hitches after the start had such a free in the frame (renderer 49-54 ms). Raced the old way.
     // Benches #459/#460 (v33, lean): the queue was even with the old way (all three tracks at 29.9 fps, none at
-    // 20 fps with the profiler's readout off), so it stays on and its row went. No Old 3DS rows left.
+    // 20 fps with the profiler's readout off), so it stays on and its row went.
+    // v35: the GSP event thread (retraces, the GPU's next command list, the swap) above the walk (DKR_GSP_PRIO,
+    // plat_3ds.c): at the walk's priority it waited for the walk, and lean quick test #462's 39 ms worst frames were
+    // retraces that came late that way. Raced the old way.
+    { "GPU events thread at the renderer's priority (old)", { "DKR_GSP_PRIO", NULL, NULL }, 1, 0, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -523,7 +527,8 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
 enum Request {
     REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
-    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED, REQUEST_SWITCH_LEAN, REQUEST_QUICK_LEAN
+    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED, REQUEST_SWITCH_LEAN, REQUEST_QUICK_LEAN,
+    REQUEST_FULL_LEAN
 };
 
 typedef struct ModeInfo {
@@ -611,7 +616,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
-static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart;
+static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -1103,6 +1108,10 @@ static s32 sWorstHitchCount;
 
 static void reset_hitches(void) {
     sHitchSince = rec_frame_now();
+    {
+        char none[8];
+        rec_slow_take(none, sizeof(none)); // Forgets the slow frames before the run.
+    }
     sRunHitches = 0;
     bzero(sRunCauses, sizeof(sRunCauses));
     sWorstHitchCount = 0;
@@ -1132,7 +1141,11 @@ static void record_hitches(const char *outcome) {
                                 rec_cause_name(c), counts[c]);
         sRunCauses[c] += counts[c];
     }
-    plat_snprintf(text + length, sizeof(text) - length, "\n");
+    length += plat_snprintf(text + length, sizeof(text) - length, "\n");
+    // v35: then the race's slowest frames short of a hitch (what its worst_frame_ms was), with what took the time.
+    if (length < (s32) sizeof(text)) {
+        rec_slow_take(text + length, sizeof(text) - length);
+    }
     sRunHitches += found;
     append_file(HITCH_FILE, text, "# Hitches in each race of the test runs: frames half as long again as usual, with what "
                                   "took the time and what happened then (port/src/plat/recorder.c).\n");
@@ -1356,7 +1369,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
-                  "gpu_lists_ms,gpu_copy_ms\n",
+                  "gpu_lists_ms,gpu_copy_ms,late_retraces\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1401,8 +1414,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
     // Then (2026-11-06) what adaptive anti-aliasing did (the share of its frames at the low resolution, -1 when it
     // was not in use), the average change in period between consecutive frames, and how often the pace changed.
-    // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies.
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f\n",
+    // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies,
+    // and (v35) the retraces that reached the VI thread more than 3 ms late (plat_wait_vblank).
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
@@ -1411,7 +1425,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart),
                   (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges,
                   ms(stats, PROF_GPU_FILL, stats->renderedFrames), ms(stats, PROF_GPU_LISTS, stats->renderedFrames),
-                  ms(stats, PROF_GPU_COPY, stats->renderedFrames));
+                  ms(stats, PROF_GPU_COPY, stats->renderedFrames),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_RETRACES] - sLateStart));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -1639,10 +1654,11 @@ s32 port_autorun_shelved_count(void) {
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
  * boss fights (4), the switch bench (5), the whole game run (6, or 7 for its short variant) or the shelved switches
- * bench (8), the lean switch bench (9) or lean quick test (10), or stop whichever is going (0), at the next game frame.
+ * bench (8), the lean switch bench (9), lean quick test (10) or lean full test (11), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 10  ? REQUEST_QUICK_LEAN
+    sRequest = start == 11  ? REQUEST_FULL_LEAN
+               : start == 10 ? REQUEST_QUICK_LEAN
                : start == 9 ? REQUEST_SWITCH_LEAN
                : start == 8 ? REQUEST_SWITCH_SHELVED
                : start == 7 ? REQUEST_WHOLE_SHORT
@@ -2954,10 +2970,14 @@ static void handle_request(void) {
     sRequest = REQUEST_NONE;
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
          request == REQUEST_SWITCH || request == REQUEST_SWITCH_SHELVED || request == REQUEST_WHOLE ||
-         request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN) &&
+         request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN ||
+         request == REQUEST_FULL_LEAN) &&
         !port_autorun_active()) {
-        sLeanRun = request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN;
-        request = request == REQUEST_SWITCH_LEAN ? REQUEST_SWITCH : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK : request;
+        sLeanRun = request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN || request == REQUEST_FULL_LEAN;
+        request = request == REQUEST_SWITCH_LEAN  ? REQUEST_SWITCH
+                  : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK
+                  : request == REQUEST_FULL_LEAN  ? REQUEST_START
+                                                  : request;
         sShort = request == REQUEST_WHOLE_SHORT || (request == REQUEST_SWITCH_SHELVED && !plat_old_3ds());
         if (request == REQUEST_SWITCH_SHELVED) {
             if (plat_old_3ds()) {
@@ -3138,6 +3158,7 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
+                sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
                 sAaFramesStart = gPlatCounters[PLAT_COUNTER_AA_FRAMES];
                 sAaLowStart = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES];
                 set_phase(PHASE_RACING);

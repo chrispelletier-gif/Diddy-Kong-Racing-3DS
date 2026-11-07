@@ -333,6 +333,7 @@ enum PlatCounter {
     PLAT_COUNTER_FLASHES,        /* Picture flashes seen in the frame history (a few frames unlike those around). */
     PLAT_COUNTER_AA_FRAMES,      /* Frames drawn while adaptive anti-aliasing was in use (anti-aliased or not). */
     PLAT_COUNTER_AA_LOW_FRAMES,  /* Of those, frames adaptive anti-aliasing drew at the low resolution. */
+    PLAT_COUNTER_LATE_RETRACES,  /* Retraces that reached the VI thread more than 3 ms late (3DS, plat_wait_vblank). */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];

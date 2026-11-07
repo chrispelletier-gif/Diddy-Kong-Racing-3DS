@@ -122,6 +122,8 @@ int rec_describe_game(char *out, int size, int timeoutMs);
  * it isn't NULL. Returns how many the ring had (a long stretch of hitches can push the oldest out).
  */
 unsigned int rec_hitches_since(unsigned int since, char *out, int size, unsigned int *counts);
+/* The (at most four) slowest race frames that were not hitches since the last call, a line each; then forgets them. */
+int rec_slow_take(char *out, int size);
 /* A cause's name ("game logic", "textures"...). */
 const char *rec_cause_name(int cause);
 /* Frames recorded so far (the next frame's number). */
