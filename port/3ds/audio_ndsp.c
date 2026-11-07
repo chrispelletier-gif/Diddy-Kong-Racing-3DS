@@ -256,8 +256,9 @@ int sound_option_count(void) {
 }
 
 const char *sound_option_label(int i) {
-    static const char *const sLabels[SOUND_ROWS] = { "Sound engine (restart)", "Mixing core (restart)",
-                                                     "Mixer rate (restart)", "Smooth resampling", "Sound buffer" };
+    // The rows that need a restart say so in their hint (sound_option_hint): "(restart)" made the labels too long.
+    static const char *const sLabels[SOUND_ROWS] = { "Sound engine", "Mixing core", "Mixer rate", "Smooth resampling",
+                                                     "Sound buffer" };
     i = sound_row(i);
     return (i >= 0 && i < SOUND_ROWS) ? sLabels[i] : "";
 }
@@ -282,7 +283,7 @@ void sound_option_value(int i, char *out, int size) {
     i = sound_row(i);
     load_settings();
     if (cpu_mixer_only(i)) {
-        snprintf(out, size, "CPU mixer only");
+        snprintf(out, size, "Not used"); // The hint says why (sound_option_hint).
         return;
     }
     switch (i) {
@@ -296,7 +297,7 @@ void sound_option_value(int i, char *out, int size) {
             snprintf(out, size, "%s", settings_get("sound_rate", 0) ? "32 kHz" : "22 kHz");
             break;
         case SOUND_SMOOTH:
-            snprintf(out, size, "%s", sSmooth ? "ON" : "OFF");
+            snprintf(out, size, "%s", sSmooth ? "On" : "Off"); // The menus' switch, as every other on/off row
             break;
         case SOUND_BUFFER:
             snprintf(out, size, "%s", sLargeBuffer ? "Large" : "Normal");
@@ -304,6 +305,26 @@ void sound_option_value(int i, char *out, int size) {
         default:
             out[0] = '\0';
             break;
+    }
+}
+
+const char *sound_option_hint(int i) {
+    i = sound_row(i);
+    if (cpu_mixer_only(i)) {
+        return "Only for the CPU mixer engine";
+    }
+    switch (i) {
+        case SOUND_ENGINE:
+            return "Takes effect after a restart";
+        case SOUND_CORE:
+        case SOUND_RATE:
+            return "CPU mixer; after a restart";
+        case SOUND_SMOOTH:
+            return "Softer, cleaner high notes";
+        case SOUND_BUFFER:
+            return "Large: fewer gaps, 50 ms later";
+        default:
+            return "";
     }
 }
 

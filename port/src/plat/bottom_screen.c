@@ -314,15 +314,41 @@ static void crop(Picture *p) {
     p->height = y1 - y0 + 1;
 }
 
-/* Every other column: the silver coin is drawn twice as wide as the game shows it. */
-static void narrow(Picture *p) {
-    int w = p->width / 2, x, y;
-    for (y = 0; p->rgba != NULL && y < p->height; y++) {
+/* Scales a picture down to height (keeping its shape), each texel the alpha-weighted average of those it covers. */
+static void shrink_to_height(Picture *p, int height) {
+    int w, x, y, c;
+    unsigned char *small;
+    if (p->rgba == NULL || height <= 0 || p->height <= height) {
+        return;
+    }
+    w = (p->width * height + p->height / 2) / p->height;
+    if (w < 1 || (small = malloc(w * height * 4)) == NULL) {
+        return;
+    }
+    for (y = 0; y < height; y++) {
+        int sy0 = y * p->height / height, sy1 = (y + 1) * p->height / height;
         for (x = 0; x < w; x++) {
-            memcpy(p->rgba + (y * w + x) * 4, p->rgba + (y * p->width + x * 2) * 4, 4);
+            int sx0 = x * p->width / w, sx1 = (x + 1) * p->width / w, sum[3] = { 0, 0, 0 }, alpha = 0, n = 0, i, j;
+            for (j = sy0; j < sy1; j++) {
+                for (i = sx0; i < sx1; i++) {
+                    const unsigned char *t = p->rgba + (j * p->width + i) * 4;
+                    for (c = 0; c < 3; c++) {
+                        sum[c] += t[c] * t[3];
+                    }
+                    alpha += t[3];
+                    n++;
+                }
+            }
+            for (c = 0; c < 3; c++) {
+                small[(y * w + x) * 4 + c] = alpha ? sum[c] / alpha : 0;
+            }
+            small[(y * w + x) * 4 + 3] = n ? alpha / n : 0;
         }
     }
+    free(p->rgba);
+    p->rgba = small;
     p->width = w;
+    p->height = height;
 }
 
 /* The title logo is ten strips of 16x64. */
@@ -695,6 +721,11 @@ static int ui_advance(const UiFont *u, unsigned char c) {
     return c <= 0x20 || c >= 0x7F ? u->space : u->glyphs[c - 0x21].advance;
 }
 
+/* Twice the middle of a capital letter, from the text's top: the capitals' band is what the eye centres on. */
+static int ui_cap_middle2(const UiFont *u) {
+    return u->glyphs['H' - 0x21].y + u->base;
+}
+
 static int text_width_as_is(int font, const char *text) {
     int width = 0;
     char prev = 0;
@@ -807,6 +838,70 @@ static void text_centred_as_is(int font, int x0, int x1, int y, const char *s, C
 
 static void text_centred(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
     text_centred_as_is(font, x0, x1, y, port_text(s), colour, shadow);
+}
+
+static int ui_width(const UiFont *u, const char *s) {
+    int width = 0;
+    for (; *s != '\0'; s++) {
+        width += ui_advance(u, (unsigned char) *s);
+    }
+    return width;
+}
+
+/*
+ * Text that has to fit between x0 and x1 (a menu value, label or tip, a line under a card): as it is when it fits;
+ * in a look's smaller font when that fits; otherwise cut with "..." so that it never just stops at the edge. Centred
+ * between x0 and x1, or from x0. Returns where it ended.
+ */
+static int text_fit_as_is(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow, int centred) {
+    char cut[160];
+    const UiFont *u = ui_font(font), *small = NULL;
+    int room = x1 - x0, width = text_width_as_is(font, s), n;
+    if (width <= room) {
+        return text_clipped_as_is(font, centred ? x0 + (room - width) / 2 : x0, y, s, colour, shadow, x1);
+    }
+    if (u != NULL && font == FONT_SMALL) {
+        small = ui_font_kind(UI_SM);
+        width = ui_width(small, s);
+        if (width <= room) {
+            // Its capitals on the same middle line as the bigger font's would have been.
+            return ui_draw(small, centred ? x0 + (room - width) / 2 : x0,
+                           y + (ui_cap_middle2(u) - ui_cap_middle2(small)) / 2, s, colour, shadow, x1);
+        }
+    }
+    // Neither fits: as much as fits, then "...".
+    n = (int) strlen(s);
+    if (n > (int) sizeof(cut) - 4) {
+        n = (int) sizeof(cut) - 4;
+    }
+    for (; n > 0; n--) {
+        while (n > 0 && s[n - 1] == ' ') {
+            n--;
+        }
+        snprintf(cut, sizeof(cut), "%.*s...", n, s);
+        width = small != NULL ? ui_width(small, cut) : text_width_as_is(font, cut);
+        if (width <= room) {
+            break;
+        }
+    }
+    if (n == 0) {
+        snprintf(cut, sizeof(cut), "...");
+        width = small != NULL ? ui_width(small, cut) : text_width_as_is(font, cut);
+    }
+    if (small != NULL) {
+        return ui_draw(small, centred ? x0 + (room - width) / 2 : x0,
+                       y + (ui_cap_middle2(u) - ui_cap_middle2(small)) / 2, cut, colour, shadow, x1 + 1);
+    }
+    return text_clipped_as_is(font, centred ? x0 + (room - width) / 2 : x0, y, cut, colour, shadow, x1 + 1);
+}
+
+/* The same in the game's language (port_text). */
+static int text_fit(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
+    return text_fit_as_is(font, x0, x1, y, port_text(s), colour, shadow, 0);
+}
+
+static int text_fit_centred(int font, int x0, int x1, int y, const char *s, Colour colour, int shadow) {
+    return text_fit_as_is(font, x0, x1, y, port_text(s), colour, shadow, 1);
 }
 
 /* One letter centred in a box by the glyph's own size (a name box's initial), shadowed. */
@@ -1281,7 +1376,7 @@ static void draw_home(const State *s) {
         // The controls card fills the screen under the logo; a debug build keeps the newest message on its last line.
         draw_controls(72, BS_BUTTONS_Y - 4);
         if (PLAT_DEBUG_TOOLS && font_ready(FONT_SMALL)) {
-            text_clipped(FONT_SMALL, 12, BS_BUTTONS_Y - 18, newest_message(s), DIM, 1, BS_WIDTH - 12);
+            text_fit(FONT_SMALL, 12, BS_WIDTH - 12, BS_BUTTONS_Y - 18, newest_message(s), DIM, 1);
         }
     }
 }
@@ -1342,7 +1437,12 @@ static void stepper(int x0, int x1, int y, const char *value) {
     box(x0, y, x1, y + 20, (Colour){ 0, 0, 20, 110 }, (Colour){ 140, 180, 255, 110 });
     arrow(1, x0 + 4, arrowY);
     arrow(0, x1 - 4 - arrowWidth, arrowY);
-    text_centred(FONT_SMALL, x0 + arrowWidth + 6, x1 - arrowWidth - 6, y + 6, value, YELLOW, 1);
+    // Round-ended chips (Glass, Dock) keep the text clear of the arrows; a value too long shrinks, then is cut.
+    int inset = (sStyle == 1 || sStyle == 3) ? 8 : 6;
+    // The value's capitals centred on the chip's middle line, whatever the look's font height (the game's font: y + 6).
+    const UiFont *u = ui_font(FONT_SMALL);
+    int textY = u != NULL ? y + 10 - (ui_cap_middle2(u) + 1) / 2 : y + 6;
+    text_fit_centred(FONT_SMALL, x0 + arrowWidth + inset, x1 - arrowWidth - inset, textY, value, YELLOW, 1);
 }
 
 /*
@@ -1413,13 +1513,15 @@ static void draw_menu(const State *s) {
         if (row->value[0] == '\0') {
             arrow(0, MENU_PANEL_X1 - 20, y + 7);
             labelEnd = MENU_PANEL_X1 - 24;
-        } else if (!draw_on_off(row->value, MENU_PANEL_X1 - 48, y + 3)) {
+        } else if (draw_on_off(row->value, MENU_PANEL_X1 - 48, y + 3)) {
+            labelEnd = MENU_PANEL_X1 - 52;
+        } else {
             stepper(BS_MENU_VALUE_X, MENU_PANEL_X1 - 8, y + 3, row->value);
         }
-        text_clipped(FONT_SMALL, MENU_PANEL_X0 + 14, y + 8, row->label, WHITE, 1, labelEnd);
+        text_fit(FONT_SMALL, MENU_PANEL_X0 + 14, labelEnd, y + 8, row->label, WHITE, 1);
     }
     fill(MENU_PANEL_X0 + 8, MENU_TIP_Y - 1, MENU_PANEL_X1 - 6, MENU_TIP_Y, (Colour){ 140, 180, 255, 80 });
-    text_clipped(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_TIP_Y + 11, tip, HINT, 1, MENU_PANEL_X1 - 6);
+    text_fit(FONT_SMALL, MENU_PANEL_X0 + 12, MENU_PANEL_X1 - 8, MENU_TIP_Y + 11, tip, HINT, 1);
 }
 
 /*
@@ -1499,7 +1601,7 @@ static void draw_menu_strip(const State *s) {
                        (Colour){ 255, 255, 255, 150 }, 1);
         }
         upper_case(port_text(m->tabs[i]), upper, sizeof(upper));
-        text_centred_as_is(FONT_SMALL, x0, x0 + w - 2, y0 + 6, sStyle == 2 ? upper : port_text(m->tabs[i]), ink, !lit);
+        text_fit_as_is(FONT_SMALL, x0 + 2, x0 + w - 4, y0 + 6, sStyle == 2 ? upper : port_text(m->tabs[i]), ink, !lit, 1);
     }
     for (i = 0; i < m->rowCount && i < BS_MENU_ROWS; i++) {
         const BsMenuRow *row = &m->rows[i];
@@ -1524,13 +1626,16 @@ static void draw_menu_strip(const State *s) {
         if (row->value[0] == '\0') {
             arrow(0, 296, y + 4);
             labelEnd = 290;
-        } else if (!draw_on_off(row->value, BS_WIDTH - 52, y)) {
+        } else if (draw_on_off(row->value, BS_WIDTH - 52, y)) {
+            labelEnd = BS_WIDTH - 58;
+        } else {
             stepper(BS_MENU_VALUE_X, BS_WIDTH - 10, y, row->value);
+            labelEnd = BS_MENU_VALUE_X - 4;
         }
-        text_clipped(FONT_SMALL, 18, y + 5, row->label, ink, sStyle != 2 || !hot, labelEnd);
+        text_fit(FONT_SMALL, 18, labelEnd, y + 5, row->label, ink, sStyle != 2 || !hot);
     }
     fill(10, STRIP_TIP_Y - 1, BS_WIDTH - 10, STRIP_TIP_Y, (Colour){ 255, 255, 255, 40 });
-    text_clipped(FONT_SMALL, 14, STRIP_TIP_Y + 9, tip, HINT, 1, m->pages[0] != '\0' ? BS_WIDTH - 50 : BS_WIDTH - 10);
+    text_fit(FONT_SMALL, 14, m->pages[0] != '\0' ? BS_WIDTH - 50 : BS_WIDTH - 12, STRIP_TIP_Y + 9, tip, HINT, 1);
     if (m->pages[0] != '\0') {
         text(FONT_SMALL, BS_WIDTH - 10 - text_width(FONT_SMALL, m->pages), STRIP_TIP_Y + 9, m->pages, HINT, 1);
     }
@@ -1646,13 +1751,20 @@ static void draw_buttons_styled(const char (*buttons)[40], int count) {
             w = text_width(FONT_FUN, upper);
             if (sStyle == 3) {
                 Colour dockInk = grey ? ink : (on ? (Colour){ 120, 235, 120, 255 } : WHITE);
-                int w2 = text_width(FONT_SMALL, t), iconW = 18;
+                char title[40];
+                int w2, iconW = 18;
+                // Title case, as Settings, Controls and Updates are written: "master" reads "Master".
+                snprintf(title, sizeof(title), "%s", port_text(t));
+                if (title[0] >= 'a' && title[0] <= 'z') {
+                    title[0] -= 'a' - 'A';
+                }
+                w2 = text_width_as_is(FONT_SMALL, title);
                 int tx = x0 + (x1 - x0 - w2 - iconW) / 2;
                 if (!draw_icon(t, tx + 7, cy, dockInk, (Colour){ 8, 16, 60, 255 })) {
                     iconW = 0;
                     tx = x0 + (x1 - x0 - w2) / 2;
                 }
-                text_clipped(FONT_SMALL, tx + iconW, cy - 5, t, dockInk, 0, x1);
+                text_clipped_as_is(FONT_SMALL, tx + iconW, cy - 5, title, dockInk, 0, x1);
             } else {
                 int iconW = 0;
                 Colour hole = sStyle == 1 ? (Colour){ 40, 100, 235, 255 } : (Colour){ 245, 90, 30, 255 };
@@ -1991,9 +2103,10 @@ static void load_race_art(void) {
     halve(&sTimesIcon);
     load_texture(ASSET_TEX2D_HUD_EGGICON, &sEggIcon);
     load_texture(ASSET_TEX2D_OBJECTS_EGG_0, &sEgg);
-    if (load_texture(ASSET_TEX2D_HUD_SILVERCOINCOLLECTED, &sCoin)) {
+    // The coin as the track shows it, face on (the HUD's own coin is an edge-on bar that read as a grey smear).
+    if (load_texture(ASSET_TEX2D_OBJECTS_SILVERCOIN_0, &sCoin)) {
         crop(&sCoin);
-        narrow(&sCoin);
+        shrink_to_height(&sCoin, 16);
     }
     load_texture(ASSET_TEX2D_HUD_GOLDENBALLOONICON, &sBalloon);
     load_texture(ASSET_TEX2D_HUD_RETICLEX, &sCross);
@@ -3011,12 +3124,13 @@ static void draw_time_trial(const RaceHud *hud) {
     }
     // Middle top: against the best run, the thing to glance at.
     picture_scaled(&sGhostIcon, MIDDLE_X0 + 3, UPPER_Y0 + 5, 1, 1);
-    text(FONT_SMALL, MIDDLE_X0 + 44, 12, sStyle == 0 ? "Best run" : "Best", HINT, 1);
+    // The same words in every look: "ahead" alone read as the best run being ahead of you.
+    text_fit(FONT_SMALL, MIDDLE_X0 + 44, MIDDLE_X1 - 3, 12, "Best run", HINT, 1);
     if (hud->bestGap == RACE_HUD_NO_GAP) {
-        text(FONT_SMALL, MIDDLE_X0 + 44, 24, hud->bestTotal > 0 ? "" : "none yet", DIM, 1);
+        text_fit(FONT_SMALL, MIDDLE_X0 + 44, MIDDLE_X1 - 3, 24, hud->bestTotal > 0 ? "" : "none yet", DIM, 1);
     } else {
-        text(FONT_SMALL, MIDDLE_X0 + 44, 12 + line_pitch(), hud->bestGap <= 0 ? (sStyle == 0 ? "you lead" : "ahead") : "behind",
-             hud->bestGap <= 0 ? BEHIND : AHEAD, 1);
+        text_fit(FONT_SMALL, MIDDLE_X0 + 44, MIDDLE_X1 - 3, 12 + line_pitch(),
+                 hud->bestGap <= 0 ? "you lead" : "you trail", hud->bestGap <= 0 ? BEHIND : AHEAD, 1);
         seconds_gap(MIDDLE_X0 + 8, 60, hud->bestGap);
     }
     // Middle bottom: the course record and T.T.'s time.
@@ -3109,18 +3223,20 @@ static void draw_silver_coins(const RaceHud *hud) {
     x = piece(&sTimes, MIDDLE_X0 + 26, LOWER_Y0 + 14, 2);
     x = piece(&sDigits[(hud->bananas / 10) % 10], x, LOWER_Y0 + 11, 1);
     piece(&sDigits[hud->bananas % 10], x, LOWER_Y0 + 11, 0);
-    text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 38, "Silver coins", HINT, 1);
+    // The count beside the heading, in one font; under it the eight coins, those collected lit.
+    snprintf(count, sizeof(count), "%d/8", hud->silverCoins);
+    x = MIDDLE_X1 - 6 - text_width_as_is(FONT_SMALL, count);
+    // "Coins": "Silver coins" left no room for the count in the wider looks' fonts (the pictures say silver).
+    text_fit(FONT_SMALL, MIDDLE_X0 + 8, x - 4, LOWER_Y0 + 38, "Coins", HINT, 1);
+    text_clipped_as_is(FONT_SMALL, x, LOWER_Y0 + 38, count, hud->silverCoins >= 8 ? BEHIND : YELLOW, 1, BS_WIDTH);
     for (i = 0; i < 8; i++) {
-        int cx = MIDDLE_X0 + 8 + (i % 4) * 20, cy = LOWER_Y0 + 56 + (i / 4) * 16;
+        int cx = MIDDLE_X0 + (MIDDLE_X1 - MIDDLE_X0 - 4 * 21 + 4) / 2 + (i % 4) * 21, cy = LOWER_Y0 + 56 + (i / 4) * 21;
         if (i < hud->silverCoins) {
-            picture_scaled(&sCoin, cx, cy, 1, 1);
+            picture(&sCoin, cx, cy);
         } else {
             picture_dim(&sCoin, cx, cy);
         }
     }
-    snprintf(count, sizeof(count), "%d", hud->silverCoins);
-    x = text(FONT_FUN, MIDDLE_X0 + 8, LOWER_Y0 + 82, count, hud->silverCoins >= 8 ? BEHIND : YELLOW, 1);
-    text(FONT_SMALL, x + 3, LOWER_Y0 + 85, "/ 8", DIM, 1);
 }
 
 /* The four racers of a challenge, with full-size portraits and their score. */
@@ -3275,16 +3391,8 @@ static void draw_hub(const RaceHud *hud) {
     }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
         int balloons = hud->worldBalloons[i];
-        {
-            char name[24];
-            char *space;
-            snprintf(name, sizeof(name), "%s", sWorldShortNames[i]);
-            space = strrchr(name, ' ');
-            if (space != NULL && text_width(FONT_SMALL, name) > TOWER_X1 - TOWER_X0 - 8) {
-                *space = '\0'; /* the look's font is wider: "Snowflake Mtn" becomes "Snowflake" */
-            }
-            text(FONT_SMALL, TOWER_X0 + 5, y, name, balloons > 0 ? WHITE : DIM, 1);
-        }
+        // The whole name in every look: a wider font gets its small size rather than losing a word.
+        text_fit(FONT_SMALL, TOWER_X0 + 5, TOWER_X1 - 3, y, sWorldShortNames[i], balloons > 0 ? WHITE : DIM, 1);
         // Eight balloons a world (four races, four silver coin races): two rows of four.
         for (k = 0; k < 8; k++) {
             pip(TOWER_X0 + 6 + (k % 4) * 8, y + 13 + (k / 4) * 7, 4, 4, k < balloons);
@@ -3426,7 +3534,7 @@ static void draw_menu_save(const RaceHud *hud) {
             picture_dim(&sKey[0], 230, y);
         }
         if (hud->worldBosses & (1 << i)) {
-            text(FONT_SMALL, 252, y + 2, "cleared", BEHIND, 1);
+            text_fit(FONT_SMALL, 252, BS_WIDTH - 8, y + 2, "Cleared", BEHIND, 1);
         }
         y += 19;
     }
@@ -3519,22 +3627,26 @@ static void menu_save_styled(const RaceHud *hud) {
         progress_ring(56, 104, 40, 6, hud->balloons * 256 / 47, GOLD);
         picture_scaled(&sBalloon, 42, 76, 1, 1);
         fraction_centred(16, 96, 111, hud->balloons, 47);
-        progress_ring(30, 168, 15, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
+        // Each amulet's ring with its name under the count, as the other looks name them.
+        progress_ring(30, 161, 13, 4, hud->ttAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->ttAmulet >= 0 && hud->ttAmulet <= 4) {
-            picture_fit_visible(&sTTAmulet[hud->ttAmulet], 30, 168, 18);
+            picture_fit_visible(&sTTAmulet[hud->ttAmulet], 30, 161, 16);
         }
-        fraction_centred(6, 54, 187, hud->ttAmulet, 4);
-        progress_ring(82, 168, 15, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
+        fraction_centred(6, 54, 176, hud->ttAmulet, 4);
+        text_fit_centred(FONT_SMALL, 6, 54, 188, "T.T.", LABEL_BLUE, 1);
+        progress_ring(82, 161, 13, 4, hud->wizpigAmulet * 256 / 4, (Colour){ 180, 230, 255, 255 });
         if (hud->wizpigAmulet >= 0 && hud->wizpigAmulet <= 4) {
-            picture_fit_visible(&sWizpigAmulet[hud->wizpigAmulet], 82, 168, 18);
+            picture_fit_visible(&sWizpigAmulet[hud->wizpigAmulet], 82, 161, 16);
         }
-        fraction_centred(58, 106, 187, hud->wizpigAmulet, 4);
+        fraction_centred(58, 106, 176, hud->wizpigAmulet, 4);
+        text_fit_centred(FONT_SMALL, 58, 106, 188, "Wizpig", LABEL_BLUE, 1);
         for (i = 0; i < RACE_HUD_WORLDS; i++) {
             int y = 56 + i * 28, balloons = hud->worldBalloons[i];
             Colour ink = balloons > 0 ? WHITE : DIM;
             text(FONT_SMALL, 118, y, sWorldShortNames[i], ink, 1);
+            // A world whose boss is beaten shows its count in the "Cleared" green of the other looks.
             snprintf(line, sizeof(line), "%d/8", balloons);
-            text(FONT_SMALL, 300 - text_width(FONT_SMALL, line), y, line, ink, 1);
+            text(FONT_SMALL, 300 - text_width(FONT_SMALL, line), y, line, hud->worldBosses & (1 << i) ? BEHIND : ink, 1);
             smooth_box(118, y + 15, 304, y + 19, 2, (Colour){ 0, 0, 0, 80 }, (Colour){ 0, 0, 0, 80 }, (Colour){ 0, 0, 0, 0 }, 1);
             if (balloons > 0) {
                 smooth_box(118, y + 15, 118 + 186 * balloons / 8, y + 19, 2, GOLD, GOLD, (Colour){ 0, 0, 0, 0 }, 1);
@@ -3584,12 +3696,12 @@ static void menu_save_styled(const RaceHud *hud) {
                            (Colour){ 240, 160, 20, 255 }, (Colour){ 0, 0, 0, 0 }, 1);
             }
             snprintf(line, sizeof(line), "%d/8", balloons);
-            text(FONT_SMALL, 230, y + 2, line, ink, 1);
+            text(FONT_SMALL, 230, y + 2, line, hud->worldBosses & (1 << i) ? BEHIND : ink, 1);
         }
         trophy_and_key(hud, i, sStyle == 2 ? 236 : 262, y + (sStyle == 2 ? 1 : -1), 16);
         if (sStyle == 2) {
             if (hud->worldBosses & (1 << i)) {
-                text(FONT_SMALL, 274, y + 4, "DONE", BEHIND, 1);
+                text_fit(FONT_SMALL, 272, 311, y + 4, "Cleared", BEHIND, 1);
             } else {
                 snprintf(line, sizeof(line), "%d/8", balloons);
                 text(FONT_SMALL, 276, y + 4, line, ink, 1);
@@ -3621,7 +3733,9 @@ static void draw_menu_track(const RaceHud *hud) {
         text(FONT_SMALL, x0, MENU_PANEL_Y0 + 50, "--", DIM, 1);
     }
     if (hud->vehicle >= 0 && hud->vehicle < 3) {
-        text(FONT_SMALL, x0, MENU_PANEL_Y0 + 72, sVehicles[hud->vehicle], DIM, 1);
+        // The records above are this vehicle's: "Vehicle Car" on one line, clear of the lap time.
+        int vx = text(FONT_SMALL, x0, MENU_PANEL_Y0 + 72, "Vehicle", HINT, 1) + 5;
+        text_fit(FONT_SMALL, vx, MENU_RECORDS_X1 - 4, MENU_PANEL_Y0 + 72, sVehicles[hud->vehicle], WHITE, 1);
     }
     fill(MENU_RECORDS_X0 + 6, MENU_PANEL_Y0 + 90, MENU_RECORDS_X1 - 6, MENU_PANEL_Y0 + 91, SLOT_EDGE);
     // This 3DS's own best time trial (port_race_hud.c keeps its laps for the time trial screen).
@@ -3880,7 +3994,6 @@ static void race_glass(const RaceHud *hud) {
             }
         }
     }
-    text_centred(FONT_SMALL, 120, 196, 178, "Item", LABEL_BLUE, 1);
     box(202, 104, 314, 198, BOX_FILL, BOX_EDGE);
     bananas_count(hud, 224, 130, 40, 260, 146, 142);
 }
@@ -4178,11 +4291,17 @@ static void draw_scene(Rect r, Scene sc) {
         int bx = cx + (int) (u * unit * (i >= 2 ? (sc.edge + 1.0f) / 2.0f : 1.0f)) - bw / 2;
         picture_stretched(&sBanana, bx, horizon + (int) (2 * unit), bw, bh, r, 255);
     }
-    // The kart, with fading copies behind it for motion.
+    // The kart, with speed lines behind it for motion (faded copies of the face read as a second kart).
     if (sSetupFace.rgba != NULL) {
         int size = (int) (13 * unit), kx = cx - size / 2 + (int) (sc.kartOffset * unit), ky = cy + (int) (2 * unit);
-        for (i = sc.ghosts; i > 0; i--) {
-            picture_stretched(&sSetupFace, kx - i * size / 3, ky, size, size, r, 70 / i);
+        for (i = 0; i < sc.ghosts * 2; i++) {
+            int ly = ky + size * (3 + i * 3) / (sc.ghosts * 6 + 2), len = size * (i % 2 ? 5 : 8) / 10, seg;
+            int thick = unit >= 2.0f ? 2 : 1;
+            // Three pieces, fainter away from the kart.
+            for (seg = 0; seg < 3; seg++) {
+                int x1 = kx + 1 - seg * len / 3, x0 = kx + 1 - (seg + 1) * len / 3;
+                fill_clipped(x0, ly, x1, ly + thick, r, (Colour){ 255, 255, 255, 200 - seg * 65 });
+            }
         }
         picture_stretched(&sSetupFace, kx, ky, size, size, r, 255);
     }

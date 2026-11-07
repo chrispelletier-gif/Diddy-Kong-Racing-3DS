@@ -25,6 +25,7 @@ const char *sound_option_label(int i);
 void sound_option_value(int i, char *out, int size);
 void sound_option_change(int i, int step);
 int sound_option_in_race(int i);
+const char *sound_option_hint(int i);
 int port_autorun_enabled(void);
 /* The Camera page (port_camera.c). */
 int race_hud_option_count(void);
@@ -36,6 +37,7 @@ int camera_option_count(void);
 const char *camera_option_label(int i);
 void camera_option_value(int i, char *out, int size);
 void camera_option_change(int i, int step);
+const char *camera_option_hint(int i);
 int port_modern_camera(void);
 /* The Start-up page (port_intro.c). */
 int intro_option_count(void);
@@ -132,9 +134,9 @@ int plat_main_loop_iteration(void) {
 /* The same settings in the game's own Options and pause menus (plat/options.h, src/menu.c). */
 static void add_game_menu_options(void) {
     static const OptionsSection sCamera = { camera_option_count, camera_option_label, camera_option_value,
-                                            camera_option_change, NULL, NULL };
+                                            camera_option_change, camera_option_hint, NULL };
     static const OptionsSection sSound = { sound_option_count, sound_option_label, sound_option_value,
-                                           sound_option_change, NULL, sound_option_in_race };
+                                           sound_option_change, sound_option_hint, sound_option_in_race };
     static const OptionsSection sControls = { controls_option_count, controls_option_label, controls_option_value,
                                               controls_option_change, NULL, NULL };
     static const OptionsSection sRaceHud = { race_hud_option_count, race_hud_option_label, race_hud_option_value,
@@ -176,12 +178,16 @@ int main(int argc, char **argv) {
     controls_init();
     menu_3ds_add_page("Controls", controls_option_count, controls_option_label, controls_option_value,
                       controls_option_change);
-    menu_3ds_add_page("Sound", sound_option_count, sound_option_label, sound_option_value, sound_option_change);
+    // Each page with its rows' hints (shown under the rows), as the game's own menus show them.
+    menu_3ds_add_page_hint("Sound", sound_option_count, sound_option_label, sound_option_value, sound_option_change,
+                           sound_option_hint, NULL);
     port_modern_camera();
-    menu_3ds_add_page("Race HUD", race_hud_option_count, race_hud_option_label, race_hud_option_value,
-                      race_hud_option_change);
-    menu_3ds_add_page("Camera", camera_option_count, camera_option_label, camera_option_value, camera_option_change);
-    menu_3ds_add_page("Start-up", intro_option_count, intro_option_label, intro_option_value, intro_option_change);
+    menu_3ds_add_page_hint("Race HUD", race_hud_option_count, race_hud_option_label, race_hud_option_value,
+                           race_hud_option_change, race_hud_option_hint, NULL);
+    menu_3ds_add_page_hint("Camera", camera_option_count, camera_option_label, camera_option_value,
+                           camera_option_change, camera_option_hint, NULL);
+    menu_3ds_add_page_hint("Start-up", intro_option_count, intro_option_label, intro_option_value, intro_option_change,
+                           intro_option_hint, NULL);
     menu_3ds_add_page_hint("Saves", saves_option_count, saves_option_label, saves_option_value, saves_option_change,
                            saves_option_hint, "Saved as N64 dkr.eep and dkr.mpk");
     add_game_menu_options();

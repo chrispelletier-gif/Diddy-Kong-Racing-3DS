@@ -205,7 +205,7 @@ static const char *row_hint(int i) {
     if (i == MAIN_PICTURE_DELAY) {
         return "Wait before the picture is taken";
     } else if (i == MAIN_PICTURE) {
-        return "Closes this menu; reopen a page, then wait";
+        return "Closes the menu; open a page and wait";
     } else if (i == MAIN_AA) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
@@ -392,7 +392,7 @@ static const char *screen_row_hint(int i) {
     } else if (SCREEN_STEREO_ROW(i)) {
         static const char *const sStereoHints[5] = {
             "How deep the 3D looks", "Higher: the kart comes out of the screen", "Where the HUD and text sit in 3D",
-            "Keeps close things from popping out", "How far auto convergence lets things out"
+            "Keeps close things from popping out", "How far things may come out"
         };
         return sStereoHints[i - SCREEN_STEREO_FIRST];
     } else if (i == SCREEN_HUD) {
@@ -462,7 +462,7 @@ static void test_value(int i, char *out, int size) {
 static const char *test_hint(int i) {
     static const char *const sStart[11] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
                                             "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
-                                            NULL, "Menus, races, coins, arenas, bosses, hubs, ~5 hours",
+                                            NULL, "Every part of the game, ~5 hours",
                                             "Every part, 1 lap each, ~1 hour", NULL,
                                             "Switch bench, profiler off as in a player's build",
                                             "Quick test, profiler off as in a player's build",
