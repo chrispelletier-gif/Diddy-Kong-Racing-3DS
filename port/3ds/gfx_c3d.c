@@ -3446,6 +3446,8 @@ static void read_switches(void) {
     sGpuKinds = -1;
     sFbVram = -1;
     sTexCacheKeep = -1;
+    sSkipInvisible = -1;
+    sSkipKinds = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -5840,6 +5842,9 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     int timed, twiceReads = 0;
     unsigned long long t0 = 0, t1 = 0, t2 = 0;
 
+    if (skip_invisible(state)) {
+        return;
+    }
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
@@ -6047,9 +6052,13 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
                      const unsigned short *indices, int numTriangles) {
     HangDraw *hangDraw;
     int vertex, i, count = numTriangles * 3, vertBytes = numVerts * (int) sizeof(GfxModelVertex);
-    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    unsigned long long t0;
     u16 *ibo;
 
+    if (skip_invisible(state)) {
+        return;
+    }
+    t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
         return;
@@ -6239,10 +6248,14 @@ static void delete_mesh(void *mesh) {
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts) {
     HangDraw *hangDraw;
-    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    unsigned long long t0;
     int i, count = 0;
     u16 *ibo;
 
+    if (skip_invisible(state)) {
+        return;
+    }
+    t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         for (i = 0; i < numParts; i++) {
             const C3DMesh *m = parts[i].mesh;

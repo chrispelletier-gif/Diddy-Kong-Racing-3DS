@@ -154,6 +154,54 @@ static inline float gfx_flat_px(float x, float narrow, float width) {
     return (gfx_flat_x(x / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f, 1.0f, narrow, GFX_FLAT_STRETCH) + 1.0f) * (width / 2.0f);
 }
 
+/*
+ * A draw that can't change a pixel (New 3DS GPU work, gpu_cuts.inc): blended (alpha or additive), writing no depth,
+ * and its combiner's alpha 0 whatever the pixel, from constants alone (prim, env, one, zero). The screen fader is one:
+ * a whole screen of prim alpha 0 drawn in every race frame once the fade is over (PC pixel count, DKR_FRAG_STATS),
+ * which costs a New 3DS at 800 pixels with anti-aliasing as much GPU time as the sky. Blending with alpha 0 leaves
+ * every pixel as it was, so leaving the draw out keeps frames identical. -1 in gfx_cc_alpha_const: not a constant.
+ */
+static inline float gfx_cc_alpha_input(const GfxDrawState *st, int input, float combined) {
+    switch (input) {
+        case GFX_CC_ZERO: return 0.0f;
+        case GFX_CC_ONE: return 1.0f;
+        case GFX_CC_COMBINED:
+        case GFX_CC_COMBINED_ALPHA: return combined;
+        case GFX_CC_PRIM:
+        case GFX_CC_PRIM_ALPHA: return st->prim[3] / 255.0f;
+        case GFX_CC_ENV:
+        case GFX_CC_ENV_ALPHA: return st->env[3] / 255.0f;
+        case GFX_CC_PRIM_LOD_FRACTION: return st->primLodFrac / 255.0f;
+        default: return -1.0f; // Texels, shade, noise: per pixel
+    }
+}
+static inline float gfx_cc_alpha_const(const GfxDrawState *st) {
+    float combined = -1.0f;
+    int c;
+    for (c = 0; c < st->combiner.numCycles && c < 2; c++) {
+        const GfxCCEquation *eq = &st->combiner.alpha[c];
+        float a = gfx_cc_alpha_input(st, eq->a, combined), b = gfx_cc_alpha_input(st, eq->b, combined);
+        float m = gfx_cc_alpha_input(st, eq->c, combined), d = gfx_cc_alpha_input(st, eq->d, combined);
+        float v;
+        if (d < 0.0f) {
+            return -1.0f;
+        }
+        if (m == 0.0f || eq->a == eq->b) {
+            v = d; // (a - b) * 0, or (x - x) * c: whatever a, b and c are
+        } else if (a < 0.0f || b < 0.0f || m < 0.0f) {
+            return -1.0f;
+        } else {
+            v = (a - b) * m + d;
+        }
+        combined = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    }
+    return combined;
+}
+static inline int gfx_draw_invisible(const GfxDrawState *st) {
+    return (st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD) && !st->depthWrite &&
+           st->combiner.numCycles >= 1 && gfx_cc_alpha_const(st) == 0.0f;
+}
+
 /* Backend entry points. */
 void gfxb_init(void) __attribute__((cold));
 void gfxb_start_frame(void);
@@ -209,9 +257,12 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
 
 /*
  * The GPU timeline's draw kinds (3DS gpu_cuts.inc): whether the walk is to say, in this frame, what kind of draws
- * (port_drawtag.h) come next whenever that changes, and the backend's end of it (gfxb_gpu_kind, or
- * gfxb_gpu_kind_call with the kind as an OP_CALL record's payload on the two-core renderer).
+ * (port_drawtag.h) come next whenever that changes (0 no, 1 yes, 2 yes and the backend times each kind: the walk adds
+ * GFX_KIND_CUT to the kind it passes), and the backend's end of it (gfxb_gpu_kind, or gfxb_gpu_kind_call with the
+ * kind as an OP_CALL record's payload on the two-core renderer). The kinds are also what DKR_SKIP_DRAW_KINDS leaves
+ * out (the switch bench's cost rows).
  */
+#define GFX_KIND_CUT 0x100
 int gfxb_gpu_kinds_frame(int frame);
 void gfxb_gpu_kind(int kind);
 void gfxb_gpu_kind_call(void *payload);

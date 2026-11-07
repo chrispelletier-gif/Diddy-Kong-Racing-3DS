@@ -295,13 +295,20 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
     // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
     // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
-    // GPU time (gfx_c3d.c gpu_cuts.inc, 2026-11-07; #444: GPU 14-16 ms, the limit on every track). The game's
-    // full-screen colour clear as a memory fill (on by default) raced drawn as before; the top screen's buffers in
-    // VRAM; citro3d's texture cache clear on every texture setting (twice a draw) kept only after texture memory
-    // changed. Performance rows: the usual laps. The results' last column is the GPU timeline's split.
-    { "colour clear drawn (old)", { "DKR_COLOUR_FILL", NULL, NULL }, 1, 0, 1, 0 },
-    { "top screen buffers in VRAM", { "DKR_FB_VRAM", NULL, NULL }, 0, 1, 0, 0 },
-    { "texture cache kept between draws", { "DKR_TEX_CACHE_KEEP", NULL, NULL }, 0, 1, 0, 0 },
+    // GPU time (gfx_c3d.c gpu_cuts.inc). Bench #451 (2026-11-07): the colour clear as a memory fill saved 1.5-3.2 ms
+    // of GPU (stays on, row gone); the top screen's buffers in VRAM took the copy to the screen from 1.2 to 0.55 ms
+    // on every track (now on, raced the old way once more: one Haunted Woods race was worse); the texture cache kept
+    // between draws gained nothing (shelved, row gone). Round 2: draws that can't change a pixel left out (the
+    // screen fader's alpha 0 quad over the whole screen in every race frame; PC frames identical), raced the old
+    // way, and cost rows for what the bench's GPU timeline can't split: the sky, the see-through/effects/shadows
+    // draws left out (DKR_SKIP_DRAW_KINDS, the backend's), and every draw's settings written once instead of twice
+    // (DKR_REWRITE=1; the head and cliff dropouts may show in that race).
+    { "draws that can't change a pixel drawn (old)", { "DKR_SKIP_INVISIBLE", NULL, NULL }, 1, 0, 1, 0 },
+    { "top screen buffers in main memory (old)", { "DKR_FB_VRAM", NULL, NULL }, 1, 0, 1, 0 },
+    { "sky not drawn (cost)", { "DKR_SKIP_DRAW_KINDS", NULL, NULL }, 0, 1 << 4, 1, 0 },
+    { "see-through, effects and shadows not drawn (cost)", { "DKR_SKIP_DRAW_KINDS", NULL, NULL }, 0,
+      (1 << 5) | (1 << 6) | (1 << 7), 1, 0 },
+    { "settings written once, not twice (cost; may flicker)", { "DKR_REWRITE", NULL, NULL }, 2, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

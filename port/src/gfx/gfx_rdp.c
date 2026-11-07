@@ -1641,16 +1641,17 @@ static unsigned long long sObjTicks[PROF_OBJ_BUCKETS + 1];
 static unsigned long long sKindTicks[PROF_KINDS];
 static unsigned long long sKindStart, sKindWaited;
 static s32 sKindTimed;  // This frame times each kind (kind_frame_start)
-static s32 sGpuKindMarks; // This frame tells the backend each change of kind (gfxb_gpu_kinds_frame, GPU timeline)
+static s32 sGpuKindMarks; // This frame tells the backend each change of kind (gfxb_gpu_kinds_frame): 2 to time them
 
 /* The backend's GPU timeline (3DS gpu_cuts.inc): the draws from here on are of this kind, in order with them. */
 static COLD NOINLINE void gpu_kind_send(u32 kind) {
+    int value = (int) kind | (sGpuKindMarks == 2 ? GFX_KIND_CUT : 0);
     int *p = gfx_split_call_reserve(gfxb_gpu_kind_call, sizeof(int) * 2);
     if (p == NULL) {
-        gfxb_gpu_kind((int) kind); // Not queued this frame: the backend's calls are made at once
+        gfxb_gpu_kind(value); // Not queued this frame: the backend's calls are made at once
         return;
     }
-    *p = (int) kind;
+    *p = value;
     gfx_split_call_commit(p);
 }
 static s32 sAuditFrame; // This frame's triangles are classified (audit_triangle)
@@ -1704,6 +1705,7 @@ static COLD void kind_switch_timed(void) {
 
 /* A tag's low 4 bits are the kind, bits 4-11 the object kind plus one (port_drawtag.h). */
 static void sky_kind_boundary(void);
+static inline void flush_batch(void);
 static s32 sTrackPending;
 static void track_flush(void);
 static inline void kind_switch(u32 tag) {
@@ -1719,6 +1721,7 @@ static inline void kind_switch(u32 tag) {
         kind_switch_timed();
     }
     if (UNLIKELY(sGpuKindMarks) && (tag & (PROF_KINDS - 1)) != sDrawKind) {
+        flush_batch(); // The batch so far is the last kind's (it would carry on across the tag)
         gpu_kind_send(tag & (PROF_KINDS - 1));
     }
     sDrawKind = (u8) (tag & (PROF_KINDS - 1));

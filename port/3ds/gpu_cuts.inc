@@ -11,10 +11,12 @@
  *     screen to a colour before it draws anything (rcp_dkr.c bgdraw_render: black in a race), which was drawn as two
  *     triangles over the whole target: 384,000 pixels at 800x480, as many as the sky. The GPU's memory fill unit
  *     does it instead, beside the depth clear's fill (P18), before the command list starts.
- *  3. The top screen's buffers in VRAM (DKR_FB_VRAM, off: a bench row): the copy to the screen writes VRAM instead of
- *     the main memory the CPU is using.
- *  4. The texture cache kept between draws (DKR_TEX_CACHE_KEEP, off: a bench row): citro3d's cache clear on every
- *     texture set taken out unless texture memory changed.
+ *  3. The top screen's buffers in VRAM (DKR_FB_VRAM, on by default on a New 3DS after #451): the copy to the screen
+ *     writes VRAM instead of the main memory the CPU is using (1.2 -> 0.55 ms a frame).
+ *  4. The texture cache kept between draws (DKR_TEX_CACHE_KEEP, off: #451 saw no gain, shelved): citro3d's cache
+ *     clear on every texture set taken out unless texture memory changed.
+ *  5. Draws that can't change a pixel left out (DKR_SKIP_INVISIBLE, on): the screen fader's alpha 0 quad over the
+ *     whole screen in every race frame. Also DKR_SKIP_DRAW_KINDS, for the bench's cost rows.
  */
 
 /******************************** 1. The GPU timeline ********************************/
@@ -34,6 +36,7 @@ static int sTimeline = -1;            // DKR_GPU_TIMELINE
 static unsigned int sTexClearsKept, sTexClearsDropped; // Section 4's (DKR_TEX_CACHE_KEEP)
 static unsigned int sColourFills, sColourDrawn, sColourProbes; // Section 2's (DKR_COLOUR_FILL)
 static int sGpuKinds = -1;            // DKR_GPU_KINDS
+static unsigned int sInvisibleSkipped; // Section 5's (DKR_SKIP_INVISIBLE)
 
 /* This frame's command list is cut by kind (gfxb_gpu_kind), and each part's kind, for the slot it is built in. */
 static int sKindFrame[2], sKindParts[2], sKindNow;
@@ -131,8 +134,9 @@ static void PLAT_COLD timeline_log(void) {
         plat_log("GPU command lists by kind (%u frames cut at each kind, ms): %s", sTlKindFrames, line);
     }
     plat_log("GPU cuts: colour clear filled %u times (edges drawn %u, colours read back %u), texture cache clears %u "
-             "kept, %u taken out", sColourFills, sColourDrawn, sColourProbes, sTexClearsKept, sTexClearsDropped);
-    sColourFills = sColourDrawn = sColourProbes = sTexClearsKept = sTexClearsDropped = 0;
+             "kept, %u taken out, %u draws left out (they couldn't change a pixel)", sColourFills, sColourDrawn,
+             sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped);
+    sColourFills = sColourDrawn = sColourProbes = sTexClearsKept = sTexClearsDropped = sInvisibleSkipped = 0;
     sTlFillTicks = sTlListTicks = sTlCopyTicks = sTlOtherTicks = sTlWholeTicks = 0;
     sTlFrames = sTlJobs = 0;
     memset(sTlKindTicks, 0, sizeof(sTlKindTicks));
@@ -203,20 +207,34 @@ static void timeline_take(int slot) {
     }
 }
 
-/* Walk (any thread): whether this frame's draws are to be cut by kind. */
+static int sSkipKinds = -1; // DKR_SKIP_DRAW_KINDS (section 5; read_switches resets it)
+static int sKindCur;        // The kind of the draws now coming (section 5)
+
+/* Walk (any thread): whether this frame's draws are to be told by kind (1) and cut by kind (2). */
 int gfxb_gpu_kinds_frame(int frame) {
     if (__builtin_expect(sGpuKinds < 0, 0)) {
         read_timeline_switches();
     }
-    return sGpuKinds && sTimeline && !sStereo && prof_recording() && frame % GPU_KIND_EVERY == GPU_KIND_EVERY / 2;
+    if (__builtin_expect(sSkipKinds < 0, 0)) {
+        sSkipKinds = plat_switch("DKR_SKIP_DRAW_KINDS", 0);
+    }
+    if (sGpuKinds && sTimeline && !sStereo && prof_recording() && frame % GPU_KIND_EVERY == GPU_KIND_EVERY / 2) {
+        return 2;
+    }
+    return sSkipKinds != 0;
 }
 
 /*
  * Backend: the draws from here on are of this kind (port_drawtag.h). The first call of a frame starts the cutting;
  * each change of kind after it ends the part of the command list so far. Only in frames gfxb_gpu_kinds_frame chose.
  */
-void gfxb_gpu_kind(int kind) {
+void gfxb_gpu_kind(int value) {
     FrameSlot *slot = &sSlots[sRec];
+    int kind = value & 0xFF;
+    sKindCur = kind;
+    if (!(value & GFX_KIND_CUT)) {
+        return;
+    }
     if (!sKindFrame[sRec]) {
         sKindFrame[sRec] = 1;
         sKindParts[sRec] = 0;
@@ -501,7 +519,10 @@ static int sTripleSetFailed[2]; // sTripleSets and sTripleSetNow: before triple_
 
 static int fb_vram_wanted(void) {
     if (sFbVram < 0) {
-        sFbVram = plat_switch("DKR_FB_VRAM", 0) != 0 && !plat_old_3ds();
+        // On by default on a New 3DS after bench #451: the copy to the screen 1.2 -> 0.55 ms on all three tracks.
+        // The debug build's frame history (bug reports' flash finder) can't read VRAM, so it stops while they are
+        // there: DKR_FB_VRAM=0 brings it back.
+        sFbVram = plat_switch("DKR_FB_VRAM", 1) != 0 && !plat_old_3ds();
     }
     return sFbVram;
 }
@@ -557,8 +578,8 @@ static int triple_use_set(int vram) {
  * changed, shared or freed, or a new frame (anything the CPU wrote while the last frame was drawn).
  * DKR_TEX_CACHE_KEEP=1 keeps the first clear after such a change and takes the clear bit out of the others, in the
  * commands C3Di_UpdateContext has just written (-Wl,--wrap=C3Di_UpdateContext; citro3d's draws call it from their
- * own files, so they reach the wrapper too). Off by default: a bench row, as only a real GPU can show whether its
- * cache is tagged by address (if not, textures would show each other's texels).
+ * own files, so they reach the wrapper too). Shelved, off: bench #451 raced it with no gain (GPU within 0.1 ms on
+ * Crescent Island and Jungle Falls, worse on Haunted Woods) and no wrong texels, so the clears cost the GPU nothing.
  */
 static int sTexCacheKeep = -1;      // DKR_TEX_CACHE_KEEP (read_switches resets it)
 static int sTexClearAllowed = 1;    // Texture memory changed since the last clear (or a frame began)
@@ -594,4 +615,29 @@ __attribute__((used)) void __wrap_C3Di_UpdateContext(void) {
 /* Texture memory changed (an upload, share or free, or a new frame): the next clear is kept. */
 static inline void tex_cache_dirty(void) {
     sTexClearAllowed = 1;
+}
+
+/******************************** 5. Draws that can't change a pixel ********************************/
+
+/*
+ * gfx_draw_invisible (gfx_backend.h): blended, no depth written, alpha 0 from constants. The screen fader's prim
+ * alpha 0 quad over the whole screen in every race frame was one screen of the GPU's pixels (PC count, DKR_FRAG_STATS;
+ * #451's "menus/other" 0.8-1.2 ms). Left out with DKR_SKIP_INVISIBLE (on); frames identical.
+ * Also here: DKR_SKIP_DRAW_KINDS, a bitmask of kinds (port_drawtag.h) whose draws are left out, for the switch
+ * bench's cost rows (what a kind costs the GPU and the backend; the walk still does its part).
+ */
+static int sSkipInvisible = -1; // DKR_SKIP_INVISIBLE (read_switches resets it)
+
+static inline int skip_invisible(const GfxDrawState *state) {
+    if (__builtin_expect(sSkipInvisible < 0, 0)) {
+        sSkipInvisible = plat_switch("DKR_SKIP_INVISIBLE", 1) != 0;
+    }
+    if (__builtin_expect(sSkipKinds > 0, 0) && ((sSkipKinds >> sKindCur) & 1)) {
+        return 1;
+    }
+    if (sSkipInvisible && __builtin_expect(gfx_draw_invisible(state), 0)) {
+        sInvisibleSkipped++;
+        return 1;
+    }
+    return 0;
 }
