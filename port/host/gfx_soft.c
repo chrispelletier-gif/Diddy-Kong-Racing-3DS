@@ -959,3 +959,17 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
     }
 }
+
+/* The GPU timeline's draw kinds (3DS only, gpu_cuts.inc): nothing to time here. */
+int gfxb_gpu_kinds_frame(int frame) {
+    (void) frame;
+    return 0;
+}
+
+void gfxb_gpu_kind(int kind) {
+    (void) kind;
+}
+
+void gfxb_gpu_kind_call(void *payload) {
+    (void) payload;
+}

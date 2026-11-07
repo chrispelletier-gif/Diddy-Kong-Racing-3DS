@@ -1641,6 +1641,18 @@ static unsigned long long sObjTicks[PROF_OBJ_BUCKETS + 1];
 static unsigned long long sKindTicks[PROF_KINDS];
 static unsigned long long sKindStart, sKindWaited;
 static s32 sKindTimed;  // This frame times each kind (kind_frame_start)
+static s32 sGpuKindMarks; // This frame tells the backend each change of kind (gfxb_gpu_kinds_frame, GPU timeline)
+
+/* The backend's GPU timeline (3DS gpu_cuts.inc): the draws from here on are of this kind, in order with them. */
+static COLD NOINLINE void gpu_kind_send(u32 kind) {
+    int *p = gfx_split_call_reserve(gfxb_gpu_kind_call, sizeof(int) * 2);
+    if (p == NULL) {
+        gfxb_gpu_kind((int) kind); // Not queued this frame: the backend's calls are made at once
+        return;
+    }
+    *p = (int) kind;
+    gfx_split_call_commit(p);
+}
 static s32 sAuditFrame; // This frame's triangles are classified (audit_triangle)
 
 void gfx_draw_mix_take(ProfDrawMix *out) {
@@ -1706,6 +1718,9 @@ static inline void kind_switch(u32 tag) {
     if (UNLIKELY(sKindTimed)) {
         kind_switch_timed();
     }
+    if (UNLIKELY(sGpuKindMarks) && (tag & (PROF_KINDS - 1)) != sDrawKind) {
+        gpu_kind_send(tag & (PROF_KINDS - 1));
+    }
     sDrawKind = (u8) (tag & (PROF_KINDS - 1));
     sDrawObj = (u8) (obj < PROF_OBJ_BUCKETS ? obj : PROF_OBJ_NONE);
 }
@@ -1718,6 +1733,7 @@ static void kind_frame_start(u32 frame) {
     sDrawObj = PROF_OBJ_NONE;
     sMix.frames++;
     sKindTimed = profiling && (!plat_old_3ds() || frame % 8 == 0);
+    sGpuKindMarks = gfxb_gpu_kinds_frame((int) frame);
     sAuditFrame = profiling && frame % 8 == 4;
     if (sKindTimed) {
         sMix.timedFrames++;
@@ -7134,6 +7150,9 @@ void port_gfx_run_task(void *taskPtr) {
     snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
     gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
                           (!plat_old_3ds() && plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)));
+    if (UNLIKELY(sGpuKindMarks)) {
+        gpu_kind_send(PORT_DRAW_OTHER); // The frame's first kind (kind_frame_start set it without a switch)
+    }
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(snapshot)) {
         start_snapshot();

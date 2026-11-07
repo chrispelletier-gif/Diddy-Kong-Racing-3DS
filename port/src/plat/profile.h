@@ -27,6 +27,9 @@ enum ProfStage {
     PROF_GPU_WAIT,   /* Renderer: waiting for the GPU to finish the previous frame, or the screen to show it. */
     PROF_AUDIO,      /* Audio tasks (synthesis). */
     PROF_GPU_DRAW,   /* The GPU's drawing time (3DS only). */
+    PROF_GPU_FILL,   /* Within it, from the GPU timeline (3DS, gpu_cuts.inc): memory fills (the frame's clears), */
+    PROF_GPU_LISTS,  /* the command lists (the draws) */
+    PROF_GPU_COPY,   /* and copies (the picture to the screen). */
     PROF_STAGE_COUNT
 };
 
@@ -244,6 +247,7 @@ void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size)
 int prof_monitor_tap(int x, int y);
 #ifdef PORT_RELEASE
 #define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
+#define prof_kind_name(kind) ((void) (kind), "-")
 #define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
 #define prof_object_logic_begin() 0ULL
 #define prof_object_logic_end(bucket, start) ((void) (start))

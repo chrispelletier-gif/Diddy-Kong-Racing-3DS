@@ -162,7 +162,7 @@ ifeq ($(TARGET),3ds)
                 -DPORT_VERSION=\"$(PORT_VERSION)\" -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" \
                 -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer -Wl,--wrap=gxCmdQueueRun -Wl,--wrap=C3Di_UpdateContext
   # One link-time partition, so that the renderer's per-draw functions (plat.h PLAT_HOT) come out in one .text.hot
   # section: with several, each partition's .text.hot lands among the others' cold code (roadmap O9).
   LDFLAGS   += $(if $(filter 1,$(LTO)),-flto-partition=one)

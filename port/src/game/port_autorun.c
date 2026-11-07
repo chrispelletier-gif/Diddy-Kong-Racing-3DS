@@ -284,6 +284,13 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
     // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
     // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
+    // GPU time (gfx_c3d.c gpu_cuts.inc, 2026-11-07; #444: GPU 14-16 ms, the limit on every track). The game's
+    // full-screen colour clear as a memory fill (on by default) raced drawn as before; the top screen's buffers in
+    // VRAM; citro3d's texture cache clear on every texture setting (twice a draw) kept only after texture memory
+    // changed. Performance rows: the usual laps. The results' last column is the GPU timeline's split.
+    { "colour clear drawn (old)", { "DKR_COLOUR_FILL", NULL, NULL }, 1, 0, 1, 0 },
+    { "top screen buffers in VRAM", { "DKR_FB_VRAM", NULL, NULL }, 0, 1, 0, 0 },
+    { "texture cache kept between draws", { "DKR_TEX_CACHE_KEEP", NULL, NULL }, 0, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
@@ -1311,7 +1318,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
-                  "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes\n",
+                  "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
+                  "gpu_lists_ms,gpu_copy_ms\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1356,14 +1364,17 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
     // Then (2026-11-06) what adaptive anti-aliasing did (the share of its frames at the low resolution, -1 when it
     // was not in use), the average change in period between consecutive frames, and how often the pace changed.
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u\n",
+    // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies.
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart),
-                  (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges);
+                  (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges,
+                  ms(stats, PROF_GPU_FILL, stats->renderedFrames), ms(stats, PROF_GPU_LISTS, stats->renderedFrames),
+                  ms(stats, PROF_GPU_COPY, stats->renderedFrames));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -2102,7 +2113,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 16) // The whole game run has three columns of its own; then the flashes
+#define MAX_FIELDS (COL_COUNT + 24) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -2118,6 +2129,8 @@ typedef struct BenchGroup {
     s32 flashes, flashRaces; // Picture flashes (the frame history's watch), in races whose results have the column
     s32 steadyRaces; // Races with the steadiness columns (jitter_ms, pace_changes; 2026-11-06)
     double jitter, paceChanges;
+    s32 timelineRaces; // Races with the GPU timeline's columns (gpu_fill_ms, gpu_lists_ms, gpu_copy_ms; 2026-11-07)
+    double gpuFill, gpuLists, gpuCopy;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
@@ -2130,6 +2143,17 @@ static const char *steady_cells(const BenchGroup *g) {
         return "- | -";
     }
     plat_snprintf(cell, sizeof(cell), "%.2f | %.0f", g->jitter / g->steadyRaces, g->paceChanges / g->steadyRaces);
+    return cell;
+}
+
+/* The switch bench's GPU timeline cell: fills / draws / copies, ms a frame ("-" without the columns). */
+static const char *timeline_cell(const BenchGroup *g) {
+    static char cell[48];
+    if (g->timelineRaces == 0) {
+        return "-";
+    }
+    plat_snprintf(cell, sizeof(cell), "%.2f / %.2f / %.2f", g->gpuFill / g->timelineRaces,
+                  g->gpuLists / g->timelineRaces, g->gpuCopy / g->timelineRaces);
     return cell;
 }
 
@@ -2292,6 +2316,12 @@ static void bench_summary(char *out, s32 size) {
             g->jitter += parse_decimal(fields[gapsColumn + 11]);
             g->paceChanges += parse_decimal(fields[gapsColumn + 12]);
         }
+        if (numFields > gapsColumn + 15) {
+            g->timelineRaces++;
+            g->gpuFill += parse_decimal(fields[gapsColumn + 13]);
+            g->gpuLists += parse_decimal(fields[gapsColumn + 14]);
+            g->gpuCopy += parse_decimal(fields[gapsColumn + 15]);
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -2332,8 +2362,8 @@ static void bench_summary(char *out, s32 size) {
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
                                "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | frame to frame ms "
-                               "| pace changes | limit | flashes |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|\n",
+                               "| pace changes | limit | flashes | GPU fills / draws / copies ms |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -2366,14 +2396,15 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
-                        (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g));
+                        (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g),
+                        timeline_cell(g));
                     continue;
                 }
                 length += plat_snprintf(

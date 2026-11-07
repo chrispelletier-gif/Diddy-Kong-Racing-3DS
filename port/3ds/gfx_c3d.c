@@ -1612,6 +1612,11 @@ static int triple_free(void) {
     return -1;
 }
 
+static int fb_vram_wanted(void);   // gpu_cuts.inc
+static int triple_use_set(int vram);
+static u8 *sTripleSets[2][3];
+static int sTripleSetNow = -1;
+
 static int triple_choose(void) {
     int i;
     if (sTripleFrame && !triple_poll(triple_swapped)) {
@@ -1622,24 +1627,21 @@ static int triple_choose(void) {
     if (!sTripleWanted || sStereo || sTripleFail) {
         return 0;
     }
-    if (sTriple[0] == NULL) {
-        // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here left
-        // 35 textures without a GPU copy (bug report #252).
-        if (plat_old_3ds() && linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
-            plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
-                     (unsigned long) (linearSpaceFree() / 1024));
-            sTripleFail = 1;
-            return 0;
-        }
-        for (i = 0; i < 3; i++) {
-            sTriple[i] = linearAlloc(TRIPLE_BYTES);
-            if (sTriple[i] == NULL) {
+    if (fb_vram_wanted() != sTripleSetNow || sTriple[0] == NULL) {
+        // The buffers in VRAM (DKR_FB_VRAM, gpu_cuts.inc), else in linear memory.
+        if (!(fb_vram_wanted() && triple_use_set(1))) {
+            // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here
+            // left 35 textures without a GPU copy (bug report #252).
+            if (sTripleSets[0][0] == NULL && plat_old_3ds() &&
+                linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
+                plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
+                         (unsigned long) (linearSpaceFree() / 1024));
+                sTripleFail = 1;
+                return 0;
+            }
+            if (!triple_use_set(0)) {
                 plat_log("top screen: no memory for a third buffer, two kept");
                 sTripleFail = 1;
-                for (i = 0; i < 3; i++) {
-                    linearFree(sTriple[i]);
-                    sTriple[i] = NULL;
-                }
                 return 0;
             }
         }
@@ -2675,6 +2677,8 @@ static void split_command_list(void) {
     }
 }
 
+#include "gpu_cuts.inc"
+
 /******************************** Stereo ********************************/
 
 /*
@@ -3066,6 +3070,8 @@ static void wait_for_gpu(int measure) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
+    timeline_take(sOnGpu); // gpu_cuts.inc
+    probe_take(sOnGpu);
     if (measure && prof_recording()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
         if (sOnGpu >= 0) {
@@ -3435,6 +3441,11 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    sColourFill = -1; // gpu_cuts.inc: DKR_COLOUR_FILL, DKR_GPU_TIMELINE, DKR_GPU_KINDS and DKR_FB_VRAM read again
+    sTimeline = -1;
+    sGpuKinds = -1;
+    sFbVram = -1;
+    sTexCacheKeep = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -3561,6 +3572,11 @@ void gfxb_start_frame(void) {
     sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
     sFrameFirstDraw = 1;
     sDepthFillPending = 0;
+    sColourFillPending = 0;
+    tex_cache_dirty(); // gpu_cuts.inc: the CPU may have written textures while the GPU drew the last frame
+    sKindFrame[sRec] = 0; // gpu_cuts.inc: the slot's last frame has been taken (wait_for_gpu)
+    sKindParts[sRec] = 0;
+    sProbe[sRec].after = -1;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         gfxb_clear_depth(sFullScreen);
@@ -3666,6 +3682,7 @@ void gfxb_end_frame(void) {
         save_command_list();
     }
     hand_over_draw_parts();
+    gpu_kind_end_frame();
     if (sOnceFrame) {
         stereo_once_lists(&sSlots[sRec]);
     }
@@ -3712,7 +3729,9 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
-        if (sDepthFillPending) {
+        if (colour_fill_queue()) {
+            // The colour clear's fill, with the depth clear's if it is one too (gpu_cuts.inc).
+        } else if (sDepthFillPending) {
             // With the GPU idle: the fill runs before the frame's command list in the GPU queue.
             C3D_RenderTargetClear(sTarget, C3D_CLEAR_DEPTH, 0, 0);
             if (sStereo) {
@@ -3729,6 +3748,7 @@ void gfxb_end_frame(void) {
             } else {
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
             }
+            probe_after_part(i);
         }
         adaptive_link(slot);
         sTarget->used = true;
@@ -3750,6 +3770,7 @@ void gfxb_end_frame(void) {
         history_sample();
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
+        timeline_arm();
         if (full_flush()) {
             heap_flush(); // What C3D_FrameEnd(0) would do, timed
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -3764,6 +3785,7 @@ void gfxb_end_frame(void) {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
         sTripleGet = 0;
+        timeline_expect(); // gpu_cuts.inc
         history_note_copy();
         record_recent_frame();
     }
@@ -4069,6 +4091,7 @@ static void upload_level0(u8 *data, const GfxTexture *tex, int format, unsigned 
 #undef UPLOAD_LEVEL0
 
 void gfxb_texture_upload(GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     C3DTexture *t = (C3DTexture *) tex->backendData;
     unsigned int w = tex->width, h = tex->height;
     unsigned int pw = next_pot(w), ph = next_pot(h);
@@ -4199,6 +4222,7 @@ PLAT_COLD static void verify_texture(const GfxTexture *tex) {
 }
 
 void gfxb_texture_free(GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     C3DTexture *t = (C3DTexture *) tex->backendData;
     if (t == NULL) {
         return;
@@ -4229,6 +4253,7 @@ static void defer_delete(C3DTexture *t) {
 }
 
 void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
+    tex_cache_dirty(); // gpu_cuts.inc
     const C3DTexture *s = (const C3DTexture *) src->backendData;
     C3DTexture *t;
     if (s == NULL || (t = malloc(sizeof(C3DTexture))) == NULL) {
@@ -4766,6 +4791,7 @@ PLAT_HOT static void apply_combiner(const GfxDrawState *state) {
 /* The Show mipmap setting changed since a texture's levels were built: builds them again. The GPU may still be
  * drawing the last frame with them, which can show one frame of mixed levels. Off the per-draw path: cold. */
 static void __attribute__((noinline, cold)) retint_levels(C3DTexture *t, GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     if (upload_mip_levels(t, tex, gpu_format(tex))) {
         gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
     }
@@ -4846,6 +4872,18 @@ static void __attribute__((noinline)) set_scissor(const short rect[4], int flat)
         // Nothing inside: citro3d would wrap an empty rectangle's right - 1 round to 1023, turning the scissor off on
         // that side. Keeping out everything inside the whole screen draws nothing instead.
         C3D_SetScissor(GPU_SCISSOR_INVERT, 0, 0, TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX);
+        return;
+    }
+    if (__builtin_expect(sScissorClamp, 0)) {
+        // The colour fill's edges (gpu_cuts.inc colour_fill): only the lines the fill leaves out.
+        int from = top * sScaleX, to = bottom * sScaleX;
+        if (from < sScissorClampFrom) from = sScissorClampFrom;
+        if (to > sScissorClampTo) to = sScissorClampTo;
+        if (to <= from) {
+            C3D_SetScissor(GPU_SCISSOR_INVERT, 0, 0, TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX);
+            return;
+        }
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, from, right * sRenderScale, to);
         return;
     }
     C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sScaleX, right * sRenderScale, bottom * sScaleX);
@@ -6294,6 +6332,10 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
     // Colour fills are drawn so that they cover only the game's part of the screen, leaving black bars at the sides.
+    // The frame's first, over the whole screen, is a memory fill instead (gpu_cuts.inc, DKR_COLOUR_FILL).
+    if (colour_fill(rect, (r << 24) | (g << 16) | (b << 8) | a)) {
+        return;
+    }
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 

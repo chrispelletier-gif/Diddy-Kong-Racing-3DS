@@ -206,6 +206,15 @@ int gfxb_gpu_transform(void);
 /* Whether the walk may cull back faces itself this frame (DKR_CPU_CULL): not while the frame is drawn for two eyes. */
 int gfxb_cpu_cull_ok(void);
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]);
+
+/*
+ * The GPU timeline's draw kinds (3DS gpu_cuts.inc): whether the walk is to say, in this frame, what kind of draws
+ * (port_drawtag.h) come next whenever that changes, and the backend's end of it (gfxb_gpu_kind, or
+ * gfxb_gpu_kind_call with the kind as an OP_CALL record's payload on the two-core renderer).
+ */
+int gfxb_gpu_kinds_frame(int frame);
+void gfxb_gpu_kind(int kind);
+void gfxb_gpu_kind_call(void *payload);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*
