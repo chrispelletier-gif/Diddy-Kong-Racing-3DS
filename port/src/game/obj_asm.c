@@ -188,26 +188,10 @@ void port_nmat_texture_freed(const void *start, const void *end) {
     }
 }
 
-/* v29: the id each texture's last lookup found, checked against that key (a key is in the table once, so a slot
- * holding it is the one the search would find). Cleared with the table. */
-#define NMAT_MEMO 256
-static u16 sNMatMemo[NMAT_MEMO];
-
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture) {
-    u32 h, i, memo = (u32) ((u32) ((size_t) texture >> 3) * 2654435761u) >> 24;
+    u32 h = (u32) ((((size_t) texture >> 3) ^ (u32) flags * 31u ^ (u32) texOffset * 131u ^
+                    (u32) gBlockedRenderFlags * 7u ^ (u32) gUseDirectionalLighting) * 2654435761u) % NMAT_KEYS, i;
     nmat_level_check();
-    {
-        u32 id = sNMatMemo[memo];
-        NMatKey *k = &sNMatKeys[id];
-        if (k->used && k->tex == texture && k->flags == flags && k->texOffset == texOffset &&
-            k->blocked == gBlockedRenderFlags && k->dirLight == gUseDirectionalLighting) {
-            *capture = gPortNMatBad[id] != 0;
-            gPortNMatBad[id] = 0;
-            return (int) id;
-        }
-    }
-    h = (u32) ((((size_t) texture >> 3) ^ (u32) flags * 31u ^ (u32) texOffset * 131u ^ (u32) gBlockedRenderFlags * 7u ^
-                (u32) gUseDirectionalLighting) * 2654435761u) % NMAT_KEYS;
     for (i = 0; i < 16; i++) {
         u32 id = (h + i) % NMAT_KEYS;
         NMatKey *k = &sNMatKeys[id];
@@ -224,14 +208,12 @@ int port_nmat_key(const void *texture, int flags, int texOffset, int *capture) {
             sNMatCount++;
             gPortNMatBad[id] = 0;
             *capture = 1;
-            sNMatMemo[memo] = (u16) id;
             return (int) id;
         }
         if (k->tex == texture && k->flags == flags && k->texOffset == texOffset && k->blocked == gBlockedRenderFlags &&
             k->dirLight == gUseDirectionalLighting) {
             *capture = gPortNMatBad[id] != 0;
             gPortNMatBad[id] = 0;
-            sNMatMemo[memo] = (u16) id;
             return (int) id;
         }
     }

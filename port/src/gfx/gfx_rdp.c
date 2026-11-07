@@ -1855,6 +1855,10 @@ static u32 sOpaqueStats[2]; // Batches held, draws made
  */
 static s32 sRemote;
 static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
+static s32 sRemoteFlush; // v29 DKR_REMOTE_FLUSH (read_switches): a waiting walk batch is drawn ahead of a remote draw
+static u32 sNativeCopies; // v29: shared tables remade beside the old (profiler log)
+static u32 sNativeUnshares; // v29: drains for shared tables (profiler log)
+static s32 sRemoteShare; // v29 DKR_REMOTE_SHARE (read_switches): the backend reads unchanged mesh tables in place
 static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
 #define ENG_PENDING (*(sRemote ? &sEngPending : &sOpaquePending))
@@ -2313,6 +2317,8 @@ static void read_switches(void) {
     sNativeHashHigh = plat_switch("DKR_NATIVE_HASH", 1) != 0;
     sPresetOn = plat_switch("DKR_SPRITE_AXES", 1) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
+    sRemoteFlush = plat_switch("DKR_REMOTE_FLUSH", 1);
+    sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
     {
         s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
         sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
@@ -3771,8 +3777,10 @@ static void track_frame_start(void) {
         }
     }
     if (sFrameCount % 600 == 0 && sOpaqueStats[0] + sEngStats[0] > 0) {
-        plat_log("opaque sorting: %u batches held, %u draws%s", (unsigned) (sOpaqueStats[0] + sEngStats[0]),
-                 (unsigned) (sOpaqueStats[1] + sEngStats[1]), sRemote ? " (on the backend thread)" : "");
+        plat_log("opaque sorting: %u batches held, %u draws%s, %u table drains, %u copies", (unsigned) (sOpaqueStats[0] + sEngStats[0]),
+                 (unsigned) (sOpaqueStats[1] + sEngStats[1]), sRemote ? " (on the backend thread)" : "",
+                 (unsigned) sNativeUnshares, (unsigned) sNativeCopies);
+        sNativeUnshares = sNativeCopies = 0;
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
         sEngStats[0] = sEngStats[1] = 0; // Read without a lock, as the other profiler counts
     }
@@ -4088,6 +4096,8 @@ typedef struct NativeMesh {
     u32 checkedFrame; // The frame its triangles were last compared in (DKR_NATIVE_ONCE)
     u8 maxVertex;   // The highest vertex number used
     u8 usable;      // Fits the tables (corners)
+    u32 shared;     // v29 DKR_REMOTE_SHARE: sShareEpoch when the backend was last handed these tables themselves
+    u8 changes;     // v29: tables changed in place after being made (copied to the backend from then on)
     s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
     u8 *cornerVertex;
     u32 *cornerUv;  // As TexCoords.texCoords
@@ -4119,7 +4129,21 @@ void gfx_native_mesh_take(unsigned long *drawn, unsigned long *declined) {
     sNativeDeclined = 0;
 }
 
+static u8 sNativeShared; // v29: some mesh's tables have been handed to the backend (DKR_REMOTE_SHARE)
+static u32 sShareEpoch = 1; // v29: counts the drains after which no tables are the backend's
+
+/* v29: tables about to be changed or thrown away while the backend may still read them: it finishes what it has. */
+static COLD NOINLINE void native_unshare(void) {
+    gfx_split_drain();
+    sNativeShared = 0;
+    sShareEpoch++;
+    sNativeUnshares++;
+}
+
 static COLD void native_forget_all(void) {
+    if (sNativeShared) {
+        native_unshare();
+    }
     __builtin_memset(sNativeMeshes, 0, sizeof(sNativeMeshes));
     sNativeMeshCount = 0;
     sNativePoolUsed = 0;
@@ -4149,7 +4173,18 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     u32 *cornerUv;
     u16 *triCorners;
     u8 *backface;
+    if (reuse && e->shared == sShareEpoch && sNativeShared) {
+        // v29: the backend may still read these tables: new ones are made beside them (the pool's room comes back
+        // when it is emptied, after a drain).
+        e->cornerVertex = (u8 *) native_alloc(e->capTris * 3);
+        e->cornerUv = (u32 *) native_alloc(e->capTris * 3 * sizeof(u32));
+        e->triCorners = (u16 *) native_alloc(e->capTris * 3 * sizeof(u16));
+        e->backface = (u8 *) native_alloc(e->capTris);
+        e->shared = 0;
+        sNativeCopies++;
+    }
     if (reuse) {
+        e->changes = 1;
         // The same number of triangles changed in place (a racer's face, a scrolled texture: only their texture
         // coordinates move): the tables are remade where they are, instead of taking new room every time, which
         // filled the pool every few seconds and had every mesh's tables remade (DKR_NMAT_FAST).
@@ -4167,6 +4202,10 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     }
     if (e->copy == NULL || cornerVertex == NULL || cornerUv == NULL || triCorners == NULL || backface == NULL) {
         return FALSE;
+    }
+    if (!reuse) {
+        e->changes = 0;
+        e->shared = 0;
     }
     __builtin_memcpy(e->copy, tris, count * sizeof(Triangle));
     e->minU = e->minV = 0x7FFF;
@@ -4237,6 +4276,18 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
             return FALSE;
         }
     }
+    if (e->shared == sShareEpoch && sNativeShared) {
+        // v29: as native_build, the backend's copy of the coordinates is left as it is.
+        u32 *uv = (u32 *) native_alloc(e->capTris * 3 * sizeof(u32));
+        if (uv == NULL) {
+            return FALSE;
+        }
+        __builtin_memcpy(uv, e->cornerUv, n * sizeof(u32));
+        e->cornerUv = uv;
+        e->shared = 0;
+        sNativeCopies++;
+    }
+    e->changes = 1;
     ++sNativeStamp;
     for (i = 0; i < (u32) count; i++) {
         const TexCoords *c = &tris[i].uv0;
@@ -4629,10 +4680,23 @@ static inline void nmat_state(const NMat *mat, GfxDrawState *state, s32 textured
     }
 }
 
+static inline void nmat_axes(NMat *mat, const GfxDrawState *state, s32 textured, TexAxis ax[4]);
+
+/* v29 (DKR_SPRITE_AXES): draw_dkr_triangles takes the material's texture axes, worked out once (nmat_axes keeps them)
+ * from the same tiles and textures the triangles would have used (sTriState, set just before). */
+static inline void native_preset_axes(NMat *mat, s32 textured) {
+    sPresetAxes = NULL;
+    if (sNMatFast && sPresetOn && textured) {
+        TexAxis ax[4];
+        nmat_axes(mat, &sTriState, textured, ax);
+        sPresetAxes = mat->axReady ? mat->axes : NULL;
+    }
+}
+
 /* A recorded batch drawn the way its commands would have been (vertex slots, draw_dkr_triangles), with the
  * material's tiles, fog bit and state in place meanwhile: for geometry made anew each frame (shadows, water, particles,
  * billboards), whose triangles the native mesh tables would have to be remade for every frame. */
-static NOINLINE void native_record_slots(const NMat *mat, const Vertex *vtx, s32 numVerts, s32 start,
+static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start,
                                          const Triangle *tris, s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
     u32 geometry = g.geometryMode;
@@ -4650,7 +4714,9 @@ static NOINLINE void native_record_slots(const NMat *mat, const Vertex *vtx, s32
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
+    native_preset_axes(mat, textured);
     draw_dkr_triangles(tris, count, textured);
+    sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
     g.tiles[1] = t1;
@@ -4660,7 +4726,7 @@ static NOINLINE void native_record_slots(const NMat *mat, const Vertex *vtx, s32
 
 /* A sprite tile (port_native_sprite): its vertices, if any, go where the frame's appending load would have put them
  * (after a billboard's anchor, or after the slots loaded so far), and its two triangles use them. */
-static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris,
+static NOINLINE void native_record_append(NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris,
                                           s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
     u32 geometry = g.geometryMode;
@@ -4682,7 +4748,7 @@ static NOINLINE void native_record_append(const NMat *mat, const Vertex *vtx, s3
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
-    sPresetAxes = sNMatFast && sPresetOn && textured && mat->axReady ? mat->axes : NULL;
+    native_preset_axes(mat, textured);
     draw_dkr_triangles(tris, count, textured);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
@@ -4839,7 +4905,7 @@ static inline s32 native_dynamic_ok(s32 start, s32 numVerts, s32 cur) {
  */
 enum {
     NP_FOG = 1, NP_LIGHT = 2, NP_CULL = 4, NP_REJECT = 8, NP_SCREEN = 16, NP_FAST_OUTCODE = 32, NP_VFP = 64,
-    NP_ZERO_TEX1 = 128, NP_AXIS_FAST = 256, NP_ORDERED = 512, NP_DONE = 1024
+    NP_ZERO_TEX1 = 128, NP_AXIS_FAST = 256, NP_ORDERED = 512, NP_DONE = 1024, NP_SHARED = 2048
 };
 typedef struct NativePiece {
     GfxDrawState state;
@@ -4850,6 +4916,11 @@ typedef struct NativePiece {
     u16 total, count, numCorners, split; // split: the vertices of the first load, when there are two
     u16 flags;
     u8 numLoads, frontCull, kind, pad[3];
+    // NP_SHARED (v29, DKR_REMOTE_SHARE): the mesh's own tables, which stay as they are until the backend is done
+    // (native_unshare); otherwise copies follow the vertices.
+    const u32 *cornerUv;
+    const u16 *triCorners;
+    const u8 *cornerVertex, *backface;
 } NativePiece;
 
 #define NP_ALIGN(n) (((n) + 7u) & ~7u)
@@ -4905,6 +4976,13 @@ static NOINLINE HOT void native_piece_run(void *payload) {
         (const u16 *) (vertBytes + (u32) total * ((flags & NP_DONE) ? sizeof(RspVertex) : sizeof(Vertex)));
     const u8 *cornerVertex = (const u8 *) (triCorners + count * 3);
     const u8 *triFlags = cornerVertex + np->numCorners;
+    if (flags & NP_SHARED) {
+        vertBytes = at;
+        cornerUv = np->cornerUv;
+        triCorners = np->triCorners;
+        cornerVertex = np->cornerVertex;
+        triFlags = np->backface;
+    }
     const RspVertex *V = (flags & NP_DONE) ? (const RspVertex *) vertBytes : sEngVerts;
     GfxDrawState state = np->state;
     const Viewport vp = np->vp;
@@ -5144,8 +5222,9 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
                                         s32 numLoads, s32 split, const s32 matrices[2], u8 frontCull, s32 ordered,
                                         s32 done) {
     u32 numCorners = mesh->numCorners, vertBytes = (u32) total * (done ? sizeof(RspVertex) : sizeof(Vertex));
-    u32 bytes = NP_ALIGN(sizeof(NativePiece)) + numCorners * 4u + vertBytes + (u32) count * 6u + numCorners +
-                (u32) count;
+    s32 share = sRemoteShare && !mesh->changes;
+    u32 bytes = NP_ALIGN(sizeof(NativePiece)) + vertBytes +
+                (share ? 0u : numCorners * 4u + (u32) count * 6u + numCorners + (u32) count);
     u8 *p = (u8 *) remote_begin(native_piece_run, bytes), *at;
     NativePiece *np = (NativePiece *) p;
     s32 i, tex0 = state->textures[0] != NULL;
@@ -5175,11 +5254,23 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
                 (sTriReject ? NP_REJECT : 0) | (sTriReject && sScreenOnce ? NP_SCREEN : 0) |
                 (sFastOutcode ? NP_FAST_OUTCODE : 0) | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
                 (sAxisFast && tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
-                (done ? NP_DONE : 0);
+                (done ? NP_DONE : 0) | (share ? NP_SHARED : 0);
 #ifdef HAVE_VFP_VECTORS
     np->flags |= sVfpVectors && sNativeVfp ? NP_VFP : 0;
 #endif
     at = p + NP_ALIGN(sizeof(NativePiece));
+    if (share) {
+        ((NativeMesh *) mesh)->shared = sShareEpoch;
+        sNativeShared = 1;
+        np->cornerUv = mesh->cornerUv;
+        np->triCorners = mesh->triCorners;
+        np->cornerVertex = mesh->cornerVertex;
+        np->backface = mesh->backface;
+        __builtin_memcpy(at, done ? (const void *) sNativeVerts : (const void *) vtx, vertBytes);
+        remote_end(p);
+        sOpaquePending = TRUE;
+        return;
+    }
     __builtin_memcpy(at, mesh->cornerUv, numCorners * 4u);
     at += numCorners * 4u;
     __builtin_memcpy(at, done ? (const void *) sNativeVerts : (const void *) vtx, vertBytes);
@@ -5318,7 +5409,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
-    if (sRemote && sBatchCount == 0 && sModelCount == 0 && sMeshPartCount == 0) {
+    if (sRemote && (sBatchCount == 0 || sRemoteFlush) && sModelCount == 0 && sMeshPartCount == 0) {
         // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
         // waiting, the walk works out the screen edges first (below), as a draw wholly off the screen leaves it be.
         s32 ordered;
@@ -5329,6 +5420,12 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         if (direct || ordered) {
             TexAxis ax[4];
             s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
+            if (sBatchCount > 0) {
+                // v29 (DKR_REMOTE_FLUSH): the walk's waiting batch is drawn first, in order, rather than the walk
+                // making this draw's vertices itself to learn whether it is off the screen (it then splits a batch
+                // that would have gone on: the same picture).
+                flush_cpu_batch();
+            }
             nmat_axes(mat, &state, textured, ax);
             g.curMatrix = cur;
             g.vertexIndex = 0;
