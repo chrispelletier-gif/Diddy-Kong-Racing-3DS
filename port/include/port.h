@@ -329,7 +329,21 @@ static inline s32 port_half_shift(s32 step) {
 }
 /* A whole number added each frame: half of it at half step (odd amounts round toward zero). */
 #define PORT_HALF(x) (gPortHalfStep ? (x) / 2 : (x))
+/* A whole-number step added right before "v -= (v * updateRate) >> n" in the same frame (add, then keep 1 - 2/2^n of
+   it at 30 fps). The 60 fps half step keeps 1 - 1/2^n, so halves of the add (updateRate 1 already halves it) would
+   settle (2^n - 1)/(2^n - 2) times as far as at 30 fps: 7% too far for n = 4. Shrinking the add by the inverse makes
+   the level it settles at the same. Nothing changes at 30 fps. */
+#define PORT_ADD_BEFORE_SHIFT(x, n) \
+    (gPortHalfStep ? (s32) ((f32) (x) * (f32) ((1 << (n)) - 2) / (f32) ((1 << (n)) - 1)) : (x))
+/* "(x * updateRate) >> n" stepped each frame (x already scaled by updateRate). The shift rounds down, losing half a
+   unit on average; at 60 fps that happens twice per 30 fps frame, which biases angles that chase each other this way
+   (the hovercraft's heading and camera) by a unit or more per 30 fps frame. Adding a quarter before the shift at half
+   step makes the two half steps lose half a unit together, as the one 30 fps step does. */
+#define PORT_SHR(x, n) (gPortHalfStep ? ((x) + (1 << ((n) - 2))) >> (n) : (x) >> (n))
 void port_set_logic_rate(s32 updateRate);
+/* A kart held up by only one or two wheels levels out (src/racer.c update_racer_collision); DKR_CAR_SETTLE=0 is the
+   N64's, which can leave it riding on its side for good. */
+s32 port_car_settle(void);
 
 /*
  * What the game thread is doing (src/thread3_main.c sets it at each step of the main loop), and a line describing the

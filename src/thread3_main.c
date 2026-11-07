@@ -274,6 +274,13 @@ void init_game(void) {
  * The main gameplay loop.
  * Contains all game logic, audio and graphics processing.
  */
+#ifdef TARGET_PORT
+/* The host 60 fps step check reads the controllers again between its two half steps, as the 60 fps loop does. */
+static void port_stepdiff_reinput(s32 updateRate) {
+    gSaveDataFlags = input_update(gSaveDataFlags, updateRate);
+}
+#endif
+
 void main_game_loop(void) {
     s32 debugLoopCounter;
     s32 framebufferSize;
@@ -348,9 +355,21 @@ void main_game_loop(void) {
             mode_intro();
             break;
         case GAMEMODE_MENU: // In a menu
+#ifdef TARGET_PORT
+            {
+                extern s32 gCurrentMenuId;
+                plat_step_diff(sLogicUpdateRate, mode_menu, port_stepdiff_reinput, gCurrentMenuId | (gGameMode << 8));
+            }
+#endif
             mode_menu(sLogicUpdateRate);
             break;
         case GAMEMODE_INGAME: // In game (Controlling a character)
+#ifdef TARGET_PORT
+            // Host 60 fps step check (DKR_STEPDIFF): tries this frame both ways in copies of the game first.
+            if (!gIsPaused) {
+                plat_step_diff(sLogicUpdateRate, mode_game, port_stepdiff_reinput, level_id() | (gGameMode << 8));
+            }
+#endif
             mode_game(sLogicUpdateRate);
             break;
         case GAMEMODE_LOCKUP: // EPC (lockup display)

@@ -1968,7 +1968,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         }
         sp11C *= 0.125;
         var_v1 = (sp11C * var_v1) * 0.75;
-        racer->cameraYaw += (var_v1 * updateRate) >> 4;
+        racer->cameraYaw += PORT_SHR(var_v1 * updateRate, 4); //!@Delta
         var_v1 = (0x8000 - racer->cameraYaw) - (racer->steerVisualRotation & 0xFFFF);
         if (var_v1 > 0x8000) {
             var_v1 -= 0xFFFF;
@@ -1985,7 +1985,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         if (gCurrentRacerInput & A_BUTTON || gCurrentRacerInput & R_TRIG) {
             var_v1 *= 2;
         }
-        racer->steerVisualRotation += ((s32) (var_v1 * updateRate)) >> 7;
+        racer->steerVisualRotation += PORT_SHR((s32) (var_v1 * updateRate), 7); //!@Delta
     }
     var_v1 = (0x8000 - racer->steerVisualRotation) - (racer->cameraYaw & 0xFFFF);
     if (var_v1 > 0x8000) {
@@ -1997,7 +1997,7 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     var_f6 = 1.0f;
     var_v1 = ((s32) ((((f32) var_v1) * 1.75) * var_f6));
     var_t0 = (var_v1 * updateRate);
-    racer->cameraYaw += var_t0 >> 6;
+    racer->cameraYaw += PORT_SHR(var_t0, 6); //!@Delta
     if (racer->zipperDirCorrection == 0) {
         if (gCurrentPlayerIndex == PLAYER_COMPUTER && !racer->raceFinished) {
             temp = racer->lateral_velocity * 0.25;
@@ -2148,6 +2148,10 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         }
     }
     if (racer->waterTimer > 0) {
+#ifdef TARGET_PORT
+        // Frames of grace after leaving the water: counted at 30 fps, or they'd end twice as soon at 60 fps.
+        if (PORT_TICK())
+#endif
         racer->waterTimer--;
     } else {
         racer->buoyancy = 0.0f;
@@ -2505,10 +2509,13 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
     xVel -= racer->ox1 * 10.0f * yVel;
     zVel -= racer->oz1 * 10.0f * yVel;
     yVel = racer->lateral_velocity * 2;
-    racer->unkC8 -= (racer->unkC8 - yVel) * 0.25;
+    racer->unkC8 -= (racer->unkC8 - yVel) * PORT_LERP(0.25); //!@Delta
     yVel = sins_f(racer->cameraYaw + 0x4000) * racer->unkC8;
     gCameraObject->trans.x_position = obj->trans.x_position + xVel + yVel;
     yVel = gCameraObject->trans.y_position - (obj->trans.y_position + phi_f18);
+#ifdef TARGET_PORT
+    xVel = yVel; // The whole height gap, to redo the share closed below as a 60 fps half step.
+#endif
     if (yVel > 0.0f) {
         yVel *= 0.5;
     } else {
@@ -2521,6 +2528,12 @@ void update_camera_hovercraft(f32 updateRate, Object *obj, Object_Racer *racer) 
             yVel *= 2.0;
         }
     }
+#ifdef TARGET_PORT
+    if (gPortHalfStep && xVel != 0.0f) {
+        // The camera closes a share of its height gap each frame (a half, a quarter, or all of it when boosting).
+        yVel = xVel * PORT_LERP(yVel / xVel); //!@Delta
+    }
+#endif
     gCameraObject->trans.y_position -= yVel;
     gCameraObject->trans.rotation.z_rotation = 0;
     if (gRaceStartTimer) {
@@ -3115,11 +3128,13 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
                     racerSteerAngle = -racerSteerAngle;
                 }
                 var_t0 *= (f32) (1.0 - ((f32) racerSteerAngle / 4096));
+                // 60 fps: the bank added here is then shrunk by the >> 4 below, so at half steps it settled 7% further
+                // over (and the plane turned 7% faster) than at 30 fps; PORT_ADD_BEFORE_SHIFT makes up for that.
                 if (gCurrentRacerInput & R_TRIG) {
                     obj->particleEmittersEnabled |= OBJ_EMIT_7 | OBJ_EMIT_8;
-                    racer->x_rotation_vel -= (var_t0 * 16 * updateRate) >> 1;
+                    racer->x_rotation_vel -= PORT_ADD_BEFORE_SHIFT((var_t0 * 16 * updateRate) >> 1, 4); //!@Delta
                 }
-                racer->x_rotation_vel -= (var_t0 * updateRate * 20) >> 1;
+                racer->x_rotation_vel -= PORT_ADD_BEFORE_SHIFT((var_t0 * updateRate * 20) >> 1, 4); //!@Delta
                 racer->x_rotation_vel -= (racer->x_rotation_vel * updateRate) >> 4;
                 if (racer->zipperDirCorrection == 0) {
                     if (gCurrentPlayerIndex != PLAYER_COMPUTER && racer->raceFinished == FALSE) {
@@ -3153,7 +3168,8 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
                 racer->steerVisualRotation -= (var_t0 * updateRate) & 0xFFFF;
             }
             if (!(gCurrentRacerInput & R_TRIG) || racer->groundedWheels == 0 || racer->zipperDirCorrection != 0) {
-                var_f20 = racer->velocity * var_t0 * 0.00015;
+                // A push each frame: twice as many of them at 60 fps without the half step.
+                var_f20 = PORT_STEP(racer->velocity * var_t0 * 0.00015); //!@Delta
                 obj->x_velocity -= racer->ox3 * var_f20;
                 obj->y_velocity -= racer->oy3 * var_f20;
                 obj->z_velocity -= racer->oz3 * var_f20;
@@ -3378,12 +3394,21 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     if (obj->attachPoints != NULL && obj->attachPoints->count >= 3) {
         temp_v0_obj = obj->attachPoints->obj[2];
         temp_v0_obj->trans.rotation.y_rotation = 0x4000;
+#ifdef TARGET_PORT
+        // The propeller's frame steps once a 30 fps frame, so it doesn't spin twice as fast at 60 fps.
+        if (PORT_TICK())
+#endif
         temp_v0_obj->modelIndex += 1;
         if (temp_v0_obj->modelIndex == temp_v0_obj->header->numberOfModelIds) {
             temp_v0_obj->modelIndex = 0;
         }
     }
+#ifdef TARGET_PORT
+    // The wheels fold away and come back down by a fixed amount a frame: at 30 fps steps, as on the N64.
+    if (obj->attachPoints != NULL && obj->attachPoints->count >= 3 && PORT_TICK()) {
+#else
     if (obj->attachPoints != NULL && obj->attachPoints->count >= 3) {
+#endif
         if (racer->groundedWheels != 0 || spA2 != FALSE) {
             temp_v0_obj = obj->attachPoints->obj[0];
             if (temp_v0_obj->trans.y_position > 0.0f) {
@@ -4505,6 +4530,9 @@ void update_player_racer(Object *obj, s32 updateRate) {
                 }
             } else {
                 if (tempRacer->waterTimer > 0) {
+#ifdef TARGET_PORT
+                    if (PORT_TICK()) // Counted at 30 fps, as in the hovercraft update above.
+#endif
                     tempRacer->waterTimer--;
                 } else {
                     tempRacer->buoyancy = 0.0f;
@@ -5222,6 +5250,9 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
     f32 topSpeed;
     UNUSED s32 pad1;
     UNUSED s32 pad2;
+#ifdef TARGET_PORT
+    f32 slideStep; // 60 fps: this frame's slide from steering (see the grip below).
+#endif
 
     sp58 = FALSE;
     // Set the square value of the current forward velocity
@@ -5503,9 +5534,18 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
     // so a higher value means the character slides less.
     miscAsset = (f32 *) get_misc_asset(ASSET_MISC_8);
     // Degrade lateral velocity
+#ifdef TARGET_PORT
+    slideStep = 0.0f;
+#endif
     if (gCurrentPlayerIndex != PLAYER_COMPUTER) {
         if (!(racer->velocity > -2.0) && racer->drift_direction == 0 && !racer->raceFinished) {
-            racer->lateral_velocity += PORT_STEP((racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]); //!@Delta
+#ifdef TARGET_PORT
+            if (gPortHalfStep) {
+                // 60 fps: added below, once both grip factors are known (see there).
+                slideStep = (racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]; //!@Delta
+            } else
+#endif
+            racer->lateral_velocity += (racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]; //!@Delta
             if (racer->playerIndex == PLAYER_COMPUTER) {
                 racer->lateral_velocity *= 0.9;
             }
@@ -5519,14 +5559,25 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
         gCurrentCarSteerVel *= tempVel;
         surfaceTraction = ((1.0 - tempVel) * 0.7) + (surfaceTraction * tempVel);
     }
-    // Multiply current velocity by the surface grip levels.
-    racer->lateral_velocity *= PORT_DECAY(surfaceTraction); //!@Delta
     velocityDiff = coss_f(racer->x_rotation_vel);
     if (velocityDiff < 0.0f) {
         velocityDiff = -velocityDiff;
     }
+#ifdef TARGET_PORT
+    if (gPortHalfStep) {
+        // 60 fps: the N64's frame adds the steering's slide and then keeps the grip's share of it, (v + a) * g. Two
+        // half steps of (v + b) * sqrt(g) match that only with b = a * sqrt(g) / (1 + sqrt(g)); half of a (what
+        // PORT_STEP gave) left karts sliding wider than on the N64, by 6 to 10 percent on normal grip. //!@Delta
+        f32 grip = sqrtf(surfaceTraction * velocityDiff);
+        racer->lateral_velocity = (racer->lateral_velocity + slideStep * grip / (1.0f + grip)) * grip;
+    } else
+#endif
+    {
+    // Multiply current velocity by the surface grip levels.
+    racer->lateral_velocity *= surfaceTraction; //!@Delta
     // Multiply lateral velocity by pitch
-    racer->lateral_velocity *= PORT_DECAY(velocityDiff); //!@Delta
+    racer->lateral_velocity *= velocityDiff; //!@Delta
+    }
     gCurrentSurfaceType = surfaceType;
     if (stoneWheels != 0) {
         miscAsset = (f32 *) get_misc_asset(ASSET_MISC_32);
@@ -6091,7 +6142,8 @@ void update_car_velocity_offground(Object *obj, Object_Racer *racer, s32 updateR
         angle = -racer->steerAngle;
         angle *= 6;
     }
-    racer->steerVisualRotation -= angle & 0xFFFF;
+    // At 60 fps this per-frame turn ran twice as often, so karts turned twice as sharply in the air as on the N64.
+    racer->steerVisualRotation -= PORT_HALF(angle) & 0xFFFF; //!@Delta
     gCurrentCarSteerVel = racer->unk110;
     if (racer->boostTimer) {
         if (racer->velocity > -20.0) {
@@ -6957,6 +7009,14 @@ void update_racer_collision(Object *racerObj, Object_Racer *racer, s32 updateRat
     if (sp184 == 0) {
         racer->x_rotation_vel += temp_s16 & 0xFFFF & 0xFFFF & 0xFFFF;
     }
+#ifdef TARGET_PORT
+    // Not resting on enough wheels for the lines above to tilt it: level out (see port_car_settle).
+    if (racer->vehicleID == VEHICLE_CAR && racer->groundedWheels > 0 && racer->groundedWheels < 3 &&
+        port_car_settle()) {
+        racerObj->trans.rotation.x_rotation -= (racerObj->trans.rotation.x_rotation * updateRate) >> 5;
+        racer->x_rotation_vel -= (racer->x_rotation_vel * updateRate) >> 5;
+    }
+#endif
     if (racer->vehicleID != VEHICLE_LOOPDELOOP && racer->vehicleID != VEHICLE_PLANE &&
         racer->vehicleID != VEHICLE_CARPET && racer->vehicleID != VEHICLE_SMOKEY) {
         CLAMP(racer->x_rotation_vel, -0x3400, 0x3400);

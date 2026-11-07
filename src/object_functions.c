@@ -176,7 +176,11 @@ void obj_loop_scenery(Object *obj, s32 updateRate) {
             properties->interactObj = NULL;
         }
         obj->trans.rotation.z_rotation = properties->angleVel;
-        properties->angleVel = (properties->angleVel * -200) >> 8;
+#ifdef TARGET_PORT
+        // The wobble after a hit swings back once a 30 fps frame; every 60 fps frame made it twice as fast and short.
+        if (PORT_TICK())
+#endif
+        properties->angleVel = (properties->angleVel * -200) >> 8; //!@Delta
     }
 }
 
@@ -1553,7 +1557,12 @@ void obj_loop_fish(Object *fishObj, s32 updateRate) {
             yThing += fishObj->y_velocity * fish->unkFD;
             fish->unkFD = 0;
         }
+#ifdef TARGET_PORT
+    // One chance in 8 a 30 fps frame to swim up or down: twice the chances at 60 fps without this.
+    } else if (PORT_TICK()) {
+#else
     } else {
+#endif
         randNumber = rand_range(0, 7);
         if (randNumber == 0 && fish->unk118 >= 1.0f) {
             fish->unkFD = rand_range(160, 255);
