@@ -616,7 +616,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
-static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart;
+static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart, sWakesStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -1369,7 +1369,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
-                  "gpu_lists_ms,gpu_copy_ms,late_retraces\n",
+                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1415,8 +1415,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // Then (2026-11-06) what adaptive anti-aliasing did (the share of its frames at the low resolution, -1 when it
     // was not in use), the average change in period between consecutive frames, and how often the pace changed.
     // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies,
-    // and (v35) the retraces that reached the VI thread more than 3 ms late (plat_wait_vblank).
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u\n",
+    // and (v35) the retraces that reached the VI thread more than 3 ms late (plat_wait_vblank), (v36) the game's waits
+    // for a retrace it ran more than 3 ms after (frames.c).
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u,%u\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
@@ -1426,7 +1427,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges,
                   ms(stats, PROF_GPU_FILL, stats->renderedFrames), ms(stats, PROF_GPU_LISTS, stats->renderedFrames),
                   ms(stats, PROF_GPU_COPY, stats->renderedFrames),
-                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_RETRACES] - sLateStart));
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_RETRACES] - sLateStart),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_WAKES] - sWakesStart));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -3159,6 +3161,7 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
                 sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
+                sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
                 sAaFramesStart = gPlatCounters[PLAT_COUNTER_AA_FRAMES];
                 sAaLowStart = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES];
                 set_phase(PHASE_RACING);

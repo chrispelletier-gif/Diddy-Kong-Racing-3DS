@@ -16,6 +16,7 @@
 #include "types.h"
 #include "port.h"
 #include "plat/plat.h"
+#include "plat/recorder.h"
 
 #ifdef PICA_ALL
 
@@ -39,6 +40,24 @@ static s32 sDoneHead, sDoneCount;
 static s32 sVideoTicks, sAudioTicks;
 static u32 sRetraces;
 static u32 sOverflows;
+
+/*
+ * v36: how late the game ran after the retrace that let its frame end. v35 put the GSP event thread above the walk,
+ * and lean quick test #465 had no late retraces left, but the 38-39 ms frames stayed ("waiting 22 ms for the
+ * retrace"): so the retrace came on time and the game thread, below the walk on an Old 3DS's game core, ran later.
+ * Each retrace keeps when it came and what the walk was doing then; a game thread that waited for it and ran more
+ * than 3 ms later counts a late wake (late_wakes in the test run's results) and says in the flight recorder how much
+ * of the gap the walk had.
+ */
+extern volatile unsigned long long gPortWalkTotalNs, gPortWalkStartNs;
+static unsigned long long sRetraceNs, sRetraceWalkNs, sRetraceWalkStartNs;
+static const char *sRetraceStage;
+
+static unsigned long long walk_ns_at(unsigned long long now, unsigned long long *start) {
+    unsigned long long walkStart = gPortWalkStartNs;
+    *start = walkStart;
+    return gPortWalkTotalNs + (walkStart != 0 && now > walkStart ? now - walkStart : 0);
+}
 
 int port_frames_native(void) {
     if (sNative < 0) {
@@ -139,7 +158,13 @@ void port_frames_gfx_done(void) {
 /* A retrace (os_vi.c, instead of the scheduler's retrace message). */
 void port_frames_retrace(void) {
     OSScTask *go;
+    unsigned long long now = plat_time_ns(), walkStart;
+    unsigned long long walkNs = walk_ns_at(now, &walkStart);
     plat_klock();
+    sRetraceNs = now;
+    sRetraceWalkNs = walkNs;
+    sRetraceWalkStartNs = walkStart;
+    sRetraceStage = gPlatGfxStage;
     sRetraces++;
     gRetraceCounter64++;
     gRetraceCounter32++;
@@ -187,12 +212,33 @@ s32 port_frames_video_take(void) {
 
 /* fb_update: waits for the next retrace. */
 void port_frames_video_wait(void) {
+    unsigned long long retraceNs = 0, retraceWalkNs = 0, retraceWalkStartNs = 0, now, walkNs, walkStart;
+    const char *stage = NULL;
+    int waited = 0;
     plat_klock();
     while (sVideoTicks == 0) {
         plat_kwait();
+        waited = 1;
     }
     sVideoTicks--;
+    if (waited) {
+        retraceNs = sRetraceNs;
+        retraceWalkNs = sRetraceWalkNs;
+        retraceWalkStartNs = sRetraceWalkStartNs;
+        stage = sRetraceStage;
+    }
     plat_kunlock();
+    if (!waited) {
+        return;
+    }
+    now = plat_time_ns();
+    if (now - retraceNs > 3000000ULL) {
+        walkNs = walk_ns_at(now, &walkStart);
+        gPlatCounters[PLAT_COUNTER_LATE_WAKES]++;
+        rec_event("late wake %.1f ms, walk %.1f ms of it; at the retrace %s, %s",
+                  (now - retraceNs) / 1e6, (walkNs - retraceWalkNs) / 1e6, stage != NULL ? stage : "-",
+                  retraceWalkStartNs != 0 ? "walking" : "no walk");
+    }
 }
 
 /* The audio thread's beat: every other retrace. */
