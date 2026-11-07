@@ -20,6 +20,8 @@ void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, i
 void gfx_split_texture_upload(GfxTexture *tex);
 void gfx_split_texture_share(GfxTexture *dst, const GfxTexture *src);
 void gfx_split_texture_free(GfxTexture *tex);
+unsigned int gfx_split_texture_free_later(GfxTexture *tex);
+int gfx_split_free_done(unsigned int ticket);
 void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
                           int numVerts, const unsigned short *indices, int numTriangles);
 void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,

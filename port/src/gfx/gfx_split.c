@@ -71,7 +71,12 @@ typedef struct SplitModel {
 typedef struct SplitTexture {
     GfxTexture *tex;
     const GfxTexture *src;
+    unsigned int ticket; // v33 OP_TEX_FREE from gfx_split_texture_free_later: done when sFreeDone reaches it
 } SplitTexture;
+
+/* v33 (DKR_TEX_FREE_QUEUE): the last free ticket given out (walk) and the last one the backend has done. */
+static unsigned int sFreeTicket;
+static volatile unsigned int sFreeDone;
 
 /* OP_CALL: followed by the caller's bytes. */
 typedef struct SplitCall {
@@ -271,6 +276,9 @@ static void backend_thread(void *arg) {
                     break;
                 case OP_TEX_FREE:
                     gfxb_texture_free(((SplitTexture *) p)->tex);
+                    if (((SplitTexture *) p)->ticket != 0) {
+                        __atomic_store_n(&sFreeDone, ((SplitTexture *) p)->ticket, __ATOMIC_RELEASE);
+                    }
                     break;
                 case OP_TEX_SHARE:
                     gfxb_texture_share(((SplitTexture *) p)->tex, ((SplitTexture *) p)->src);
@@ -507,7 +515,35 @@ static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) 
     SplitTexture *t = reserve(op, sizeof(SplitTexture));
     t->tex = tex;
     t->src = src;
+    t->ticket = 0;
     commit(t);
+}
+
+/*
+ * v33 (DKR_TEX_FREE_QUEUE): a free that goes through the queue after the draws that still use the texture, as a
+ * mesh's does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not
+ * reuse tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now.
+ * On an Old 3DS a mid-race free made the walk wait for the whole queue: frames of 49-54 ms (bench #457).
+ */
+unsigned int gfx_split_texture_free_later(GfxTexture *tex) {
+    SplitTexture *t;
+    if (!sActive) {
+        gfxb_texture_free(tex);
+        return 0;
+    }
+    t = reserve(OP_TEX_FREE, sizeof(SplitTexture));
+    t->tex = tex;
+    t->src = NULL;
+    if (++sFreeTicket == 0) {
+        sFreeTicket = 1;
+    }
+    t->ticket = sFreeTicket;
+    commit(t);
+    return sFreeTicket;
+}
+
+int gfx_split_free_done(unsigned int ticket) {
+    return (int) (__atomic_load_n(&sFreeDone, __ATOMIC_ACQUIRE) - ticket) >= 0;
 }
 
 void gfx_split_texture_upload(GfxTexture *tex) {

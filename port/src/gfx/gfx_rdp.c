@@ -351,6 +351,7 @@ typedef struct TexCacheEntry {
     u8 hasOtherFilter;
     u8 atlasState[2];       // For each filter: ATLAS_UNKNOWN, ATLAS_NEVER, ATLAS_UNPLACED or ATLAS_PAGE0 + a page
     u8 atlasX[2], atlasY[2]; // For each filter: where the texture's first texel sits in its page
+    u32 dying; // v33: freed through the backend's queue, kept (with its pixels) until this ticket is done; 0 = not
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
@@ -676,6 +677,44 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
 
 static void tex_memo_forget(void);
 
+/*
+ * v33 (DKR_TEX_FREE_QUEUE, on): entries freed through the backend's queue (free_entry_later), unusable until the
+ * backend has passed their free, as its queued draws may still point at the entry's textures. Only for frees at a
+ * frame's start (dropped and stale textures), where no batch of the walk's own uses them.
+ */
+#define TEX_DYING_MAX 64
+static s32 sTexFreeQueue; // (read_switches)
+static u16 sTexDying[TEX_DYING_MAX];
+static s32 sTexDyingCount;
+
+/* A dying entry whose free the backend has done: its pixels go and it can be used again. */
+static s32 dying_try(TexCacheEntry *e) {
+    if (e->dying != 0 && gfx_split_free_done(e->dying)) {
+        plat_free((void *) e->tex.pixels);
+        e->tex.pixels = NULL;
+        e->dying = 0;
+    }
+    return e->dying == 0;
+}
+
+/* Frame start, and when the list is full (wait=TRUE: the backend catches up first, as the old free did). */
+static void dying_reclaim(s32 wait) {
+    s32 i, n = 0;
+    if (sTexDyingCount == 0) {
+        return;
+    }
+    if (wait) {
+        gfx_split_drain();
+    }
+    for (i = 0; i < sTexDyingCount; i++) {
+        TexCacheEntry *e = &sTexCache[sTexDying[i]];
+        if (!dying_try(e)) {
+            sTexDying[n++] = sTexDying[i];
+        }
+    }
+    sTexDyingCount = n;
+}
+
 /* Frees a cache entry's textures. */
 static void free_entry(TexCacheEntry *e) {
     if (e->hasOtherFilter) {
@@ -691,6 +730,42 @@ static void free_entry(TexCacheEntry *e) {
     e->gen++;
     if (e->gen == 0) {
         tex_memo_forget(); // The 8-bit generation wrapped: a memo entry from 256 frees ago must not match it again
+    }
+    sTexCacheAddr[e - sTexCache] = NULL;
+}
+
+/* v33: free_entry through the backend's queue: the walk doesn't wait for the backend to catch up. */
+static void free_entry_later(TexCacheEntry *e) {
+    u32 ticket = 0;
+    if (!sTexFreeQueue || !gfx_split_active()) {
+        free_entry(e);
+        return;
+    }
+    if (sTexDyingCount == TEX_DYING_MAX) {
+        dying_reclaim(TRUE); // A level's worth of frees: one wait for all of them
+        if (sTexDyingCount == TEX_DYING_MAX) {
+            free_entry(e);
+            return;
+        }
+    }
+    if (e->hasOtherFilter) {
+        OPAQUE_FLUSH();
+        gfx_split_texture_free_later(&e->otherFilter);
+        e->hasOtherFilter = FALSE;
+    }
+    OPAQUE_FLUSH();
+    ticket = gfx_split_texture_free_later(&e->tex);
+    if (ticket != 0) {
+        e->dying = ticket;
+        sTexDying[sTexDyingCount++] = (u16) (e - sTexCache);
+    } else {
+        plat_free((void *) e->tex.pixels);
+    }
+    e->atlasState[0] = e->atlasState[1] = 0;
+    e->used = FALSE;
+    e->gen++;
+    if (e->gen == 0) {
+        tex_memo_forget();
     }
     sTexCacheAddr[e - sTexCache] = NULL;
 }
@@ -1070,11 +1145,23 @@ __attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const G
             return texture_with_filter(e, filter);
         }
         if (!e->used) {
+            if (e->dying != 0 && !dying_try(e)) {
+                continue; // The backend may still draw with it
+            }
             oldest = (slot + i) % TEX_CACHE_SIZE;
             break;
         }
         if (!texture_in_use(e, pinned) && (oldest == TEX_CACHE_SIZE || e->lastFrame < sTexCache[oldest].lastFrame)) {
             oldest = (slot + i) % TEX_CACHE_SIZE;
+        }
+    }
+    if (oldest == TEX_CACHE_SIZE && sTexDyingCount > 0) {
+        // v33: every free probe slot still dying: the backend catches up, then the first free slot is taken.
+        dying_reclaim(TRUE);
+        for (i = 0; i < TEX_CACHE_PROBES && oldest == TEX_CACHE_SIZE; i++) {
+            if (!sTexCache[(slot + i) % TEX_CACHE_SIZE].used) {
+                oldest = (slot + i) % TEX_CACHE_SIZE;
+            }
         }
     }
     if (oldest == TEX_CACHE_SIZE) {
@@ -2343,6 +2430,7 @@ static void read_switches(void) {
     sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
     sTrisSkip = plat_switch("DKR_TRIS_SKIP", 1);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
+    sTexFreeQueue = plat_switch("DKR_TEX_FREE_QUEUE", 1) != 0;
     {
         s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
         sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
@@ -6967,7 +7055,7 @@ static void drop_textures(const u8 *start, const u8 *end) {
     s32 i;
     for (i = 0; i < TEX_CACHE_SIZE; i++) {
         if (sTexCacheAddr[i] >= start && sTexCacheAddr[i] < end) {
-            free_entry(&sTexCache[i]);
+            free_entry_later(&sTexCache[i]);
         }
     }
     for (i = 0; i < HASH_CACHE_SIZE; i++) {
@@ -7010,7 +7098,7 @@ static s32 sweep_stale_textures(void) {
                         continue;
                     }
                 }
-                free_entry(e);
+                free_entry_later(e);
                 swept++;
             }
         }
@@ -7203,6 +7291,7 @@ void port_gfx_run_task(void *taskPtr) {
     }
     native_tris_take();
 #endif
+    dying_reclaim(FALSE);
     prewarm_textures();
     forget_all_loads();
     sLightOn = FALSE;

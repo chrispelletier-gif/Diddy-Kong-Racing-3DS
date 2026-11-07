@@ -285,9 +285,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // v32: the profiler's own costs, found by v31's slowest-frame line: its readout and log lines run after the frame
     // is built (DKR_PROF_IDLE_LOG; they took ~8 ms after the frame's end every 4th second), and the GPU timeline's
     // frame cut by kind is off (DKR_GPU_KINDS; 24 of #456's 53 renderer hitches were on it). Raced the v31 way.
-    { "sound players on the game core (old)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 1 },
-    { "profiler as in v31 (old)", { "DKR_PROF_IDLE_LOG", NULL, NULL }, 1, 0, 1, 1 },
-    { "GPU timed by kind every 2 s (old)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 1 },
+    // Bench #457 (v32): all three kept (worst GPU frame 35-50 -> 24-27 ms without the kind cuts; the sound players
+    // on core 1 take 0.6 ms a frame off the game core, fps even), so their rows went.
+    // v33: a texture freed at a frame's start (objects' textures mid-race, stale ones at loads) goes through the
+    // backend's queue instead of the walk waiting for the backend to catch up (DKR_TEX_FREE_QUEUE): half of #457's
+    // Whale Bay hitches after the start had such a free in the frame (renderer 49-54 ms). Raced the old way.
+    { "texture frees wait for the renderer (old)", { "DKR_TEX_FREE_QUEUE", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

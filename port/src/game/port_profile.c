@@ -830,6 +830,144 @@ static void show_monitor_page(void) {
     plat_overlay_show(text);
 }
 
+/* v33: the log lines after the renderer parts line (draw mix, sections, sound players; then objects, renderer
+ * lines), in two steps: with DKR_PROF_IDLE_LOG each is one frame's BUILT mark, as all of them at once took ~8 ms of
+ * a busy frame's idle time on an Old 3DS (bench #457: 4 game-thread hitches still on the log). */
+static u32 sLogFrames;
+static double sLogPerFrame[PROF_PART_COUNT];
+static s32 sLogWalkTimed, sLogBackendTimed, sLogStep;
+static void log_rest(int step) {
+    u32 frames = sLogFrames;
+    double *perFrame = sLogPerFrame;
+    s32 walkTimed = sLogWalkTimed, backendTimed = sLogBackendTimed;
+    if (frames > 0) {
+        char line[1024];
+        if (step == 1) {
+                prof_format_draw_mix(&sSecondMix, &sSecondScene, line, sizeof(line));
+                port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
+                if (sSecFrames > 0) {
+                    s32 k, n = 0;
+                    u32 secFrames = sSecFrames;
+                    unsigned long long total = 0;
+                    for (k = 0; k < PORT_SEC_COUNT; k++) {
+                        total += sSecNs[k];
+                    }
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
+                        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", k ? ", " : "", sSecNames[k],
+                                      sSecNs[k] / 1e6 / sSecFrames);
+                        sSecNs[k] = 0;
+                    }
+                    port_log("game core sections a frame (ms, %.2f in all): %s", total / 1e6 / sSecFrames, line);
+                    n = 0;
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
+                        if (sSecOtherSumNs[k] >= 50000ULL * secFrames) {
+                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
+                                               sSecOtherSumNs[k] / 1e6 / secFrames);
+                        }
+                        sSecOtherSumNs[k] = 0;
+                    }
+                    port_log("of which the renderer's walk and the sound players on the game's core (ms a frame, 0.05 "
+                             "or more): %s", n ? line : "none");
+                    sSecFrames = 0;
+                    n = 0;
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 48; k++) {
+                        if (sSecWorstNs[k] >= 50000) {
+                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
+                                               sSecWorstNs[k] / 1e6);
+                            if (sSecWorstOtherNs[k] >= 50000) {
+                                n += plat_snprintf(line + n, sizeof(line) - n, " (%.2f walk/sound)",
+                                                   sSecWorstOtherNs[k] / 1e6);
+                            }
+                        }
+                    }
+                    port_log("slowest frame's sections (ms, %.2f in all; 0.05 ms or more; in brackets what the "
+                             "renderer's walk and the sound players took of it on the game's core): %s",
+                             sSecWorstTotal / 1e6, line);
+                    sSecWorstTotal = 0;
+                    __builtin_memset(sSecWorstNs, 0, sizeof(sSecWorstNs));
+                    {
+                        static unsigned long long sLastPlayersNs;
+                        static unsigned int sLastPlayersFrames;
+                        unsigned long long ns = gPortSoundPlayersNs;
+                        unsigned int count = gPortSoundPlayersFrames;
+                        if (count != sLastPlayersFrames) {
+                            port_log("sound players: %.2f ms a game frame, %.3f ms each of %u (their thread on core %d)",
+                                     (ns - sLastPlayersNs) / 1e6 / secFrames,
+                                     (ns - sLastPlayersNs) / 1e6 / (count - sLastPlayersFrames),
+                                     count - sLastPlayersFrames, gPortSoundPlayersCore);
+                        }
+                        sLastPlayersNs = ns;
+                        sLastPlayersFrames = count;
+                    }
+                }
+        } else {
+                prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
+                port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
+                {
+                    unsigned long rejected, rejectedTris;
+                    gfx_walk_reject_take(&rejected, &rejectedTris);
+                    if (rejected > 0) {
+                        port_log("walk: %lu commands (%lu triangles) a frame dropped wholly off the screen",
+                                 rejected / frames, rejectedTris / frames);
+                    }
+                }
+                {
+                    unsigned long drawn, declined;
+                    gfx_native_mesh_take(&drawn, &declined);
+                    if (drawn + declined > 0) {
+                        port_log("native meshes (DKR_NATIVE_MESH): %lu batches a frame drawn natively, %lu left to the walk",
+                                 drawn / frames, declined / frames);
+                    }
+                }
+                {
+                    unsigned long atlas[3];
+                    if (gfx_atlas_take(atlas)) {
+                        port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
+                                 "%lu page sets started again", atlas[0] / frames, atlas[1], atlas[2]);
+                    }
+                }
+                if (gfx_split_active()) {
+                    unsigned long long walkWait, busy;
+                    unsigned int backendFrames, wakes;
+                    gfx_split_take_times(&walkWait, &busy, &backendFrames, &wakes);
+                    port_log("two-core renderer: backend busy %.2f ms a frame, woken %.1f times a frame; the walk "
+                             "waited %.2f ms a frame for it",
+                             backendFrames ? busy / 1e6 / backendFrames : 0.0,
+                             backendFrames ? (double) wakes / backendFrames : 0.0, walkWait / 1e6 / frames);
+                }
+        }
+    }
+    if (step == 2) {
+            // The frame end's waits are shown apart from its work.
+            perFrame[PROF_PART_WALK_FRAMEEND] -=
+                perFrame[PROF_PART_END_GPU_WAIT] + perFrame[PROF_PART_PRESENT_WAIT];
+            if (perFrame[PROF_PART_WALK_FRAMEEND] < 0.0) {
+                perFrame[PROF_PART_WALK_FRAMEEND] = 0.0;
+            }
+            if (!walkTimed) {
+                port_log("%s: not timed in parts (DKR_WALK_PARTS=0%s), waits at the frame end: GPU %.2f, screen "
+                         "%.2f ms, timer %.2f ms taken out",
+                         backendTimed ? "display list walk" : "renderer parts",
+                         backendTimed ? "" : ", DKR_DRAW_PARTS=0", perFrame[PROF_PART_END_GPU_WAIT],
+                         perFrame[PROF_PART_PRESENT_WAIT], perFrame[PROF_PART_WALK_TIMER]);
+            } else {
+                port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
+                         "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
+                         "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
+                         perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
+                             perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
+                             perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
+                             perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
+                         perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
+                         perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
+                         perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
+                         perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
+                         perFrame[PROF_PART_WALK_TIMER]);
+            }
+    }
+}
+
 static void show_overlay(void) {
     ProfStats s;
     u32 slow, i;
@@ -946,126 +1084,15 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
-            if (frames > 0) {
-                char line[1024];
-                prof_format_draw_mix(&sSecondMix, &sSecondScene, line, sizeof(line));
-                port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
-                if (sSecFrames > 0) {
-                    s32 k, n = 0;
-                    u32 secFrames = sSecFrames;
-                    unsigned long long total = 0;
-                    for (k = 0; k < PORT_SEC_COUNT; k++) {
-                        total += sSecNs[k];
-                    }
-                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
-                        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", k ? ", " : "", sSecNames[k],
-                                      sSecNs[k] / 1e6 / sSecFrames);
-                        sSecNs[k] = 0;
-                    }
-                    port_log("game core sections a frame (ms, %.2f in all): %s", total / 1e6 / sSecFrames, line);
-                    n = 0;
-                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
-                        if (sSecOtherSumNs[k] >= 50000ULL * secFrames) {
-                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
-                                               sSecOtherSumNs[k] / 1e6 / secFrames);
-                        }
-                        sSecOtherSumNs[k] = 0;
-                    }
-                    port_log("of which the renderer's walk and the sound players on the game's core (ms a frame, 0.05 "
-                             "or more): %s", n ? line : "none");
-                    sSecFrames = 0;
-                    n = 0;
-                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 48; k++) {
-                        if (sSecWorstNs[k] >= 50000) {
-                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
-                                               sSecWorstNs[k] / 1e6);
-                            if (sSecWorstOtherNs[k] >= 50000) {
-                                n += plat_snprintf(line + n, sizeof(line) - n, " (%.2f walk/sound)",
-                                                   sSecWorstOtherNs[k] / 1e6);
-                            }
-                        }
-                    }
-                    port_log("slowest frame's sections (ms, %.2f in all; 0.05 ms or more; in brackets what the "
-                             "renderer's walk and the sound players took of it on the game's core): %s",
-                             sSecWorstTotal / 1e6, line);
-                    sSecWorstTotal = 0;
-                    __builtin_memset(sSecWorstNs, 0, sizeof(sSecWorstNs));
-                    {
-                        static unsigned long long sLastPlayersNs;
-                        static unsigned int sLastPlayersFrames;
-                        unsigned long long ns = gPortSoundPlayersNs;
-                        unsigned int count = gPortSoundPlayersFrames;
-                        if (count != sLastPlayersFrames) {
-                            port_log("sound players: %.2f ms a game frame, %.3f ms each of %u (their thread on core %d)",
-                                     (ns - sLastPlayersNs) / 1e6 / secFrames,
-                                     (ns - sLastPlayersNs) / 1e6 / (count - sLastPlayersFrames),
-                                     count - sLastPlayersFrames, gPortSoundPlayersCore);
-                        }
-                        sLastPlayersNs = ns;
-                        sLastPlayersFrames = count;
-                    }
-                }
-                prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
-                port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
-                {
-                    unsigned long rejected, rejectedTris;
-                    gfx_walk_reject_take(&rejected, &rejectedTris);
-                    if (rejected > 0) {
-                        port_log("walk: %lu commands (%lu triangles) a frame dropped wholly off the screen",
-                                 rejected / frames, rejectedTris / frames);
-                    }
-                }
-                {
-                    unsigned long drawn, declined;
-                    gfx_native_mesh_take(&drawn, &declined);
-                    if (drawn + declined > 0) {
-                        port_log("native meshes (DKR_NATIVE_MESH): %lu batches a frame drawn natively, %lu left to the walk",
-                                 drawn / frames, declined / frames);
-                    }
-                }
-                {
-                    unsigned long atlas[3];
-                    if (gfx_atlas_take(atlas)) {
-                        port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
-                                 "%lu page sets started again", atlas[0] / frames, atlas[1], atlas[2]);
-                    }
-                }
-                if (gfx_split_active()) {
-                    unsigned long long walkWait, busy;
-                    unsigned int backendFrames, wakes;
-                    gfx_split_take_times(&walkWait, &busy, &backendFrames, &wakes);
-                    port_log("two-core renderer: backend busy %.2f ms a frame, woken %.1f times a frame; the walk "
-                             "waited %.2f ms a frame for it",
-                             backendFrames ? busy / 1e6 / backendFrames : 0.0,
-                             backendFrames ? (double) wakes / backendFrames : 0.0, walkWait / 1e6 / frames);
-                }
-            }
-            // The frame end's waits are shown apart from its work.
-            perFrame[PROF_PART_WALK_FRAMEEND] -=
-                perFrame[PROF_PART_END_GPU_WAIT] + perFrame[PROF_PART_PRESENT_WAIT];
-            if (perFrame[PROF_PART_WALK_FRAMEEND] < 0.0) {
-                perFrame[PROF_PART_WALK_FRAMEEND] = 0.0;
-            }
-            if (!walkTimed) {
-                port_log("%s: not timed in parts (DKR_WALK_PARTS=0%s), waits at the frame end: GPU %.2f, screen "
-                         "%.2f ms, timer %.2f ms taken out",
-                         backendTimed ? "display list walk" : "renderer parts",
-                         backendTimed ? "" : ", DKR_DRAW_PARTS=0", perFrame[PROF_PART_END_GPU_WAIT],
-                         perFrame[PROF_PART_PRESENT_WAIT], perFrame[PROF_PART_WALK_TIMER]);
+            sLogFrames = frames;
+            __builtin_memcpy(sLogPerFrame, perFrame, sizeof(sLogPerFrame));
+            sLogWalkTimed = walkTimed;
+            sLogBackendTimed = backendTimed;
+            if (sIdleLog > 0) {
+                sLogStep = 1; // The next frames' BUILT marks
             } else {
-                port_log("display list walk: %.2f ms (commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
-                         "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f), waits at the frame "
-                         "end: GPU %.2f, screen %.2f ms, timer %.2f ms taken out",
-                         perFrame[PROF_PART_WALK_COMMANDS] + perFrame[PROF_PART_WALK_MATRICES] +
-                             perFrame[PROF_PART_WALK_VERTICES] + perFrame[PROF_PART_WALK_TRIANGLES] +
-                             perFrame[PROF_PART_WALK_RECTS] + perFrame[PROF_PART_WALK_DRAWSTATE] +
-                             perFrame[PROF_PART_WALK_TEXTURES] + perFrame[PROF_PART_WALK_FRAMEEND],
-                         perFrame[PROF_PART_WALK_COMMANDS], perFrame[PROF_PART_WALK_MATRICES],
-                         perFrame[PROF_PART_WALK_VERTICES], perFrame[PROF_PART_WALK_TRIANGLES],
-                         perFrame[PROF_PART_WALK_RECTS], perFrame[PROF_PART_WALK_DRAWSTATE],
-                         perFrame[PROF_PART_WALK_TEXTURES], perFrame[PROF_PART_WALK_FRAMEEND],
-                         perFrame[PROF_PART_END_GPU_WAIT], perFrame[PROF_PART_PRESENT_WAIT],
-                         perFrame[PROF_PART_WALK_TIMER]);
+                log_rest(1);
+                log_rest(2);
             }
         }
     }
@@ -1186,6 +1213,12 @@ void prof_game_mark(int mark, int updateRate) {
                 show_overlay();
                 port_game_section(PORT_SEC_RWAIT);
                 sMarkNs[PROF_MARK_BUILT] = plat_time_ns(); // The waits after it are timed without it
+            } else if (sLogStep != 0) {
+                port_game_section(PORT_SEC_PROFILER);
+                log_rest(sLogStep);
+                sLogStep = sLogStep == 1 ? 2 : 0;
+                port_game_section(PORT_SEC_RWAIT);
+                sMarkNs[PROF_MARK_BUILT] = plat_time_ns();
             }
             break;
         }
