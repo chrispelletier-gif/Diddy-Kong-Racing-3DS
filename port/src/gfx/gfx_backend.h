@@ -263,6 +263,7 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
  * out (the switch bench's cost rows).
  */
 #define GFX_KIND_CUT 0x100
+#define GFX_KIND_DRAWS 0x200 /* 3: this frame is timed draw by draw (gpu_cuts.inc section 6), told its kinds */
 int gfxb_gpu_kinds_frame(int frame);
 void gfxb_gpu_kind(int kind);
 void gfxb_gpu_kind_call(void *payload);

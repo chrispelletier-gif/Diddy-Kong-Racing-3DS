@@ -35,6 +35,10 @@ static u32 sTlExpected;               // Jobs in the frame's queue (timeline_exp
 static int sTimeline = -1;            // DKR_GPU_TIMELINE
 static unsigned int sTexClearsKept, sTexClearsDropped; // Section 4's (DKR_TEX_CACHE_KEEP)
 static unsigned int sColourFills, sColourDrawn, sColourProbes; // Section 2's (DKR_COLOUR_FILL)
+// Clears drawn rather than filled (round 4, to see which they are): colour clears not the frame's first draw / not the
+// full height / too narrow a band / a new colour while a probe is out; depth clears over the whole screen after a draw
+// / over part of it.
+static unsigned int sFillNo[4], sDepthDrawnWhole, sDepthDrawnPart;
 static int sGpuKinds = -1;            // DKR_GPU_KINDS
 static unsigned int sInvisibleSkipped; // Section 5's (DKR_SKIP_INVISIBLE)
 /* Section 6's (DKR_GPU_DRAWS): a frame whose command list is cut after each of a window of draws. */
@@ -45,11 +49,14 @@ typedef struct DrawDesc {
     u8 fmt, levels;          // tex0's GPU format (GPU_TEXCOLOR) and mipmap levels
     u8 kind, blend, depth, alphaTest, fog, cycles, flat, path; // depth: test | write << 1; path: 0 indexed, 1 model, 2 meshes
     u16 tris;
+    u16 idx; // The draw's place in the frame (not part of the key: the lowest seen is kept)
 } DrawDesc;
 static int sDpFrame[2], sDpParts[2], sDpIndex, sDpStart, sDpCount;
 static unsigned int sDpFrames; // Frames timed by draw since the last log line
 static DrawDesc sDpPart[2][MAX_LIST_PARTS + 1], sDpPrev;
 static void dp_take(int slot, int part, u64 ticks);
+static int dp_wanted(int frame);
+static void dp_arm(void);
 static void dp_log(void);
 
 /* This frame's command list is cut by kind (gfxb_gpu_kind), and each part's kind, for the slot it is built in. */
@@ -151,8 +158,12 @@ static void PLAT_COLD timeline_log(void) {
     }
     dp_log();
     plat_log("GPU cuts: colour clear filled %u times (edges drawn %u, colours read back %u), texture cache clears %u "
-             "kept, %u taken out, %u draws left out (they couldn't change a pixel)", sColourFills, sColourDrawn,
-             sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped);
+             "kept, %u taken out, %u draws left out (they couldn't change a pixel); clears drawn: colour %u after a draw, "
+             "%u not the full height, %u too narrow, %u a new colour waiting; depth %u whole screen after a draw, %u part "
+             "of it", sColourFills, sColourDrawn, sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped,
+             sFillNo[0], sFillNo[1], sFillNo[2], sFillNo[3], sDepthDrawnWhole, sDepthDrawnPart);
+    memset(sFillNo, 0, sizeof(sFillNo));
+    sDepthDrawnWhole = sDepthDrawnPart = 0;
     sColourFills = sColourDrawn = sColourProbes = sTexClearsKept = sTexClearsDropped = sInvisibleSkipped = 0;
     sTlFillTicks = sTlListTicks = sTlCopyTicks = sTlOtherTicks = sTlWholeTicks = 0;
     sTlFrames = sTlJobs = 0;
@@ -248,6 +259,9 @@ int gfxb_gpu_kinds_frame(int frame) {
     if (sGpuKinds && sTimeline && !sStereo && prof_recording() && frame % GPU_KIND_EVERY == GPU_KIND_EVERY / 2) {
         return 2;
     }
+    if (dp_wanted(frame)) {
+        return 3; // Timed draw by draw (section 6), told each kind so its list names them
+    }
     return sSkipKinds != 0;
 }
 
@@ -259,6 +273,9 @@ void gfxb_gpu_kind(int value) {
     FrameSlot *slot = &sSlots[sRec];
     int kind = value & 0xFF;
     sKindCur = kind;
+    if (value & GFX_KIND_DRAWS) {
+        dp_arm(); // The frame's first kind (sent before any draw) starts it
+    }
     if (!(value & GFX_KIND_CUT)) {
         return;
     }
@@ -375,12 +392,16 @@ static int colour_fill(const short rect[4], u32 rgba) {
     if (sColourFill < 0) {
         sColourFill = colour_fill_setting();
     }
-    if (!sColourFill || !sFrameFirstDraw || sStereo || sOnceFrame || sClearing || sNumSlots < 1 ||
-        sTarget->frameBuf.colorFmt != GPU_RB_RGBA8) {
+    if (!sColourFill || sStereo || sOnceFrame || sClearing || sNumSlots < 1 || sTarget->frameBuf.colorFmt != GPU_RB_RGBA8) {
+        return 0;
+    }
+    if (!sFrameFirstDraw) {
+        sFillNo[0]++;
         return 0;
     }
     // Across the target (the screen's height): the whole of it, but for the bottom row the game leaves out.
     if (rect[1] > 0 || rect[3] < GFX_SCREEN_HEIGHT - 1) {
+        sFillNo[1]++;
         return 0;
     }
     // Along it (the screen's width): the clear's lines, from its triangles and its scissor (set_scissor's sums).
@@ -413,6 +434,7 @@ static int colour_fill(const short rect[4], u32 rgba) {
         to = lines - from;
     }
     if (to - from < 16) {
+        sFillNo[2]++;
         return 0;
     }
     key = rgba;
@@ -421,6 +443,7 @@ static int colour_fill(const short rect[4], u32 rgba) {
         // The probe: drawn as before, and one tile of it read back once the frame is done.
         FrameSlot *slot = &sSlots[sRec];
         if (sProbe[sRec].after >= 0 || slot->numParts >= MAX_LIST_PARTS - 2) {
+            sFillNo[3]++;
             return 0;
         }
         if (sProbeTile[sRec] == NULL) {
@@ -683,7 +706,7 @@ static inline int skip_invisible(const GfxDrawState *state) {
 #define GPU_DRAW_EVERY 60
 #define DP_KEYS 96
 static int sGpuDraws = -1; // DKR_GPU_DRAWS
-static unsigned int sDpFrameNo;
+static int sDpArmed;
 static struct {
     DrawDesc d;
     u64 ticks;
@@ -694,16 +717,27 @@ static int sDpKeysUsed;
 static unsigned long long sDpTicksAll;
 static unsigned int sDpTimed;
 
-/* Backend, frame start: whether this frame is timed by draw. */
-static void dp_frame_start(void) {
-    int i;
+/* Walk: whether this frame is timed by draw (the walk then tells the backend, gfxb_gpu_kind with GFX_KIND_DRAWS). */
+static int dp_wanted(int frame) {
     if (__builtin_expect(sGpuDraws < 0, 0)) {
         sGpuDraws = plat_switch("DKR_GPU_DRAWS", !plat_old_3ds()) != 0;
     }
+    return sGpuDraws && sTimeline && !sStereo && frame % GPU_DRAW_EVERY == 0 && prof_recording();
+}
+
+/* Backend, frame start: not timed by draw unless the walk says so. */
+static void dp_frame_start(void) {
     sDpFrame[sRec] = 0;
-    if (++sDpFrameNo % GPU_DRAW_EVERY != 0 || !sGpuDraws || !sTimeline || sStereo || !prof_recording()) {
+    sDpArmed = 0;
+}
+
+/* Backend, the frame's first kind told with GFX_KIND_DRAWS (before its first draw): this frame is timed by draw. */
+static void dp_arm(void) {
+    int i;
+    if (sDpArmed || sKindFrame[sRec] || sStereo) {
         return;
     }
+    sDpArmed = 1;
     sDpFrame[sRec] = 1;
     sDpParts[sRec] = MAX_LIST_PARTS + 1;
     for (i = 0; i <= MAX_LIST_PARTS; i++) {
@@ -734,8 +768,9 @@ static void dp_describe(DrawDesc *d, const GfxDrawState *st, int tris, int path)
     d->fog = st->fogEnabled;
     d->cycles = st->combiner.numCycles;
     d->flat = st->flat;
-    d->path = (u8) path;
+    d->path = (u8) (sClearing ? (sDepthOnly ? 4 : 3) : path); // 3, 4: a colour or depth clear drawn
     d->tris = (u16) (tris > 65535 ? 65535 : tris);
+    d->idx = (u16) (sDpIndex - 1); // dp_draw counted it already
 }
 
 /* Backend, at a draw's start (after it is known to be drawn): in the window, the list is cut before it, so the part
@@ -815,6 +850,8 @@ static void dp_take(int slot, int part, u64 ticks) {
         }
         sDpKeys[i].d = *d;
         sDpKeys[i].ticks = 0;
+    } else if (d->idx < sDpKeys[i].d.idx) {
+        sDpKeys[i].d.idx = d->idx;
         sDpKeys[i].count = 0;
         sDpKeys[i].tris = 0;
     }
@@ -835,7 +872,8 @@ static void PLAT_COLD dp_log(void) {
     // frames in which its index was in the window.
     perFrame = (double) sDpCount / DP_WINDOW;
     plat_log("GPU draws (%u frames timed by draw, %u draws timed, %.2f ms of GPU in them; about %d draws a frame): the "
-             "costliest, ms a frame (est.) / ms each, how many, triangles each, texture, settings:",
+             "costliest, ms a frame (est.) / ms each, how many, triangles each, kind and first place in the frame, "
+             "texture, settings:",
              sDpFrames, sDpTimed, ticks_ms(sDpTicksAll), sDpCount);
     for (shown = 0; shown < 14 && sDpKeysUsed > 0; shown++) {
         int best = 0;
@@ -847,15 +885,20 @@ static void PLAT_COLD dp_log(void) {
         {
             const DrawDesc *d = &sDpKeys[best].d;
             double each = ticks_ms(sDpKeys[best].ticks) / sDpKeys[best].count;
-            plat_log("  %.3f / %.3f ms x%u, %lu tris, %s: tex %dx%d %s%s mips %d, blend %d depth %s alpha test %d fog %d "
-                     "cycles %d flat %d %s",
+            plat_log("  %.3f / %.3f ms x%u, %lu tris, %s #%d: tex %dx%d %s%s mips %d, blend %d depth %s alpha test %d "
+                     "fog %d cycles %d flat %d %s",
                      ticks_ms(sDpKeys[best].ticks) / sDpFrames * perFrame, each, sDpKeys[best].count,
                      sDpKeys[best].tris / sDpKeys[best].count, d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?",
+                     d->idx,
                      d->w, d->h, d->tex0 != NULL && d->fmt < 14 ? sFmt[d->fmt] : "none", d->tex1 != NULL ? " +2nd" : "",
                      d->levels, d->blend,
                      d->depth == 3 ? "test+write" : d->depth == 1 ? "test" : d->depth == 2 ? "write" : "off",
                      d->alphaTest, d->fog, d->cycles, d->flat,
-                     d->path == 0 ? "triangles" : d->path == 1 ? "model" : "meshes");
+                     d->path == 0   ? "triangles"
+                     : d->path == 1 ? "model"
+                     : d->path == 2 ? "meshes"
+                     : d->path == 3 ? "COLOUR CLEAR drawn"
+                                    : "DEPTH CLEAR drawn");
         }
         sDpKeys[best].ticks = 0; // Shown (the table is emptied below)
     }

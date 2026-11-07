@@ -6387,5 +6387,10 @@ void gfxb_clear_depth(const short rect[4]) {
         }
         return;
     }
+    if (rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 && rect[3] >= GFX_SCREEN_HEIGHT - 1) {
+        sDepthDrawnWhole++; // gpu_cuts.inc's count
+    } else {
+        sDepthDrawnPart++;
+    }
     draw_clear_rect(rect, 0, 1);
 }
