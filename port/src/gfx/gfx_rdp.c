@@ -4092,27 +4092,26 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
 #define NATIVE_MAX_LOADS 4
 
 typedef struct NativeMesh {
+    // v29: what a lookup reads first, in one cache line (the table is lined up on lines, NativeMesh is 96 bytes)
     const Triangle *tris; // The game's triangles (the key); NULL: unused
-    Triangle *copy;       // What they held when the tables were made
     u16 numTris, numCorners;
-    u16 capTris;    // The triangles its tables have room for
+    u16 capTris;      // The triangles its tables have room for
+    u8 maxVertex;     // The highest vertex number used
+    u8 usable;        // Fits the tables (corners)
     u32 checkedFrame; // The frame its triangles were last compared in (DKR_NATIVE_ONCE)
-    u8 maxVertex;   // The highest vertex number used
-    u8 usable;      // Fits the tables (corners)
-    u32 shared;     // v29 DKR_REMOTE_SHARE: sShareEpoch when the backend was last handed these tables themselves
-    u8 changes;     // v29: tables changed in place after being made (copied to the backend from then on)
-    u16 trisSeen;   // v29 DKR_TRIS_SKIP: gPortTrisCount of its slot when its triangles were last compared
-    u32 trisLoads;  // gPortLevelLoads then (0: not compared that way)
-    u32 trisEpoch;  // gPortTrisEpoch then
-    s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
+    u32 trisStamp;    // v29 DKR_TRIS_SKIP: sTrisValid when its triangles were last compared as unchanged by the game
+    u32 shared;       // v29 DKR_REMOTE_SHARE: sShareEpoch when the backend was last handed these tables themselves
+    u8 changes;       // v29: tables changed in place after being made (copied to the backend from then on)
+    u32 *cornerUv;    // As TexCoords.texCoords
+    u16 *triCorners;  // Three a triangle
     u8 *cornerVertex;
-    u32 *cornerUv;  // As TexCoords.texCoords
-    u16 *triCorners; // Three a triangle
-    u8 *backface;    // Each triangle's BACKFACE_DRAW flag (DKR_NATIVE_REMOTE copies these)
+    u8 *backface;     // Each triangle's BACKFACE_DRAW flag (DKR_NATIVE_REMOTE copies these)
+    Triangle *copy;   // What they held when the tables were made
+    s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
     const Vertex *boxSrc; // DKR_TRI_REJECT: the vertices boxMin/boxMax were taken from (the track's don't move)
     u32 boxLoads;         // gPortLevelLoads then
     s16 boxMin[3], boxMax[3];
-} NativeMesh;
+} __attribute__((aligned(32))) NativeMesh;
 
 static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
 _Static_assert(NATIVE_TABLE_SIZE == 2048 && NATIVE_POOL_BYTES == 640 * 1024, "read_switches sets the limits from these");
@@ -4324,11 +4323,52 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
 }
 
 /* The tables of these triangles, made if need be; NULL if they can't be. */
-volatile unsigned short gPortTrisCount[PORT_TRIS_SLOTS];
-volatile unsigned int gPortTrisEpoch;
+const void *volatile gPortTrisRing[PORT_TRIS_RING];
+volatile unsigned int gPortTrisHead, gPortTrisEpoch;
+static u32 sTrisTail, sTrisValid = 1, sTrisLevel, sTrisEpochSeen;
+
+static void native_tris_mark(const Triangle *tris);
+
+/* v29 (DKR_TRIS_SKIP), at the start of each frame: the batches the game has changed since (port_tris_changed) are
+ * compared at their next draw; another level, a freed model or more changes than the ring holds has all compared. */
+static NOINLINE void native_tris_take(void) {
+    u32 head = gPortTrisHead, start = sTrisTail;
+    __sync_synchronize(); // The head before its entries
+    if (sTrisLevel != gPortLevelLoads || sTrisEpochSeen != gPortTrisEpoch || head - start > PORT_TRIS_RING) {
+        sTrisLevel = gPortLevelLoads;
+        sTrisEpochSeen = gPortTrisEpoch;
+        sTrisValid++;
+        sTrisTail = head;
+        return;
+    }
+    while (sTrisTail != head) {
+        native_tris_mark((const Triangle *) gPortTrisRing[sTrisTail % PORT_TRIS_RING]);
+        sTrisTail++;
+    }
+    __sync_synchronize();
+    if (gPortTrisHead - start > PORT_TRIS_RING) {
+        sTrisValid++; // Entries were written over while being read
+    }
+}
 
 /* track: a level or model batch (not made anew each frame), whose triangles only the game code that calls
  * port_tris_changed changes in place. */
+/* Has every mesh kept for these triangles (any count) compared at its next draw. */
+static void native_tris_mark(const Triangle *tris) {
+    u32 h = sNativeHashHigh ? (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11)
+                            : (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1),
+        probes;
+    for (probes = 0; probes < NATIVE_TABLE_SIZE; probes++) {
+        NativeMesh *e = &sNativeMeshes[(h + probes) & (NATIVE_TABLE_SIZE - 1)];
+        if (e->tris == NULL) {
+            break;
+        }
+        if (e->tris == tris) {
+            e->trisStamp = 0;
+        }
+    }
+}
+
 static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic, s32 track) {
     // v29 (DKR_NATIVE_HASH=0: the old low bits): triangle lists are 16-byte aligned, so the product's low bits only
     // ever started a search in a quarter of the table; its top bits are spread over all of it.
@@ -4358,14 +4398,12 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
                 // the same kart part twice) compares its triangles once.
                 return e->usable ? e : NULL;
             }
-            u32 seen = 0;
             s32 skip = 0;
             if (track && sTrisSkip) {
-                // v29 (DKR_TRIS_SKIP): unchanged since its last comparison unless its slot's count moved. Every 64th
-                // frame in turn it is compared anyway, which counts any change made without the count (sTrisMissed).
-                seen = gPortTrisCount[port_tris_slot(tris)];
-                __sync_synchronize(); // The count before the triangles (port_tris_changed)
-                skip = e->trisLoads == gPortLevelLoads && e->trisEpoch == gPortTrisEpoch && e->trisSeen == (u16) seen;
+                // v29 (DKR_TRIS_SKIP): unchanged since its last comparison unless the game said it changed them
+                // (native_tris_take). Every 64th frame in turn they are compared anyway, which counts any change made
+                // without port_tris_changed (sTrisMissed).
+                skip = e->trisStamp == sTrisValid;
                 if (skip && sTrisSkip == 1 && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
                     e->checkedFrame = (u32) sFrameCount;
                     sTrisSkipped++;
@@ -4375,9 +4413,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
             if (sNMatFast ? native_tris_same(e->copy, tris, count)
                           : __builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
                 e->checkedFrame = (u32) sFrameCount;
-                e->trisSeen = (u16) seen;
-                e->trisLoads = track ? gPortLevelLoads : 0;
-                e->trisEpoch = gPortTrisEpoch;
+                e->trisStamp = track ? sTrisValid : 0;
                 return e->usable ? e : NULL;
             }
             if (skip) {
@@ -4388,9 +4424,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
                 }
             }
             e->checkedFrame = (u32) sFrameCount;
-            e->trisSeen = (u16) seen;
-            e->trisLoads = track ? gPortLevelLoads : 0;
-            e->trisEpoch = gPortTrisEpoch;
+            e->trisStamp = track ? sTrisValid : 0;
             if (sNMatFast && e->copy != NULL && native_uv_update(e, tris, count)) {
                 return e->usable ? e : NULL;
             }
@@ -7126,6 +7160,7 @@ void port_gfx_run_task(void *taskPtr) {
         }
         native_remote_take();
     }
+    native_tris_take();
 #endif
     prewarm_textures();
     forget_all_loads();

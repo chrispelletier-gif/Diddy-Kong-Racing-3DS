@@ -83,18 +83,18 @@ int port_native_material_here(Gfx **dl, const void *key, int keyFlags);
 int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
                           const void *tris, int numTris);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
-/* v29 (DKR_TRIS_SKIP): a count for each group of level triangle lists, which the game code that changes the level's
- * triangles in place (texture scrollers, animators) moves on after a batch's changes; the renderer compares a track
- * batch's triangles with its copy only when its count has moved (or in its turn, see native_find). */
-#define PORT_TRIS_SLOTS 4096
-extern volatile unsigned short gPortTrisCount[PORT_TRIS_SLOTS];
+/* v29 (DKR_TRIS_SKIP): the level and model triangle lists that game code changed in place (texture scrollers,
+ * animators, model UV maps) go in this ring after their changes, and the renderer compares those batches' triangles
+ * with its copies only then (see native_tris_take). Written by the game thread alone. */
+#define PORT_TRIS_RING 2048
+extern const void *volatile gPortTrisRing[PORT_TRIS_RING];
+extern volatile unsigned int gPortTrisHead;
 extern volatile unsigned int gPortTrisEpoch; /* Moved on when a model's memory is freed */
-static inline unsigned int port_tris_slot(const void *tris) {
-    return ((unsigned int) ((unsigned long) tris >> 4) * 2654435761u) >> 20;
-}
 static inline void port_tris_changed(const void *tris) {
-    __sync_synchronize(); // The triangles first
-    gPortTrisCount[port_tris_slot(tris)]++;
+    unsigned int head = gPortTrisHead;
+    gPortTrisRing[head % PORT_TRIS_RING] = tris;
+    __sync_synchronize(); // The triangles and the entry before the head
+    gPortTrisHead = head + 1;
 }
 struct Vertex;
 int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);
