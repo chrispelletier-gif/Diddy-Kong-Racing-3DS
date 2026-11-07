@@ -3041,12 +3041,13 @@ void port_autorun_frame(s32 updateRate) {
             progress = racer->courseCheckpoint;
             if (manual_now()) {
                 port_log("man t=%d v=%.2f roll=%d xrv=%d zrv=%d pitch=%d yaw=%d wheels=%d mask=%x yv=%.2f "
-                         "pos=%.1f,%.1f,%.1f buoy=%.2f",
+                         "pos=%.1f,%.1f,%.1f buoy=%.2f svr=%d yrv=%d lat=%.3f steer=%d",
                          (int) (sRaceRetraces - manual_start()), racer->velocity, (int) obj->trans.rotation.z_rotation,
                          (int) racer->x_rotation_vel, (int) racer->z_rotation_vel, (int) obj->trans.rotation.x_rotation,
                          (int) (u16) obj->trans.rotation.y_rotation, (int) racer->groundedWheels, (int) racer->unk1E3,
                          obj->y_velocity, obj->trans.x_position, obj->trans.y_position, obj->trans.z_position,
-                         racer->buoyancy);
+                         racer->buoyancy, (int) (u16) racer->steerVisualRotation, (int) racer->y_rotation_vel,
+                         racer->lateral_velocity, (int) racer->steerAngle);
             }
             {
                 // DKR_LOG_RACER: logs the kart's checkpoint, speed and place at each checkpoint and every half second,

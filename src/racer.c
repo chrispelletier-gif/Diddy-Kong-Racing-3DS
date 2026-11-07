@@ -5222,6 +5222,9 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
     f32 topSpeed;
     UNUSED s32 pad1;
     UNUSED s32 pad2;
+#ifdef TARGET_PORT
+    f32 slideStep; // 60 fps: this frame's slide from steering (see the grip below).
+#endif
 
     sp58 = FALSE;
     // Set the square value of the current forward velocity
@@ -5503,9 +5506,18 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
     // so a higher value means the character slides less.
     miscAsset = (f32 *) get_misc_asset(ASSET_MISC_8);
     // Degrade lateral velocity
+#ifdef TARGET_PORT
+    slideStep = 0.0f;
+#endif
     if (gCurrentPlayerIndex != PLAYER_COMPUTER) {
         if (!(racer->velocity > -2.0) && racer->drift_direction == 0 && !racer->raceFinished) {
-            racer->lateral_velocity += PORT_STEP((racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]); //!@Delta
+#ifdef TARGET_PORT
+            if (gPortHalfStep) {
+                // 60 fps: added below, once both grip factors are known (see there).
+                slideStep = (racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]; //!@Delta
+            } else
+#endif
+            racer->lateral_velocity += (racer->velocity * gCurrentStickX) / miscAsset[racer->characterId]; //!@Delta
             if (racer->playerIndex == PLAYER_COMPUTER) {
                 racer->lateral_velocity *= 0.9;
             }
@@ -5519,14 +5531,25 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
         gCurrentCarSteerVel *= tempVel;
         surfaceTraction = ((1.0 - tempVel) * 0.7) + (surfaceTraction * tempVel);
     }
-    // Multiply current velocity by the surface grip levels.
-    racer->lateral_velocity *= PORT_DECAY(surfaceTraction); //!@Delta
     velocityDiff = coss_f(racer->x_rotation_vel);
     if (velocityDiff < 0.0f) {
         velocityDiff = -velocityDiff;
     }
+#ifdef TARGET_PORT
+    if (gPortHalfStep) {
+        // 60 fps: the N64's frame adds the steering's slide and then keeps the grip's share of it, (v + a) * g. Two
+        // half steps of (v + b) * sqrt(g) match that only with b = a * sqrt(g) / (1 + sqrt(g)); half of a (what
+        // PORT_STEP gave) left karts sliding wider than on the N64, by 6 to 10 percent on normal grip. //!@Delta
+        f32 grip = sqrtf(surfaceTraction * velocityDiff);
+        racer->lateral_velocity = (racer->lateral_velocity + slideStep * grip / (1.0f + grip)) * grip;
+    } else
+#endif
+    {
+    // Multiply current velocity by the surface grip levels.
+    racer->lateral_velocity *= surfaceTraction; //!@Delta
     // Multiply lateral velocity by pitch
-    racer->lateral_velocity *= PORT_DECAY(velocityDiff); //!@Delta
+    racer->lateral_velocity *= velocityDiff; //!@Delta
+    }
     gCurrentSurfaceType = surfaceType;
     if (stoneWheels != 0) {
         miscAsset = (f32 *) get_misc_asset(ASSET_MISC_32);
@@ -6091,7 +6114,8 @@ void update_car_velocity_offground(Object *obj, Object_Racer *racer, s32 updateR
         angle = -racer->steerAngle;
         angle *= 6;
     }
-    racer->steerVisualRotation -= angle & 0xFFFF;
+    // At 60 fps this per-frame turn ran twice as often, so karts turned twice as sharply in the air as on the N64.
+    racer->steerVisualRotation -= PORT_HALF(angle) & 0xFFFF; //!@Delta
     gCurrentCarSteerVel = racer->unk110;
     if (racer->boostTimer) {
         if (racer->velocity > -20.0) {
