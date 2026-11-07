@@ -404,6 +404,23 @@ static void hub_progress(RaceHud *hud, Settings *settings, LevelModel *model) {
     }
 }
 
+/*
+ * A course record, or -1 when it is still the game's own placeholder (clear_lap_records fills each from a table: a
+ * course time of 3:00:00 and a lap of 1:00:00, so a plain "under three minutes" check showed the empty lap as a record).
+ */
+static s32 record_time(s32 vehicle, s32 level, s32 lap) {
+    Settings *settings = get_settings();
+    u16 *defaults = (u16 *) get_misc_asset(ASSET_MISC_23);
+    u16 time = lap ? settings->flapTimesPtr[vehicle][level] : settings->courseTimesPtr[vehicle][level];
+    if (time == 0 || time >= 10800) {
+        return -1;
+    }
+    if (defaults != NULL && time == defaults[level * 12 + vehicle * 4 + (lap ? 2 : 0)]) {
+        return -1;
+    }
+    return time;
+}
+
 /* Time trial: the course records, T.T., the ghosts, and how this run compares with the best one. */
 static void time_trial_progress(RaceHud *hud, Object_Racer *me, LevelModel *model) {
     Settings *settings = get_settings();
@@ -412,11 +429,8 @@ static void time_trial_progress(RaceHud *hud, Object_Racer *me, LevelModel *mode
     hud->record = hud->recordLap = hud->staffTime = -1;
     hud->bestGap = RACE_HUD_NO_GAP;
     if (vehicle >= 0 && vehicle < 3) {
-        u16 course = settings->courseTimesPtr[vehicle][settings->courseId];
-        u16 lap = settings->flapTimesPtr[vehicle][settings->courseId];
-        // 10800 (three minutes) and over is the empty record.
-        hud->record = course > 0 && course < 10800 ? course : -1;
-        hud->recordLap = lap > 0 && lap < 10800 ? lap : -1;
+        hud->record = record_time(vehicle, settings->courseId, FALSE);
+        hud->recordLap = record_time(vehicle, settings->courseId, TRUE);
     }
     if (timetrial_ghost_staff() != NULL) {
         hud->staffTime = gTTGhostTimeToBeat;
@@ -468,7 +482,6 @@ static s32 menu_companion(RaceHud *hud) {
             plat_snprintf(hud->name, sizeof(hud->name), "%.3s", name);
             return TRUE;
         case PORT_MENU_FOCUS_TRACK: {
-            Settings *settings = get_settings();
             char *trackName = level_name(level);
             *hud = sEmpty;
             hud->mode = RACE_HUD_MODE_MENU_TRACK;
@@ -477,10 +490,8 @@ static s32 menu_companion(RaceHud *hud) {
             hud->vehicle = vehicle;
             hud->record = hud->recordLap = hud->bestTotal = -1;
             if (vehicle >= 0 && vehicle < BEST_VEHICLES && level >= 0) {
-                u16 course = settings->courseTimesPtr[vehicle][level];
-                u16 lap = settings->flapTimesPtr[vehicle][level];
-                hud->record = course > 0 && course < 10800 ? course : -1;
-                hud->recordLap = lap > 0 && lap < 10800 ? lap : -1;
+                hud->record = record_time(vehicle, level, FALSE);
+                hud->recordLap = record_time(vehicle, level, TRUE);
                 if (level < BEST_LEVELS && sBestTotals[level][vehicle] > 0) {
                     hud->bestTotal = sBestTotals[level][vehicle];
                 }
