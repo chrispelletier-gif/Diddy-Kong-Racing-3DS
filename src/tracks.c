@@ -1360,6 +1360,56 @@ void track_tex_anim(s32 updateRate) {
     s32 temp;
 
     segment = gCurrentLevelModel->segments;
+#ifdef TARGET_PORT
+    // v29: the batches with animated textures, found once per level (a scan of every batch of the level each frame
+    // was a cache miss per batch on the Old 3DS). A level batch's RENDER_TEX_ANIM and texture never change; the
+    // same batches in the same order. DKR_TEXANIM_OLD=1 scans every frame as before.
+    if (!plat_switch("DKR_TEXANIM_OLD", 0)) {
+#define TEXANIM_MAX 512
+        static TriangleBatchInfo *sAnim[TEXANIM_MAX];
+        static s32 sAnimCount = -1;
+        static LevelModel *sAnimModel;
+        static unsigned int sAnimLevel;
+        s32 n;
+        if (sAnimModel != gCurrentLevelModel || sAnimLevel != gPortLevelLoads) {
+            sAnimModel = gCurrentLevelModel;
+            sAnimLevel = gPortLevelLoads;
+            n = 0;
+            for (segmentNumber = 0; segmentNumber < gCurrentLevelModel->numberOfSegments && n >= 0; segmentNumber++) {
+                batch = segment[segmentNumber].batches;
+                for (batchNumber = 0; batchNumber < segment[segmentNumber].numberOfBatches; batchNumber++) {
+                    if ((batch[batchNumber].flags & RENDER_TEX_ANIM) && batch[batchNumber].textureIndex != 0xFF) {
+                        if (n == TEXANIM_MAX) {
+                            n = -1;
+                            break;
+                        }
+                        sAnim[n++] = &batch[batchNumber];
+                    }
+                }
+            }
+            sAnimCount = n;
+        }
+        if (sAnimCount >= 0) {
+            for (n = 0; n < sAnimCount; n++) {
+                TriangleBatchInfo *b = sAnim[n];
+                texture = gCurrentLevelModel->textures[b->textureIndex].texture;
+                if (texture->numOfTextures != 0x100 && texture->frameAdvanceDelay) {
+                    temp = b->texOffset << 6;
+                    if (b->flags & RENDER_UNK_80000000) {
+                        temp |= b->miscData;
+                        tex_animate_texture(texture, &b->flags, &temp, updateRate);
+                        b->miscData = temp & 0x3F;
+                    } else {
+                        tex_animate_texture(texture, &b->flags, &temp, updateRate);
+                    }
+                    b->texOffset = (temp >> 6) & 0xFF;
+                }
+            }
+            return;
+        }
+#undef TEXANIM_MAX
+    }
+#endif
     for (segmentNumber = 0; segmentNumber < gCurrentLevelModel->numberOfSegments; segmentNumber++) {
         batch = segment[segmentNumber].batches;
         for (batchNumber = 0; batchNumber < segment[segmentNumber].numberOfBatches; batchNumber++) {

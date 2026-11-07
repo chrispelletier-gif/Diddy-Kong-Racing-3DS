@@ -265,6 +265,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Bench #437 (v28): native draws' vertex maths on the system core (DKR_NATIVE_REMOTE=3) saved 1.4-3.0 ms of
     // renderer time on the game core (frames at 30: Whale Bay 91 -> 97%, Windmill Plains 93 -> 98%), more than
     // opaque draws alone; it stays the default and its rows went, as did textures in RAM (even again).
+    // v29 walk cuts (PC walk -20% instructions, -20% cache misses on a simulated Old 3DS cache, frames identical):
+    // draws behind a waiting batch go to the system core too (DKR_REMOTE_FLUSH), the system core reads unchanged
+    // mesh tables in place (DKR_REMOTE_SHARE), track and model triangles are compared only after the game changes
+    // them (DKR_TRIS_SKIP). Raced all off, and the first alone off (it moves more work to the system core).
+    { "v29 walk cuts off (old)", { "DKR_REMOTE_FLUSH", "DKR_REMOTE_SHARE", "DKR_TRIS_SKIP" }, 1, 0, 1, 1 },
+    { "draws behind a waiting batch kept on the game core", { "DKR_REMOTE_FLUSH", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -272,6 +278,8 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Bench #438 (v28): native draws' vertex maths on the second renderer thread cost the New 3DS 1.5-2.7 ms of
     // renderer time on two tracks (its second thread shares the game's core), and textures in VRAM were mixed again
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
+    // v29: track and model triangles compared only after the game changes them (DKR_TRIS_SKIP); raced the old way.
+    { "triangles compared every frame (old)", { "DKR_TRIS_SKIP", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

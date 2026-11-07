@@ -418,10 +418,24 @@ void main_game_loop(void) {
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
 #if PICA_ALL
     {
-        static s32 sSlowHistory, sHold;
-        s32 sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", 1) != 0; // Each frame: the switch bench changes it
+        static s32 sSlowHistory, sHold, sQuiet;
+        static u32 sLevelSeen;
+        extern unsigned int gPortLevelLoads;
+        // v29: Old 3DS only by default. The slow frames of a level's first seconds (loads, texture decodes) no longer
+        // count: they turned it on at every race start, and five seconds later each kart's full detail models came
+        // back a part at a time as the karts crossed the normal distances (seen on the New 3DS, 2026-11-07).
+        s32 sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", plat_old_3ds() ? 1 : 0) != 0; // Each frame: the bench changes it
+        if (sLevelSeen != gPortLevelLoads) {
+            sLevelSeen = gPortLevelLoads;
+            sQuiet = 90; // Three seconds at 30 fps
+            sSlowHistory = 0;
+            sHold = 0;
+        }
+        if (sQuiet > 0) {
+            sQuiet--;
+        }
         sSlowHistory = (sSlowHistory << 1) & 0xFF;
-        if (sAdapt && tempLogicUpdateRate > plat_frame_retraces()) {
+        if (sAdapt && sQuiet == 0 && tempLogicUpdateRate > plat_frame_retraces()) {
             sSlowHistory |= 1;
         }
         if (__builtin_popcount(sSlowHistory) >= 2) {
