@@ -56,6 +56,7 @@ enum {
     PORT_SEC_END_AUTORUN, /* port_autorun_frame (test runs and benches) */
     PORT_SEC_END_HUD,    /* port_race_hud_frame (the bottom screen's race HUD) */
     PORT_SEC_END_LOOP,   /* Menu sounds and the loop back to the next frame's start */
+    PORT_SEC_PROFILER,   /* v32: the profiler's readout and log lines, after the frame is built (DKR_PROF_IDLE_LOG) */
     PORT_SEC_COUNT
 };
 void port_game_section(int section);

@@ -525,6 +525,12 @@ int plat_core_id(void) {
 
 int plat_syscore_call(void (*fn)(void), void *osThread) {
     if (sSysCallState == 0) {
+        // v32: not decided before the system core lends its time (the two-core renderer raises the share as a race's
+        // frames start): v31 asked at start-up, found no share and gave up for good, so the sound players never moved
+        // (bench #456's row tested nothing).
+        if (!sNew3DS && sSyscoreShare <= 0) {
+            return 0;
+        }
         sSysCallState = -1;
         if (!sNew3DS && sSyscoreShare > 0) {
             LightEvent_Init(&sSysCallGo, RESET_ONESHOT);

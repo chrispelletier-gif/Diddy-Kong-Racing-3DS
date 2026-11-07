@@ -279,13 +279,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the next piece ahead of use (DKR_WALK_PREFETCH, DKR_BACKEND_PREFETCH); exact game code cuts (shadow pass skips
     // objects without shadows, each clip corner worked out once, lighter object loops; the music fade scan is skipped
     // on levels without fades, no row); the watchdog counts free memory every 5 s and the bottom screen is flushed
-    // by a system call. Each raced the old way.
+    // by a system call. Each raced the old way. Bench #456: every row even with the usual races (within 0.3 fps),
+    // so the cuts stay on and their rows went; the sound players' row tested nothing (their thread gave up at
+    // start-up, before the system core lent any time), fixed in v32, so it races again.
+    // v32: the profiler's own costs, found by v31's slowest-frame line: its readout and log lines run after the frame
+    // is built (DKR_PROF_IDLE_LOG; they took ~8 ms after the frame's end every 4th second), and the GPU timeline's
+    // frame cut by kind is off (DKR_GPU_KINDS; 24 of #456's 53 renderer hitches were on it). Raced the v31 way.
     { "sound players on the game core (old)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 1 },
-    { "object loops without early loads (old)", { "DKR_OBJ_PREFETCH", NULL, NULL }, 1, 0, 1, 1 },
-    { "renderer without early loads (old)", { "DKR_WALK_PREFETCH", "DKR_BACKEND_PREFETCH", NULL }, 1, 0, 1, 1 },
-    { "v31 game code cuts off (old)", { "DKR_SHADOW_QUICK", "DKR_SHADOW_CLIP_ONCE", "DKR_OBJ_LEAN" }, 1, 0, 1, 1 },
-    { "heap count each second, screen flush via GPU service (old)", { "DKR_WATCHDOG_LIGHT", "DKR_BS_SVC_FLUSH", NULL },
-      1, 0, 1, 1 },
+    { "profiler as in v31 (old)", { "DKR_PROF_IDLE_LOG", NULL, NULL }, 1, 0, 1, 1 },
+    { "GPU timed by kind every 2 s (old)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

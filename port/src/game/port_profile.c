@@ -355,7 +355,7 @@ static s32 sSecNow;
 static const char *const sSecNames[PORT_SEC_COUNT] = {
     "top", "game", "logic", "after logic", "waves", "shadows", "prelude", "sky", "view", "segments",
     "sort", "objects", "late", "weather", "hud", "game tail", "sound", "tail", "render wait", "vsync",
-    "end: racer detail", "end: note", "end: autorun", "end: race HUD", "end: loop",
+    "end: racer detail", "end: note", "end: autorun", "end: race HUD", "end: loop", "profiler",
 };
 /* v31: the N64 sound players' frames (audiomgr.c port_native_audio_frame, on their own thread): time and count. */
 extern volatile unsigned long long gPortSoundPlayersNs;
@@ -364,6 +364,7 @@ extern volatile int gPortSoundPlayersCore;
 extern volatile unsigned long long gPortSoundPlayersStartNs, gPortWalkTotalNs, gPortWalkStartNs;
 static unsigned long long sSecOtherNs[PORT_SEC_COUNT], sSecWorstOtherNs[PORT_SEC_COUNT], sSecOtherLast;
 static unsigned long long sSecOtherSumNs[PORT_SEC_COUNT];
+static s32 sOverlayDue, sIdleLog = -1; // v32 DKR_PROF_IDLE_LOG: the readout waits for the next frame's BUILT mark
 
 /* The walk's time so far (and the sound players' when they share the game's core): what other threads on the game's
  * core have run, so a section's time can be split into the game's own and theirs. */
@@ -1176,6 +1177,16 @@ void prof_game_mark(int mark, int updateRate) {
                     sWindows[w].worstBuildUs = (u32) (build / 1000);
                 }
             }
+            if (sOverlayDue) {
+                // v32: the once-a-second readout (and every 4th second's log lines, ~8 ms on an Old 3DS: the slowest
+                // frame of every bench #456 log, and 8 of its 12 game-thread hitches) here, with the frame built: the
+                // game's core would only wait for the screen now (13 ms on average on an Old 3DS).
+                sOverlayDue = 0;
+                port_game_section(PORT_SEC_PROFILER);
+                show_overlay();
+                port_game_section(PORT_SEC_RWAIT);
+                sMarkNs[PROF_MARK_BUILT] = plat_time_ns(); // The waits after it are timed without it
+            }
             break;
         }
         case PROF_MARK_WAITED:
@@ -1226,8 +1237,15 @@ void prof_game_mark(int mark, int updateRate) {
             sGameThreadOn = 2; // The readout is in use.
             if (sWindows[PROF_WINDOW_OVERLAY].startNs == 0) {
                 prof_window_start(PROF_WINDOW_OVERLAY);
-            } else if (now - sWindows[PROF_WINDOW_OVERLAY].startNs >= 1000000000ULL) {
-                show_overlay();
+            } else if (now - sWindows[PROF_WINDOW_OVERLAY].startNs >= 1000000000ULL && !sOverlayDue) {
+                if (sIdleLog < 0 || (sGameFrames & 0xFF) == 0) {
+                    sIdleLog = plat_switch("DKR_PROF_IDLE_LOG", plat_old_3ds()) != 0; // The bench may change it
+                }
+                if (sIdleLog) {
+                    sOverlayDue = 1; // At the next frame's BUILT mark
+                } else {
+                    show_overlay();
+                }
             }
             break;
         }

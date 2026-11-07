@@ -85,7 +85,9 @@ __attribute__((used)) void __wrap_gxCmdQueueRun(gxCmdQueue_s *queue) {
 
 static void PLAT_COLD read_timeline_switches(void) {
     sTimeline = plat_switch("DKR_GPU_TIMELINE", 1) != 0;
-    sGpuKinds = plat_switch("DKR_GPU_KINDS", 1) != 0;
+    // v32: off by default on the Old 3DS. Its cut frame (one in GPU_KIND_EVERY) was itself a hitch there: 24 of the 53
+    // renderer hitches of bench #456 landed on it (the GPU drawing 30-60 ms instead of ~13).
+    sGpuKinds = plat_switch("DKR_GPU_KINDS", !plat_old_3ds()) != 0;
 }
 
 /* Renderer: just before C3D_FrameEnd hands a frame over. */
