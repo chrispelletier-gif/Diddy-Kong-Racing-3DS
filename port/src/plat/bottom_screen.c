@@ -787,6 +787,26 @@ static int text_clipped_as_is(int font, int x, int y, const char *text, Colour c
     return x;
 }
 
+/* How far below the line's top the lowest glyph in the text reaches, so that two fonts can share a baseline. */
+static int text_bottom(int font, const char *text) {
+    int bottom = 0;
+    const UiFont *u = ui_font(font);
+    for (; *text != '\0'; text++) {
+        unsigned char c = (unsigned char) *text;
+        int b = 0;
+        if (c <= 0x20 || c >= 0x7F) {
+            continue;
+        }
+        if (u != NULL) {
+            b = u->glyphs[c - 0x21].y + u->glyphs[c - 0x21].height;
+        } else if (font_ready(font) && c < 0x80 && sFonts[font].glyphs[c - 0x20].texture != 0xFF) {
+            b = sFonts[font].glyphs[c - 0x20].y + sFonts[font].glyphs[c - 0x20].height;
+        }
+        bottom = b > bottom ? b : bottom;
+    }
+    return bottom;
+}
+
 /* The same in the game's language (port_text). */
 static int text_width(int font, const char *text) {
     return text_width_as_is(font, port_text(text));
@@ -3162,8 +3182,12 @@ static void draw_four_rows(const RaceHud *hud) {
             default:
                 snprintf(score, sizeof(score), "%d", r->score);
                 x = text(FONT_FUN, x, y, score, YELLOW, 1);
-                snprintf(score, sizeof(score), "/ %d", hud->goal);
-                text(FONT_SMALL, x + 3, y + 3, score, DIM, 1);
+                {
+                    char goal[12];
+                    snprintf(goal, sizeof(goal), "/ %d", hud->goal);
+                    /* The "/ 3" shares the score's baseline in every look's fonts. */
+                    text(FONT_SMALL, x + 3, y + text_bottom(FONT_FUN, score) - text_bottom(FONT_SMALL, goal), goal, DIM, 1);
+                }
                 for (k = 0; k < 3; k++) {
                     if (k < r->score) {
                         picture_scaled(&sEggIcon, 54 + k * 12, y + 20, 1, 1);
@@ -3172,7 +3196,7 @@ static void draw_four_rows(const RaceHud *hud) {
                     }
                 }
                 if (r->carrying) {
-                    text(FONT_SMALL, 54, y + 33, sStyle == 0 ? "+1 held" : "+1", YELLOW, 1);
+                    text(FONT_SMALL, 54, y + (sStyle == 0 ? 33 : 30), sStyle == 0 ? "+1 held" : "+1", YELLOW, 1);
                 }
                 break;
         }
@@ -3195,14 +3219,14 @@ static void draw_challenge(const RaceHud *hud) {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5, "Carrying", HINT, 1);
         /* The egg centred under the label, its instruction in two wrapped lines beneath it, the hint at the foot. */
         if (me != NULL && me->carrying) {
-            picture_scaled(&sEgg, (MIDDLE_X0 + MIDDLE_X1 - sEgg.width) / 2, LOWER_Y0 + 20, 1, 1);
+            picture_scaled(&sEggIcon, (MIDDLE_X0 + MIDDLE_X1 - sEggIcon.width * 3) / 2, LOWER_Y0 + 17, 3, 1);
             wrapped_centred(MIDDLE_X0, MIDDLE_X1,
-                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEgg.height, "Get it to", YELLOW),
+                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 20 + sEggIcon.height * 3, "Get it to", YELLOW),
                             "your nest", YELLOW);
         } else {
             text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 40, "No egg", DIM, 1);
         }
-        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 6, "Drop it if hit", DIM, 1);
+        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 3, "Drop it if hit", DIM, 1);
     } else {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5,
                      hud->mode == RACE_HUD_MODE_BATTLE ? "Your health" : "Carrying", HINT, 1);
