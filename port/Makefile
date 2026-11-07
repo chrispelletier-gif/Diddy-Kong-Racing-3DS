@@ -210,6 +210,7 @@ $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
 # v30 (Old 3DS bench builds): GAME_OPT=2 or s compiles the game's own code (src/*.c) at that level instead, to cut the
 # instruction cache misses of its large functions (update_car, obj_update, update_player_racer: 14-18 KB each at -O3
 # with link-time inlining, against a 16 KB instruction cache and no L2 on an Old 3DS). The renderer keeps HOT_OPT.
+# (Keeping the maths and collision files at -O3 cost more instruction cache misses than it saved: simulated cache.)
 ifneq ($(strip $(GAME_OPT)),)
 $(foreach f,$(GAME_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(GAME_OPT)
 endif
