@@ -4102,7 +4102,8 @@ typedef struct NativeMesh {
     u32 shared;     // v29 DKR_REMOTE_SHARE: sShareEpoch when the backend was last handed these tables themselves
     u8 changes;     // v29: tables changed in place after being made (copied to the backend from then on)
     u16 trisSeen;   // v29 DKR_TRIS_SKIP: gPortTrisCount of its slot when its triangles were last compared
-    u32 trisLoads;  // gPortLevelLoads then (0: not a track batch's)
+    u32 trisLoads;  // gPortLevelLoads then (0: not compared that way)
+    u32 trisEpoch;  // gPortTrisEpoch then
     s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
     u8 *cornerVertex;
     u32 *cornerUv;  // As TexCoords.texCoords
@@ -4324,8 +4325,10 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
 
 /* The tables of these triangles, made if need be; NULL if they can't be. */
 volatile unsigned short gPortTrisCount[PORT_TRIS_SLOTS];
+volatile unsigned int gPortTrisEpoch;
 
-/* track: a level batch drawn as the track (only the game code that calls port_tris_changed changes those in place). */
+/* track: a level or model batch (not made anew each frame), whose triangles only the game code that calls
+ * port_tris_changed changes in place. */
 static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic, s32 track) {
     // v29 (DKR_NATIVE_HASH=0: the old low bits): triangle lists are 16-byte aligned, so the product's low bits only
     // ever started a search in a quarter of the table; its top bits are spread over all of it.
@@ -4362,7 +4365,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
                 // frame in turn it is compared anyway, which counts any change made without the count (sTrisMissed).
                 seen = gPortTrisCount[port_tris_slot(tris)];
                 __sync_synchronize(); // The count before the triangles (port_tris_changed)
-                skip = e->trisLoads == gPortLevelLoads && e->trisSeen == (u16) seen;
+                skip = e->trisLoads == gPortLevelLoads && e->trisEpoch == gPortTrisEpoch && e->trisSeen == (u16) seen;
                 if (skip && sTrisSkip == 1 && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
                     e->checkedFrame = (u32) sFrameCount;
                     sTrisSkipped++;
@@ -4374,6 +4377,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
                 e->checkedFrame = (u32) sFrameCount;
                 e->trisSeen = (u16) seen;
                 e->trisLoads = track ? gPortLevelLoads : 0;
+                e->trisEpoch = gPortTrisEpoch;
                 return e->usable ? e : NULL;
             }
             if (skip) {
@@ -4386,6 +4390,7 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
             e->checkedFrame = (u32) sFrameCount;
             e->trisSeen = (u16) seen;
             e->trisLoads = track ? gPortLevelLoads : 0;
+            e->trisEpoch = gPortTrisEpoch;
             if (sNMatFast && e->copy != NULL && native_uv_update(e, tris, count)) {
                 return e->usable ? e : NULL;
             }
@@ -5414,7 +5419,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         return 2;
     }
     {
-        s32 track = !dynamic && sDrawKind == PORT_DRAW_TRACK;
+        s32 track = !dynamic; // The level's batches (tracks.c) and models' (render_mesh): see native_find
         mesh = native_find(tris, count, dynamic, track);
         if (mesh == NULL) {
             mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied

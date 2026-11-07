@@ -4320,6 +4320,9 @@ void func_80014090(Object *obj, s32 arg1) {
                             tri->uv2.u = tri->uv0.u + newU2;
                             tri->uv2.v = tri->uv0.v + newV2;
                         }
+#ifdef TARGET_PORT
+                        port_tris_changed(&objMdl->triangles[objMdl->batches[j].facesOffset]);
+#endif
                     }
                 }
             }
@@ -8503,6 +8506,9 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
                 triangles[j].uv2.u = D_8011AF68[triangles[j].vi2].u;
                 triangles[j].uv2.v = D_8011AF68[triangles[j].vi2].v;
             }
+#ifdef TARGET_PORT
+            port_tris_changed(&triangles[model->batches[i].facesOffset]);
+#endif
         } else if (model->batches[i].miscData < BATCH_VTX_COL) {
             count += model->batches[i + 1].verticesOffset - model->batches[i].verticesOffset;
         }

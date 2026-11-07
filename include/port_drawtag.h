@@ -88,6 +88,7 @@ int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
  * batch's triangles with its copy only when its count has moved (or in its turn, see native_find). */
 #define PORT_TRIS_SLOTS 4096
 extern volatile unsigned short gPortTrisCount[PORT_TRIS_SLOTS];
+extern volatile unsigned int gPortTrisEpoch; /* Moved on when a model's memory is freed */
 static inline unsigned int port_tris_slot(const void *tris) {
     return ((unsigned int) ((unsigned long) tris >> 4) * 2654435761u) >> 20;
 }
