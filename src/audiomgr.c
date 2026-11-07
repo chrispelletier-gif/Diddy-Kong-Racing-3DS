@@ -107,6 +107,7 @@ void port_frames_audio_wait(void);
 void port_frames_run_audio(void *task);
 int port_native_audio_on(void);
 void port_native_audio_frame(void);
+int port_players_syscore(void);
 #endif
 static void __clearAudioDMA(void);
 
@@ -265,7 +266,11 @@ static void __amMain(UNUSED void *arg) {
             case OS_SC_RETRACE_MSG:
 #ifdef PICA_ALL
                 if (port_native_audio_on()) {
-                    port_native_audio_frame();
+                    // v31 (DKR_PLAYERS_SYSCORE, Old 3DS): the players' frame on the system core, this thread waiting
+                    // for it, so the game's core keeps the time (about 1 ms a frame on an Old 3DS).
+                    if (!port_players_syscore() || !plat_syscore_call(port_native_audio_frame, &__am.thread)) {
+                        port_native_audio_frame();
+                    }
                     lastInfo = NULL;
                     break;
                 }
@@ -335,8 +340,19 @@ int port_native_audio_on(void) {
     return sOn;
 }
 
+volatile unsigned long long gPortSoundPlayersNs; // v31: the players' frames' time and count, for the profiler
+volatile unsigned int gPortSoundPlayersFrames;
+volatile int gPortSoundPlayersCore = -1;
+volatile unsigned long long gPortSoundPlayersStartNs; // The frame running's start (0: none)
+
+int port_players_syscore(void) {
+    return plat_switch("DKR_PLAYERS_SYSCORE", plat_old_3ds()) != 0;
+}
+
 void port_native_audio_frame(void) {
     s32 samplesLeft, frameSamples;
+    unsigned long long startNs = plat_time_ns();
+    gPortSoundPlayersStartNs = startNs;
 
     __clearAudioDMA(); // also counts the frame (audFrameCt)
     samplesLeft = (s32) (pv_output_remaining() >> 2);
@@ -353,6 +369,10 @@ void port_native_audio_frame(void) {
     alAudioFrame(__am.ACMDList[curAcmdList], &gAudioCmdLen, NULL, frameSamples);
     gPortAudioStage = "between frames";
     port_audio_output_queue(NULL, (u32) frameSamples * 4); // the DSP voices' clock (the host's software channels mix here)
+    gPortSoundPlayersNs += plat_time_ns() - startNs;
+    gPortSoundPlayersStartNs = 0;
+    gPortSoundPlayersFrames++;
+    gPortSoundPlayersCore = plat_core_id();
 }
 #endif
 

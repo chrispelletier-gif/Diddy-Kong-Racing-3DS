@@ -35,6 +35,9 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "port_track_cells.h"
+#ifdef TARGET_PORT
+static s32 sPortClipOnce; // v31 DKR_SHADOW_CLIP_ONCE (func_8002FF6C), read at each shadow_update
+#endif
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -1885,6 +1888,8 @@ void render_level_geometry_and_objects(void) {
     sp160 = get_first_active_object(&objCount);
 
 #ifdef TARGET_PORT
+    s32 portFirst, portCount;
+    Object **portObjs = objGetObjList(&portFirst, &portCount); // v31: for PORT_PREFETCH_OBJS
     sPortSegmentsAllowed = gCurrentLevelModel->numberOfSegments > 1 ? 0 : 1;
 #endif
     if (gCurrentLevelModel->numberOfSegments > 1) {
@@ -1924,6 +1929,7 @@ void render_level_geometry_and_objects(void) {
 
     for (i = sp160; i < objCount; i++) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS(portObjs, i, objCount);
         visible = 255;
         objFlags = obj->trans.flags;
         if (objFlags & OBJ_FLAGS_UNK_0080) {
@@ -1953,6 +1959,7 @@ void render_level_geometry_and_objects(void) {
 
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS_DOWN(portObjs, i, sp160);
         objFlags = obj->trans.flags;
         if (objFlags & visibleFlags) {
             visible = FALSE;
@@ -1995,6 +2002,7 @@ void render_level_geometry_and_objects(void) {
     // Particles and FX
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS_DOWN(portObjs, i, sp160);
         visible = 255;
         objFlags = obj->trans.flags;
         if (objFlags & OBJ_FLAGS_UNK_0080) {
@@ -3713,8 +3721,21 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
     gNewShadowVtxCount = 0;
     numViewports = cam_get_viewport_layout();
     objects = objGetObjList(&objIndex, &objectCount);
+#ifdef TARGET_PORT
+    // v31 (DKR_SHADOW_QUICK): an object with neither a shadow nor a water effect is passed over before its flags and
+    // header are read (nothing below touches it then: most objects in a race), instead of after.
+    s32 portQuick = plat_switch("DKR_SHADOW_QUICK", 1) != 0;
+    sPortClipOnce = plat_switch("DKR_SHADOW_CLIP_ONCE", 1) != 0;
+#endif
     while (objIndex < objectCount) {
         obj = objects[objIndex];
+#ifdef TARGET_PORT
+        PORT_PREFETCH_OBJS(objects, objIndex, objectCount);
+        if (portQuick && obj->shadow == NULL && obj->waterEffect == NULL) {
+            objIndex += 1;
+            continue;
+        }
+#endif
         objHeader = obj->header;
         waterEffect = obj->waterEffect;
         shadow = obj->shadow;
@@ -4453,13 +4474,32 @@ s32 func_8002FF6C(s32 arg0, unk8011C8B8 *arg1, s32 arg2, Vec2f *arg3) {
             var_f2 = -var_f2;
         }
 
+#ifdef TARGET_PORT
+        // v31 (DKR_SHADOW_CLIP_ONCE): each corner's side of the edge is worked out once, not as the end of one side
+        // and again as the start of the next (the same sum of the same values: the same result).
+        s32 portOnce = sPortClipOnce;
+        f32 portFirst = 0.0f, portNext = 0.0f;
+        if (portOnce && var_s2 > 0) {
+            portFirst = portNext = (temp_f12 * var_s3[0].x) + (var_s3[0].z * temp_f14) + var_f2;
+        }
+#endif
         for (var_t1 = 0, var_t2 = 0; var_t1 < var_s2; var_t1++) {
             var_v1 = var_t1 + 1;
             if (var_v1 >= var_s2) {
                 var_v1 = 0;
             }
+#ifdef TARGET_PORT
+            if (portOnce) {
+                temp_f16 = portNext;
+                temp_f22 = var_v1 == 0 ? portFirst
+                                       : (temp_f12 * var_s3[var_v1].x) + (var_s3[var_v1].z * temp_f14) + var_f2;
+                portNext = temp_f22;
+            } else
+#endif
+            {
             temp_f16 = (temp_f12 * var_s3[var_t1].x) + (var_s3[var_t1].z * temp_f14) + var_f2;
             temp_f22 = (temp_f12 * var_s3[var_v1].x) + (var_s3[var_v1].z * temp_f14) + var_f2;
+            }
             if ((temp_f16 >= 0.0f && temp_f22 < 0.0f) || (temp_f16 < 0.0f && temp_f22 >= 0.0f)) {
                 var_a0 = D_8011B320[var_v0];
                 var_a1 = -1;

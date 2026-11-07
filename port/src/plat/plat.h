@@ -82,6 +82,9 @@ unsigned long long plat_render_idle_ns(void);
 unsigned long long plat_screen_busy_ns(void);
 /* Nonzero on an Old 3DS (roadmap O8): some switches default differently there. */
 int plat_old_3ds(void);
+/* v31: fn run on the system core as N64 thread osThread, the caller waiting; 0 if it can't be (Old 3DS only). */
+int plat_syscore_call(void (*fn)(void), void *osThread);
+int plat_core_id(void); /* The core the calling thread runs on (-1 if unknown) */
 unsigned long plat_screen_draws(void);
 
 /* Monotonic time. */

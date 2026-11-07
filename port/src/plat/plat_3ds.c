@@ -498,6 +498,55 @@ int plat_split_syscore_share(int on) {
     return 1;
 }
 
+/*
+ * v31 (DKR_PLAYERS_SYSCORE): a call made on the system core, for code whose own thread would otherwise run it on the
+ * game's core (the N64 sound players' frame: audiomgr.c). The caller waits for it (so it is still one thread's work,
+ * run elsewhere), with osThread the N64 thread it runs as. 0 when the system core can't take it: the caller runs it.
+ * Only on an Old 3DS while the two-core renderer has the system core's share raised.
+ */
+static LightEvent sSysCallGo, sSysCallDone;
+static void (*volatile sSysCallFn)(void);
+static void *volatile sSysCallOsThread;
+static int sSysCallState; // 0 not tried, 1 running, -1 unavailable
+
+static void syscall_thread(void *arg) {
+    (void) arg;
+    for (;;) {
+        LightEvent_Wait(&sSysCallGo);
+        plat_set_current_os_thread(sSysCallOsThread);
+        sSysCallFn();
+        LightEvent_Signal(&sSysCallDone);
+    }
+}
+
+int plat_core_id(void) {
+    return svcGetProcessorID();
+}
+
+int plat_syscore_call(void (*fn)(void), void *osThread) {
+    if (sSysCallState == 0) {
+        sSysCallState = -1;
+        if (!sNew3DS && sSyscoreShare > 0) {
+            LightEvent_Init(&sSysCallGo, RESET_ONESHOT);
+            LightEvent_Init(&sSysCallDone, RESET_ONESHOT);
+            // Above the renderer's backend there (PRIO_SYSCORE_AUDIO + 1): a short call it waits behind, as the sound
+            // players are above the game on its own core.
+            if (threadCreate(syscall_thread, NULL, 64 * 1024, PRIO_SYSCORE_AUDIO, 1, true) != NULL) {
+                sSysCallState = 1;
+            }
+        }
+        plat_log("system core calls (DKR_PLAYERS_SYSCORE): %s", sSysCallState > 0 ? "on core 1" : "unavailable");
+    }
+    if (sSysCallState < 0 || sSyscoreShare <= 0) {
+        return 0;
+    }
+    sSysCallFn = fn;
+    sSysCallOsThread = osThread;
+    LightEvent_Signal(&sSysCallGo);
+    LightEvent_Wait(&sSysCallDone);
+    return 1;
+}
+
 void plat_split_backend_priority(void) {
     PlatThread *thread = sSplitBackend;
     int prio;
@@ -1090,8 +1139,23 @@ static void screen_copy(int first, int end) {
             column[-y] = sImage[y * BS_WIDTH + x];
         }
     }
-    // Nothing else flushes the bottom screen's framebuffer from the CPU cache.
-    GSPGPU_FlushDataCache(fb, width * height * 2);
+    // Nothing else flushes the bottom screen's framebuffer from the CPU cache. v31 (DKR_BS_SVC_FLUSH, Old 3DS): only
+    // the columns' part these rows wrote, by a system call on this core instead of a request to the GPU service
+    // (which runs on the system core, where the renderer's backend is short of time): the rows of one area are a
+    // run inside every column, so the flush covers the first to the last column's run.
+    {
+        static int sSvc = -1, sEpoch = -1;
+        if (sEpoch != gPlatSwitchEpoch) {
+            sEpoch = gPlatSwitchEpoch;
+            sSvc = plat_switch("DKR_BS_SVC_FLUSH", !sNew3DS) != 0;
+        }
+        if (sSvc && end > first) {
+            u32 from = (u32) (fb + 239 - (end - 1)), to = (u32) (fb + (BS_WIDTH - 1) * 240 + 239 - first + 1);
+            svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, to - from);
+        } else {
+            GSPGPU_FlushDataCache(fb, width * height * 2);
+        }
+    }
 }
 
 /* Draws what changed. Only one thread at a time: the screen's own, or before it starts the caller (lock held). */
@@ -1580,12 +1644,28 @@ static void watchdog(void *arg) {
                  (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
         // Sound gaps and drops, textures without memory, free GPU (linear) and CPU (heap) memory in tenths of a MB.
         {
-            struct mallinfo info = mallinfo();
-            unsigned long gpuFree = linearSpaceFree() / (1024 * 1024 / 10);
-            unsigned long heapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+            // v31 (DKR_WATCHDOG_LIGHT, Old 3DS): the free memory is counted every 5th second (when it is logged), not
+            // every second. Counting walks the heap's free lists with its lock held at the highest priority on the
+            // game's core, so the game (and any malloc it makes) waits for it; how long it takes is logged when over
+            // 0.5 ms.
+            static unsigned long sGpuFree, sHeapFree;
+            static int sLight = -1;
+            if (sLight < 0 || seconds % 5 == 0) {
+                sLight = plat_switch("DKR_WATCHDOG_LIGHT", !sNew3DS) != 0;
+            }
+            if (!sLight || seconds % 5 == 0 || seconds <= 1) {
+                unsigned long long start = plat_time_ns(), spent;
+                struct mallinfo info = mallinfo();
+                sGpuFree = linearSpaceFree() / (1024 * 1024 / 10);
+                sHeapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+                spent = plat_time_ns() - start;
+                if (spent > 500000) {
+                    rec_event("watchdog: counting free memory took %.2f ms", spent / 1e6);
+                }
+            }
             snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
-                     now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
+                     now[PLAT_COUNTER_TEXTURE_FAILED], sGpuFree / 10, sGpuFree % 10, sHeapFree / 10, sHeapFree % 10);
         }
         {
             // A full sound event queue loses events (and, before the fix in csplayer.c, froze the game).

@@ -52,6 +52,9 @@ extern Object *gSkydomeSegment;
 #include "plat/plat.h"
 #endif
 #include "port_step.h"
+#ifdef TARGET_PORT
+static s32 gPortMidiObjects; // v31 DKR_MIDI_SKIP: music fade/channel objects made since the list was emptied
+#endif
 
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
@@ -858,6 +861,9 @@ void clear_object_pointers(void) {
     gAINodeTail[1] = 0xFF;
     gObjectCount = 0;
     gObjectListStart = 0;
+#ifdef TARGET_PORT
+    gPortMidiObjects = 0;
+#endif
     gParticleCount = 0;
     D_8011AE88 = 0;
     D_8011ADD4 = 0;
@@ -898,6 +904,9 @@ void free_all_objects(void) {
     gFreeListCount = 0;
     gObjectCount = 0;
     gObjectListStart = 0;
+#ifdef TARGET_PORT
+    gPortMidiObjects = 0;
+#endif
     clear_object_pointers();
     mempool_free((void *) gObjectMap[0]);
     mempool_free((void *) gObjectMap[1]);
@@ -2862,6 +2871,9 @@ void obj_destroy(Object *obj, s32 arg1) {
 /**
  * Updates all objects in the game.
  */
+#ifdef TARGET_PORT
+int gPortObjPrefetch; // v31 DKR_OBJ_PREFETCH (port_drawtag.h PORT_PREFETCH_OBJS), read at each obj_update
+#endif
 void obj_update(s32 updateRate) {
     s32 i;
     s32 j;
@@ -2870,6 +2882,10 @@ void obj_update(s32 updateRate) {
     s32 sp54;
     Object *obj;
 
+#ifdef TARGET_PORT
+    s32 portLean = plat_switch("DKR_OBJ_LEAN", 1) != 0;
+    gPortObjPrefetch = plat_switch("DKR_OBJ_PREFETCH", plat_old_3ds()) != 0;
+#endif
     func_800245B4(-1);
     gEventStartTimer = gEventCountdown;
     if (gEventCountdown > 0 && race_starting() != FALSE) {
@@ -2905,6 +2921,7 @@ void obj_update(s32 updateRate) {
     j = gObjectCount;
     for (i = gObjectListStart; i < j; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, j);
         if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE)) {
             if ((obj->behaviorId != BHV_LIGHT_RGBA) && (obj->behaviorId != BHV_WEAPON) &&
                 (obj->behaviorId != BHV_FOG_CHANGER)) {
@@ -2919,6 +2936,13 @@ void obj_update(s32 updateRate) {
                     for (sp54 = 0; sp54 < obj->header->numberOfModelIds; sp54++) {
                         modInst = obj->modelInstances[sp54];
                         if (modInst != NULL) {
+#ifdef TARGET_PORT
+                            // v31 (DKR_OBJ_LEAN): a model shared by many objects (trees, bananas) is written once,
+                            // not dirtied again with the same value by each.
+                            if (portLean && modInst->objModel->texOffsetUpdateRate == updateRate) {
+                                continue;
+                            }
+#endif
                             modInst->objModel->texOffsetUpdateRate = updateRate;
                         }
                     }
@@ -2951,6 +2975,17 @@ void obj_update(s32 updateRate) {
     racerfx_update(updateRate);
     for (i = gObjectListStart; i < j; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, j);
+#ifdef TARGET_PORT
+        if (portLean) {
+            // v31 (DKR_OBJ_LEAN): the behaviour first, so the flags' line is only read for weapons (the same test).
+            s16 bhv = obj->behaviorId;
+            if ((bhv == BHV_WEAPON && !(obj->trans.flags & OBJ_FLAGS_PARTICLE)) || bhv == BHV_FOG_CHANGER) {
+                run_object_loop_func(obj, updateRate);
+            }
+            continue;
+        }
+#endif
         if ((!(obj->trans.flags & OBJ_FLAGS_PARTICLE) && (obj->behaviorId == BHV_WEAPON)) ||
             (obj->behaviorId == BHV_FOG_CHANGER)) {
             run_object_loop_func(obj, updateRate);
@@ -2960,6 +2995,7 @@ void obj_update(s32 updateRate) {
     if (gParticleCount > 0) {
         for (i = gObjectListStart; i < j; i++) {
             obj = gObjPtrList[i];
+            PORT_PREFETCH_OBJS(gObjPtrList, i, j);
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
 #ifdef TARGET_PORT
                 unsigned long long portStart = prof_object_logic_begin();
@@ -2977,6 +3013,7 @@ void obj_update(s32 updateRate) {
     if (light_count() > 0) {
         for (i = gObjectListStart; i < gObjectCount; i++) {
             obj = gObjPtrList[i];
+            PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
             if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE) && (obj->shading != NULL)) {
                 light_update_shading(obj);
             }
@@ -4343,6 +4380,7 @@ void obj_tick_anims(void) {
 
     for (; i < gObjectCount; i++) {
         currObj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
         if (!(currObj->trans.flags & OBJ_FLAGS_PARTICLE) && currObj->header->modelType == OBJECT_MODEL_TYPE_3D_MODEL) {
             for (j = 0; j < currObj->header->numberOfModelIds; j++) {
                 modInst = currObj->modelInstances[j];
@@ -4762,6 +4800,7 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
 
     for (i = startIndex; i <= lastIndex; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, lastIndex + 1);
         if (obj != NULL) {
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
                 // get_distance_to_camera calculates the distance to the camera from a XYZ location.
@@ -4911,6 +4950,7 @@ void process_object_interactions(void) {
     objsWithInteractives = 0;
     for (i = gObjectListStart; i < gObjectCount; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
         if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE)) {
             objInteract = obj->interactObj;
             if (objInteract != NULL) {
@@ -6239,8 +6279,19 @@ void func_80018CE0(Object *racerObj, f32 xPos, f32 yPos, f32 zPos, s32 updateRat
         return;
     }
 
+#ifdef TARGET_PORT
+    // v31 (DKR_MIDI_SKIP): no music fade or channel object made since the object list was last emptied (most levels):
+    // nothing in the list for the loop to find.
+    spF4 = gObjectListStart;
+    if (gPortMidiObjects == 0 && plat_switch("DKR_MIDI_SKIP", 1)) {
+        spF4 = gObjectCount;
+    }
+    for (; spF4 < gObjectCount; spF4++) {
+#else
     for (spF4 = gObjectListStart; spF4 < gObjectCount; spF4++) {
+#endif
         obj = gObjPtrList[spF4];
+        PORT_PREFETCH_OBJS(gObjPtrList, spF4, gObjectCount);
         if (!(obj->trans.flags & 0x8000)) {
             if (obj->behaviorId == BHV_MIDI_FADE_POINT) {
                 spC0 = sqrtf(((racerObj->trans.x_position - obj->trans.x_position) *
@@ -10544,6 +10595,12 @@ s32 get_object_property_size(Object *obj, void *obj64) {
  */
 void run_object_init_func(Object *obj, void *entry, s32 param) {
     obj->behaviorId = obj->header->behaviorId;
+#ifdef TARGET_PORT
+    if (obj->behaviorId == BHV_MIDI_FADE || obj->behaviorId == BHV_MIDI_FADE_POINT ||
+        obj->behaviorId == BHV_MIDI_CHANNEL_SET) {
+        gPortMidiObjects++;
+    }
+#endif
     switch (obj->behaviorId) {
         case BHV_RACER:
             obj_init_racer(obj, (LevelObjectEntry_Racer *) entry);

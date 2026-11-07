@@ -106,6 +106,7 @@ static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBack
 static unsigned int sBackendFrames, sBackendWakes;
 
 static void backend_thread(void *arg);
+static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
     return (n + 7u) & ~7u;
@@ -199,11 +200,21 @@ static void backend_thread(void *arg) {
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
+            if (sBackendPrefetch && sTail + bytes != sHead) {
+                // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
+                // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
+                const unsigned char *next = (const unsigned char *) sRing + (sTail + bytes) % SPLIT_RING_BYTES;
+                int k;
+                for (k = 0; k < 256; k += 32) {
+                    __builtin_prefetch(next + k);
+                }
+            }
             if (sCloseFn != NULL && (op != OP_CALL || ((SplitCall *) p)->fn != sKeepFn) && op != OP_WRAP) {
                 sCloseFn();
             }
             switch (op) {
                 case OP_START:
+                    sBackendPrefetch = plat_switch("DKR_BACKEND_PREFETCH", plat_old_3ds()) != 0;
                     sBackendFrameStart = plat_time_ns();
                     sBackendWaitNs = 0;
                     gfxb_start_frame();

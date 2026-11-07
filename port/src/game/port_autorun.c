@@ -272,9 +272,20 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Bench #443 kept all three (renderer -0.8 to -1.0 ms on Windmill Plains and EverFrost Peak, even on Whale Bay;
     // the flush alone off: Whale Bay +0.8 ms, the others -0.3), so their rows went.
     // v30: the bottom screen is drawn on the system core (DKR_BS_SYSCORE) and its copy to the screen no longer
-    // holds the lock the game's HUD updates wait for (DKR_BS_COPY_LOCK). Each raced the old way.
-    { "bottom screen drawn on the game core (old)", { "DKR_BS_SYSCORE", NULL, NULL }, 1, 0, 1, 1 },
-    { "bottom screen copy under the game's lock (old)", { "DKR_BS_COPY_LOCK", NULL, NULL }, 1, 0, 1, 1 },
+    // holds the lock the game's HUD updates wait for (DKR_BS_COPY_LOCK). Benches #449/#450 kept both (the copy under
+    // the lock had more frames slower than 30: 95-98% at 30 against 98-99%), so their rows went.
+    // v31: the N64 sound players' frame on the system core (DKR_PLAYERS_SYSCORE); the game's loops over every object
+    // load the objects ahead of use (DKR_OBJ_PREFETCH); the walk loads the next draw record's data and the backend
+    // the next piece ahead of use (DKR_WALK_PREFETCH, DKR_BACKEND_PREFETCH); exact game code cuts (shadow pass skips
+    // objects without shadows, each clip corner worked out once, lighter object loops; the music fade scan is skipped
+    // on levels without fades, no row); the watchdog counts free memory every 5 s and the bottom screen is flushed
+    // by a system call. Each raced the old way.
+    { "sound players on the game core (old)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 1 },
+    { "object loops without early loads (old)", { "DKR_OBJ_PREFETCH", NULL, NULL }, 1, 0, 1, 1 },
+    { "renderer without early loads (old)", { "DKR_WALK_PREFETCH", "DKR_BACKEND_PREFETCH", NULL }, 1, 0, 1, 1 },
+    { "v31 game code cuts off (old)", { "DKR_SHADOW_QUICK", "DKR_SHADOW_CLIP_ONCE", "DKR_OBJ_LEAN" }, 1, 0, 1, 1 },
+    { "heap count each second, screen flush via GPU service (old)", { "DKR_WATCHDOG_LIGHT", "DKR_BS_SVC_FLUSH", NULL },
+      1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

@@ -49,9 +49,50 @@ enum {
     PORT_SEC_GAMETAIL,   /* The rest of mode_game (general HUD, race state, menus) */
     PORT_SEC_SOUND,      /* sound_update_queue */
     PORT_SEC_TAIL,       /* Dialogue, transitions, the display list's end */
+    PORT_SEC_RWAIT,      /* v31: waiting for the renderer to take the frame (gfxtask_wait_ahead) */
+    PORT_SEC_VSYNC,      /* v31: fb_update (the frame's swap and the wait for its retrace) */
+    PORT_SEC_END_LOD,    /* v31, after the frame's end: the adaptive racer detail */
+    PORT_SEC_END_NOTE,   /* port_game_note_frame */
+    PORT_SEC_END_AUTORUN, /* port_autorun_frame (test runs and benches) */
+    PORT_SEC_END_HUD,    /* port_race_hud_frame (the bottom screen's race HUD) */
+    PORT_SEC_END_LOOP,   /* Menu sounds and the loop back to the next frame's start */
     PORT_SEC_COUNT
 };
 void port_game_section(int section);
+/*
+ * v31 (DKR_OBJ_PREFETCH, Old 3DS by default): the game's loops over every object (updates, shadows, sorting, the draw
+ * passes) start loading the object two places ahead (its first line, with the position and flags, and the line at
+ * 0x40 with its header, behaviour and parts pointers) and the header of the next one, so the misses on objects spread
+ * all over the heap overlap the work on this one. A hint only: what the loops do is unchanged.
+ */
+extern int gPortObjPrefetch;
+#define PORT_PREFETCH_OBJS(list, i, end)                                                                              \
+    do {                                                                                                              \
+        if (gPortObjPrefetch) {                                                                                       \
+            if ((i) + 2 < (end)) {                                                                                    \
+                const char *pfObj_ = (const char *) (list)[(i) + 2];                                                  \
+                __builtin_prefetch(pfObj_);                                                                           \
+                __builtin_prefetch(pfObj_ + 0x40);                                                                    \
+            }                                                                                                         \
+            if ((i) + 1 < (end) && (list)[(i) + 1] != NULL) {                                                                                    \
+                __builtin_prefetch((list)[(i) + 1]->header);                                                          \
+            }                                                                                                         \
+        }                                                                                                             \
+    } while (0)
+/* The same going down the list. */
+#define PORT_PREFETCH_OBJS_DOWN(list, i, start)                                                                       \
+    do {                                                                                                              \
+        if (gPortObjPrefetch) {                                                                                       \
+            if ((i) - 2 >= (start)) {                                                                                 \
+                const char *pfObj_ = (const char *) (list)[(i) - 2];                                                  \
+                __builtin_prefetch(pfObj_);                                                                           \
+                __builtin_prefetch(pfObj_ + 0x40);                                                                    \
+            }                                                                                                         \
+            if ((i) - 1 >= (start) && (list)[(i) - 1] != NULL) {                                                                                 \
+                __builtin_prefetch((list)[(i) - 1]->header);                                                          \
+            }                                                                                                         \
+        }                                                                                                             \
+    } while (0)
 /*
  * Native model meshes (roadmap NR1, DKR_NATIVE_MESH, a bitmask: 1 the racers, 2 other objects' 3D models): render_mesh
  * puts this tag before each batch's vertex loads and triangles. The renderer then draws the batch from its own tables
@@ -138,5 +179,7 @@ void port_gpu_light_clear(const struct Vertex *verts);
 #define port_draw_tag(dl, kind)
 #define port_draw_tag_object(dl, kind, object)
 #define port_game_section(section) ((void) 0)
+#define PORT_PREFETCH_OBJS(list, i, end) ((void) 0)
+#define PORT_PREFETCH_OBJS_DOWN(list, i, start) ((void) 0)
 #endif
 #endif

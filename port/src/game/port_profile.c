@@ -344,24 +344,81 @@ static int percent(u32 part, u32 whole) {
 static s32 sGameTimed;
 static u32 sGameFrameCount;
 static unsigned long long sKindBuildNs[PROF_KINDS];
-/* v30 game core sections (port_drawtag.h PORT_SEC_*): this run of timed frames' time per section. */
-static unsigned long long sSecNs[PORT_SEC_COUNT], sSecStartNs;
+/* v30 game core sections (port_drawtag.h PORT_SEC_*): this run of timed frames' time per section. v31: timed every
+ * frame (not every 8th on the Old 3DS: 2 dozen clock reads a frame), from one frame's start to the next (the waits and
+ * the code after the frame's end too), and the slowest frame's sections kept apart: what a 50 ms frame spent its time
+ * on, where the average hides it. */
+static unsigned long long sSecNs[PORT_SEC_COUNT], sSecStartNs, sSecFrameNs[PORT_SEC_COUNT], sSecWorstNs[PORT_SEC_COUNT];
+static unsigned long long sSecWorstTotal;
 static u32 sSecFrames;
 static s32 sSecNow;
 static const char *const sSecNames[PORT_SEC_COUNT] = {
     "top", "game", "logic", "after logic", "waves", "shadows", "prelude", "sky", "view", "segments",
-    "sort", "objects", "late", "weather", "hud", "game tail", "sound", "tail",
+    "sort", "objects", "late", "weather", "hud", "game tail", "sound", "tail", "render wait", "vsync",
+    "end: racer detail", "end: note", "end: autorun", "end: race HUD", "end: loop",
 };
+/* v31: the N64 sound players' frames (audiomgr.c port_native_audio_frame, on their own thread): time and count. */
+extern volatile unsigned long long gPortSoundPlayersNs;
+extern volatile unsigned int gPortSoundPlayersFrames;
+extern volatile int gPortSoundPlayersCore;
+extern volatile unsigned long long gPortSoundPlayersStartNs, gPortWalkTotalNs, gPortWalkStartNs;
+static unsigned long long sSecOtherNs[PORT_SEC_COUNT], sSecWorstOtherNs[PORT_SEC_COUNT], sSecOtherLast;
+static unsigned long long sSecOtherSumNs[PORT_SEC_COUNT];
+
+/* The walk's time so far (and the sound players' when they share the game's core): what other threads on the game's
+ * core have run, so a section's time can be split into the game's own and theirs. */
+static unsigned long long sec_other_now(unsigned long long now) {
+    unsigned long long walkStart = gPortWalkStartNs, total = 0;
+    if (plat_old_3ds()) { // (A New 3DS's walk has a core of its own)
+        total = gPortWalkTotalNs;
+        if (walkStart != 0 && now > walkStart) {
+            total += now - walkStart;
+        }
+    }
+    if (gPortSoundPlayersCore != 1) {
+        unsigned long long playersStart = gPortSoundPlayersStartNs;
+        total += gPortSoundPlayersNs;
+        if (playersStart != 0 && now > playersStart) {
+            total += now - playersStart;
+        }
+    }
+    return total;
+}
 
 void port_game_section(int section) {
-    unsigned long long now;
+    unsigned long long now, spent;
     if (sSecStartNs == 0) {
         return;
     }
     now = plat_time_ns();
-    sSecNs[sSecNow] += now - sSecStartNs;
+    spent = now - sSecStartNs;
+    sSecNs[sSecNow] += spent;
+    sSecFrameNs[sSecNow] += spent;
+    {
+        unsigned long long other = sec_other_now(now), inside = other - sSecOtherLast;
+        inside = inside < spent ? inside : spent; // (64-bit reads of another core's counters may tear)
+        sSecOtherNs[sSecNow] += inside;
+        sSecOtherSumNs[sSecNow] += inside;
+        sSecOtherLast = other;
+    }
     sSecStartNs = now;
     sSecNow = section;
+}
+
+/* At a frame's start: the last frame's sections, kept if it was the slowest so far. */
+static void sec_frame_done(void) {
+    unsigned long long total = 0;
+    s32 k;
+    for (k = 0; k < PORT_SEC_COUNT; k++) {
+        total += sSecFrameNs[k];
+    }
+    if (total > sSecWorstTotal) {
+        sSecWorstTotal = total;
+        __builtin_memcpy(sSecWorstNs, sSecFrameNs, sizeof(sSecWorstNs));
+        __builtin_memcpy(sSecWorstOtherNs, sSecOtherNs, sizeof(sSecWorstOtherNs));
+    }
+    __builtin_memset(sSecFrameNs, 0, sizeof(sSecFrameNs));
+    __builtin_memset(sSecOtherNs, 0, sizeof(sSecOtherNs));
 }
 static unsigned long long sKindStartNs, sOtherAtStartNs;
 static s32 sKindNow, sObjNow = PROF_OBJ_NONE;
@@ -894,6 +951,7 @@ static void show_overlay(void) {
                 port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
                 if (sSecFrames > 0) {
                     s32 k, n = 0;
+                    u32 secFrames = sSecFrames;
                     unsigned long long total = 0;
                     for (k = 0; k < PORT_SEC_COUNT; k++) {
                         total += sSecNs[k];
@@ -904,7 +962,47 @@ static void show_overlay(void) {
                         sSecNs[k] = 0;
                     }
                     port_log("game core sections a frame (ms, %.2f in all): %s", total / 1e6 / sSecFrames, line);
+                    n = 0;
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
+                        if (sSecOtherSumNs[k] >= 50000ULL * secFrames) {
+                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
+                                               sSecOtherSumNs[k] / 1e6 / secFrames);
+                        }
+                        sSecOtherSumNs[k] = 0;
+                    }
+                    port_log("of which the renderer's walk and the sound players on the game's core (ms a frame, 0.05 "
+                             "or more): %s", n ? line : "none");
                     sSecFrames = 0;
+                    n = 0;
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 48; k++) {
+                        if (sSecWorstNs[k] >= 50000) {
+                            n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", n ? ", " : "", sSecNames[k],
+                                               sSecWorstNs[k] / 1e6);
+                            if (sSecWorstOtherNs[k] >= 50000) {
+                                n += plat_snprintf(line + n, sizeof(line) - n, " (%.2f walk/sound)",
+                                                   sSecWorstOtherNs[k] / 1e6);
+                            }
+                        }
+                    }
+                    port_log("slowest frame's sections (ms, %.2f in all; 0.05 ms or more; in brackets what the "
+                             "renderer's walk and the sound players took of it on the game's core): %s",
+                             sSecWorstTotal / 1e6, line);
+                    sSecWorstTotal = 0;
+                    __builtin_memset(sSecWorstNs, 0, sizeof(sSecWorstNs));
+                    {
+                        static unsigned long long sLastPlayersNs;
+                        static unsigned int sLastPlayersFrames;
+                        unsigned long long ns = gPortSoundPlayersNs;
+                        unsigned int count = gPortSoundPlayersFrames;
+                        if (count != sLastPlayersFrames) {
+                            port_log("sound players: %.2f ms a game frame, %.3f ms each of %u (their thread on core %d)",
+                                     (ns - sLastPlayersNs) / 1e6 / secFrames,
+                                     (ns - sLastPlayersNs) / 1e6 / (count - sLastPlayersFrames),
+                                     count - sLastPlayersFrames, gPortSoundPlayersCore);
+                        }
+                        sLastPlayersNs = ns;
+                        sLastPlayersFrames = count;
+                    }
                 }
                 prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
                 port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
@@ -1048,18 +1146,20 @@ void prof_game_mark(int mark, int updateRate) {
             sGameTimed = prof_enabled() && (!plat_old_3ds() || sGameFrameCount % 8 == 0);
             sGameTimedFrames += sGameTimed;
             sKindStartNs = sGameTimed ? now : 0;
-            sSecStartNs = sKindStartNs;
+            if (sSecStartNs != 0) {
+                port_game_section(PORT_SEC_TOP); // The last frame's code after its end
+                sec_frame_done();
+            }
+            sSecStartNs = prof_enabled() ? now : 0;
+            sSecOtherLast = sec_other_now(now);
             sSecNow = PORT_SEC_TOP;
-            sSecFrames += sGameTimed;
+            sSecFrames += sSecStartNs != 0;
             sOtherAtStartNs = sKindBuildNs[PORT_DRAW_OTHER];
             break;
         case PROF_MARK_BUILT: {
             unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
             sBuildUs = (u32) (build / 1000);
-            if (sSecStartNs != 0) {
-                port_game_section(PORT_SEC_TOP);
-                sSecStartNs = 0;
-            }
+            port_game_section(PORT_SEC_RWAIT);
             if (sKindStartNs != 0) {
                 // The last kind ends here; the logic ran under "menus/other" and is shown apart.
                 unsigned long long other;
@@ -1079,11 +1179,13 @@ void prof_game_mark(int mark, int updateRate) {
             break;
         }
         case PROF_MARK_WAITED:
+            port_game_section(PORT_SEC_VSYNC);
             prof_add(PROF_FRAME_WAIT, now - sMarkNs[PROF_MARK_BUILT]);
             break;
         case PROF_MARK_END: {
             u32 periodUs = sLastFrameEndNs ? (u32) ((now - sLastFrameEndNs) / 1000) : 0;
             prof_add(PROF_VSYNC, now - sMarkNs[PROF_MARK_WAITED]);
+            port_game_section(PORT_SEC_END_LOD);
             sLastFrameEndNs = now;
             sGameFrames++;
             if (updateRate < 0) {

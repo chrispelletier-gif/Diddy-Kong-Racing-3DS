@@ -88,6 +88,10 @@ int port_frame_flip(int flip) {
     return (flip + 1) % (plat_render_ahead() + 1);
 }
 
+/* v31: the walk's time so far and the start of the one running (0: none), for the profiler's sections, which count
+ * what of each section the walk took from the game thread on the same core. */
+volatile unsigned long long gPortWalkTotalNs, gPortWalkStartNs;
+
 static void gfx_thread(void *arg) {
     OSTask *task;
 
@@ -104,8 +108,14 @@ static void gfx_thread(void *arg) {
         port_raise_event(OS_EVENT_SP);
         plat_set_frame_step(sGfxSteps[sGfxTasksFinished % GFX_STEP_RING]);
         start = plat_time_ns();
+        gPortWalkStartNs = start;
         port_gfx_run_task(task);
-        prof_render_task(plat_time_ns() - start);
+        {
+            unsigned long long spent = plat_time_ns() - start;
+            gPortWalkTotalNs += spent;
+            gPortWalkStartNs = 0;
+            prof_render_task(spent);
+        }
         port_load_frame_done();
         gPlatCounters[PLAT_COUNTER_GFX_DONE]++;
         gPlatGfxStage = "raising the DP interrupt";

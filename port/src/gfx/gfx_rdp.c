@@ -1876,6 +1876,7 @@ static u32 sNativeCopies; // v29: shared tables remade beside the old (profiler 
 static u32 sNativeUnshares; // v29: drains for shared tables (profiler log)
 static s32 sTrisSkip;            // v29 DKR_TRIS_SKIP (read_switches): 1 on, 2 also compares to count missed changes
 static u32 sTrisSkipped, sTrisMissed; // Track batches not compared, and changes found that skipping would have missed
+static s32 sWalkPrefetch; // v31 DKR_WALK_PREFETCH (read_switches): native_record starts loading the next record's data
 static s32 sRemoteShare; // v29 DKR_REMOTE_SHARE (read_switches): the backend reads unchanged mesh tables in place
 static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
@@ -2338,6 +2339,7 @@ static void read_switches(void) {
     sRemoteFlush = plat_switch("DKR_REMOTE_FLUSH", 1);
     sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
     sTrisSkip = plat_switch("DKR_TRIS_SKIP", 1);
+    sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     {
         s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
         sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
@@ -5399,6 +5401,23 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     }
     vtx = (const Vertex *) seg_addr(dl[0].words.w0);
     tris = (const Triangle *) seg_addr(dl[0].words.w1);
+    if (sWalkPrefetch && remaining >= 4 && dl[2].words.w0 == dl[-1].words.w0 &&
+        (dl[2].words.w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+        // v31 (DKR_WALK_PREFETCH): the next command is another record (most are: a model's batches, the track's
+        // segments). Its material, the first lines of its vertices and the line its tables' lookup reads first start
+        // loading now, under this record's work. Hints only.
+        const NMat *nextMat = &sNMats[dl[2].words.w1 & (NMAT_MAX - 1)];
+        const u8 *nextVtx = seg_addr(dl[3].words.w0);
+        size_t nextTris = (size_t) seg_addr(dl[3].words.w1);
+        u32 h = sNativeHashHigh ? (u32) ((u32) (nextTris >> 4) * 2654435761u) >> (32 - 11)
+                                : (u32) ((nextTris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1);
+        __builtin_prefetch(nextMat);
+        __builtin_prefetch((const u8 *) nextMat + 32);
+        __builtin_prefetch((const u8 *) nextMat + 64);
+        __builtin_prefetch(nextVtx);
+        __builtin_prefetch(nextVtx + 32);
+        __builtin_prefetch(&sNativeMeshes[h]);
+    }
     numVerts = dl[1].words.w0 & 0xFF;
     start = (dl[1].words.w0 >> 8) & 0xFF;
     textured = (dl[1].words.w0 >> 16) & 1;

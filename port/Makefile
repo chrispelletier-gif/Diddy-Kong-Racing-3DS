@@ -155,7 +155,8 @@ ifeq ($(TARGET),3ds)
   PORT_VERSION_MINOR := $(or $(word 2,$(PORT_VERSION_NUMBERS)),0)
   PORT_VERSION_MICRO := $(or $(word 3,$(PORT_VERSION_NUMBERS)),0)
   # Identifies the build in bug reports: git describe from the newest version tag, or the commit before there is one.
-  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)
+  # BUILD_NAME=x (v31) adds "-x" to it, so test builds of one commit (compile levels, variants) tell apart in reports.
+  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)$(if $(BUILD_NAME),-$(BUILD_NAME))
   # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
   PORT_BUILD_COMMIT := $(shell $(GIT) rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \

@@ -449,9 +449,13 @@ void main_game_loop(void) {
         gPortRacerLodBoost = sAdapt && sHold > 0;
     }
 #endif
+    port_game_section(PORT_SEC_END_NOTE);
     port_game_note_frame();
+    port_game_section(PORT_SEC_END_AUTORUN);
     port_autorun_frame(tempLogicUpdateRate);
+    port_game_section(PORT_SEC_END_HUD);
     port_race_hud_frame(tempLogicUpdateRate);
+    port_game_section(PORT_SEC_END_LOOP);
     {
         // A tap on the 3DS bottom screen's menu sounds like the game's own menus.
         static const u16 sUiSounds[] = { 0, SOUND_SELECT2, SOUND_MENU_PICK2, SOUND_MENU_BACK3 };

@@ -269,6 +269,16 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
     return thread;
 }
 
+int plat_core_id(void) {
+    return -1;
+}
+
+int plat_syscore_call(void (*fn)(void), void *osThread) {
+    (void) fn;
+    (void) osThread;
+    return 0;
+}
+
 int plat_split_syscore_possible(void) {
     return 0;
 }
