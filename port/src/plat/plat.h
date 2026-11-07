@@ -297,6 +297,9 @@ void plat_set_hud_edges(int on);
  * -1 the player's setting: settings.txt "fps60", else DKR_60FPS); the setting is saved by plat_set_60fps_setting.
  */
 int plat_frame_retraces(void);
+/* Host 60 fps step check (port/host/host_stepdiff.c, DKR_STEPDIFF): runs step() as one 30 fps step and as two 60 fps
+ * half steps in forked copies of the game and records what ends up different. Does nothing on the 3DS. */
+void plat_step_diff(int updateRate, void (*step)(long), void (*reinput)(long), int context);
 void plat_set_60fps(int on);
 int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
