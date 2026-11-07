@@ -344,6 +344,25 @@ static int percent(u32 part, u32 whole) {
 static s32 sGameTimed;
 static u32 sGameFrameCount;
 static unsigned long long sKindBuildNs[PROF_KINDS];
+/* v30 game core sections (port_drawtag.h PORT_SEC_*): this run of timed frames' time per section. */
+static unsigned long long sSecNs[PORT_SEC_COUNT], sSecStartNs;
+static u32 sSecFrames;
+static s32 sSecNow;
+static const char *const sSecNames[PORT_SEC_COUNT] = {
+    "top", "game", "logic", "after logic", "waves", "shadows", "prelude", "sky", "view", "segments",
+    "sort", "objects", "late", "weather", "hud", "game tail", "sound", "tail",
+};
+
+void port_game_section(int section) {
+    unsigned long long now;
+    if (sSecStartNs == 0) {
+        return;
+    }
+    now = plat_time_ns();
+    sSecNs[sSecNow] += now - sSecStartNs;
+    sSecStartNs = now;
+    sSecNow = section;
+}
 static unsigned long long sKindStartNs, sOtherAtStartNs;
 static s32 sKindNow, sObjNow = PROF_OBJ_NONE;
 static unsigned long sGameTimedFrames;
@@ -873,6 +892,20 @@ static void show_overlay(void) {
                 char line[1024];
                 prof_format_draw_mix(&sSecondMix, &sSecondScene, line, sizeof(line));
                 port_log("draw mix a frame (tris/draws rdp/build ms, waste off/back/tiny, overdraw): %s", line);
+                if (sSecFrames > 0) {
+                    s32 k, n = 0;
+                    unsigned long long total = 0;
+                    for (k = 0; k < PORT_SEC_COUNT; k++) {
+                        total += sSecNs[k];
+                    }
+                    for (k = 0; k < PORT_SEC_COUNT && n < (s32) sizeof(line) - 40; k++) {
+                        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %.2f", k ? ", " : "", sSecNames[k],
+                                      sSecNs[k] / 1e6 / sSecFrames);
+                        sSecNs[k] = 0;
+                    }
+                    port_log("game core sections a frame (ms, %.2f in all): %s", total / 1e6 / sSecFrames, line);
+                    sSecFrames = 0;
+                }
                 prof_format_object_mix(&sSecondObj, 10, line, sizeof(line));
                 port_log("objects a frame (updated/drawn/tris logic/build/rdp ms): %s", line);
                 {
@@ -1015,11 +1048,18 @@ void prof_game_mark(int mark, int updateRate) {
             sGameTimed = prof_enabled() && (!plat_old_3ds() || sGameFrameCount % 8 == 0);
             sGameTimedFrames += sGameTimed;
             sKindStartNs = sGameTimed ? now : 0;
+            sSecStartNs = sKindStartNs;
+            sSecNow = PORT_SEC_TOP;
+            sSecFrames += sGameTimed;
             sOtherAtStartNs = sKindBuildNs[PORT_DRAW_OTHER];
             break;
         case PROF_MARK_BUILT: {
             unsigned long long build = now - sMarkNs[PROF_MARK_LOOP_START];
             sBuildUs = (u32) (build / 1000);
+            if (sSecStartNs != 0) {
+                port_game_section(PORT_SEC_TOP);
+                sSecStartNs = 0;
+            }
             if (sKindStartNs != 0) {
                 // The last kind ends here; the logic ran under "menus/other" and is shown apart.
                 unsigned long long other;

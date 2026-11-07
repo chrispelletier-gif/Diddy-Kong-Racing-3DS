@@ -324,10 +324,13 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
     } else {
         tempUpdateRate = updateRate;
     }
+    port_game_section(PORT_SEC_WAVES);
     if (gWaveBlockCount) {
         waves_update(tempUpdateRate);
     }
+    port_game_section(PORT_SEC_SHADOWS);
     shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate);
+    port_game_section(PORT_SEC_PRELUDE);
     for (i = 0; i < 7; i++) {
         if ((s32) gCurrentLevelHeader2->unk74[i] != -1) {
             update_colour_cycle(gCurrentLevelHeader2->unk74[i], tempUpdateRate);
@@ -386,6 +389,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         if (flip) {
             gSPSetGeometryMode(gTrackDL++, G_CULL_FRONT);
         }
+        port_game_section(PORT_SEC_SKY);
         apply_fog(gSceneCurrentPlayerID);
         gDPPipeSync(gTrackDL++);
         set_active_camera(gSceneCurrentPlayerID);
@@ -422,6 +426,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         port_draw_tag(gTrackDL++, PORT_DRAW_OTHER);
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
+        port_game_section(PORT_SEC_WEATHER);
         port_draw_tag(gTrackDL++, PORT_DRAW_EFFECTS);
         // Show weather effects in single player.
         if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2
@@ -434,6 +439,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
         port_draw_tag(gTrackDL++, PORT_DRAW_HUD);
+        port_game_section(PORT_SEC_HUD);
 #ifdef TARGET_PORT
         if (!port_portrait_active())
 #endif
@@ -1805,6 +1811,7 @@ void initialise_player_viewport_vars(s32 updateRate) {
     s32 segmentIndex;
     Object_Racer *racer;
 
+    port_game_section(PORT_SEC_VIEW);
     gSceneActiveCamera = cam_get_active_camera();
     viewportID = get_current_viewport();
     compute_scene_camera_transform_matrix();
@@ -1836,6 +1843,7 @@ void initialise_player_viewport_vars(s32 updateRate) {
         }
     }
     level_header()->unk3 = 1;
+    port_game_section(PORT_SEC_SEGMENTS);
     render_level_geometry_and_objects();
 }
 
@@ -1909,7 +1917,9 @@ void render_level_geometry_and_objects(void) {
     }
 
     rendermode_reset(&gTrackDL);
+    port_game_section(PORT_SEC_SORT);
     sort_objects_by_dist(sp160, objCount - 1);
+    port_game_section(PORT_SEC_OBJECTS);
     visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
 
     for (i = sp160; i < objCount; i++) {
@@ -1966,6 +1976,7 @@ void render_level_geometry_and_objects(void) {
         }
     }
 
+    port_game_section(PORT_SEC_LATE);
     if (gDrawLevelSegments) {
         for (i = numberOfSegments - 1; i >= 0; i--) {
             render_level_segment(segmentIds[i], TRUE); // Render transparent segments

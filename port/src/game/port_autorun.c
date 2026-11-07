@@ -269,8 +269,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // draws behind a waiting batch go to the system core too (DKR_REMOTE_FLUSH), the system core reads unchanged
     // mesh tables in place (DKR_REMOTE_SHARE), track and model triangles are compared only after the game changes
     // them (DKR_TRIS_SKIP). Raced all off, and the first alone off (it moves more work to the system core).
-    { "v29 walk cuts off (old)", { "DKR_REMOTE_FLUSH", "DKR_REMOTE_SHARE", "DKR_TRIS_SKIP" }, 1, 0, 1, 1 },
-    { "draws behind a waiting batch kept on the game core", { "DKR_REMOTE_FLUSH", NULL, NULL }, 1, 0, 1, 1 },
+    // Bench #443 kept all three (renderer -0.8 to -1.0 ms on Windmill Plains and EverFrost Peak, even on Whale Bay;
+    // the flush alone off: Whale Bay +0.8 ms, the others -0.3), so their rows went.
+    // v30: the bottom screen is drawn on the system core (DKR_BS_SYSCORE) and its copy to the screen no longer
+    // holds the lock the game's HUD updates wait for (DKR_BS_COPY_LOCK). Each raced the old way.
+    { "bottom screen drawn on the game core (old)", { "DKR_BS_SYSCORE", NULL, NULL }, 1, 0, 1, 1 },
+    { "bottom screen copy under the game's lock (old)", { "DKR_BS_COPY_LOCK", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -278,8 +282,8 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Bench #438 (v28): native draws' vertex maths on the second renderer thread cost the New 3DS 1.5-2.7 ms of
     // renderer time on two tracks (its second thread shares the game's core), and textures in VRAM were mixed again
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
-    // v29: track and model triangles compared only after the game changes them (DKR_TRIS_SKIP); raced the old way.
-    { "triangles compared every frame (old)", { "DKR_TRIS_SKIP", NULL, NULL }, 1, 0, 1, 1 },
+    // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
+    // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

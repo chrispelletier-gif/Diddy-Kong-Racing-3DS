@@ -28,6 +28,30 @@ void port_draw_kind_game(int kind, int object);
 /* DKR_SKIP_GAME_KINDS (a bitmask of the kinds above, switch bench cost rows): the game doesn't build these at all, so
  * neither the game thread nor the renderer pays for them; the most a native renderer for that kind could save. */
 int port_skip_game_kind(int kind);
+/* v30: where the game thread's frame goes, for the profiler's "game core sections" line (port_profile.c). Each call
+ * ends the section running and starts this one; only timed frames read the clock. */
+enum {
+    PORT_SEC_TOP,        /* The loop's start: display list set-up, input, the frame's load work */
+    PORT_SEC_GAME,       /* mode_game before the object updates */
+    PORT_SEC_LOGIC,      /* obj_update */
+    PORT_SEC_POSTLOGIC,  /* After obj_update: state hash, native frame, cameras, AI nodes */
+    PORT_SEC_WAVES,      /* waves_update */
+    PORT_SEC_SHADOWS,    /* shadow_update */
+    PORT_SEC_PRELUDE,    /* Colour cycles, fog, texture animations, display list state */
+    PORT_SEC_SKY,        /* Camera, viewport and the sky */
+    PORT_SEC_VIEW,       /* The camera matrix, environment map and wave visibility */
+    PORT_SEC_SEGMENTS,   /* Finding the visible segments and their opaque geometry */
+    PORT_SEC_SORT,       /* sort_objects_by_dist */
+    PORT_SEC_OBJECTS,    /* The opaque and see-through object loops */
+    PORT_SEC_LATE,       /* See-through geometry, the last object pass, particles */
+    PORT_SEC_WEATHER,    /* Weather and lens flare */
+    PORT_SEC_HUD,        /* hud_render_player */
+    PORT_SEC_GAMETAIL,   /* The rest of mode_game (general HUD, race state, menus) */
+    PORT_SEC_SOUND,      /* sound_update_queue */
+    PORT_SEC_TAIL,       /* Dialogue, transitions, the display list's end */
+    PORT_SEC_COUNT
+};
+void port_game_section(int section);
 /*
  * Native model meshes (roadmap NR1, DKR_NATIVE_MESH, a bitmask: 1 the racers, 2 other objects' 3D models): render_mesh
  * puts this tag before each batch's vertex loads and triangles. The renderer then draws the batch from its own tables
@@ -113,5 +137,6 @@ void port_gpu_light_clear(const struct Vertex *verts);
 #else
 #define port_draw_tag(dl, kind)
 #define port_draw_tag_object(dl, kind, object)
+#define port_game_section(section) ((void) 0)
 #endif
 #endif

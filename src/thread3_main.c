@@ -1,4 +1,5 @@
 #include "thread3_main.h"
+#include "port_drawtag.h"
 
 #include "asset_enums.h"
 #include "asset_loading.h"
@@ -360,7 +361,9 @@ void main_game_loop(void) {
     // This is a good spot to place custom text if you want it to overlay it over ALL the
     // menus & gameplay.
 
+    port_game_section(PORT_SEC_SOUND);
     sound_update_queue(sLogicUpdateRate);
+    port_game_section(PORT_SEC_TAIL);
     debug_text_print(&gCurrDisplayList);
     render_dialogue_boxes(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList);
     dialogue_close(4);
@@ -535,6 +538,7 @@ void unload_level_game(void) {
 void mode_game(s32 updateRate) {
     s32 buttonPressedInputs, buttonHeldInputs, i, loadContext, sp3C;
 
+    port_game_section(PORT_SEC_GAME);
     loadContext = LEVEL_CONTEXT_NONE;
     buttonHeldInputs = 0;
     buttonPressedInputs = 0;
@@ -558,9 +562,11 @@ void mode_game(s32 updateRate) {
     // Update all objects
     if (!gIsPaused) {
 #ifdef TARGET_PORT
+        port_game_section(PORT_SEC_LOGIC);
         prof_logic_begin();
         obj_update(updateRate);
         prof_logic_end();
+        port_game_section(PORT_SEC_POSTLOGIC);
         port_state_hash();
         port_game_native_frame();
 #else
@@ -588,6 +594,7 @@ void mode_game(s32 updateRate) {
     gParticlePtrList_flush();
     ainode_update();
     render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+    port_game_section(PORT_SEC_GAMETAIL);
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);

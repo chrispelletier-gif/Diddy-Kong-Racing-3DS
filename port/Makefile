@@ -207,6 +207,12 @@ endef
 $(foreach f,$(GAME_SRC) $(LIBULTRA_SRC),$(eval $(call compile_rule,$(f),$$(GAME_CFLAGS))))
 $(foreach f,$(PORT_GAME_SRC),$(eval $(call compile_rule,$(f),$$(PORT_CFLAGS))))
 $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
+# v30 (Old 3DS bench builds): GAME_OPT=2 or s compiles the game's own code (src/*.c) at that level instead, to cut the
+# instruction cache misses of its large functions (update_car, obj_update, update_player_racer: 14-18 KB each at -O3
+# with link-time inlining, against a 16 KB instruction cache and no L2 on an Old 3DS). The renderer keeps HOT_OPT.
+ifneq ($(strip $(GAME_OPT)),)
+$(foreach f,$(GAME_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(GAME_OPT)
+endif
 ifneq ($(strip $(HOT_FLAGS)),)
 $(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := $(HOT_FLAGS)
 endif

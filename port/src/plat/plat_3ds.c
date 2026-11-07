@@ -56,6 +56,11 @@ static int sRcpCore;
 static int sAudioCore;
 static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
+/* v30 (DKR_BS_COPY_LOCK, default 1; 0 = old): the screen thread copies its picture to the framebuffer under a lock
+ * of its own, so the game thread's HUD and menu updates (which take sConsoleLock) never wait for a copy and cache
+ * flush done by that low-priority thread, which the walk can hold off for a whole frame on an Old 3DS. */
+static LightLock sCopyLock;
+static int sCopyLockOn = -1;
 static int sNew3DS;
 
 static void watchdog_start(void);
@@ -327,6 +332,7 @@ void plat_3ds_exit(void) {
     port_audio_output_exit();
     // Nothing may use the bottom screen console once the screens are gone: hold its lock for good.
     LightLock_Lock(&sConsoleLock);
+    LightLock_Lock(&sCopyLock); // And no copy may be under way (DKR_BS_COPY_LOCK)
     if (sRendererParked == PLAT_3DS_PARKED_GPU_IDLE) {
         gfxb_3ds_shutdown();
     }
@@ -1045,7 +1051,9 @@ void plat_log(const char *fmt, ...) {
  * so the game's threads never wait for the drawing. Until that thread starts (plat_rom_loaded), the caller draws.
  */
 static u16 sImage[BS_WIDTH * BS_HEIGHT];
-static LightEvent sScreenEvent;
+static LightEvent sScreenEvent, sScreenSysEvent;
+static LightLock sDrawLock;
+static volatile int sScreenSysStarted;
 static volatile int sScreenThreadStarted;
 static volatile unsigned long long sScreenBusyNs; // Time its thread has spent drawing (the profiler's P36 line)
 static volatile unsigned long sScreenDraws;       // Areas it has drawn
@@ -1102,18 +1110,27 @@ static void screen_draw(unsigned changes) {
 /* After a change (the console lock is held). */
 static void screen_changed(void) {
     if (sScreenThreadStarted) {
-        LightEvent_Signal(&sScreenEvent);
+        // DKR_BS_SYSCORE (v30, Old 3DS, default 1; 0 = old): the screen is drawn by its thread on the system core,
+        // in the time the renderer's backend leaves there, so its drawing no longer evicts the game core's caches.
+        static int sEpoch = -1, sSys;
+        if (sEpoch != gPlatSwitchEpoch) {
+            sEpoch = gPlatSwitchEpoch;
+            sSys = sScreenSysStarted && plat_switch("DKR_BS_SYSCORE", 1) != 0;
+            sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
+        }
+        LightEvent_Signal(sSys ? &sScreenSysEvent : &sScreenEvent);
     } else {
         screen_draw(bs_take_changes());
     }
 }
 
 static void screen_thread(void *arg) {
-    (void) arg;
-    bugreport_watch_thread("screen");
+    LightEvent *event = arg != NULL ? &sScreenSysEvent : &sScreenEvent;
+    bugreport_watch_thread(arg != NULL ? "screen (system core)" : "screen");
     for (;;) {
         unsigned changes;
-        LightEvent_Wait(&sScreenEvent);
+        LightEvent_Wait(event);
+        LightLock_Lock(&sDrawLock); // One of the two threads at a time (DKR_BS_SYSCORE changes between races)
         LightLock_Lock(&sConsoleLock);
         changes = bs_take_changes();
         LightLock_Unlock(&sConsoleLock);
@@ -1126,9 +1143,15 @@ static void screen_thread(void *arg) {
                     int first, end;
                     bs_draw(sImage, area);
                     bs_area_rows(area, &first, &end);
-                    LightLock_Lock(&sConsoleLock);
-                    screen_copy(first, end);
-                    LightLock_Unlock(&sConsoleLock);
+                    if (sCopyLockOn) {
+                        LightLock_Lock(&sCopyLock);
+                        screen_copy(first, end);
+                        LightLock_Unlock(&sCopyLock);
+                    } else {
+                        LightLock_Lock(&sConsoleLock);
+                        screen_copy(first, end);
+                        LightLock_Unlock(&sConsoleLock);
+                    }
                     sScreenDraws++;
                 }
             }
@@ -1136,6 +1159,7 @@ static void screen_thread(void *arg) {
             // is an upper bound.
             sScreenBusyNs += plat_time_ns() - start;
         }
+        LightLock_Unlock(&sDrawLock);
     }
 }
 
@@ -1147,11 +1171,17 @@ static void screen_thread(void *arg) {
 static void screen_thread_start(int core) {
     LightLock_Lock(&sConsoleLock);
     LightEvent_Init(&sScreenEvent, RESET_ONESHOT);
+    LightEvent_Init(&sScreenSysEvent, RESET_ONESHOT);
+    LightLock_Init(&sDrawLock);
     if (threadCreate(screen_thread, NULL, 16 * 1024, 0x3E, core, true) != NULL) {
         sScreenThreadStarted = 1;
         LightEvent_Signal(&sScreenEvent);
     } else {
         plat_log("bottom screen: could not create its thread");
+    }
+    // Old 3DS: a second thread on the system core (DKR_BS_SYSCORE), lowest but one priority there too.
+    if (!sNew3DS && core == 0 && threadCreate(screen_thread, (void *) 1, 16 * 1024, 0x3E, 1, true) != NULL) {
+        sScreenSysStarted = 1;
     }
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1159,6 +1189,7 @@ static void screen_thread_start(int core) {
 /* First thing in main, before plat_init. */
 void plat_3ds_console_init(void) {
     LightLock_Init(&sConsoleLock);
+    LightLock_Init(&sCopyLock);
     gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
     gfxSwapBuffersGpu();
@@ -1179,6 +1210,7 @@ void plat_rom_loaded(void) {
     bs_set_style(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
+    sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
     sLogAsync = !plat_switch("DKR_LOG_SYNC", 0);
 }
@@ -1279,12 +1311,19 @@ void plat_set_race_hud(const RaceHud *hud) {
             return;
         }
     }
+    // DKR_BS_COPY_LOCK: a race HUD update that finds the screen thread holding the lock (it can be held off by the
+    // walk with it) tries again next frame instead of waiting.
+    if (sCopyLockOn > 0 && racing && sShown && hud != NULL && LightLock_TryLock(&sConsoleLock) != 0) {
+        return;
+    }
+    if (!(sCopyLockOn > 0 && racing && sShown && hud != NULL)) {
+        LightLock_Lock(&sConsoleLock);
+    }
     sShown = hud != NULL;
     if (hud != NULL) {
         sLast = *hud;
         sLastNs = now;
     }
-    LightLock_Lock(&sConsoleLock);
     bs_set_race_hud(hud);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
