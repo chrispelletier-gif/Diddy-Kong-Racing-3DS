@@ -1,6 +1,6 @@
 # makerom settings for the installable dkr.cia (roadmap O7). Based on the devkitPro homebrew template.
 BasicInfo:
-  Title                   : "Diddy Kong Racing"
+  Title                   : "DKR 3D"
   ProductCode             : "CTR-H-DKRP"
   Logo                    : Homebrew
 

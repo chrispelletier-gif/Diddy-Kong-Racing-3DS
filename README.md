@@ -1,4 +1,4 @@
-# Diddy Kong Racing for Nintendo 3DS
+# DKR 3D (Nintendo 3DS)
 
 An unofficial, native Nintendo 3DS version of Diddy Kong Racing, built from the community decompilation of the N64
 game. It isn't an emulator: the game's own code runs on the 3DS, drawn by the 3DS GPU, with widescreen, stereo 3D and
