@@ -313,12 +313,15 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // way, and cost rows for what the bench's GPU timeline can't split: the sky, the see-through/effects/shadows
     // draws left out (DKR_SKIP_DRAW_KINDS, the backend's), and every draw's settings written once instead of twice
     // (DKR_REWRITE=1; the head and cliff dropouts may show in that race).
-    { "draws that can't change a pixel drawn (old)", { "DKR_SKIP_INVISIBLE", NULL, NULL }, 1, 0, 1, 0 },
-    { "top screen buffers in main memory (old)", { "DKR_FB_VRAM", NULL, NULL }, 1, 0, 1, 0 },
-    { "sky not drawn (cost)", { "DKR_SKIP_DRAW_KINDS", NULL, NULL }, 0, 1 << 4, 1, 0 },
-    { "see-through, effects and shadows not drawn (cost)", { "DKR_SKIP_DRAW_KINDS", NULL, NULL }, 0,
-      (1 << 5) | (1 << 6) | (1 << 7), 1, 0 },
-    { "settings written once, not twice (cost; may flicker)", { "DKR_REWRITE", NULL, NULL }, 2, 1, 1, 0 },
+    // Bench #463 (gpu3): leaving out those draws saved Haunted Woods 3.6 ms and Jungle Falls 1.9 ms of GPU (stays
+    // on), main memory buffers cost 0.6-2.6 ms (VRAM stays on), and settings written once saved nothing (the second
+    // write costs the GPU nothing), so those rows went. The cost rows said the sky takes 1.0-3.1 ms and the
+    // see-through/effects/shadows draws up to 2.8 ms (Crescent Island); round 3 times every draw on the GPU in the
+    // profile instead (DKR_GPU_DRAWS, "GPU draws" in the log), so they went too.
+    // Round 3: the GPU events thread above the renderer's priority on a New 3DS too (DKR_GSP_PRIO=1, v35's Old 3DS
+    // default): at equal priority the next list part and the swap waited for the walk, idle GPU time that the
+    // timeline can't see.
+    { "GPU events thread above the renderer (new)", { "DKR_GSP_PRIO", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

@@ -3451,6 +3451,7 @@ static void read_switches(void) {
     sTexCacheKeep = -1;
     sSkipInvisible = -1;
     sSkipKinds = -1;
+    sGpuDraws = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -3580,6 +3581,7 @@ void gfxb_start_frame(void) {
     sColourFillPending = 0;
     tex_cache_dirty(); // gpu_cuts.inc: the CPU may have written textures while the GPU drew the last frame
     sKindFrame[sRec] = 0; // gpu_cuts.inc: the slot's last frame has been taken (wait_for_gpu)
+    dp_frame_start();
     sKindParts[sRec] = 0;
     sProbe[sRec].after = -1;
     if (sFrameStarted < 0) {
@@ -3688,6 +3690,7 @@ void gfxb_end_frame(void) {
     }
     hand_over_draw_parts();
     gpu_kind_end_frame();
+    dp_frame_end();
     if (sOnceFrame) {
         stereo_once_lists(&sSlots[sRec]);
     }
@@ -5848,6 +5851,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (skip_invisible(state)) {
         return;
     }
+    dp_draw(state, numTriangles, 0);
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
@@ -6061,6 +6065,7 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     if (skip_invisible(state)) {
         return;
     }
+    dp_draw(state, numTriangles, 1);
     t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
@@ -6257,6 +6262,13 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
 
     if (skip_invisible(state)) {
         return;
+    }
+    if (__builtin_expect(sDpFrame[sRec], 0)) {
+        for (i = 0; i < numParts; i++) {
+            count += parts[i].numTriangles;
+        }
+        dp_draw(state, count, 2);
+        count = 0;
     }
     t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {

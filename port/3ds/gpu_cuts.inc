@@ -37,6 +37,20 @@ static unsigned int sTexClearsKept, sTexClearsDropped; // Section 4's (DKR_TEX_C
 static unsigned int sColourFills, sColourDrawn, sColourProbes; // Section 2's (DKR_COLOUR_FILL)
 static int sGpuKinds = -1;            // DKR_GPU_KINDS
 static unsigned int sInvisibleSkipped; // Section 5's (DKR_SKIP_INVISIBLE)
+/* Section 6's (DKR_GPU_DRAWS): a frame whose command list is cut after each of a window of draws. */
+#define DP_WINDOW (MAX_LIST_PARTS - 5)
+typedef struct DrawDesc {
+    const void *tex0, *tex1; // The draw's textures (their GfxTexture), its key with the rest
+    u16 w, h;                // tex0's size
+    u8 fmt, levels;          // tex0's GPU format (GPU_TEXCOLOR) and mipmap levels
+    u8 kind, blend, depth, alphaTest, fog, cycles, flat, path; // depth: test | write << 1; path: 0 indexed, 1 model, 2 meshes
+    u16 tris;
+} DrawDesc;
+static int sDpFrame[2], sDpParts[2], sDpIndex, sDpStart, sDpCount;
+static unsigned int sDpFrames; // Frames timed by draw since the last log line
+static DrawDesc sDpPart[2][MAX_LIST_PARTS + 1], sDpPrev;
+static void dp_take(int slot, int part, u64 ticks);
+static void dp_log(void);
 
 /* This frame's command list is cut by kind (gfxb_gpu_kind), and each part's kind, for the slot it is built in. */
 static int sKindFrame[2], sKindParts[2], sKindNow;
@@ -135,6 +149,7 @@ static void PLAT_COLD timeline_log(void) {
         }
         plat_log("GPU command lists by kind (%u frames cut at each kind, ms): %s", sTlKindFrames, line);
     }
+    dp_log();
     plat_log("GPU cuts: colour clear filled %u times (edges drawn %u, colours read back %u), texture cache clears %u "
              "kept, %u taken out, %u draws left out (they couldn't change a pixel)", sColourFills, sColourDrawn,
              sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped);
@@ -156,6 +171,9 @@ static void timeline_take(int slot) {
     }
     if (sTlArmed != 2) {
         sTlArmed = 0;
+        if (slot >= 0) {
+            sDpFrame[slot] = 0;
+        }
         return;
     }
     // libctru's queue says it is done before the GSP thread gets to the last job's event callback: wait for it.
@@ -175,6 +193,9 @@ static void timeline_take(int slot) {
                 break;
             case GSPGPU_EVENT_P3D:
                 list += d;
+                if (slot >= 0 && sDpFrame[slot]) {
+                    dp_take(slot, part, d);
+                }
                 if (kinds) {
                     int k = part < sKindParts[slot] ? sPartKind[slot][part] : GPU_KIND_MIXED;
                     sTlKindTicks[k] += d;
@@ -191,6 +212,10 @@ static void timeline_take(int slot) {
     }
     if (kinds) {
         sTlKindFrames++;
+    }
+    if (slot >= 0 && sDpFrame[slot]) {
+        sDpFrame[slot] = 0;
+        sDpFrames++;
     }
     if (n == 0) {
         return;
@@ -642,4 +667,201 @@ static inline int skip_invisible(const GfxDrawState *state) {
         return 1;
     }
     return 0;
+}
+
+/******************************** 6. Each draw's GPU time ********************************/
+
+/*
+ * DKR_GPU_DRAWS (on, while the profiler records, not in 3D; New 3DS): one frame in GPU_DRAW_EVERY has its command list
+ * cut before each draw of a window of DP_WINDOW draws (the window moves on each time, so every draw of a race frame
+ * gets its turn), and the GPU timeline times each part: what each draw costs the GPU, with what it was drawn with.
+ * The timeline's split by kind (section 1) says which kinds cost; this says which draws, and why (their texture's
+ * size and format, blending, depth, how many triangles). Draws are added up by their textures and settings; the
+ * costliest are logged with the timeline ("GPU draws ..."). Each cut adds the GPU's finishing and restarting of a
+ * list part (some microseconds), so the cheapest draws read a little high.
+ */
+#define GPU_DRAW_EVERY 60
+#define DP_KEYS 96
+static int sGpuDraws = -1; // DKR_GPU_DRAWS
+static unsigned int sDpFrameNo;
+static struct {
+    DrawDesc d;
+    u64 ticks;
+    unsigned int count;
+    unsigned long tris;
+} sDpKeys[DP_KEYS];
+static int sDpKeysUsed;
+static unsigned long long sDpTicksAll;
+static unsigned int sDpTimed;
+
+/* Backend, frame start: whether this frame is timed by draw. */
+static void dp_frame_start(void) {
+    int i;
+    if (__builtin_expect(sGpuDraws < 0, 0)) {
+        sGpuDraws = plat_switch("DKR_GPU_DRAWS", !plat_old_3ds()) != 0;
+    }
+    sDpFrame[sRec] = 0;
+    if (++sDpFrameNo % GPU_DRAW_EVERY != 0 || !sGpuDraws || !sTimeline || sStereo || !prof_recording()) {
+        return;
+    }
+    sDpFrame[sRec] = 1;
+    sDpParts[sRec] = MAX_LIST_PARTS + 1;
+    for (i = 0; i <= MAX_LIST_PARTS; i++) {
+        sDpPart[sRec][i].kind = 0xFF; // Parts outside the window are not timed
+    }
+    sDpIndex = 0;
+    if (sDpStart >= sDpCount) {
+        sDpStart = 0; // Round again from the frame's first draw
+    }
+}
+
+static void dp_describe(DrawDesc *d, const GfxDrawState *st, int tris, int path) {
+    const GfxTexture *t = st->textures[0];
+    memset(d, 0, sizeof(*d));
+    d->tex0 = t;
+    d->tex1 = st->textures[1];
+    if (t != NULL && t->backendData != NULL) {
+        const C3DTexture *ct = (const C3DTexture *) t->backendData;
+        d->w = ct->tex.width;
+        d->h = ct->tex.height;
+        d->fmt = (u8) ct->tex.fmt;
+        d->levels = (u8) ct->levels;
+    }
+    d->kind = (u8) sKindCur;
+    d->blend = st->blend;
+    d->depth = (u8) ((st->depthTest ? 1 : 0) | (st->depthWrite ? 2 : 0));
+    d->alphaTest = st->alphaTest;
+    d->fog = st->fogEnabled;
+    d->cycles = st->combiner.numCycles;
+    d->flat = st->flat;
+    d->path = (u8) path;
+    d->tris = (u16) (tris > 65535 ? 65535 : tris);
+}
+
+/* Backend, at a draw's start (after it is known to be drawn): in the window, the list is cut before it, so the part
+ * that ends there holds the draw before (sDpPrev). */
+static inline void dp_draw(const GfxDrawState *st, int tris, int path) {
+    int idx;
+    FrameSlot *slot;
+    if (__builtin_expect(!sDpFrame[sRec], 1)) {
+        return;
+    }
+    if (sKindFrame[sRec]) {
+        sDpFrame[sRec] = 0; // Being cut by kind this frame
+        return;
+    }
+    slot = &sSlots[sRec];
+    idx = sDpIndex++;
+    if (idx >= sDpStart && idx <= sDpStart + DP_WINDOW && slot->numParts < MAX_LIST_PARTS - 3 && sVboUsed > 0) {
+        int before = slot->numParts;
+        flush_new_vertices();
+        split_command_list();
+        // The part that ended here (numbered as the timeline numbers the frame's list parts) holds the draw before;
+        // the one before the window's first draw is the frame's start, not timed (kind 0xFF).
+        if (slot->numParts > before && idx > sDpStart) {
+            sDpPart[sRec][before] = sDpPrev;
+        }
+    }
+    dp_describe(&sDpPrev, st, tris, path);
+}
+
+/* Backend, frame end: the draw count (for the window's next turn) and the window moved on. */
+static inline void dp_frame_end(void) {
+    if (!sDpFrame[sRec]) {
+        return;
+    }
+    if (sDpIndex > sDpStart && sDpIndex <= sDpStart + DP_WINDOW && sSlots[sRec].numParts <= MAX_LIST_PARTS) {
+        sDpPart[sRec][sSlots[sRec].numParts] = sDpPrev; // The window's last draw is the frame's last: the list's rest
+    }
+    sDpCount = sDpIndex;
+    sDpStart += DP_WINDOW;
+}
+
+static int dp_same(const DrawDesc *a, const DrawDesc *b) {
+    return a->tex0 == b->tex0 && a->tex1 == b->tex1 && a->kind == b->kind && a->blend == b->blend &&
+           a->depth == b->depth && a->alphaTest == b->alphaTest && a->path == b->path && a->cycles == b->cycles;
+}
+
+/* Renderer (timeline_take): part `part` of the frame slot built took `ticks` on the GPU. */
+static void dp_take(int slot, int part, u64 ticks) {
+    const DrawDesc *d;
+    int i;
+    if (part >= sDpParts[slot]) {
+        return;
+    }
+    d = &sDpPart[slot][part];
+    if (d->kind == 0xFF) {
+        return; // Before the window
+    }
+    sDpTicksAll += ticks;
+    sDpTimed++;
+    for (i = 0; i < sDpKeysUsed; i++) {
+        if (dp_same(&sDpKeys[i].d, d)) {
+            break;
+        }
+    }
+    if (i == sDpKeysUsed) {
+        if (sDpKeysUsed == DP_KEYS) {
+            // Full: the cheapest so far makes room
+            int j, low = 0;
+            for (j = 1; j < DP_KEYS; j++) {
+                if (sDpKeys[j].ticks < sDpKeys[low].ticks) {
+                    low = j;
+                }
+            }
+            i = low;
+        } else {
+            sDpKeysUsed++;
+        }
+        sDpKeys[i].d = *d;
+        sDpKeys[i].ticks = 0;
+        sDpKeys[i].count = 0;
+        sDpKeys[i].tris = 0;
+    }
+    sDpKeys[i].ticks += ticks;
+    sDpKeys[i].count++;
+    sDpKeys[i].tris += d->tris;
+}
+
+static void PLAT_COLD dp_log(void) {
+    static const char *const sFmt[] = { "RGBA8", "RGB8", "RGBA5551", "RGB565", "RGBA4", "LA8", "HILO8", "L8",
+                                        "A8", "LA4", "L4", "A4", "ETC1", "ETC1A4" };
+    int shown, i, j;
+    double perFrame;
+    if (sDpFrames == 0 || sDpTimed == 0) {
+        return;
+    }
+    // The window covers DP_WINDOW of the frame's draws, so a draw's time a frame is its sampled time spread over the
+    // frames in which its index was in the window.
+    perFrame = (double) sDpCount / DP_WINDOW;
+    plat_log("GPU draws (%u frames timed by draw, %u draws timed, %.2f ms of GPU in them; about %d draws a frame): the "
+             "costliest, ms a frame (est.) / ms each, how many, triangles each, texture, settings:",
+             sDpFrames, sDpTimed, ticks_ms(sDpTicksAll), sDpCount);
+    for (shown = 0; shown < 14 && sDpKeysUsed > 0; shown++) {
+        int best = 0;
+        for (j = 1; j < sDpKeysUsed; j++) {
+            if (sDpKeys[j].ticks > sDpKeys[best].ticks) {
+                best = j;
+            }
+        }
+        {
+            const DrawDesc *d = &sDpKeys[best].d;
+            double each = ticks_ms(sDpKeys[best].ticks) / sDpKeys[best].count;
+            plat_log("  %.3f / %.3f ms x%u, %lu tris, %s: tex %dx%d %s%s mips %d, blend %d depth %s alpha test %d fog %d "
+                     "cycles %d flat %d %s",
+                     ticks_ms(sDpKeys[best].ticks) / sDpFrames * perFrame, each, sDpKeys[best].count,
+                     sDpKeys[best].tris / sDpKeys[best].count, d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?",
+                     d->w, d->h, d->tex0 != NULL && d->fmt < 14 ? sFmt[d->fmt] : "none", d->tex1 != NULL ? " +2nd" : "",
+                     d->levels, d->blend,
+                     d->depth == 3 ? "test+write" : d->depth == 1 ? "test" : d->depth == 2 ? "write" : "off",
+                     d->alphaTest, d->fog, d->cycles, d->flat,
+                     d->path == 0 ? "triangles" : d->path == 1 ? "model" : "meshes");
+        }
+        sDpKeys[best].ticks = 0; // Shown (the table is emptied below)
+    }
+    sDpKeysUsed = 0;
+    sDpTicksAll = 0;
+    sDpTimed = 0;
+    sDpFrames = 0;
+    (void) i;
 }
