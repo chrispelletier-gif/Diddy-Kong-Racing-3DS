@@ -2437,8 +2437,28 @@ static void load_map(int sprite, int mirrored, const unsigned char *colour, cons
             }
         }
     }
-    sMapX = box[0] + (box[2] - box[0] - outW) / 2;
-    sMapY = box[1] + (box[3] - box[1] - outH) / 2;
+    {
+        // Centre what is drawn, not the sprite's rectangle: its empty margins differ from track to track.
+        int minX = outW, maxX = -1, minY = outH, maxY = -1;
+        for (y = 0; y < outH; y++) {
+            for (x = 0; x < outW; x++) {
+                if (sMap.rgba[(y * outW + x) * 4 + 3] != 0) {
+                    minX = x < minX ? x : minX;
+                    maxX = x > maxX ? x : maxX;
+                    minY = y < minY ? y : minY;
+                    maxY = y > maxY ? y : maxY;
+                }
+            }
+        }
+        if (maxX < minX) {
+            minX = 0;
+            maxX = outW - 1;
+            minY = 0;
+            maxY = outH - 1;
+        }
+        sMapX = (box[0] + box[2]) / 2 - (minX + maxX + 1) / 2;
+        sMapY = (box[1] + box[3]) / 2 - (minY + maxY + 1) / 2;
+    }
     free(alpha);
     free(tex.rgba);
 }
@@ -3245,7 +3265,7 @@ static void draw_four_rows(const RaceHud *hud) {
     for (i = 0; i < hud->racerCount && i < 4; i++) {
         const RaceHudRacer *r = &hud->racers[i];
         int y = 8 + i * 47, x = 54;
-        char score[12];
+        char score[12], goal[12];
         if (r->player) {
             box(TOWER_X0 + 2, y - 3, TOWER_X1 - 2, y + 44, (Colour){ 255, 200, 40, 70 }, GOLD);
         }
@@ -3277,18 +3297,22 @@ static void draw_four_rows(const RaceHud *hud) {
                 break;
             default:
                 snprintf(score, sizeof(score), "%d", r->score);
-                x = text(FONT_FUN, x, y, score, YELLOW, 1);
-                snprintf(score, sizeof(score), "/ %d", hud->goal);
-                text(FONT_SMALL, x + 3, y + 3, score, DIM, 1);
+                snprintf(goal, sizeof(goal), sStyle == 0 ? " / %d" : "/%d", hud->goal);
+                if (sStyle == 0) {
+                    /* The game's big font has no slash: the whole score in the small font, one font, one baseline. */
+                    x = text(FONT_SMALL, x, y + 3, score, YELLOW, 1);
+                    text(FONT_SMALL, x, y + 3, goal, DIM, 1);
+                } else {
+                    /* The goal in the score's own font, dimmer, on its baseline. */
+                    x = text(FONT_FUN, x, y, score, YELLOW, 1);
+                    text(FONT_FUN, x + 2, y, goal, DIM, 1);
+                }
                 for (k = 0; k < 3; k++) {
                     if (k < r->score) {
                         picture_scaled(&sEggIcon, 54 + k * 12, y + 20, 1, 1);
                     } else {
                         picture_dim(&sEggIcon, 54 + k * 12, y + 20);
                     }
-                }
-                if (r->carrying) {
-                    text(FONT_SMALL, 54, y + 33, sStyle == 0 ? "+1 held" : "+1", YELLOW, 1);
                 }
                 break;
         }
@@ -3311,14 +3335,14 @@ static void draw_challenge(const RaceHud *hud) {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5, "Carrying", HINT, 1);
         /* The egg centred under the label, its instruction in two wrapped lines beneath it, the hint at the foot. */
         if (me != NULL && me->carrying) {
-            picture_scaled(&sEgg, (MIDDLE_X0 + MIDDLE_X1 - sEgg.width) / 2, LOWER_Y0 + 20, 1, 1);
+            picture_scaled(&sEggIcon, (MIDDLE_X0 + MIDDLE_X1 - sEggIcon.width * 2) / 2, LOWER_Y0 + 20, 2, 1);
             wrapped_centred(MIDDLE_X0, MIDDLE_X1,
-                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEgg.height, "Get it to", YELLOW),
+                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEggIcon.height * 2, "Get it to", YELLOW),
                             "your nest", YELLOW);
         } else {
             text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 40, "No egg", DIM, 1);
         }
-        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 6, "Drop it if hit", DIM, 1);
+        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 3, "Drop it if hit", DIM, 1);
     } else {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5,
                      hud->mode == RACE_HUD_MODE_BATTLE ? "Your health" : "Carrying", HINT, 1);
