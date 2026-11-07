@@ -241,6 +241,7 @@ void port_frames_video_wait(void) {
         (void) walkNs; // (Unused where the recorder is left out: release builds)
         (void) stage;
         (void) retraceWalkStartNs;
+        (void) retraceWalkNs;
     }
 }
 
