@@ -1783,6 +1783,9 @@ void obj_loop_animator(Object *obj, s32 updateRate) {
                 curTriangle->uv2.u += t0;
             }
         }
+#ifdef TARGET_PORT
+        port_tris_changed(&curBlock->triangles[trisStart]);
+#endif
     }
 }
 
@@ -5662,6 +5665,9 @@ void obj_loop_texscroll(Object *obj, s32 updateRate) {
                         curTriangle->uv2.u += t0;
                     }
                 }
+#ifdef TARGET_PORT
+                port_tris_changed(&curBlock[i].triangles[curBatch[j].facesOffset]);
+#endif
             }
             return;
         }
@@ -5705,6 +5711,9 @@ void obj_loop_texscroll(Object *obj, s32 updateRate) {
                         curTriangle->uv2.u += t0;
                     }
                 }
+#ifdef TARGET_PORT
+                port_tris_changed(&curBlock[i].triangles[curBatch[j].facesOffset]);
+#endif
             }
         }
     }

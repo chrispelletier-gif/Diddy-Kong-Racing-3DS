@@ -1858,6 +1858,8 @@ static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 
 static s32 sRemoteFlush; // v29 DKR_REMOTE_FLUSH (read_switches): a waiting walk batch is drawn ahead of a remote draw
 static u32 sNativeCopies; // v29: shared tables remade beside the old (profiler log)
 static u32 sNativeUnshares; // v29: drains for shared tables (profiler log)
+static s32 sTrisSkip;            // v29 DKR_TRIS_SKIP (read_switches): 1 on, 2 also compares to count missed changes
+static u32 sTrisSkipped, sTrisMissed; // Track batches not compared, and changes found that skipping would have missed
 static s32 sRemoteShare; // v29 DKR_REMOTE_SHARE (read_switches): the backend reads unchanged mesh tables in place
 static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
@@ -2319,6 +2321,7 @@ static void read_switches(void) {
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
     sRemoteFlush = plat_switch("DKR_REMOTE_FLUSH", 1);
     sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
+    sTrisSkip = plat_switch("DKR_TRIS_SKIP", 1);
     {
         s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
         sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
@@ -3777,10 +3780,10 @@ static void track_frame_start(void) {
         }
     }
     if (sFrameCount % 600 == 0 && sOpaqueStats[0] + sEngStats[0] > 0) {
-        plat_log("opaque sorting: %u batches held, %u draws%s, %u table drains, %u copies", (unsigned) (sOpaqueStats[0] + sEngStats[0]),
+        plat_log("opaque sorting: %u batches held, %u draws%s, %u table drains, %u copies, %u track batches not compared, %u changes caught late", (unsigned) (sOpaqueStats[0] + sEngStats[0]),
                  (unsigned) (sOpaqueStats[1] + sEngStats[1]), sRemote ? " (on the backend thread)" : "",
-                 (unsigned) sNativeUnshares, (unsigned) sNativeCopies);
-        sNativeUnshares = sNativeCopies = 0;
+                 (unsigned) sNativeUnshares, (unsigned) sNativeCopies, (unsigned) sTrisSkipped, (unsigned) sTrisMissed);
+        sNativeUnshares = sNativeCopies = sTrisSkipped = 0;
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
         sEngStats[0] = sEngStats[1] = 0; // Read without a lock, as the other profiler counts
     }
@@ -4098,6 +4101,8 @@ typedef struct NativeMesh {
     u8 usable;      // Fits the tables (corners)
     u32 shared;     // v29 DKR_REMOTE_SHARE: sShareEpoch when the backend was last handed these tables themselves
     u8 changes;     // v29: tables changed in place after being made (copied to the backend from then on)
+    u16 trisSeen;   // v29 DKR_TRIS_SKIP: gPortTrisCount of its slot when its triangles were last compared
+    u32 trisLoads;  // gPortLevelLoads then (0: not a track batch's)
     s16 minU, maxU, minV, maxV; // The texture coordinates' box, for the atlas
     u8 *cornerVertex;
     u32 *cornerUv;  // As TexCoords.texCoords
@@ -4318,7 +4323,10 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
 }
 
 /* The tables of these triangles, made if need be; NULL if they can't be. */
-static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic) {
+volatile unsigned short gPortTrisCount[PORT_TRIS_SLOTS];
+
+/* track: a level batch drawn as the track (only the game code that calls port_tris_changed changes those in place). */
+static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic, s32 track) {
     // v29 (DKR_NATIVE_HASH=0: the old low bits): triangle lists are 16-byte aligned, so the product's low bits only
     // ever started a search in a quarter of the table; its top bits are spread over all of it.
     u32 h = sNativeHashHigh ? (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11)
@@ -4347,12 +4355,37 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
                 // the same kart part twice) compares its triangles once.
                 return e->usable ? e : NULL;
             }
+            u32 seen = 0;
+            s32 skip = 0;
+            if (track && sTrisSkip) {
+                // v29 (DKR_TRIS_SKIP): unchanged since its last comparison unless its slot's count moved. Every 64th
+                // frame in turn it is compared anyway, which counts any change made without the count (sTrisMissed).
+                seen = gPortTrisCount[port_tris_slot(tris)];
+                __sync_synchronize(); // The count before the triangles (port_tris_changed)
+                skip = e->trisLoads == gPortLevelLoads && e->trisSeen == (u16) seen;
+                if (skip && sTrisSkip == 1 && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
+                    e->checkedFrame = (u32) sFrameCount;
+                    sTrisSkipped++;
+                    return e->usable ? e : NULL;
+                }
+            }
             if (sNMatFast ? native_tris_same(e->copy, tris, count)
                           : __builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
                 e->checkedFrame = (u32) sFrameCount;
+                e->trisSeen = (u16) seen;
+                e->trisLoads = track ? gPortLevelLoads : 0;
                 return e->usable ? e : NULL;
             }
+            if (skip) {
+                sTrisMissed++;
+                if (UNLIKELY(sTrisMissed < 20)) {
+                    plat_log("NDRAW triangles %p changed without port_tris_changed (frame %u)", (const void *) tris,
+                             (unsigned) sFrameCount);
+                }
+            }
             e->checkedFrame = (u32) sFrameCount;
+            e->trisSeen = (u16) seen;
+            e->trisLoads = track ? gPortLevelLoads : 0;
             if (sNMatFast && e->copy != NULL && native_uv_update(e, tris, count)) {
                 return e->usable ? e : NULL;
             }
@@ -4441,7 +4474,7 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
             return 0; // Flat (orthographic): the walk's flatness rules apply
         }
     }
-    mesh = native_find(tris, count, FALSE);
+    mesh = native_find(tris, count, FALSE, FALSE);
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
         return 0;
@@ -5380,9 +5413,12 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (total > MAX_VERTICES || count <= 0) {
         return 2;
     }
-    mesh = native_find(tris, count, dynamic);
-    if (mesh == NULL) {
-        mesh = native_find(tris, count, dynamic); // The tables were full and have just been emptied
+    {
+        s32 track = !dynamic && sDrawKind == PORT_DRAW_TRACK;
+        mesh = native_find(tris, count, dynamic, track);
+        if (mesh == NULL) {
+            mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
+        }
     }
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
