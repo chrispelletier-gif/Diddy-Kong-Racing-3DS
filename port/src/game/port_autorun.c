@@ -468,6 +468,9 @@ static void apply_config(s32 config) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
+        // v33 (user 2026-11-07): profiled as little as the results need, as close to a player's build as can be
+        // (port_profile.c DKR_PROF_LEAN). DKR_BENCH_FULL_PROFILE=1 keeps the profiler's log lines and frame history.
+        plat_override_switch("DKR_PROF_LEAN", plat_getenv("DKR_BENCH_FULL_PROFILE") == NULL);
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
         plat_override_switch("BENCH_WIDESCREEN", 2);
         plat_override_switch("BENCH_AA", PLAT_AA_2X);

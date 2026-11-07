@@ -2073,6 +2073,9 @@ static void history_sample(void) {
     if (sHistoryOn < 0) {
         history_start();
     }
+    if (sHistorySlots != 0 && plat_switch("DKR_PROF_LEAN", 0)) {
+        return; // v33: the switch bench's lean profiling (port_profile.c), as in a player's build
+    }
     if (sHistorySlots == 0 || sRecentFrozen || src == NULL || rows == 0 || rows / step < HISTORY_W || in_vram(src)) {
         return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
     }

@@ -968,11 +968,34 @@ static void log_rest(int step) {
     }
 }
 
+/*
+ * v33 DKR_PROF_LEAN (the switch bench sets it, user 2026-11-07: measure as close to a player's build as can be): with
+ * no readout shown, only what a race's results need is kept: the stage times, frame periods, flight recorder and
+ * draw mix. Off: the frame's section timing (two dozen clock reads, system calls on an Old 3DS), the readout's text
+ * and every log line of the profiler, and the bug reports' frame history (gfx_c3d.c: ~3.9 ms a frame of the Old 3DS
+ * renderer's system core time, bench #458).
+ */
+static s32 sLean;
+static s32 prof_lean_now(void) {
+    return sLean && !sEnabled && !sUserOn;
+}
+
 static void show_overlay(void) {
     ProfStats s;
     u32 slow, i;
     double fps;
 
+    sLean = plat_switch("DKR_PROF_LEAN", 0) != 0;
+    if (prof_lean_now()) {
+        take_draw_mix();
+        if (sOverlayShown) {
+            sOverlayShown = FALSE;
+            plat_overlay_graph(NULL, NULL, 0);
+            plat_overlay_show("");
+        }
+        prof_window_start(PROF_WINDOW_OVERLAY);
+        return;
+    }
     prof_window_read(PROF_WINDOW_OVERLAY, &s);
     take_draw_mix();
     fps = s.elapsedNs ? s.gameFrames * 1e9 / s.elapsedNs : 0.0;
@@ -1178,7 +1201,7 @@ void prof_game_mark(int mark, int updateRate) {
                 port_game_section(PORT_SEC_TOP); // The last frame's code after its end
                 sec_frame_done();
             }
-            sSecStartNs = prof_enabled() ? now : 0;
+            sSecStartNs = prof_enabled() && !prof_lean_now() ? now : 0;
             sSecOtherLast = sec_other_now(now);
             sSecNow = PORT_SEC_TOP;
             sSecFrames += sSecStartNs != 0;
