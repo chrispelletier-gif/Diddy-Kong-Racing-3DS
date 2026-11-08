@@ -3338,15 +3338,11 @@ static void draw_challenge(const RaceHud *hud) {
             picture_scaled(&sEggIcon, (MIDDLE_X0 + MIDDLE_X1 - sEggIcon.width * 2) / 2, LOWER_Y0 + 20, 2, 1);
             wrapped_centred(MIDDLE_X0, MIDDLE_X1,
                             wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEggIcon.height * 2, "Get it to", YELLOW),
-            picture_scaled(&sEgg, (MIDDLE_X0 + MIDDLE_X1 - sEgg.width) / 2, LOWER_Y0 + 20, 1, 1);
-            wrapped_centred(MIDDLE_X0, MIDDLE_X1,
-                            wrapped_centred(MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 24 + sEgg.height, "Get it to", YELLOW),
                             "your nest", YELLOW);
         } else {
             text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 40, "No egg", DIM, 1);
         }
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 3, "Drop it if hit", DIM, 1);
-        text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y1 - line_pitch() - 6, "Drop it if hit", DIM, 1);
     } else {
         text_centred(FONT_SMALL, MIDDLE_X0, MIDDLE_X1, LOWER_Y0 + 5,
                      hud->mode == RACE_HUD_MODE_BATTLE ? "Your health" : "Carrying", HINT, 1);
