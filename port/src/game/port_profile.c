@@ -1122,6 +1122,47 @@ static void show_overlay(void) {
     prof_window_start(PROF_WINDOW_OVERLAY);
 }
 
+/*
+ * v38: for the flight recorder's slow frames (recorder.c record_slow), called while the frame just ended is recorded:
+ * how much of its time the walk and the sound players took on the game's core (an Old 3DS's walk shares it), and, with
+ * the profiler's sections timed (not in a lean run), its three longest sections other than the waits.
+ */
+static unsigned long long sDetailOtherLast, sDetailOther;
+
+int port_rec_frame_detail(char *out, int size) {
+    int length = 0, shown, k;
+    u8 used[PORT_SEC_COUNT];
+    if (size <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (plat_old_3ds()) {
+        length += plat_snprintf(out + length, size - length, "; walk/sound on the game core %.1f ms",
+                                sDetailOther / 1e6);
+    }
+    if (sSecStartNs == 0) {
+        return length < size ? length : size - 1;
+    }
+    __builtin_memset(used, 0, sizeof(used));
+    used[PORT_SEC_RWAIT] = used[PORT_SEC_VSYNC] = 1;
+    for (shown = 0; shown < 3 && length < size; shown++) {
+        s32 best = -1;
+        for (k = 0; k < PORT_SEC_COUNT; k++) {
+            if (!used[k] && (best < 0 || sSecFrameNs[k] > sSecFrameNs[best])) {
+                best = k;
+            }
+        }
+        if (best < 0 || sSecFrameNs[best] < 500000ULL) {
+            break;
+        }
+        used[best] = 1;
+        length += plat_snprintf(out + length, size - length, "%s%s %.1f (%.1f walk/sound)",
+                                shown == 0 ? "; longest: " : ", ", sSecNames[best], sSecFrameNs[best] / 1e6,
+                                sSecOtherNs[best] / 1e6);
+    }
+    return length < size ? length : size - 1;
+}
+
 /* The flight recorder's row for the frame just ended: the game thread's stages, and what the renderer, the GPU and
  * the sound did since the row before (from the running totals). */
 static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
@@ -1158,6 +1199,11 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
     }
     for (i = 0; i < PROF_COUNTER_COUNT; i++) {
         sLastCounters[i] = counters[i];
+    }
+    {
+        unsigned long long other = sec_other_now(now);
+        sDetailOther = other > sDetailOtherLast ? other - sDetailOtherLast : 0;
+        sDetailOtherLast = other;
     }
     rec_game_frame(&row);
     if (sMonDirty && sOverlayShown) {
