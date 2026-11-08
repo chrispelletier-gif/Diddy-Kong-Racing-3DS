@@ -9,8 +9,8 @@ SHADER_ASM  := $(BUILD_DIR)/shader/shader_shbin.s
 SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h
 SHADER_OBJS := $(BUILD_DIR)/shader/shader_shbin.o
 
-APP_TITLE       := DKR 3D
-APP_DESCRIPTION := Unofficial 3DS port of the DKR decompilation, version $(PORT_VERSION)
+APP_TITLE       := Diddy Kong Racing
+APP_DESCRIPTION := Native port of the DKR decompilation, version $(PORT_VERSION)
 APP_AUTHOR      := DKR decomp contributors
 APP_ICON        := $(firstword $(wildcard 3ds/icon.png) $(CTRULIB)/default_icon.png)
 
