@@ -1137,7 +1137,7 @@ int port_rec_frame_detail(char *out, int size) {
     }
     out[0] = '\0';
     if (plat_old_3ds()) {
-        length += plat_snprintf(out + length, size - length, "; walk/sound on the game core %.1f ms",
+        length += plat_snprintf(out + length, size - length, "; walk/sound under way (working or waiting) %.1f ms",
                                 sDetailOther / 1e6);
     }
     if (sSecStartNs == 0) {
