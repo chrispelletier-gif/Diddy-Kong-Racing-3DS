@@ -8,6 +8,8 @@
  *  - hidden: written, then written over by a later opaque pixel in the same frame (wasted)
  *  - blended, no depth test: of the rasterized
  * DKR_FRAG_STATS=2 also lists the sky's draws (each with its pixels and settings) once a second.
+ * DKR_FRAG_STATS=3 also writes every frame's pixels and triangles by kind to frag_frames.csv (in the data directory),
+ * to find the frames whose GPU work spikes (Old 3DS Whale Bay, quick test #475: 17-24 ms GPU frames against 10).
  */
 static int sFragStats = -1, sFragKind;
 static uint8_t sFragLast[MAX_W * H]; // The kind that last wrote each pixel this frame, +1 (0: the clear)
@@ -72,6 +74,46 @@ static void frag_frame_end(void) {
                     sOracleRect += sFragSky[y * W + x];
                 }
             }
+        }
+    }
+    if (sFragStats == 3) {
+        // This frame's share of the running sums: rasterized screens and triangles by kind.
+        static FILE *sCsv;
+        static unsigned long long sPrevRaster[PROF_KINDS + 2], sPrevTris[PROF_KINDS + 2], sPrevBlend[PROF_KINDS + 2];
+        static unsigned long long sFrameNo;
+        if (sCsv == NULL) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/frag_frames.csv", plat_data_dir());
+            sCsv = fopen(path, "w");
+            if (sCsv != NULL) {
+                fprintf(sCsv, "frame,raster,blend,tris");
+                for (k = 0; k < 9; k++) {
+                    fprintf(sCsv, ",raster_%d,tris_%d", k, k);
+                }
+                fprintf(sCsv, "\n");
+            }
+        }
+        if (sCsv != NULL) {
+            double screen = (double) W * H, raster = 0, blend = 0, tris = 0;
+            for (k = 0; k < 9; k++) {
+                raster += (sFragRaster[k] - sPrevRaster[k]) / screen;
+                blend += (sFragBlend[k] - sPrevBlend[k]) / screen;
+                tris += (double) (sFragTris[k] - sPrevTris[k]);
+            }
+            fprintf(sCsv, "%llu,%.3f,%.3f,%.0f", sFrameNo, raster, blend, tris);
+            for (k = 0; k < 9; k++) {
+                fprintf(sCsv, ",%.3f,%llu", (sFragRaster[k] - sPrevRaster[k]) / screen, sFragTris[k] - sPrevTris[k]);
+            }
+            fprintf(sCsv, "\n");
+        }
+        sFrameNo++;
+        memcpy(sPrevRaster, sFragRaster, sizeof(sPrevRaster));
+        memcpy(sPrevTris, sFragTris, sizeof(sPrevTris));
+        memcpy(sPrevBlend, sFragBlend, sizeof(sPrevBlend));
+        if ((sFragFrames + 1) % 300 == 0) {
+            memset(sPrevRaster, 0, sizeof(sPrevRaster)); // The sums restart below
+            memset(sPrevTris, 0, sizeof(sPrevTris));
+            memset(sPrevBlend, 0, sizeof(sPrevBlend));
         }
     }
     memset(sFragLast, 0, sizeof(sFragLast));

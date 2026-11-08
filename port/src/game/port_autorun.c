@@ -303,7 +303,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went.
     // The New 3DS's GPU cuts that are off here, the frame's colour clear and the whole-screen solid rectangle as memory
     // fills (DKR_COLOUR_FILL + DKR_RECT_FILL), raced together in bench #476: no GPU time saved on any of the three
-    // tracks (9.8-10.3 ms either way), so they stay off and the row went. No Old 3DS rows left.
+    // tracks (9.8-10.3 ms either way), so they stay off and the row went.
+    // v39: Whale Bay's last 50 ms frames (quick tests #474/#475) come in the first 15 s of a race, with the pack
+    // together: the PC race has twice the usual triangles then (2000 against 970 a frame, the racers 900 of them).
+    // A racer's model comes in 23-35 pieces that repeat most of their vertices (~300 sent for ~130 different), so
+    // the backend's shared corners (DKR_WELD, gfx_rdp.c weld_vertices) work out a vertex seen again in the same
+    // matrix, light and fog once: PC Whale Bay, 31-37% of the racers' vertices (36-38% of every piece's) taken from
+    // the table, frames and game state identical. Raced for the racers alone and for every piece.
+    { "shared corners for the racers (new)", { "DKR_WELD", NULL, NULL }, 0, 1, 0, 0 },
+    { "shared corners for everything (new)", { "DKR_WELD", NULL, NULL }, 0, 2, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

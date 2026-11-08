@@ -920,6 +920,13 @@ static void log_rest(int step) {
                     }
                 }
                 {
+                    unsigned long weld[2];
+                    if (gfx_weld_take(weld) && weld[0] + weld[1] > 0) {
+                        port_log("shared corners (DKR_WELD): %lu of %lu vertices a frame taken from the table",
+                                 weld[0] / frames, (weld[0] + weld[1]) / frames);
+                    }
+                }
+                {
                     unsigned long atlas[3];
                     if (gfx_atlas_take(atlas)) {
                         port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
