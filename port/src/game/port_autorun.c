@@ -350,6 +350,10 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
     // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
     { "whole-screen solid rectangle drawn (old)", { "DKR_RECT_FILL", NULL, NULL }, 1, 0, 1, 0 },
+    // Boss fights (2026-11-08, user: "performance during the boss fights seems poor at times"): Wizpig 1's rain is two
+    // whole-screen blended layers every frame. Blended draws that write no depth now drop their alpha 0 pixels with
+    // the GPU's alpha test before the blend (DKR_XLU_ALPHA_TEST, gfx_c3d.c; same picture), raced the old way.
+    { "blended draws' clear pixels blended (old)", { "DKR_XLU_ALPHA_TEST", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

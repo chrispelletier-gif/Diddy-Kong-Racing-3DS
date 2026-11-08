@@ -200,6 +200,15 @@ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
  * last flush stopped; the command list itself is flushed by GX_CMDLIST_FLUSH. DKR_FULL_FLUSH=1 is the old way.
  */
 static int sNoCull = -1;  // DKR_NO_CULL, read on set_draw_state's first use
+/*
+ * DKR_XLU_ALPHA_TEST (on, New 3DS; boss fights, 2026-11-08): a blended draw (alpha or additive) that writes no depth
+ * leaves a pixel as it was where its alpha is 0 (dst * 1 + src * 0), so the GPU's alpha test can drop those pixels
+ * before the blend reads and writes the colour buffer: the same picture for less of the GPU's memory traffic. Wizpig
+ * 1's rain draws two whole-screen layers of a mostly clear 64x64 texture every frame (PC pixel count: 2 of its 4.7
+ * screens a frame), and see-through water and smoke are mostly clear too. Draws with their own alpha test keep it.
+ * 0 leaves the test off, as before.
+ */
+static int sXluAlphaTest = -1;
 static int sFlushMode = -1; // drain_before_draw's settings, read on its first call (read_drain_settings)
 static int sFogMode = -1; // DKR_NO_FOG / DKR_VERTEX_FOG, read on first use
 static int sStateCache = -1; // DKR_STATE_CACHE, read on set_all_state's first use
@@ -3453,6 +3462,7 @@ static void read_switches(void) {
     sSkipKinds = -1;
     sGpuDraws = -1;
     sRectFill = -1;
+    sXluAlphaTest = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -5065,10 +5075,21 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
         }
         sGpu.blend = state->blend;
     }
-    if (!sGpu.known || state->alphaTest != sGpu.alphaTest || state->alphaRef != sGpu.alphaRef) {
-        C3D_AlphaTest(state->alphaTest, GPU_GEQUAL, state->alphaRef);
-        sGpu.alphaTest = state->alphaTest;
-        sGpu.alphaRef = state->alphaRef;
+    {
+        u8 alphaTest = state->alphaTest, alphaRef = state->alphaRef;
+        if (__builtin_expect(sXluAlphaTest < 0, 0)) {
+            sXluAlphaTest = plat_switch("DKR_XLU_ALPHA_TEST", !plat_old_3ds()) != 0;
+        }
+        if (sXluAlphaTest && !alphaTest && !state->depthWrite && !sDepthOnly &&
+            (state->blend == GFX_BLEND_ALPHA || state->blend == GFX_BLEND_ADD)) {
+            alphaTest = 1;
+            alphaRef = 1; // GEQUAL 1: every pixel whose alpha isn't 0
+        }
+        if (!sGpu.known || alphaTest != sGpu.alphaTest || alphaRef != sGpu.alphaRef) {
+            C3D_AlphaTest(alphaTest, GPU_GEQUAL, alphaRef);
+            sGpu.alphaTest = alphaTest;
+            sGpu.alphaRef = alphaRef;
+        }
     }
     if (sDepthOnly) {
         depthEnable = true;
