@@ -1,4 +1,8 @@
 #include "font.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 #include "asset_loading.h"
 #include "camera.h"
 #include "common.h"
@@ -469,7 +473,11 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     if (lastTextureIndex != textureIndex) {
                         lastTextureIndex = textureIndex;
                         texture = fontData->texturePointers[textureIndex];
-                        gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(texture->cmd), texture->numberOfCommands);
+#ifdef PICA_ALL
+                        if (!port_native_draw()) // Native draws: each letter's rectangle names its texture
+#endif
+                            gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(texture->cmd),
+                                               texture->numberOfCommands);
                     }
                     textureWidth = fontData->letter[curChar].width;
                     textureHeight = fontData->letter[curChar].height;
@@ -498,6 +506,9 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     textureT += -textureUly * 8;
                     textureUly = 0;
                 }
+#ifdef PICA_ALL
+                port_native_rect(dList, texture); // Nothing with native draws off
+#endif
                 gSPTextureRectangle((*dList)++, textureUlx, textureUly, textureLrx, newTempY, 0, textureS, textureT,
                                     1 << 10, 1 << 10);
                 if (lastTextureIndex) {} // Fakematch

@@ -5,6 +5,14 @@
 #include "thread3_main.h"
 #include <ultra64.h>
 #include "port_loadtime.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#endif
+#ifdef PICA_ALL
+// Native wake-up (DKR_NATIVE_BGLOAD, off in lockstep runs): a semaphore instead of the message queue.
+#include "port.h"
+static PlatSem *sBgLoadSem;
+#endif
 
 /************ .data ************/
 
@@ -28,6 +36,12 @@ u64 gThread30Stack[STACKSIZE(STACK_BGLOAD)];
  * Initalizes and starts thread30()
  */
 void bgload_init(void) {
+#ifdef PICA_ALL
+    if (plat_switch("DKR_NATIVE_BGLOAD", 1) && !port_lockstep_enabled()) {
+        sBgLoadSem = plat_sem_create(0);
+        plat_log("bgload: native wake-up (no message queue)");
+    }
+#endif
     osCreateMesgQueue(&gThread30MesgQueue, gThread30Message, ARRAY_COUNT(gThread30Message));
     osCreateThread(&gThread30, 30, &thread30_bgload, NULL, &gThread30Stack[STACKSIZE(STACK_BGLOAD)], 8);
     osStartThread(&gThread30);
@@ -57,6 +71,12 @@ void bgload_tick(void) {
         gThread30LoadDelay--;
         if (gThread30LoadDelay == 0) {
             // Signal thread30 that the level needs to load.
+#ifdef PICA_ALL
+            if (sBgLoadSem != NULL) {
+                plat_sem_post(sBgLoadSem);
+                return;
+            }
+#endif
             osSendMesg(&gThread30MesgQueue, (OSMesg *) OS_MESG_TYPE_LOOPBACK, OS_MESG_NOBLOCK);
         }
     }
@@ -92,6 +112,14 @@ void thread30_bgload(UNUSED void *arg) {
     OSMesg mesg = 0;
     while (TRUE) {
         // Wait for a signal from the main thread
+#ifdef PICA_ALL
+        if (sBgLoadSem != NULL) {
+            plat_sem_wait(sBgLoadSem);
+            load_level_for_menu(gThread30LevelIdToLoad, -1, gThread30CutsceneIdToLoad);
+            gThread30NeedToLoadLevel = FALSE;
+            continue;
+        }
+#endif
         osRecvMesg(&gThread30MesgQueue, &mesg, OS_MESG_BLOCK);
         if (mesg != (OSMesg) OS_MESG_TYPE_LOOPBACK) {
             continue;

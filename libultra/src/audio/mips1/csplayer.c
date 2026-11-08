@@ -37,6 +37,10 @@
  */
 
 #include <libaudio.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_music_player_new(ALCSPlayer *player, ALSeqpConfig *c);
+#endif
 #include <os_internal.h>
 #include <ultraerror.h>
 #ifdef TARGET_PORT
@@ -48,6 +52,11 @@ extern volatile u32 gPortAudioQueueEmpty;
 #include "cseqp.h"
 #include "cseq.h"
 #include "synthInternals.h"
+#ifdef PICA_ALL
+/* The sound code's interrupt-disabled sections take the sound lock instead (port/src/os/audio_lock.c). */
+OSIntMask port_audio_set_mask(OSIntMask mask);
+#define osSetIntMask port_audio_set_mask
+#endif
 
 /************ .rodata ************/
 const char D_800E6C20[] = "CSP: oh oh \n";
@@ -74,6 +83,12 @@ void alCSPNew(ALCSPlayer *seqp, ALSeqpConfig *c)
     ALVoiceState        *voices;
     
     ALHeap *hp = c->heap;    
+
+#ifdef PICA_ALL
+    if (port_music_player_new(seqp, c)) {
+        return; // the native music player (port/src/audio/music.c)
+    }
+#endif
 
     /*
      * initialize member variables

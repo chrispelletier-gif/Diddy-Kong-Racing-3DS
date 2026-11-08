@@ -53,6 +53,11 @@
  *   DKR_AUTORUN_QUICK_CHARACTER=n     Character (default Bumper, as the anti-aliasing benchmark).
  *   DKR_AUTORUN_QUICK_PASSES=n        Races per track (2).
  * Its files are quick_test_state.txt and quick_test_results.csv (with a "build" column).
+ * For reproducing a driving bug by hand on the host build (any mode):
+ *   DKR_AUTORUN_MANUAL=s              After s seconds of each race the AI lets go of the player's kart (and nothing
+ *                                     puts it back at a checkpoint), and DKR_MANUAL_INPUT drives it instead: a
+ *                                     DKR_INPUT style script whose step times are 60ths of a second from that moment.
+ *                                     Each frame logs a "man" line with the kart's speed, tilt and grounded wheels.
  *
  * The boss fights test races every boss once (Tricky, Bluey, Bubbler, Smokey and Wizpig, the first and the second
  * fight of each), with one character, about half an hour. Boss levels aren't on the tracks menu, so the full run
@@ -243,6 +248,105 @@ typedef struct BenchSwitch {
  * models by distance, sooner with more players on screen (objects.c); DKR_RACER_LOD=n uses the distances of n + 1
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
+#ifdef PICA_ALL
+/* The off-GitHub "every N64 layer native" test build (plat_common.c defaults): native draws on, GPU vertex maths and
+ * textures in VRAM off, two-core renderer on on both consoles. */
+/* The bench after the OS-layer stages (user 2026-11-05 22:51): GPU vertex maths and textures in VRAM are settled
+ * (both stay off: no gain on either console, runs 9/10 and the New 3DS runs 5/6), so their rows are gone and the
+ * usual races (the new renderer at its best settings) race the old renderer at its best: the game builds its N64
+ * display lists again and the walk draws them in their order (DKR_OLD_RENDERER 1: native draws and opaque sorting off), as before the
+ * PICA stages. The OS-layer stages (frame queue, sound, music, input, ROM reads, locks) are set at launch, so both
+ * kinds of race have them. Textures in VRAM with each (Old 3DS runs 9 and 10 disagreed; user 23:00: VRAM with new and with old renderer). */
+/* Textures in VRAM never beat the usual races with the new renderer (Old 3DS #417 and #419, New 3DS #418), so it stays
+ * off and its two rows are gone (user 2026-11-06: remove redundant tests). */
+/* Benches #432/#436 (Old 3DS) and #435 (New 3DS), v26-v27: the off-screen triangle drop, the kart detail drop, the
+ * native code's vertex vectors and game code are kept (no row beat them); checking pieces once a frame made no
+ * difference and the stall finder only costs, so their rows are gone (user rule: drop settled rows). Textures in
+ * VRAM: steadier on Whale Bay in both Old 3DS runs (frame to frame 2.0-2.2 ms against 2.3-3.8), even elsewhere, so
+ * v28 makes it the Old 3DS default and its row races the old way; on the New 3DS it was even, and races again. */
+/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
+ * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
+static const BenchSwitch sSwitchesOld3ds[] = {
+    // Bench #437 (v28): native draws' vertex maths on the system core (DKR_NATIVE_REMOTE=3) saved 1.4-3.0 ms of
+    // renderer time on the game core (frames at 30: Whale Bay 91 -> 97%, Windmill Plains 93 -> 98%), more than
+    // opaque draws alone; it stays the default and its rows went, as did textures in RAM (even again).
+    // v29 walk cuts (PC walk -20% instructions, -20% cache misses on a simulated Old 3DS cache, frames identical):
+    // draws behind a waiting batch go to the system core too (DKR_REMOTE_FLUSH), the system core reads unchanged
+    // mesh tables in place (DKR_REMOTE_SHARE), track and model triangles are compared only after the game changes
+    // them (DKR_TRIS_SKIP). Raced all off, and the first alone off (it moves more work to the system core).
+    // Bench #443 kept all three (renderer -0.8 to -1.0 ms on Windmill Plains and EverFrost Peak, even on Whale Bay;
+    // the flush alone off: Whale Bay +0.8 ms, the others -0.3), so their rows went.
+    // v30: the bottom screen is drawn on the system core (DKR_BS_SYSCORE) and its copy to the screen no longer
+    // holds the lock the game's HUD updates wait for (DKR_BS_COPY_LOCK). Benches #449/#450 kept both (the copy under
+    // the lock had more frames slower than 30: 95-98% at 30 against 98-99%), so their rows went.
+    // v31: the N64 sound players' frame on the system core (DKR_PLAYERS_SYSCORE); the game's loops over every object
+    // load the objects ahead of use (DKR_OBJ_PREFETCH); the walk loads the next draw record's data and the backend
+    // the next piece ahead of use (DKR_WALK_PREFETCH, DKR_BACKEND_PREFETCH); exact game code cuts (shadow pass skips
+    // objects without shadows, each clip corner worked out once, lighter object loops; the music fade scan is skipped
+    // on levels without fades, no row); the watchdog counts free memory every 5 s and the bottom screen is flushed
+    // by a system call. Each raced the old way. Bench #456: every row even with the usual races (within 0.3 fps),
+    // so the cuts stay on and their rows went; the sound players' row tested nothing (their thread gave up at
+    // start-up, before the system core lent any time), fixed in v32, so it races again.
+    // v32: the profiler's own costs, found by v31's slowest-frame line: its readout and log lines run after the frame
+    // is built (DKR_PROF_IDLE_LOG; they took ~8 ms after the frame's end every 4th second), and the GPU timeline's
+    // frame cut by kind is off (DKR_GPU_KINDS; 24 of #456's 53 renderer hitches were on it). Raced the v31 way.
+    // Bench #457 (v32): all three kept (worst GPU frame 35-50 -> 24-27 ms without the kind cuts; the sound players
+    // on core 1 take 0.6 ms a frame off the game core, fps even), so their rows went.
+    // v33: a texture freed at a frame's start (objects' textures mid-race, stale ones at loads) goes through the
+    // backend's queue instead of the walk waiting for the backend to catch up (DKR_TEX_FREE_QUEUE): half of #457's
+    // Whale Bay hitches after the start had such a free in the frame (renderer 49-54 ms). Raced the old way.
+    // Benches #459/#460 (v33, lean): the queue was even with the old way (all three tracks at 29.9 fps, none at
+    // 20 fps with the profiler's readout off), so it stays on and its row went.
+    // v35: the GSP event thread (retraces, the GPU's next command list, the swap) above the walk (DKR_GSP_PRIO,
+    // plat_3ds.c): at the walk's priority it waited for the walk, and lean quick test #462's 39 ms worst frames were
+    // retraces that came late that way. Raced the old way.
+    // Lean quick tests #465/#467 (v35/v36): the GSP thread raised cut Whale Bay's GPU time 11.4 -> 9.8 ms; the 39 ms
+    // frames stayed, and v36's probe found them: the game thread slept out its 4 ms bound after a lost broadcast
+    // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c).
+    // Switch bench #472 (combined build fc6df8e8): both kept. The old GSP priority cost 1.2-5.1 ms of GPU a frame;
+    // the old waits had 10-34 late wakes a race against none, a 1% low of 25.8 against 29.2 on Whale Bay and Windmill
+    // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went.
+    // The New 3DS's GPU cuts that are off here: the frame's colour clear as a memory fill (DKR_COLOUR_FILL) and the
+    // whole-screen solid rectangle drawn first in race frames as that fill (DKR_RECT_FILL, ~1.9 ms of New 3DS GPU,
+    // bench #469). Whale Bay's slowest frames wait on 18-41 ms GPU frames (#472), so they race here together.
+    { "colour clear and whole-screen rectangle as memory fills (new)", { "DKR_COLOUR_FILL", "DKR_RECT_FILL", NULL }, 0, 1,
+      0, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+/* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
+static const BenchSwitch sSwitchesNew3ds[] = {
+    // Bench #438 (v28): native draws' vertex maths on the second renderer thread cost the New 3DS 1.5-2.7 ms of
+    // renderer time on two tracks (its second thread shares the game's core), and textures in VRAM were mixed again
+    // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
+    // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
+    // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
+    // GPU time (gfx_c3d.c gpu_cuts.inc). Bench #451 (2026-11-07): the colour clear as a memory fill saved 1.5-3.2 ms
+    // of GPU (stays on, row gone); the top screen's buffers in VRAM took the copy to the screen from 1.2 to 0.55 ms
+    // on every track (now on, raced the old way once more: one Haunted Woods race was worse); the texture cache kept
+    // between draws gained nothing (shelved, row gone). Round 2: draws that can't change a pixel left out (the
+    // screen fader's alpha 0 quad over the whole screen in every race frame; PC frames identical), raced the old
+    // way, and cost rows for what the bench's GPU timeline can't split: the sky, the see-through/effects/shadows
+    // draws left out (DKR_SKIP_DRAW_KINDS, the backend's), and every draw's settings written once instead of twice
+    // (DKR_REWRITE=1; the head and cliff dropouts may show in that race).
+    // Bench #463 (gpu3): leaving out those draws saved Haunted Woods 3.6 ms and Jungle Falls 1.9 ms of GPU (stays
+    // on), main memory buffers cost 0.6-2.6 ms (VRAM stays on), and settings written once saved nothing (the second
+    // write costs the GPU nothing), so those rows went. The cost rows said the sky takes 1.0-3.1 ms and the
+    // see-through/effects/shadows draws up to 2.8 ms (Crescent Island); round 3 times every draw on the GPU in the
+    // profile instead (DKR_GPU_DRAWS, "GPU draws" in the log), so they went too.
+    // Round 3: the GPU events thread above the renderer's priority on a New 3DS too (DKR_GSP_PRIO=1, v35's Old 3DS
+    // default): at equal priority the next list part and the swap waited for the walk, idle GPU time that the
+    // timeline can't see.
+    // Bench #466 (gpu4): it cost Haunted Woods 1.7 ms of GPU and gained nothing elsewhere, so the New 3DS keeps
+    // libctru's priority and the row went. Round 4: v37's kernel lock waits that can't lose a broadcast (DKR_KCOND,
+    // on for both consoles) raced the old way, for the New 3DS's pacing and render waits (late_wakes column).
+    // Bench #469 (v37 in the combined build): the old waits cost Haunted Woods 2.2 ms of GPU and a 33 ms worst frame,
+    // so DKR_KCOND stays on and its row went. Round 5: #469's per-draw list began race frames with a whole-screen
+    // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
+    // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
+    { "whole-screen solid rectangle drawn (old)", { "DKR_RECT_FILL", NULL, NULL }, 1, 0, 1, 0 },
+    { NULL, { NULL, NULL, NULL }, 0, 0 },
+};
+#else
 static const BenchSwitch sSwitchesOld3ds[] = {
     // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
     // at 30 against 96/92/94%), so DKR_RACER_LOD=2 is the Old 3DS default (src/objects.c) and its rows are gone.
@@ -273,6 +377,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "native meshes for the racers", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 1, 1 },
     { "native meshes for the racers and objects", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 3, 1 },
     { "other karts' simpler models sooner (4-player distances)", { "DKR_RACER_LOD", NULL, NULL }, 2, 3, 1 },
+    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths,
+    // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
+    // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -292,8 +400,13 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Central Area's game logic up to 12.7 ms a frame, 47-52 fps); this row races the old order.
     { "renderer's second thread above the game (old)", { "DKR_SPLIT_BELOW_GAME", NULL }, 1, 0, 1, 0 },
     { "renderer's second thread on the system core", { "DKR_SPLIT_SYSCORE", NULL }, 0, 1, 1, 0 },
+    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths, the
+    // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
+    // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
+#endif
 /*
  * New 3DS: the shelved switches bench ("Shelved switches" in the Test run menu, 2026-11-01; the user asked whether
  * anything shelved earlier is worth another look now that the profiler times every part, the renderer runs on two
@@ -349,6 +462,8 @@ static s32 sMode; // enum Mode
 static s32 config_count(void);
 static const char *config_name(s32 config);
 
+static void lean_apply(void);
+
 /* Sets the race's settings: config -1 puts back the player's render settings and every switch's own value. */
 static void apply_config(s32 config) {
     s32 i, k;
@@ -385,6 +500,7 @@ static void apply_config(s32 config) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
+        lean_apply(); // The lean bench only (v34; DKR_BENCH_FULL_PROFILE=1 keeps the profiler's lines and frame history)
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
         plat_override_switch("BENCH_WIDESCREEN", 2);
         plat_override_switch("BENCH_AA", PLAT_AA_2X);
@@ -436,7 +552,8 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 
 enum Request {
     REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
-    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED
+    REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED, REQUEST_SWITCH_LEAN, REQUEST_QUICK_LEAN,
+    REQUEST_FULL_LEAN
 };
 
 typedef struct ModeInfo {
@@ -477,6 +594,12 @@ static const char *config_name(s32 config) {
 
 static s32 sEnabled = -1;
 static s32 sShort;          // The whole game run's short variant, or the switch bench's shelved switches
+/* v34 (user 2026-11-07: a separate option from the normal switch bench): the lean switch bench and quick test profile
+ * only what the results need, as close to a player's build as can be (port_profile.c DKR_PROF_LEAN). */
+static s32 sLeanRun;
+static void lean_apply(void) {
+    plat_override_switch("DKR_PROF_LEAN", sLeanRun && plat_getenv("DKR_BENCH_FULL_PROFILE") == NULL);
+}
 static s32 sReportedAt = -1; // The whole game run: the stop before which the last progress report went out
 static unsigned long long sLastReportNs;
 static unsigned long long sReportWaitNs; // When the run started waiting for a report to go out, or 0
@@ -488,6 +611,10 @@ static volatile s32 sRequest;
 static s32 sQuitPending;
 static double sFpsSum;
 static s32 sFpsCount;
+// Since the game started, for the issue's summary: adaptive anti-aliasing's frames and those at the low resolution,
+// the frame to frame period changes summed (ms) with the frames they cover, and the pace changes.
+static unsigned long long sSumAaFrames, sSumAaLow, sSumFrames, sSumPaceChanges;
+static double sSumJitterMs;
 static s32 sPhase;
 static Race sRaces[MAX_RACES];
 static s32 sNumRaces;
@@ -514,7 +641,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
-static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart;
+static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart, sWakesStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -667,7 +794,9 @@ static s32 parse_list(const char *list, s8 *ids, s32 maxIds) {
 static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
-    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND }; // head flicker
+    // Haunted Woods and Crescent Island for the head flicker, Jungle Falls for its tunnel with the native track (NR4).
+    static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND,
+                                              ASSET_LEVEL_JUNGLEFALLS };
     static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13 }; // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst)
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
@@ -872,9 +1001,9 @@ static void save_state_recorded(s32 running, s32 recorded) {
     char text[200];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n"
-                  "short=%d\nreported=%d\n",
+                  "short=%d\nreported=%d\nlean=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
-                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt);
+                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt, (int) sLeanRun);
     io_queue(state_file(), text, NULL, FALSE);
 }
 
@@ -946,6 +1075,16 @@ static s32 pct(u32 part, u32 whole) {
     return whole ? (s32) (((unsigned long long) part * 100 + whole / 2) / whole) : 0;
 }
 
+/* The race's share of adaptive anti-aliasing frames drawn at the low resolution; -1 if it wasn't in use. */
+static s32 aa_low_pct(s32 none) {
+    u32 frames = gPlatCounters[PLAT_COUNTER_AA_FRAMES] - sAaFramesStart;
+    u32 low = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES] - sAaLowStart;
+    if (none || frames == 0) {
+        return -1;
+    }
+    return (s32) (low * 100ull / frames);
+}
+
 static const char *aa_label(void) {
     s32 aa = plat_antialias();
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
@@ -966,6 +1105,15 @@ static const char *graphics_setup(void) {
         s32 len = (s32) strlen(text);
         plat_snprintf(text + len, sizeof(text) - len, "/split");
     }
+    if (plat_switch("DKR_PROF_LEAN", 0)) {
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/lean"); // v34: profiled lean (port_profile.c)
+    }
+    if (plat_wide800_active()) {
+        // At 800 pixels across, 4x and 2x both draw twice the height (aa_label says 2x for either).
+        s32 len = (s32) strlen(text);
+        plat_snprintf(text + len, sizeof(text) - len, "/800px");
+    }
     return text;
 }
 
@@ -985,6 +1133,10 @@ static s32 sWorstHitchCount;
 
 static void reset_hitches(void) {
     sHitchSince = rec_frame_now();
+    {
+        char none[8];
+        rec_slow_take(none, sizeof(none)); // Forgets the slow frames before the run.
+    }
     sRunHitches = 0;
     bzero(sRunCauses, sizeof(sRunCauses));
     sWorstHitchCount = 0;
@@ -1014,7 +1166,11 @@ static void record_hitches(const char *outcome) {
                                 rec_cause_name(c), counts[c]);
         sRunCauses[c] += counts[c];
     }
-    plat_snprintf(text + length, sizeof(text) - length, "\n");
+    length += plat_snprintf(text + length, sizeof(text) - length, "\n");
+    // v35: then the race's slowest frames short of a hitch (what its worst_frame_ms was), with what took the time.
+    if (length < (s32) sizeof(text)) {
+        rec_slow_take(text + length, sizeof(text) - length);
+    }
     sRunHitches += found;
     append_file(HITCH_FILE, text, "# Hitches in each race of the test runs: frames half as long again as usual, with what "
                                   "took the time and what happened then (port/src/plat/recorder.c).\n");
@@ -1237,7 +1393,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "rdp_ms,texture_ms,gpu_wait_ms,gpu_draw_ms,audio_ms,worst_build_ms,worst_render_ms,"
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
-                  "paced_20fps_pct,paced_slower_pct,flashes\n",
+                  "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
+                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1280,13 +1437,23 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // After the mode's own column, so the columns before keep their places in older results files.
     // Then the frame pacing: the 1% low, and the share of game frames that took one retrace, two, three or more (measured
     // between frames, so unlike pct_30fps it counts the frames the game meant to show at 60 but couldn't).
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u\n",
+    // Then (2026-11-06) what adaptive anti-aliasing did (the share of its frames at the low resolution, -1 when it
+    // was not in use), the average change in period between consecutive frames, and how often the pace changed.
+    // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies,
+    // and (v35) the retraces that reached the VI thread more than 3 ms late (plat_wait_vblank), (v36) the game's waits
+    // for a retrace it ran more than 3 ms after (frames.c).
+    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u,%u\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
                   (int) pct(stats->pacedFrames[0], stats->gameFrames), (int) pct(stats->pacedFrames[1], stats->gameFrames),
                   (int) pct(stats->pacedFrames[2], stats->gameFrames), (int) pct(stats->pacedFrames[3], stats->gameFrames),
-                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart));
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_FLASHES] - sFlashesStart),
+                  (int) aa_low_pct(stats == &empty), stats->jitterUs / 1000.0, stats->paceChanges,
+                  ms(stats, PROF_GPU_FILL, stats->renderedFrames), ms(stats, PROF_GPU_LISTS, stats->renderedFrames),
+                  ms(stats, PROF_GPU_COPY, stats->renderedFrames),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_RETRACES] - sLateStart),
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_WAKES] - sWakesStart));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
@@ -1326,6 +1493,7 @@ s32 port_autorun_enabled(void) {
                 if (state_value(text, "active", 0) != 0) {
                     sMode = mode;
                     sShort = state_value(text, "short", 0);
+                    sLeanRun = state_value(text, "lean", 0);
                 }
             }
         }
@@ -1369,6 +1537,7 @@ static void init(void) {
         for (i = 1; i < SWITCH_RACES; i++) {
             hash_text(config_name(i)); // A new switch starts a new run.
         }
+        hash_text(plat_build_version()); // So does a new build: its numbers aren't comparable with the last one's.
     } else if (sMode == MODE_QUICK) {
         hash_text("quick test");
         for (i = 0; i < (s32) ARRAY_COUNT(quickNames); i++) {
@@ -1396,6 +1565,8 @@ static void init(void) {
     sProblems = 0;
     sFpsSum = 0.0;
     sFpsCount = 0;
+    sSumAaFrames = sSumAaLow = sSumFrames = sSumPaceChanges = 0;
+    sSumJitterMs = 0.0;
     sReportedAt = -1;
     sReportWaitNs = 0;
     sLastReportNs = plat_time_ns();
@@ -1510,10 +1681,13 @@ s32 port_autorun_shelved_count(void) {
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
  * boss fights (4), the switch bench (5), the whole game run (6, or 7 for its short variant) or the shelved switches
- * bench (8), or stop whichever is going (0), at the next game frame.
+ * bench (8), the lean switch bench (9), lean quick test (10) or lean full test (11), or stop whichever is going (0), at the next game frame.
  */
 void port_autorun_request(s32 start) {
-    sRequest = start == 8   ? REQUEST_SWITCH_SHELVED
+    sRequest = start == 11  ? REQUEST_FULL_LEAN
+               : start == 10 ? REQUEST_QUICK_LEAN
+               : start == 9 ? REQUEST_SWITCH_LEAN
+               : start == 8 ? REQUEST_SWITCH_SHELVED
                : start == 7 ? REQUEST_WHOLE_SHORT
                : start == 6 ? REQUEST_WHOLE
                : start == 5 ? REQUEST_SWITCH
@@ -1823,8 +1997,25 @@ static const char *menu_pass_frame(s32 updateRate) {
     return NULL;
 }
 
-/* plat_input_script: the menu pass's buttons replace the player's while it runs. */
+/* DKR_AUTORUN_MANUAL: when the script takes over the player's kart, in 60ths of a second into the race (-1 never). */
+static s32 manual_start(void) {
+    const char *env = plat_getenv("DKR_AUTORUN_MANUAL");
+    return env != NULL ? port_atoi(env) * 60 : -1;
+}
+static s32 manual_now(void) {
+    s32 start = manual_start();
+    return start >= 0 && sEnabled > 0 && sPhase == PHASE_RACING && sRaceRetraces >= start;
+}
+/* plat_input_script: the menu pass's buttons replace the player's while it runs, and DKR_MANUAL_INPUT's once
+   DKR_AUTORUN_MANUAL lets go of the kart. */
 int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char *stickY) {
+    if (manual_now()) {
+        *buttons = 0;
+        *stickX = 0;
+        *stickY = 0;
+        return plat_input_script_text(plat_getenv("DKR_MANUAL_INPUT"), sRaceRetraces - manual_start(), buttons,
+                                      stickX, stickY);
+    }
     if (sEnabled <= 0 || sMode != MODE_WHOLE || sPhase != PHASE_RACING || sNext >= sNumRaces ||
         sRaces[sNext].kind != STOP_MENUS) {
         return 0;
@@ -1943,6 +2134,8 @@ s32 port_autorun_title(void) {
     save_state(sNext);
     if (race->config >= 0) {
         apply_config(race->config); // The renderer switches while the race loads.
+    } else {
+        lean_apply(); // The lean quick test's (v34)
     }
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
@@ -1973,7 +2166,11 @@ s32 port_autorun_time_trial(void) {
 }
 
 /* Nonzero while the player's kart is driven by the AI. */
+static s32 manual_now(void);
 s32 port_autorun_drives(void) {
+    if (manual_now()) {
+        return FALSE;
+    }
     // Not in the menus, nor on a hub tour, where the kart is put in each place and turned round instead.
     return sEnabled > 0 && sPhase >= PHASE_LOADING && sPhase <= PHASE_FINISHED &&
            (sNext >= sNumRaces || (sRaces[sNext].kind != STOP_HUB && sRaces[sNext].kind != STOP_MENUS));
@@ -2022,7 +2219,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 13) // The whole game run has three columns of its own; then the flashes
+#define MAX_FIELDS (COL_COUNT + 24) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -2036,10 +2233,35 @@ typedef struct BenchGroup {
     s32 pacedRaces; // Races with the frame pacing columns (results written before they were added have none).
     double low1, paced[4];
     s32 flashes, flashRaces; // Picture flashes (the frame history's watch), in races whose results have the column
+    s32 steadyRaces; // Races with the steadiness columns (jitter_ms, pace_changes; 2026-11-06)
+    double jitter, paceChanges;
+    s32 timelineRaces; // Races with the GPU timeline's columns (gpu_fill_ms, gpu_lists_ms, gpu_copy_ms; 2026-11-07)
+    double gpuFill, gpuLists, gpuCopy;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
 } BenchGroup;
 
 static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+
+/* The switch bench's steadiness cells: the frame to frame change (ms) and the pace changes a race ("-" without). */
+static const char *steady_cells(const BenchGroup *g) {
+    static char cell[48];
+    if (g->steadyRaces == 0) {
+        return "- | -";
+    }
+    plat_snprintf(cell, sizeof(cell), "%.2f | %.0f", g->jitter / g->steadyRaces, g->paceChanges / g->steadyRaces);
+    return cell;
+}
+
+/* The switch bench's GPU timeline cell: fills / draws / copies, ms a frame ("-" without the columns). */
+static const char *timeline_cell(const BenchGroup *g) {
+    static char cell[48];
+    if (g->timelineRaces == 0) {
+        return "-";
+    }
+    plat_snprintf(cell, sizeof(cell), "%.2f / %.2f / %.2f", g->gpuFill / g->timelineRaces,
+                  g->gpuLists / g->timelineRaces, g->gpuCopy / g->timelineRaces);
+    return cell;
+}
 
 /* The switch bench's flashes cell: picture flashes in how many races ("-" for results without the column). */
 static const char *flash_cell(const BenchGroup *g) {
@@ -2195,6 +2417,17 @@ static void bench_summary(char *out, s32 size) {
             g->flashRaces++;
             g->flashes += port_atoi(fields[gapsColumn + 9]);
         }
+        if (numFields > gapsColumn + 12) {
+            g->steadyRaces++;
+            g->jitter += parse_decimal(fields[gapsColumn + 11]);
+            g->paceChanges += parse_decimal(fields[gapsColumn + 12]);
+        }
+        if (numFields > gapsColumn + 15) {
+            g->timelineRaces++;
+            g->gpuFill += parse_decimal(fields[gapsColumn + 13]);
+            g->gpuLists += parse_decimal(fields[gapsColumn + 14]);
+            g->gpuCopy += parse_decimal(fields[gapsColumn + 15]);
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -2234,8 +2467,9 @@ static void bench_summary(char *out, s32 size) {
                                "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
-                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | limit | flashes |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|\n",
+                               "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | frame to frame ms "
+                               "| pace changes | limit | flashes | GPU fills / draws / copies ms |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -2268,14 +2502,15 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
                         base->races ? bench_avg(base->gpu, base->races) - bench_avg(g->gpu, g->races) : 0.0,
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
-                        (int) g->worstGpu, (int) g->worstFrame, sLimitNames[limit], flash_cell(g));
+                        (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g),
+                        timeline_cell(g));
                     continue;
                 }
                 length += plat_snprintf(
@@ -2619,8 +2854,8 @@ static void send_results(const char *why) {
     static char summary[8192];
     s32 length;
     io_flush(); // The summaries and the attached files read the results back.
-    plat_snprintf(title, sizeof(title), "[3DS test run] %srun %d: %d of %d races, %d problems (%s)",
-                  sMode == MODE_BENCH    ? "GPU benchmark "
+    plat_snprintf(title, sizeof(title), "[3DS test run] %s%srun %d: %d of %d races, %d problems (%s)",
+                  sLeanRun ? "lean " : "", sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? (sShort ? "shelved switches " : "switch bench ")
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
@@ -2646,6 +2881,26 @@ static void send_results(const char *why) {
                                 "(each race's are in the results file's graphics column).\n",
                                 aa_label(), 60 / plat_frame_retraces(),
                                 plat_render_ahead());
+    }
+    if (length > 0 && length < (s32) sizeof(summary) && sSumFrames > 0) {
+        // Steadiness and what adaptive anti-aliasing did, which the frame rate alone hides (2026-11-06: #430 drew
+        // most of its frames without anti-aliasing at a steady 60).
+        length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                "Frame steadiness: frame to frame change %.2f ms on average, pace changes (60/30/20 fps) "
+                                "%.1f a minute.\n",
+                                sSumJitterMs / (double) sSumFrames,
+                                sSumPaceChanges * 60.0 / ((double) sSumFrames / (60.0 / plat_frame_retraces())));
+    }
+    if (length > 0 && length < (s32) sizeof(summary)) {
+        if (sSumAaFrames > 0) {
+            length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                    "Adaptive anti-aliasing: **%d%% of its frames at the low resolution** "
+                                    "(aa_low_pct column per race).\n",
+                                    (int) (sSumAaLow * 100 / sSumAaFrames));
+        } else {
+            length += plat_snprintf(summary + length, sizeof(summary) - length,
+                                    "Adaptive anti-aliasing: not in use.\n");
+        }
     }
     if (length > 0 && length < (s32) sizeof(summary) - 2048) {
         // Kept to 2 KB, so the mode's own tables below still fit.
@@ -2693,6 +2948,8 @@ static void turn_off(const char *why) {
     if (is_bench()) {
         apply_config(-1); // Back to the player's settings.
     }
+    sLeanRun = 0;
+    plat_override_switch("DKR_PROF_LEAN", 0); // Frame history back for bug reports
     sMode = MODE_FULL;
     prof_set_status(NULL);
 }
@@ -2738,6 +2995,11 @@ static void end_race(const char *outcome, s32 position) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
             sFpsCount++;
         }
+        sSumAaFrames += gPlatCounters[PLAT_COUNTER_AA_FRAMES] - sAaFramesStart;
+        sSumAaLow += gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES] - sAaLowStart;
+        sSumFrames += sRaceStats.gameFrames;
+        sSumJitterMs += sRaceStats.jitterUs / 1000.0 * sRaceStats.gameFrames;
+        sSumPaceChanges += sRaceStats.paceChanges;
     } else {
         char what[64];
         plat_snprintf(what, sizeof(what), "%s after %d s", outcome, (int) (sRaceRetraces / 60));
@@ -2756,8 +3018,14 @@ static void handle_request(void) {
     sRequest = REQUEST_NONE;
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
          request == REQUEST_SWITCH || request == REQUEST_SWITCH_SHELVED || request == REQUEST_WHOLE ||
-         request == REQUEST_WHOLE_SHORT) &&
+         request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN ||
+         request == REQUEST_FULL_LEAN) &&
         !port_autorun_active()) {
+        sLeanRun = request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN || request == REQUEST_FULL_LEAN;
+        request = request == REQUEST_SWITCH_LEAN  ? REQUEST_SWITCH
+                  : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK
+                  : request == REQUEST_FULL_LEAN  ? REQUEST_START
+                                                  : request;
         sShort = request == REQUEST_WHOLE_SHORT || (request == REQUEST_SWITCH_SHELVED && !plat_old_3ds());
         if (request == REQUEST_SWITCH_SHELVED) {
             if (plat_old_3ds()) {
@@ -2766,7 +3034,7 @@ static void handle_request(void) {
             }
             request = REQUEST_SWITCH;
         }
-        if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1) {
+        if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1 && !sLeanRun) { // (The lean one races the usual settings)
             plat_status("Switch bench: no switches to test right now");
             return;
         }
@@ -2903,24 +3171,6 @@ void port_autorun_frame(s32 updateRate) {
     }
     obj = (get_game_mode() == GAMEMODE_INGAME) ? get_racer_object_by_port(PLAYER_ONE) : NULL;
     racer = (obj != NULL) ? obj->racer : NULL;
-    {
-        // What the player is doing, for bug reports (formatted only when one is made).
-        PlatGameNote note = { 0 };
-        if (racer != NULL) {
-            note.racing = 1;
-            note.lap = racer->lap + 1;
-            note.checkpoint = racer->nextCheckpoint;
-            note.bananas = racer->bananas;
-            note.boost = racer->boostTimer;
-            note.itemType = racer->balloon_type;
-            note.itemCount = racer->balloon_quantity;
-            note.shield = racer->shieldTimer;
-            note.magnet = racer->magnetTimer;
-            note.hit = racer->attackType;
-            note.paused = is_game_paused() != 0;
-        }
-        plat_set_game_note(&note);
-    }
     if (!port_autorun_active()) {
         return;
     }
@@ -2956,6 +3206,14 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
+                sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
+                sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
+                {
+                    char none[8];
+                    rec_slow_take(none, sizeof(none)); // The slowest frames are listed from here, as worst_frame_ms
+                }
+                sAaFramesStart = gPlatCounters[PLAT_COUNTER_AA_FRAMES];
+                sAaLowStart = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES];
                 set_phase(PHASE_RACING);
             } else if (plat_time_ns() - sPhaseStartNs > 120000000000ULL) {
                 // The game left the level, or never started the race (a boss's speech is far shorter than this).
@@ -3013,6 +3271,16 @@ void port_autorun_frame(s32 updateRate) {
             sLastPosition[1] = obj->trans.y_position;
             sLastPosition[2] = obj->trans.z_position;
             progress = racer->courseCheckpoint;
+            if (manual_now()) {
+                port_log("man t=%d v=%.2f roll=%d xrv=%d zrv=%d pitch=%d yaw=%d wheels=%d mask=%x yv=%.2f "
+                         "pos=%.1f,%.1f,%.1f buoy=%.2f svr=%d yrv=%d lat=%.3f steer=%d",
+                         (int) (sRaceRetraces - manual_start()), racer->velocity, (int) obj->trans.rotation.z_rotation,
+                         (int) racer->x_rotation_vel, (int) racer->z_rotation_vel, (int) obj->trans.rotation.x_rotation,
+                         (int) (u16) obj->trans.rotation.y_rotation, (int) racer->groundedWheels, (int) racer->unk1E3,
+                         obj->y_velocity, obj->trans.x_position, obj->trans.y_position, obj->trans.z_position,
+                         racer->buoyancy, (int) (u16) racer->steerVisualRotation, (int) racer->y_rotation_vel,
+                         racer->lateral_velocity, (int) racer->steerAngle);
+            }
             {
                 // DKR_LOG_RACER: logs the kart's checkpoint, speed and place at each checkpoint and every half second,
                 // to compare two runs (30 and 60 fps physics, say).
@@ -3034,7 +3302,9 @@ void port_autorun_frame(s32 updateRate) {
                 sDriving = TRUE;
                 sRaceLevel = level_id();
             }
-            if (!sDriving) {
+            if (manual_now()) {
+                sStuckRetraces = 0;
+            } else if (!sDriving) {
                 // Not going yet: no time without progress.
             } else if (progress > sBestProgress) {
                 sBestProgress = progress;

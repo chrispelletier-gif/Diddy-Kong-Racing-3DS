@@ -60,6 +60,10 @@ s32 port_sweep_level_vertex(const void *vertices) {
 }
 
 /* The profiler's draw kinds (port_drawtag.h): nothing is timed. */
+void port_game_section(int section) {
+    (void) section;
+}
+
 void port_draw_kind_game(int kind, int object) {
     (void) kind;
     (void) object;
@@ -74,4 +78,10 @@ int port_skip_game_kind(int kind) {
 int port_native_mesh_for(int isRacer) {
     (void) isRacer;
     return 0;
+}
+
+unsigned int gPortLevelLoads;
+
+int port_native_track(void) {
+    return 0; // NR4 stays off in a player's build until the switch bench puts it on by default
 }

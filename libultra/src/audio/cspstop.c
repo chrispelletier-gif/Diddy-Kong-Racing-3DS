@@ -21,12 +21,21 @@
  *====================================================================*/
 
 #include <libaudio.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_music_post(void *seqp, ALEvent *evt);
+#endif
 
 void alCSPStop(ALCSPlayer *seqp)
 {
     ALEvent     evt;
 
     evt.type = AL_SEQP_STOPPING_EVT;                    
+    #ifdef PICA_ALL
+    if (port_music_post(seqp, &evt)) {
+        return; // the native music player (port/src/audio/music.c)
+    }
+#endif
     alEvtqPostEvent(&seqp->evtq, &evt, 0);
 }
 

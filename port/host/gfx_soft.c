@@ -10,6 +10,7 @@
 
 #include "gfx/gfx_backend.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO_FILES_UNUSED
@@ -58,6 +59,7 @@ static float sBackW[MAX_W * H], sVisW[MAX_W * H];
 #define NEAR_DISTANCE 30.0f
 static int sDepthBits;
 static float sDepthScale;
+#include "frag_stats.inc"
 
 int host_frames_rendered(void) {
     return sFramesRendered;
@@ -157,6 +159,7 @@ static void sweep_frame(void) {
 
 void gfxb_end_frame(void) {
     sFramesRendered++;
+    frag_frame_end();
     if (sSweep != NULL) {
         sweep_frame();
     }
@@ -192,6 +195,9 @@ static void clip_rect(const int16_t in[4], int *x0, int *y0, int *x1, int *y1) {
 void gfxb_clear_color(const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     int x, y, x0, y0, x1, y1;
     clip_rect(rect, &x0, &y0, &x1, &y1);
+    if (frag_on()) {
+        sFragClear += (unsigned long long) (x1 - x0) * (y1 - y0);
+    }
     for (y = y0; y < y1; y++) {
         for (x = x0; x < x1; x++) {
             uint8_t *p = &sColor[(y * W + x) * 4];
@@ -587,6 +593,9 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
         return;
     }
     sTriId++;
+    if (sFragStats > 0) {
+        sFragTris[sFragKind]++;
+    }
     // Screen y points down, so counter clockwise triangles have a negative area here.
     if ((st->cullMode == 1 && area > 0.0f) || (st->cullMode == 2 && area < 0.0f)) {
         if (sSweep != NULL && gGfxSweepLevel && st->depthWrite && !gfx_flat_mode(st)) {
@@ -633,6 +642,15 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
 
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) {
                 continue;
+            }
+            if (sFragStats > 0) {
+                sFragRaster[sFragKind]++;
+                sDrawRaster++;
+                sFragBlend[sFragKind] += st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD;
+                sFragNoDepth[sFragKind] += !st->depthTest;
+                if (sFragKind == PORT_DRAW_SKY_KIND && sFragSky[y * W + x] < 255) {
+                    sFragSky[y * W + x]++;
+                }
             }
             z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
             if (st->decal == GFX_DEPTH_FAR) {
@@ -753,6 +771,14 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 dst[k] = (uint8_t) (out[k] * 255.0f + 0.5f);
             }
             dst[3] = 255;
+            if (sFragStats > 0) {
+                uint8_t *last = &sFragLast[y * W + x];
+                sFragPass[sFragKind]++;
+                if (st->blend != GFX_BLEND_ALPHA && st->blend != GFX_BLEND_ADD && *last != 0) {
+                    sFragHidden[*last - 1]++;
+                }
+                *last = (uint8_t) (sFragKind + 1);
+            }
             if (st->depthWrite) {
                 sDepth[y * W + x] = z;
             }
@@ -826,7 +852,22 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
     if (sNullRender) {
         return;
     }
+    {
+        // DKR_SKIP_INVISIBLE=1: as the 3DS backend (gpu_cuts.inc), draws that can't change a pixel left out, for
+        // checking that frames stay identical. Off here by default.
+        static int sSkip = -1;
+        if (sSkip < 0) {
+            sSkip = getenv("DKR_SKIP_INVISIBLE") != NULL && atoi(getenv("DKR_SKIP_INVISIBLE")) != 0;
+        }
+        if (sSkip && gfx_draw_invisible(state)) {
+            return;
+        }
+    }
     log_combiner(state);
+    if (sFragStats > 0) {
+        sFragDraws[sFragKind]++;
+        sDrawRaster = 0;
+    }
     if (sWide) {
         wideState = *drawState;
         wideState.scissor[0] = frame_x(drawState->scissor[0], drawState->flat);
@@ -864,6 +905,33 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
             }
         }
     }
+    if (sFragStats == 2 && (sFragKind == 5 || sFragKind == 6 || sFragKind == 0) &&
+        sFramesRendered % 60 == 0 && sDrawRaster > W * H / 50) {
+        const GfxTexture *t = state->textures[0];
+        plat_log("frag draw kind %d: %d tris, %.3f screens, blend %d depth %d/%d decal %d alpha test %d fog %d "
+                 "tex %dx%d fmt %d, cycles %d, flat %d",
+                 sFragKind, numTriangles, (double) sDrawRaster / (W * H), state->blend, state->depthTest,
+                 state->depthWrite, state->decal, state->alphaTest, state->fogEnabled, t ? t->width : 0,
+                 t ? t->height : 0, t ? (int) t->format : -1, state->combiner.numCycles, state->flat);
+        if (sDrawRaster > W * H / 20) {
+            plat_log("  big blended: prim %d,%d,%d,%d env %d,%d,%d,%d vertex 0 rgba %d,%d,%d,%d", state->prim[0],
+                     state->prim[1], state->prim[2], state->prim[3], state->env[0], state->env[1], state->env[2],
+                     state->env[3], verts[0].r, verts[0].g, verts[0].b, verts[0].a);
+            {
+                int vi, amin = 255, amax = 0;
+                for (vi = 0; vi < numTriangles * 3; vi++) {
+                    if (verts[vi].a < amin) amin = verts[vi].a;
+                    if (verts[vi].a > amax) amax = verts[vi].a;
+                }
+                plat_log("  alpha eq c0 %d %d %d %d c1 %d %d %d %d, rgb c0 %d %d %d %d, vertex alpha %d-%d, kind %d blend %d",
+                         state->combiner.alpha[0].a, state->combiner.alpha[0].b, state->combiner.alpha[0].c,
+                         state->combiner.alpha[0].d, state->combiner.alpha[1].a, state->combiner.alpha[1].b,
+                         state->combiner.alpha[1].c, state->combiner.alpha[1].d, state->combiner.rgb[0].a,
+                         state->combiner.rgb[0].b, state->combiner.rgb[0].c, state->combiner.rgb[0].d, amin, amax,
+                         sFragKind, state->blend);
+            }
+        }
+    }
 }
 
 /*
@@ -876,14 +944,32 @@ int gfxb_cpu_cull_ok(void) {
 }
 
 int gfxb_gpu_transform(void) {
-    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0;
 }
 
+/* No guard band to keep to here; DKR_HOST_BAND (a band in screen widths, e.g. 1.5) makes one up the way the 3DS's
+ * check works, so the PC frames also cover model draws left to the CPU path or left out. */
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]) {
-    (void) mtx;
-    (void) boxMin;
-    (void) boxMax;
-    return GFX_MODEL_GPU; // No guard band to keep to
+    static float band = -1.0f;
+    int all = 31, any = 0, i;
+    if (band < 0.0f) {
+        const char *env = plat_getenv("DKR_HOST_BAND");
+        band = env != NULL ? (float) atof(env) : 0.0f;
+    }
+    if (band <= 0.0f) {
+        return GFX_MODEL_GPU;
+    }
+    for (i = 0; i < 8; i++) {
+        float x = (i & 1) ? boxMax[0] : boxMin[0], y = (i & 2) ? boxMax[1] : boxMin[1], z = (i & 4) ? boxMax[2] : boxMin[2];
+        float cx = x * mtx[0][0] + y * mtx[1][0] + z * mtx[2][0] + mtx[3][0];
+        float cy = x * mtx[0][1] + y * mtx[1][1] + z * mtx[2][1] + mtx[3][1];
+        float cw = x * mtx[0][3] + y * mtx[1][3] + z * mtx[2][3] + mtx[3][3];
+        int out = (cx > band * cw ? 1 : 0) | (cx < -band * cw ? 2 : 0) | (cy > band * cw ? 4 : 0) |
+                  (cy < -band * cw ? 8 : 0) | (cw <= 1.0f ? 16 : 0);
+        all &= out;
+        any |= out;
+    }
+    return (all & 15) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
 }
 
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
@@ -940,4 +1026,19 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         const SoftMesh *m = parts[i].mesh;
         gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
     }
+}
+
+/* The GPU timeline's draw kinds (3DS only, gpu_cuts.inc): nothing to time here. */
+int gfxb_gpu_kinds_frame(int frame) {
+    (void) frame;
+    return frag_on(); // DKR_FRAG_STATS: every frame's kinds
+}
+
+void gfxb_gpu_kind(int kind) {
+    kind &= 0xFF;
+    sFragKind = kind < PROF_KINDS ? kind : 0;
+}
+
+void gfxb_gpu_kind_call(void *payload) {
+    gfxb_gpu_kind(*(int *) payload);
 }

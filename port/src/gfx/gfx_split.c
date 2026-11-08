@@ -43,6 +43,7 @@ enum {
     OP_MODEL,
     OP_MESHES,
     OP_MESH_FREE,
+    OP_CALL, // v28: a function of the walk's run on the backend thread with the record's bytes (gfx_split_call_reserve)
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -70,7 +71,23 @@ typedef struct SplitModel {
 typedef struct SplitTexture {
     GfxTexture *tex;
     const GfxTexture *src;
+    unsigned int ticket; // v33 OP_TEX_FREE from gfx_split_texture_free_later: done when sFreeDone reaches it
 } SplitTexture;
+
+/* v33 (DKR_TEX_FREE_QUEUE): the last free ticket given out (walk) and the last one the backend has done. */
+static unsigned int sFreeTicket;
+static volatile unsigned int sFreeDone;
+
+/* OP_CALL: followed by the caller's bytes. */
+typedef struct SplitCall {
+    void (*fn)(void *);
+    void *pad;
+} SplitCall;
+
+/* v28 (DKR_NATIVE_REMOTE): the walk's work on this thread may keep a batch open across calls of sKeepFn; any other
+ * record closes it first (sCloseFn), so it is drawn where the walk would have drawn it. */
+static void (*sCloseFn)(void);
+static void (*sKeepFn)(void *);
 
 static unsigned char *sRing;
 static volatile unsigned int sHead, sTail; // Bytes written and read so far (they wrap together)
@@ -94,6 +111,7 @@ static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBack
 static unsigned int sBackendFrames, sBackendWakes;
 
 static void backend_thread(void *arg);
+static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
     return (n + 7u) & ~7u;
@@ -187,8 +205,21 @@ static void backend_thread(void *arg) {
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
+            if (sBackendPrefetch && sTail + bytes != sHead) {
+                // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
+                // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
+                const unsigned char *next = (const unsigned char *) sRing + (sTail + bytes) % SPLIT_RING_BYTES;
+                int k;
+                for (k = 0; k < 256; k += 32) {
+                    __builtin_prefetch(next + k);
+                }
+            }
+            if (sCloseFn != NULL && (op != OP_CALL || ((SplitCall *) p)->fn != sKeepFn) && op != OP_WRAP) {
+                sCloseFn();
+            }
             switch (op) {
                 case OP_START:
+                    sBackendPrefetch = plat_switch("DKR_BACKEND_PREFETCH", plat_old_3ds()) != 0;
                     sBackendFrameStart = plat_time_ns();
                     sBackendWaitNs = 0;
                     gfxb_start_frame();
@@ -237,11 +268,17 @@ static void backend_thread(void *arg) {
                 case OP_MESH_FREE:
                     gfxb_mesh_free(((SplitTexture *) p)->tex);
                     break;
+                case OP_CALL:
+                    ((SplitCall *) p)->fn((SplitCall *) p + 1);
+                    break;
                 case OP_TEX_UPLOAD:
                     gfxb_texture_upload(((SplitTexture *) p)->tex);
                     break;
                 case OP_TEX_FREE:
                     gfxb_texture_free(((SplitTexture *) p)->tex);
+                    if (((SplitTexture *) p)->ticket != 0) {
+                        __atomic_store_n(&sFreeDone, ((SplitTexture *) p)->ticket, __ATOMIC_RELEASE);
+                    }
                     break;
                 case OP_TEX_SHARE:
                     gfxb_texture_share(((SplitTexture *) p)->tex, ((SplitTexture *) p)->src);
@@ -329,7 +366,17 @@ static void choose_backend(void) {
     plat_log("two-core renderer: its second thread on the %s core", want ? "system" : "game's");
 }
 
+static void split_noop(void *p) {
+    (void) p;
+}
+
 void gfx_split_drain(void) {
+    if (sActive && sCloseFn != NULL) {
+        // A record that isn't sKeepFn's, so a batch the backend holds open is drawn before the queue counts as empty.
+        SplitCall *c = reserve(OP_CALL, sizeof(SplitCall));
+        c->fn = split_noop;
+        commit(c);
+    }
     if (sStarted && sHead != sTail) {
         wait_for_room(SPLIT_RING_BYTES);
     }
@@ -468,7 +515,35 @@ static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) 
     SplitTexture *t = reserve(op, sizeof(SplitTexture));
     t->tex = tex;
     t->src = src;
+    t->ticket = 0;
     commit(t);
+}
+
+/*
+ * v33 (DKR_TEX_FREE_QUEUE): a free that goes through the queue after the draws that still use the texture, as a
+ * mesh's does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not
+ * reuse tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now.
+ * On an Old 3DS a mid-race free made the walk wait for the whole queue: frames of 49-54 ms (bench #457).
+ */
+unsigned int gfx_split_texture_free_later(GfxTexture *tex) {
+    SplitTexture *t;
+    if (!sActive) {
+        gfxb_texture_free(tex);
+        return 0;
+    }
+    t = reserve(OP_TEX_FREE, sizeof(SplitTexture));
+    t->tex = tex;
+    t->src = NULL;
+    if (++sFreeTicket == 0) {
+        sFreeTicket = 1;
+    }
+    t->ticket = sFreeTicket;
+    commit(t);
+    return sFreeTicket;
+}
+
+int gfx_split_free_done(unsigned int ticket) {
+    return (int) (__atomic_load_n(&sFreeDone, __ATOMIC_ACQUIRE) - ticket) >= 0;
 }
 
 void gfx_split_texture_upload(GfxTexture *tex) {
@@ -546,4 +621,29 @@ void gfx_split_mesh_free(void *mesh) {
         return;
     }
     texture_op(OP_MESH_FREE, mesh, NULL);
+}
+
+/*
+ * v28 (DKR_NATIVE_REMOTE, PICA_ALL): work of the walk's own run on the backend thread, in order with the draws: room
+ * for bytes of the caller's (8-aligned), or NULL when the calls aren't queued this frame or the record is too big for
+ * the ring (the caller then drains the queue and makes the call itself).
+ */
+void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
+    SplitCall *c;
+    if (!sActive || sizeof(SplitCall) + bytes + 64u > SPLIT_RING_BYTES / 4u) {
+        return NULL;
+    }
+    c = reserve(OP_CALL, sizeof(SplitCall) + bytes);
+    c->fn = fn;
+    return c + 1;
+}
+
+void gfx_split_call_commit(void *payload) {
+    commit((SplitCall *) payload - 1);
+}
+
+void gfx_split_set_hooks(void (*closeFn)(void), void (*keepFn)(void *)) {
+    gfx_split_drain();
+    sCloseFn = closeFn;
+    sKeepFn = keepFn;
 }

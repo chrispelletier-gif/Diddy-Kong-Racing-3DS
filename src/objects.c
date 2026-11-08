@@ -52,6 +52,9 @@ extern Object *gSkydomeSegment;
 #include "plat/plat.h"
 #endif
 #include "port_step.h"
+#ifdef TARGET_PORT
+static s32 gPortMidiObjects; // v31 DKR_MIDI_SKIP: music fade/channel objects made since the list was emptied
+#endif
 
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
@@ -858,6 +861,9 @@ void clear_object_pointers(void) {
     gAINodeTail[1] = 0xFF;
     gObjectCount = 0;
     gObjectListStart = 0;
+#ifdef TARGET_PORT
+    gPortMidiObjects = 0;
+#endif
     gParticleCount = 0;
     D_8011AE88 = 0;
     D_8011ADD4 = 0;
@@ -898,6 +904,9 @@ void free_all_objects(void) {
     gFreeListCount = 0;
     gObjectCount = 0;
     gObjectListStart = 0;
+#ifdef TARGET_PORT
+    gPortMidiObjects = 0;
+#endif
     clear_object_pointers();
     mempool_free((void *) gObjectMap[0]);
     mempool_free((void *) gObjectMap[1]);
@@ -2578,11 +2587,21 @@ void gParticlePtrList_flush(void) {
         search_indx = -1;
         searchObj = gParticlePtrList[i];
 
+#ifdef TARGET_PORT
+        // v27: the last match, looked for from the end (the original scans the whole list and keeps the last one).
+        for (j = gObjectCount - 1; j >= 0; j--) {
+            if (searchObj == gObjPtrList[j]) {
+                search_indx = j;
+                break;
+            }
+        }
+#else
         for (j = 0; j < gObjectCount; j++) {
             if (searchObj == gObjPtrList[j]) {
                 search_indx = j;
             }
         }
+#endif
 
         // if object found
         if (search_indx != -1) {
@@ -2852,6 +2871,9 @@ void obj_destroy(Object *obj, s32 arg1) {
 /**
  * Updates all objects in the game.
  */
+#ifdef TARGET_PORT
+int gPortObjPrefetch; // v31 DKR_OBJ_PREFETCH (port_drawtag.h PORT_PREFETCH_OBJS), read at each obj_update
+#endif
 void obj_update(s32 updateRate) {
     s32 i;
     s32 j;
@@ -2860,6 +2882,10 @@ void obj_update(s32 updateRate) {
     s32 sp54;
     Object *obj;
 
+#ifdef TARGET_PORT
+    s32 portLean = plat_switch("DKR_OBJ_LEAN", 1) != 0;
+    gPortObjPrefetch = plat_switch("DKR_OBJ_PREFETCH", plat_old_3ds()) != 0;
+#endif
     func_800245B4(-1);
     gEventStartTimer = gEventCountdown;
     if (gEventCountdown > 0 && race_starting() != FALSE) {
@@ -2895,6 +2921,7 @@ void obj_update(s32 updateRate) {
     j = gObjectCount;
     for (i = gObjectListStart; i < j; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, j);
         if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE)) {
             if ((obj->behaviorId != BHV_LIGHT_RGBA) && (obj->behaviorId != BHV_WEAPON) &&
                 (obj->behaviorId != BHV_FOG_CHANGER)) {
@@ -2909,6 +2936,13 @@ void obj_update(s32 updateRate) {
                     for (sp54 = 0; sp54 < obj->header->numberOfModelIds; sp54++) {
                         modInst = obj->modelInstances[sp54];
                         if (modInst != NULL) {
+#ifdef TARGET_PORT
+                            // v31 (DKR_OBJ_LEAN): a model shared by many objects (trees, bananas) is written once,
+                            // not dirtied again with the same value by each.
+                            if (portLean && modInst->objModel->texOffsetUpdateRate == updateRate) {
+                                continue;
+                            }
+#endif
                             modInst->objModel->texOffsetUpdateRate = updateRate;
                         }
                     }
@@ -2941,6 +2975,17 @@ void obj_update(s32 updateRate) {
     racerfx_update(updateRate);
     for (i = gObjectListStart; i < j; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, j);
+#ifdef TARGET_PORT
+        if (portLean) {
+            // v31 (DKR_OBJ_LEAN): the behaviour first, so the flags' line is only read for weapons (the same test).
+            s16 bhv = obj->behaviorId;
+            if ((bhv == BHV_WEAPON && !(obj->trans.flags & OBJ_FLAGS_PARTICLE)) || bhv == BHV_FOG_CHANGER) {
+                run_object_loop_func(obj, updateRate);
+            }
+            continue;
+        }
+#endif
         if ((!(obj->trans.flags & OBJ_FLAGS_PARTICLE) && (obj->behaviorId == BHV_WEAPON)) ||
             (obj->behaviorId == BHV_FOG_CHANGER)) {
             run_object_loop_func(obj, updateRate);
@@ -2950,6 +2995,7 @@ void obj_update(s32 updateRate) {
     if (gParticleCount > 0) {
         for (i = gObjectListStart; i < j; i++) {
             obj = gObjPtrList[i];
+            PORT_PREFETCH_OBJS(gObjPtrList, i, j);
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
 #ifdef TARGET_PORT
                 unsigned long long portStart = prof_object_logic_begin();
@@ -2967,6 +3013,7 @@ void obj_update(s32 updateRate) {
     if (light_count() > 0) {
         for (i = gObjectListStart; i < gObjectCount; i++) {
             obj = gObjPtrList[i];
+            PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
             if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE) && (obj->shading != NULL)) {
                 light_update_shading(obj);
             }
@@ -3294,9 +3341,17 @@ void render_misc_model(Object *obj, Vertex *verts, u32 numVertices, Triangle *tr
     if (tex != NULL) {
         hasTexture = TRUE;
     }
-    material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
-    gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
-    gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
+#ifdef PICA_ALL
+    if (port_native_batch(&gObjectCurrDisplayList, tex, flags, texOffset, verts, numVertices, triangles, numTriangles,
+                          hasTexture, 1)) {
+        port_native_end();
+    } else
+#endif
+    {
+        material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
+        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
+        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
+    }
     mtx_pop(&gObjectCurrDisplayList);
 }
 
@@ -3854,6 +3909,14 @@ void set_temp_model_transforms(Object *obj) {
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
                             s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
+#if PICA_ALL
+                            {
+                                extern s32 gPortRacerLodBoost;
+                                if (gPortRacerLodBoost) {
+                                    bias = 3; // The frame rate is dropping: 4-player distances (src/thread3_main.c)
+                                }
+                            }
+#endif
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }
@@ -4048,8 +4111,6 @@ void func_800135B8(Object *boostObj) {
                             (Object *) &objTransform, asset->sprite,
                             (RENDER_Z_COMPARE | RENDER_FOG_ACTIVE | RENDER_Z_UPDATE));
     if (boost->unk70 == 2) {
-        material_set(&gObjectCurrDisplayList, asset->tex,
-                     (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
         if (asset->tex != NULL) {
             hasTexture = TRUE;
         } else {
@@ -4058,8 +4119,19 @@ void func_800135B8(Object *boostObj) {
 
         vtx = &gBoostVerts[gBoostVertFlip][(boostObj->properties.boost.indexes >> 14) & 0x3FFF];
         tri = &gBoostTris[gBoostVertFlip][boostObj->properties.boost.indexes & 0x3FFF];
-        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
-        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
+#ifdef PICA_ALL
+        if (port_native_batch(&gObjectCurrDisplayList, asset->tex,
+                              (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0, vtx, BOOST_VERT_COUNT,
+                              tri, BOOST_TRI_COUNT, hasTexture, 1)) {
+            port_native_end();
+        } else
+#endif
+        {
+            material_set(&gObjectCurrDisplayList, asset->tex,
+                         (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
+            gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
+            gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
+        }
     }
     mtx_pop(&gObjectCurrDisplayList);
 }
@@ -4285,6 +4357,9 @@ void func_80014090(Object *obj, s32 arg1) {
                             tri->uv2.u = tri->uv0.u + newU2;
                             tri->uv2.v = tri->uv0.v + newV2;
                         }
+#ifdef TARGET_PORT
+                        port_tris_changed(&objMdl->triangles[objMdl->batches[j].facesOffset]);
+#endif
                     }
                 }
             }
@@ -4305,6 +4380,7 @@ void obj_tick_anims(void) {
 
     for (; i < gObjectCount; i++) {
         currObj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
         if (!(currObj->trans.flags & OBJ_FLAGS_PARTICLE) && currObj->header->modelType == OBJECT_MODEL_TYPE_3D_MODEL) {
             for (j = 0; j < currObj->header->numberOfModelIds; j++) {
                 modInst = currObj->modelInstances[j];
@@ -4321,6 +4397,10 @@ void obj_tick_anims(void) {
  * Renders every triangle batch in an objects mesh.
  * If vertOffset is true, then draw in two passes, utilising the head matrix and vertex ID offset in the batch.
  */
+#ifdef PICA_ALL
+extern s16 gForceFlags;
+extern TextureHeader *gCurrentTextureHeader;
+#endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
     s32 i;
     s32 textureIndex;
@@ -4345,6 +4425,13 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     {
         // Native model meshes (port_drawtag.h, DKR_NATIVE_MESH): tag each batch's vertices and triangles.
         s32 nativeTag = obj != NULL && port_native_mesh_for(obj->behaviorId == BHV_RACER);
+#ifdef PICA_ALL
+        // GPU vertex lighting (port_drawtag.h): the lit batches of a buffer whose colours hold normals get the light.
+        float light[4];
+        s32 lit = obj != NULL && port_gpu_light_get(obj->curVertData, objModel, light), lightOn = FALSE;
+        // Native draws (port_drawtag.h PORT_NDRAW_TAG): no N64 commands for the batches, only a record each.
+        s32 nativeDraw = obj != NULL && port_native_draw() && !gObjectTexAnim, anyNative = FALSE;
+#endif
 #endif
     while (i < objModel->numberOfBatches && !endLoop) {
         if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
@@ -4375,6 +4462,20 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     !(objModel->batches[i].flags & (flags & ~RENDER_SEMI_TRANSPARENT))) {
                     texToSetFlags |= RENDER_SEMI_TRANSPARENT;
                 }
+#ifdef PICA_ALL
+                if (nativeDraw) {
+                    // The material's commands only when the renderer hasn't kept them yet.
+                    int capture; s32 id = port_nmat_key(texToSet, texToSetFlags, texOffset, &capture);
+                    if (capture) {
+                        gForceFlags = TRUE;
+                        gCurrentTextureHeader = NULL;
+                        material_set(&dList, texToSet, texToSetFlags, texOffset);
+                        gDPNoOpTag(dList++, PORT_NMAT_TAG | id);
+                    }
+                    textureIndex = id;
+                    anyNative = TRUE;
+                } else
+#endif
                 if (gObjectTexAnim == FALSE) {
                     material_set(&dList, texToSet, texToSetFlags, texOffset);
                 } else {
@@ -4383,6 +4484,40 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                                        texToSet->numberOfCommands);
                 }
 #ifdef TARGET_PORT
+#ifdef PICA_ALL
+                {
+                    s32 want = lit && objModel->batches[i].miscData != BATCH_VTX_COL;
+                    if (want && !lightOn) {
+                        s32 k;
+                        gDPNoOpTag(dList++, PORT_LIGHT_TAG | 1);
+                        for (k = 0; k < 4; k++) {
+                            union {
+                                float f;
+                                u32 u;
+                            } bits;
+                            bits.f = light[k];
+                            gDPNoOpTag(dList++, bits.u);
+                        }
+                        lightOn = TRUE;
+                    } else if (!want && lightOn) {
+                        gDPNoOpTag(dList++, PORT_LIGHT_TAG);
+                        lightOn = FALSE;
+                    }
+                }
+#endif
+#ifdef PICA_ALL
+                if (nativeDraw) {
+                    gDPNoOpTag(dList++, PORT_NDRAW_TAG | textureIndex);
+                    dList->words.w0 = OS_K0_TO_PHYSICAL(vtx);
+                    dList->words.w1 = OS_K0_TO_PHYSICAL(tris);
+                    dList++;
+                    dList->words.w0 = (u32) numVertices | ((u32) offsetStartVertex << 8) | ((u32) texEnabled << 16);
+                    dList->words.w1 = (u32) numTris;
+                    dList++;
+                    i++;
+                    continue;
+                }
+#endif
                 if (nativeTag) {
                     gDPNoOpTag(dList++, PORT_NATIVE_TAG);
                 }
@@ -4409,6 +4544,17 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
         }
     }
 #ifdef TARGET_PORT
+#ifdef PICA_ALL
+    if (lightOn) {
+        gDPNoOpTag(dList++, PORT_LIGHT_TAG);
+    }
+    if (anyNative) {
+        // The renderer's settings are the last captured material's, not the last batch's: the next material_set
+        // sets everything again.
+        gForceFlags = TRUE;
+        gCurrentTextureHeader = NULL;
+    }
+#endif
     }
 #endif
     if (i >= objModel->numberOfBatches) {
@@ -4610,6 +4756,36 @@ s32 func_80014B50(s32 arg0, s32 arg1, f32 arg2, u32 arg3) {
     return arg0;
 }
 
+#ifdef TARGET_PORT
+static s32 port_sort_objects_fast(s32 startIndex, s32 lastIndex) {
+    static f32 sKeys[OBJECT_SLOT_COUNT];
+    s32 n = lastIndex - startIndex + 1;
+    Object **list = &gObjPtrList[startIndex];
+    s32 i, j;
+    if (n > OBJECT_SLOT_COUNT || plat_switch("DKR_FAST_SORT", 1) == 0) {
+        return FALSE;
+    }
+    for (i = 0; i < n; i++) {
+        f32 d = list[i]->distanceToCamera;
+        if (d != d) {
+            return FALSE;
+        }
+        sKeys[i] = d;
+    }
+    for (i = 1; i < n; i++) {
+        f32 key = sKeys[i];
+        Object *obj = list[i];
+        for (j = i; j > 0 && sKeys[j - 1] < key; j--) {
+            sKeys[j] = sKeys[j - 1];
+            list[j] = list[j - 1];
+        }
+        sKeys[j] = key;
+        list[j] = obj;
+    }
+    return TRUE;
+}
+#endif
+
 /**
  * Takes every object and sorts the main object list by distance to the camera.
  */
@@ -4624,6 +4800,7 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
 
     for (i = startIndex; i <= lastIndex; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, lastIndex + 1);
         if (obj != NULL) {
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
                 // get_distance_to_camera calculates the distance to the camera from a XYZ location.
@@ -4642,6 +4819,14 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
         }
     }
 
+#ifdef TARGET_PORT
+    // Same order as the bubble sort below (both are stable sorts with the same strict comparison), in one pass over
+    // cached keys instead of up to n passes over the objects. Falls back to the bubble sort if any distance is NaN,
+    // where the two would not agree.
+    if (port_sort_objects_fast(startIndex, lastIndex)) {
+        return;
+    }
+#endif
     // Keep swapping until all objects are sorted by the distance to the camera.
     do {
         didNotSwap = TRUE;
@@ -4660,6 +4845,95 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
  * Go through each object and detect potential interactions between each.
  * Add candidates to a list and calcualte their distances.
  */
+#ifdef TARGET_PORT
+/*
+ * Native rewrite of the pair loops below (DKR_NATIVE_INTERACT, default on; 0 = the original). Same calls in the same
+ * order with the same arguments: for each object that pushes (flag 0004), the original tests every other interactive
+ * object's flags and kind before anything else. Those (SOLID/TANGIBLE, 0020, unk11) never change during the loops
+ * (the pair functions only set PUSHING and COLLIDED, and set no kind), so the candidates are listed once, in list
+ * order, and only positions, which the pair functions do move, are read as they go.
+ */
+static s32 port_native_interact(void) {
+    static s32 sEpoch = -1, sOn;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sOn = plat_switch("DKR_NATIVE_INTERACT", 1);
+    }
+    return sOn;
+}
+
+static void process_object_interactions_native(Object **objList, s32 count) {
+    // Candidates of the 0004 loop: SOLID or TANGIBLE and unk11 != 2. kind 3 = unk11 3 (func_80016748), else the
+    // distance test, with its radius.
+    static u16 sPairIdx[257];
+    static u8 sPairKind[257];
+    static f32 sPairRadius[257];
+    static u16 sKind3Idx[257];
+    s32 pairs = 0, kind3 = 0;
+    s32 i, k;
+    Object *obj;
+    Object *obj2;
+    ObjectInteraction *objInteract;
+    ObjectInteraction *objInteract2;
+    f32 xDiff;
+    f32 zDiff;
+
+    for (i = 0; i < count; i++) {
+        objInteract2 = objList[i]->interactObj;
+        if (objInteract2->unk11 == 3) {
+            sKind3Idx[kind3++] = i;
+        }
+        if (objInteract2->flags & (INTERACT_FLAGS_SOLID | INTERACT_FLAGS_TANGIBLE)) {
+            if (objInteract2->unk11 == 3) {
+                sPairIdx[pairs] = i;
+                sPairKind[pairs] = 3;
+                pairs++;
+            } else if (objInteract2->unk11 != 2) {
+                sPairIdx[pairs] = i;
+                sPairKind[pairs] = 0;
+                sPairRadius[pairs] = (objInteract2->flags & INTERACT_FLAGS_UNK_0020) ? 0x400000 : 0x40000;
+                pairs++;
+            }
+        }
+    }
+
+    gCollisionObjectCount = 0;
+    for (i = 0; i < count; i++) {
+        obj = objList[i];
+        objInteract = obj->interactObj;
+        if (objInteract->unk11 == 2 && gCollisionObjectCount < 20) {
+            gCollisionObjects[gCollisionObjectCount] = obj;
+            gCollisionObjectCount++;
+        }
+        if (objInteract->flags & INTERACT_FLAGS_UNK_0004) {
+            for (k = 0; k < pairs; k++) {
+                s32 j = sPairIdx[k];
+                if (j != i) {
+                    obj2 = objList[j];
+                    if (sPairKind[k] == 3) {
+                        func_80016748(obj, obj2);
+                    } else {
+                        xDiff = obj->trans.x_position - obj2->trans.x_position;
+                        zDiff = obj->trans.z_position - obj2->trans.z_position;
+                        if (((xDiff * xDiff) + (zDiff * zDiff)) < sPairRadius[k]) {
+                            func_800159C8(obj, obj2);
+                        }
+                    }
+                }
+            }
+        }
+        if (objInteract->flags & INTERACT_FLAGS_UNK_0100) {
+            for (k = 0; k < kind3; k++) {
+                s32 j = sKind3Idx[k];
+                if (j != i) {
+                    func_80016748(obj, objList[j]);
+                }
+            }
+        }
+    }
+}
+#endif
+
 void process_object_interactions(void) {
     Object *obj2;
     Object *obj;
@@ -4676,6 +4950,7 @@ void process_object_interactions(void) {
     objsWithInteractives = 0;
     for (i = gObjectListStart; i < gObjectCount; i++) {
         obj = gObjPtrList[i];
+        PORT_PREFETCH_OBJS(gObjPtrList, i, gObjectCount);
         if (!(obj->trans.flags & OBJ_FLAGS_PARTICLE)) {
             objInteract = obj->interactObj;
             if (objInteract != NULL) {
@@ -4690,6 +4965,12 @@ void process_object_interactions(void) {
         }
     }
 
+#ifdef TARGET_PORT
+    if (port_native_interact()) {
+        process_object_interactions_native(objList, objsWithInteractives);
+        goto port_done;
+    }
+#endif
     gCollisionObjectCount = 0;
 
     for (i = 0; i < objsWithInteractives; i++) {
@@ -4736,6 +5017,9 @@ void process_object_interactions(void) {
         }
     }
 
+#ifdef TARGET_PORT
+port_done:
+#endif
     for (i = 0; i < objsWithInteractives; i++) {
         obj = objList[i];
         objInteract = obj->interactObj;
@@ -5995,8 +6279,19 @@ void func_80018CE0(Object *racerObj, f32 xPos, f32 yPos, f32 zPos, s32 updateRat
         return;
     }
 
+#ifdef TARGET_PORT
+    // v31 (DKR_MIDI_SKIP): no music fade or channel object made since the object list was last emptied (most levels):
+    // nothing in the list for the loop to find.
+    spF4 = gObjectListStart;
+    if (gPortMidiObjects == 0 && plat_switch("DKR_MIDI_SKIP", 1)) {
+        spF4 = gObjectCount;
+    }
+    for (; spF4 < gObjectCount; spF4++) {
+#else
     for (spF4 = gObjectListStart; spF4 < gObjectCount; spF4++) {
+#endif
         obj = gObjPtrList[spF4];
+        PORT_PREFETCH_OBJS(gObjPtrList, spF4, gObjectCount);
         if (!(obj->trans.flags & 0x8000)) {
             if (obj->behaviorId == BHV_MIDI_FADE_POINT) {
                 spC0 = sqrtf(((racerObj->trans.x_position - obj->trans.x_position) *
@@ -8085,6 +8380,9 @@ void calc_dynamic_lighting_for_object_1(Object *object, ObjectModel *model, s16 
     vertices = object->curVertData;
     normals = model->normals;
     normIdx = 0;
+#ifdef PICA_ALL
+    port_gpu_light_clear(vertices); // Shaded on the CPU
+#endif
 
     direction.x = -(object->shading->lightDirX << 3);
     direction.y = -(object->shading->lightDirY << 3);
@@ -8259,6 +8557,9 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
                 triangles[j].uv2.u = D_8011AF68[triangles[j].vi2].u;
                 triangles[j].uv2.v = D_8011AF68[triangles[j].vi2].v;
             }
+#ifdef TARGET_PORT
+            port_tris_changed(&triangles[model->batches[i].facesOffset]);
+#endif
         } else if (model->batches[i].miscData < BATCH_VTX_COL) {
             count += model->batches[i + 1].verticesOffset - model->batches[i].verticesOffset;
         }
@@ -10294,6 +10595,12 @@ s32 get_object_property_size(Object *obj, void *obj64) {
  */
 void run_object_init_func(Object *obj, void *entry, s32 param) {
     obj->behaviorId = obj->header->behaviorId;
+#ifdef TARGET_PORT
+    if (obj->behaviorId == BHV_MIDI_FADE || obj->behaviorId == BHV_MIDI_FADE_POINT ||
+        obj->behaviorId == BHV_MIDI_CHANNEL_SET) {
+        gPortMidiObjects++;
+    }
+#endif
     switch (obj->behaviorId) {
         case BHV_RACER:
             obj_init_racer(obj, (LevelObjectEntry_Racer *) entry);

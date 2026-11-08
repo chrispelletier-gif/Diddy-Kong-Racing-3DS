@@ -33,6 +33,11 @@
 #include "weather.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
+#include "port_track_cells.h"
+#ifdef TARGET_PORT
+static s32 sPortClipOnce; // v31 DKR_SHADOW_CLIP_ONCE (func_8002FF6C), read at each shadow_update
+#endif
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -221,6 +226,9 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     }
 
     generate_track(geometry);
+#ifdef TARGET_PORT
+    gPortLevelLoads++;
+#endif
     PORT_LOAD_STEP("track");
 
     gWaveBlockCount = 0;
@@ -319,10 +327,13 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
     } else {
         tempUpdateRate = updateRate;
     }
+    port_game_section(PORT_SEC_WAVES);
     if (gWaveBlockCount) {
         waves_update(tempUpdateRate);
     }
+    port_game_section(PORT_SEC_SHADOWS);
     shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate);
+    port_game_section(PORT_SEC_PRELUDE);
     for (i = 0; i < 7; i++) {
         if ((s32) gCurrentLevelHeader2->unk74[i] != -1) {
             update_colour_cycle(gCurrentLevelHeader2->unk74[i], tempUpdateRate);
@@ -381,6 +392,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         if (flip) {
             gSPSetGeometryMode(gTrackDL++, G_CULL_FRONT);
         }
+        port_game_section(PORT_SEC_SKY);
         apply_fog(gSceneCurrentPlayerID);
         gDPPipeSync(gTrackDL++);
         set_active_camera(gSceneCurrentPlayerID);
@@ -417,6 +429,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         port_draw_tag(gTrackDL++, PORT_DRAW_OTHER);
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
+        port_game_section(PORT_SEC_WEATHER);
         port_draw_tag(gTrackDL++, PORT_DRAW_EFFECTS);
         // Show weather effects in single player.
         if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2
@@ -429,6 +442,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
         port_draw_tag(gTrackDL++, PORT_DRAW_HUD);
+        port_game_section(PORT_SEC_HUD);
 #ifdef TARGET_PORT
         if (!port_portrait_active())
 #endif
@@ -556,6 +570,22 @@ void void_free(void) {
 }
 
 // root func for the out of bounds void rendering
+#ifdef PICA_ALL
+static s32 sVoidNative;
+#endif
+
+/* The void mesh gathered so far, drawn. */
+static void void_draw_batch(void) {
+#ifdef PICA_ALL
+    if (sVoidNative && port_native_batch(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE, 0, gVoidCurrVerts,
+                                         gVoidVertCount, gVoidCurrTris, gVoidVertCount >> 1, 0, 1)) {
+        return;
+    }
+#endif
+    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
+    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), gVoidVertCount >> 1, TRIN_DISABLE_TEXTURE);
+}
+
 void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
     s16 i;
     s16 j;
@@ -578,7 +608,11 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
         gVoidTris[var_s0] = gVoidMesh[viewportIndex].tris[var_s0];
         gVoidVerts[var_s0] = gVoidMesh[viewportIndex].verts[var_s0];
     }
-    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
+#ifdef PICA_ALL
+    sVoidNative = port_native_draw();
+    if (!sVoidNative)
+#endif
+        material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
     D_8011D49C = 0;
     D_8011D49E = 0;
 
@@ -691,9 +725,13 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
         }
     }
     if (gVoidVertCount != 0) {
-        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
-        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), gVoidVertCount >> 1, TRIN_DISABLE_TEXTURE);
+        void_draw_batch();
     }
+#ifdef PICA_ALL
+    if (sVoidNative) {
+        port_native_end();
+    }
+#endif
     gTrackVtxPtr = vtx;
     gTrackTriPtr = tri;
 }
@@ -1020,8 +1058,7 @@ s32 void_generate_primitive(f32 *arg0, f32 *arg1, f32 arg2, f32 arg3) {
     }
 
     if (gVoidVertCount == 24) {
-        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
-        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), (gVoidVertCount >> 1), TRIN_DISABLE_TEXTURE);
+        void_draw_batch();
         gVoidCurrVerts = gTrackVtxPtr;
         gVoidVertCount = 0;
         gVoidCurrTris = gTrackTriPtr;
@@ -1332,6 +1369,56 @@ void track_tex_anim(s32 updateRate) {
     s32 temp;
 
     segment = gCurrentLevelModel->segments;
+#ifdef TARGET_PORT
+    // v29: the batches with animated textures, found once per level (a scan of every batch of the level each frame
+    // was a cache miss per batch on the Old 3DS). A level batch's RENDER_TEX_ANIM and texture never change; the
+    // same batches in the same order. DKR_TEXANIM_OLD=1 scans every frame as before.
+    if (!plat_switch("DKR_TEXANIM_OLD", 0)) {
+#define TEXANIM_MAX 512
+        static TriangleBatchInfo *sAnim[TEXANIM_MAX];
+        static s32 sAnimCount = -1;
+        static LevelModel *sAnimModel;
+        static unsigned int sAnimLevel;
+        s32 n;
+        if (sAnimModel != gCurrentLevelModel || sAnimLevel != gPortLevelLoads) {
+            sAnimModel = gCurrentLevelModel;
+            sAnimLevel = gPortLevelLoads;
+            n = 0;
+            for (segmentNumber = 0; segmentNumber < gCurrentLevelModel->numberOfSegments && n >= 0; segmentNumber++) {
+                batch = segment[segmentNumber].batches;
+                for (batchNumber = 0; batchNumber < segment[segmentNumber].numberOfBatches; batchNumber++) {
+                    if ((batch[batchNumber].flags & RENDER_TEX_ANIM) && batch[batchNumber].textureIndex != 0xFF) {
+                        if (n == TEXANIM_MAX) {
+                            n = -1;
+                            break;
+                        }
+                        sAnim[n++] = &batch[batchNumber];
+                    }
+                }
+            }
+            sAnimCount = n;
+        }
+        if (sAnimCount >= 0) {
+            for (n = 0; n < sAnimCount; n++) {
+                TriangleBatchInfo *b = sAnim[n];
+                texture = gCurrentLevelModel->textures[b->textureIndex].texture;
+                if (texture->numOfTextures != 0x100 && texture->frameAdvanceDelay) {
+                    temp = b->texOffset << 6;
+                    if (b->flags & RENDER_UNK_80000000) {
+                        temp |= b->miscData;
+                        tex_animate_texture(texture, &b->flags, &temp, updateRate);
+                        b->miscData = temp & 0x3F;
+                    } else {
+                        tex_animate_texture(texture, &b->flags, &temp, updateRate);
+                    }
+                    b->texOffset = (temp >> 6) & 0xFF;
+                }
+            }
+            return;
+        }
+#undef TEXANIM_MAX
+    }
+#endif
     for (segmentNumber = 0; segmentNumber < gCurrentLevelModel->numberOfSegments; segmentNumber++) {
         batch = segment[segmentNumber].batches;
         for (batchNumber = 0; batchNumber < segment[segmentNumber].numberOfBatches; batchNumber++) {
@@ -1524,11 +1611,18 @@ void trackbg_render_flashy(void) {
         var_a3 = COLOUR_WORD(levelHeader->rgba) & (~0xFF);
     }
 
-    gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
     texHeader = set_animated_texture_header(texHeader, gTrackTexAnimOffset << 8);
-    gDkrDmaDisplayList(gTrackDL++, OS_K0_TO_PHYSICAL(texHeader->cmd), texHeader->numberOfCommands);
-    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackVtxPtr), 9, 0);
-    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackTriPtr), 8, 1);
+#ifdef PICA_ALL
+    if (port_native_batch_xlu(&gTrackDL, 1, var_a2, var_a3, texHeader, gTrackVtxPtr, 9, gTrackTriPtr, 8)) {
+        port_native_end();
+    } else
+#endif
+    {
+        gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
+        gDkrDmaDisplayList(gTrackDL++, OS_K0_TO_PHYSICAL(texHeader->cmd), texHeader->numberOfCommands);
+        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackVtxPtr), 9, 0);
+        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gTrackTriPtr), 8, 1);
+    }
     gDPPipeSync(gTrackDL++);
     if (var_t2 != NULL) {
         gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
@@ -1599,9 +1693,16 @@ void trackbg_render_gradient(void) {
     headerGreen1 = gCurrentLevelHeader2->BGColourBottomG;
     headerBlue1 = gCurrentLevelHeader2->BGColourBottomB;
     rendermode_reset(&gTrackDL);
-    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
-    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
-    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
+#ifdef PICA_ALL
+    if (port_native_batch(&gTrackDL, NULL, RENDER_FOG_ACTIVE, 0, verts, 4, tris, 2, 0, 1)) {
+        port_native_end();
+    } else
+#endif
+    {
+        material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
+        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
+        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
+    }
 
     z = 20;
     if (osTvType == OS_TV_TYPE_PAL) {
@@ -1713,6 +1814,7 @@ void initialise_player_viewport_vars(s32 updateRate) {
     s32 segmentIndex;
     Object_Racer *racer;
 
+    port_game_section(PORT_SEC_VIEW);
     gSceneActiveCamera = cam_get_active_camera();
     viewportID = get_current_viewport();
     compute_scene_camera_transform_matrix();
@@ -1744,6 +1846,7 @@ void initialise_player_viewport_vars(s32 updateRate) {
         }
     }
     level_header()->unk3 = 1;
+    port_game_section(PORT_SEC_SEGMENTS);
     render_level_geometry_and_objects();
 }
 
@@ -1785,6 +1888,8 @@ void render_level_geometry_and_objects(void) {
     sp160 = get_first_active_object(&objCount);
 
 #ifdef TARGET_PORT
+    s32 portFirst, portCount;
+    Object **portObjs = objGetObjList(&portFirst, &portCount); // v31: for PORT_PREFETCH_OBJS
     sPortSegmentsAllowed = gCurrentLevelModel->numberOfSegments > 1 ? 0 : 1;
 #endif
     if (gCurrentLevelModel->numberOfSegments > 1) {
@@ -1817,11 +1922,14 @@ void render_level_geometry_and_objects(void) {
     }
 
     rendermode_reset(&gTrackDL);
+    port_game_section(PORT_SEC_SORT);
     sort_objects_by_dist(sp160, objCount - 1);
+    port_game_section(PORT_SEC_OBJECTS);
     visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
 
     for (i = sp160; i < objCount; i++) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS(portObjs, i, objCount);
         visible = 255;
         objFlags = obj->trans.flags;
         if (objFlags & OBJ_FLAGS_UNK_0080) {
@@ -1851,6 +1959,7 @@ void render_level_geometry_and_objects(void) {
 
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS_DOWN(portObjs, i, sp160);
         objFlags = obj->trans.flags;
         if (objFlags & visibleFlags) {
             visible = FALSE;
@@ -1874,6 +1983,7 @@ void render_level_geometry_and_objects(void) {
         }
     }
 
+    port_game_section(PORT_SEC_LATE);
     if (gDrawLevelSegments) {
         for (i = numberOfSegments - 1; i >= 0; i--) {
             render_level_segment(segmentIds[i], TRUE); // Render transparent segments
@@ -1892,6 +2002,7 @@ void render_level_geometry_and_objects(void) {
     // Particles and FX
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
+        PORT_PREFETCH_OBJS_DOWN(portObjs, i, sp160);
         visible = 255;
         objFlags = obj->trans.flags;
         if (objFlags & OBJ_FLAGS_UNK_0080) {
@@ -1941,6 +2052,10 @@ void render_level_geometry_and_objects(void) {
  * Since opaque and transparent are done in two separate runs, it will skip over the other.
  * Has a special case for the flashing lights in Spaceport Alpha, too.
  */
+#ifdef PICA_ALL
+extern s16 gForceFlags;
+extern TextureHeader *gCurrentTextureHeader;
+#endif
 void render_level_segment(s32 segmentId, s32 nonOpaque) {
     LevelModelSegment *segment;
     s32 i;
@@ -1961,12 +2076,20 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     s32 batchFlags;
     s32 textureFlags;
 #ifdef TARGET_PORT
+    s32 nativeTrack;
+#ifdef PICA_ALL
+    s32 nativeDraw, anyNative = FALSE;
+#endif
     if (port_portrait_active()) {
         return; // The portrait camera shows the model alone.
     }
     if (port_skip_game_kind(nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK)) {
         return;
     }
+    nativeTrack = port_native_track();
+#ifdef PICA_ALL
+    nativeDraw = port_native_draw();
+#endif
 #endif
     port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
@@ -2035,19 +2158,58 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             color = gCurrentLevelHeader2->pulseLightData->outColorValue;
             gDPSetPrimColor(gTrackDL++, 0, 0, color, color, color, color);
             material_set_blinking_lights(&gTrackDL, texture, batchFlags, texOffset);
+#ifdef TARGET_PORT
+            if (nativeTrack) {
+                gDPNoOpTag(gTrackDL++, PORT_TRACK_TAG);
+            }
+#endif
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, TRIN_ENABLE_TEXTURE);
             gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
         } else {
+#ifdef PICA_ALL
+            if (nativeDraw) {
+                // Native draw (port_drawtag.h PORT_NDRAW_TAG): the material's commands once, then a record.
+                int capture; s32 id = port_nmat_key(texture, batchFlags, texOffset, &capture);
+                if (capture) {
+                    gForceFlags = TRUE;
+                    gCurrentTextureHeader = NULL;
+                    material_set(&gTrackDL, texture, batchFlags, texOffset);
+                    gDPNoOpTag(gTrackDL++, PORT_NMAT_TAG | id);
+                }
+                gDPNoOpTag(gTrackDL++, PORT_NDRAW_TAG | id);
+                gTrackDL->words.w0 = OS_K0_TO_PHYSICAL(vertices);
+                gTrackDL->words.w1 = OS_K0_TO_PHYSICAL(triangles);
+                gTrackDL++;
+                gTrackDL->words.w0 = (u32) numberVertices | ((u32) numberVertices << 8) |
+                                     ((u32) (texture != NULL) << 16);
+                gTrackDL->words.w1 = (u32) numberTriangles;
+                gTrackDL++;
+                anyNative = TRUE;
+                continue;
+            }
+#endif
             material_set(&gTrackDL, texture, batchFlags, texOffset);
             batchFlags = TRUE;
             if (texture == NULL) {
                 batchFlags = FALSE;
             }
+#ifdef TARGET_PORT
+            if (nativeTrack) {
+                gDPNoOpTag(gTrackDL++, PORT_TRACK_TAG);
+            }
+#endif
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
     }
+#ifdef PICA_ALL
+    if (anyNative) {
+        // The renderer's settings are the last captured material's: the next material_set sets everything again.
+        gForceFlags = TRUE;
+        gCurrentTextureHeader = NULL;
+    }
+#endif
 }
 
 /**
@@ -2333,6 +2495,63 @@ s32 block_visible(LevelModelSegmentBoundingBox *bb) {
     f32 dirX, dirY, dirZ, dirW;
     f32 x, y, z;
 
+#ifdef TARGET_PORT
+    // v27: the same sums with 32-bit conversions. The original keeps the running sum in an s64, so every step is a
+    // float to 64-bit integer conversion and back: library calls on the 3DS (no VFP instruction), 4 each for up to
+    // 24 corners of every segment box, every frame (3.4% of the game thread on PC). A float inside the s32 range
+    // truncates to the same integer either way, and an integer converts to the same float whatever its type, so
+    // the answer is the same; outside that range the original's s64 steps are kept. DKR_BOX_S64=1 is the old code.
+    if (!plat_switch("DKR_BOX_S64", 0)) {
+#define BOX_TRUNC(f) (((f) > -2147483648.0f && (f) < 2147483648.0f) ? (s64) (s32) (f) : (s64) (f))
+#define BOX_FLOAT(l) (((l) >= -2147483647LL - 1 && (l) <= 2147483647LL) ? (f32) (s32) (l) : (f32) (l))
+        for (j = 0; j < 3; j++) {
+            dirX = D_8011D0F8[j].x;
+            dirY = D_8011D0F8[j].y;
+            dirZ = D_8011D0F8[j].z;
+            dirW = D_8011D0F8[j].w;
+            {
+                // Each step (multiply, add, truncate) never lowers the result when one of its terms grows, so some
+                // corner passes exactly when the corner with the larger term on each axis does: one corner a plane
+                // instead of up to eight. Anything not a number takes the eight corners, as the original.
+                f32 ax = bb->x2 * dirX, bx = bb->x1 * dirX, ay = bb->y2 * dirY, by = bb->y1 * dirY;
+                f32 az = bb->z2 * dirZ, bz = bb->z1 * dirZ;
+                if (ax == ax && bx == bx && ay == ay && by == by && az == az && bz == bz && dirW == dirW) {
+                    f32 f = ax > bx ? ax : bx;
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + (ay > by ? ay : by);
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + (az > bz ? az : bz);
+                    sp48 = BOX_TRUNC(f);
+                    f = BOX_FLOAT(sp48) + dirW;
+                    sp48 = BOX_TRUNC(f);
+                    if (sp48 > 0) {
+                        continue;
+                    }
+                    return FALSE;
+                }
+            }
+            for (i = 0, isVisible = FALSE; i < 8 && !isVisible; i++) {
+                f32 f = ((i & 1) ? bb->x1 : bb->x2) * dirX;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + ((i & 2) ? bb->y1 : bb->y2) * dirY;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + ((i & 4) ? bb->z1 : bb->z2) * dirZ;
+                sp48 = BOX_TRUNC(f);
+                f = BOX_FLOAT(sp48) + dirW;
+                sp48 = BOX_TRUNC(f);
+                if (sp48 > 0) {
+                    isVisible = TRUE;
+                }
+            }
+            if (i == 8 && !isVisible) {
+                return FALSE;
+            }
+        }
+#undef BOX_TRUNC
+#undef BOX_FLOAT
+        goto visible;
+    }
+#endif
     for (j = 0; j < 3; j++) {
         dirX = D_8011D0F8[j].x;
         dirY = D_8011D0F8[j].y;
@@ -2364,6 +2583,9 @@ s32 block_visible(LevelModelSegmentBoundingBox *bb) {
             return FALSE;
         }
     }
+#ifdef TARGET_PORT
+visible:
+#endif
     // From here until the "return TRUE" goes completely unused, functionally.
     x = (bb->x2 + bb->x1) >> 1;
     y = (bb->y2 + bb->y1) >> 1;
@@ -2651,6 +2873,10 @@ s32 get_level_segment_waves(s32 levelSegmentIndex, f32 xIn, f32 zIn, WaterProper
             var_a1 <<= 1;
         }
 
+#ifdef TARGET_PORT
+        const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, currentSegment);
+        u64 portNeed = port_cells_all(var_s1);
+#endif
         for (batchNum = 0; batchNum < currentSegment->numberOfBatches; batchNum++) {
             surfaceType = gCurrentLevelModel->textures[currentSegment->batches[batchNum].textureIndex].surfaceType;
             currentFaceOffset = currentSegment->batches[batchNum].facesOffset;
@@ -2660,6 +2886,11 @@ s32 get_level_segment_waves(s32 levelSegmentIndex, f32 xIn, f32 zIn, WaterProper
                 (currentSegment->batches[batchNum].flags & (RENDER_HIDDEN | RENDER_NO_COLLISION))) {
                 currentFaceOffset = nextFaceOffset;
             }
+#ifdef TARGET_PORT
+            if (PORT_CELLS_SKIP(portCells, batchNum, portNeed)) {
+                currentFaceOffset = nextFaceOffset;
+            }
+#endif
             for (faceNum = currentFaceOffset; faceNum < nextFaceOffset; faceNum++) {
                 if (var_s1 == (currentSegment->unk10[faceNum] & var_s1)) {
                     tri = &currentSegment->triangles[faceNum];
@@ -2846,12 +3077,21 @@ s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut) {
     }
 
     yOutCount = 0;
+#ifdef TARGET_PORT
+    const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, currentSegment);
+    u64 portNeed = port_cells_all(var_s1);
+#endif
     for (batchNum = 0; batchNum < currentSegment->numberOfBatches; batchNum++) {
         do {
         } while (0); // fakematch
         currentFaceOffset = currentSegment->batches[batchNum].facesOffset;
         nextFaceOffset = currentSegment->batches[batchNum + 1].facesOffset;
         currentVerticesOffset = currentSegment->batches[batchNum].verticesOffset;
+#ifdef TARGET_PORT
+        if (PORT_CELLS_SKIP(portCells, batchNum, portNeed)) {
+            continue;
+        }
+#endif
         for (faceNum = currentFaceOffset; faceNum < nextFaceOffset; faceNum++) {
             if (var_s1 == (currentSegment->unk10[faceNum] & var_s1)) {
                 tri = &currentSegment->triangles[faceNum];
@@ -2968,6 +3208,9 @@ void generate_track(s32 modelId) {
         func_8002C71C(&gCurrentLevelModel->segments[k]);
         j = (s32) align16(((u8 *) (gCurrentLevelModel->segments[k].unk32 * 2)) + j);
     }
+#ifdef TARGET_PORT
+    port_cells_build(gCurrentLevelModel);
+#endif
     temp_s4 = j - (s32) gCurrentLevelModel;
     if (temp_s4 > LEVEL_MODEL_MAX_SIZE) {
         rmonPrintf("ERROR!! TrackMem overflow .. %d\n", temp_s4);
@@ -3359,6 +3602,17 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
+#ifdef PICA_ALL
+                if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
+                                      &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
+                                      gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
+                                      &gCurrShadowTris[gCurrShadowHeapData[i].triCount],
+                                      gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount, 1, 1)) {
+                    port_native_end();
+                    i++;
+                    continue;
+                }
+#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 // I hope we can clean this part up.
                 tri2 = triCount = gCurrShadowHeapData[i].triCount; // Fakematch
@@ -3409,6 +3663,17 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gCurrShadowTris = gShadowHeapTris[gWaterEffectIndex];
             gCurrShadowVerts = gShadowHeapVerts[gWaterEffectIndex];
             while (i < effect->meshEnd) {
+#ifdef PICA_ALL
+                if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
+                                      &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
+                                      gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
+                                      &gCurrShadowTris[gCurrShadowHeapData[i].triCount],
+                                      gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount, 1, 1)) {
+                    port_native_end();
+                    i++;
+                    continue;
+                }
+#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtxCount = gCurrShadowHeapData[i].vtxCount; // Fakematch
@@ -3456,8 +3721,21 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
     gNewShadowVtxCount = 0;
     numViewports = cam_get_viewport_layout();
     objects = objGetObjList(&objIndex, &objectCount);
+#ifdef TARGET_PORT
+    // v31 (DKR_SHADOW_QUICK): an object with neither a shadow nor a water effect is passed over before its flags and
+    // header are read (nothing below touches it then: most objects in a race), instead of after.
+    s32 portQuick = plat_switch("DKR_SHADOW_QUICK", 1) != 0;
+    sPortClipOnce = plat_switch("DKR_SHADOW_CLIP_ONCE", 1) != 0;
+#endif
     while (objIndex < objectCount) {
         obj = objects[objIndex];
+#ifdef TARGET_PORT
+        PORT_PREFETCH_OBJS(objects, objIndex, objectCount);
+        if (portQuick && obj->shadow == NULL && obj->waterEffect == NULL) {
+            objIndex += 1;
+            continue;
+        }
+#endif
         objHeader = obj->header;
         waterEffect = obj->waterEffect;
         shadow = obj->shadow;
@@ -3513,7 +3791,15 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
             gShadowOpacity = 1.0f;
             waterTex = waterEffect->texture;
             if (waterTex != NULL && updateRate && waterTex->numOfTextures != 0x100) {
+#ifdef TARGET_PORT
+                // Splash/wake animation: one step per 30 fps frame, split over the two 60 fps frames.
+                waterEffect->textureFrame += gPortHalfStep ? (PORT_TICK() ? waterEffect->animationSpeed -
+                                                                                waterEffect->animationSpeed / 2
+                                                                          : waterEffect->animationSpeed / 2)
+                                                           : waterEffect->animationSpeed;
+#else
                 waterEffect->textureFrame += waterEffect->animationSpeed;
+#endif
                 while (waterTex->numOfTextures < waterEffect->textureFrame) {
                     waterEffect->textureFrame -= waterTex->numOfTextures;
                 }
@@ -3570,7 +3856,16 @@ void func_8002DE30(Object *obj) {
                                            obj->trans.x_position - 16.0f, obj->trans.z_position - 16.0f,
                                            obj->trans.x_position + 16.0f, obj->trans.z_position + 16.0f);
         block = &gCurrentLevelModel->segments[blockId];
+#ifdef TARGET_PORT
+        const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, block);
+        u64 portNeed = port_cells_any(var_t3);
+#endif
         for (i = 0; i < block->numberOfBatches && !foundResult; i++) {
+#ifdef TARGET_PORT
+            if (PORT_CELLS_SKIP(portCells, i, portNeed)) {
+                continue;
+            }
+#endif
             if (!(block->batches[i].flags & (RENDER_HIDDEN | RENDER_DECAL | RENDER_WATER | RENDER_NO_SHADOW))) {
                 batchFlags = (block->batches[i].flags >> 19) & 7;
                 vertices = &block->vertices[block->batches[i].verticesOffset];
@@ -3746,7 +4041,16 @@ void func_8002E904(LevelModelSegment *arg0, s32 arg1, s32 arg2) {
     spD0[3].x = gNewShadowObj->trans.x_position + gNewShadowWidth;
     spD0[3].y = gNewShadowObj->trans.z_position - gNewShadowLength;
 
+#ifdef TARGET_PORT
+    const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, arg0);
+    u64 portNeed = port_cells_any(arg1);
+#endif
     for (spAC = 0; spAC < arg0->numberOfBatches; spAC++) {
+#ifdef TARGET_PORT
+        if (PORT_CELLS_SKIP(portCells, spAC, portNeed)) {
+            continue;
+        }
+#endif
         if ((arg2 && (arg0->batches[spAC].flags & RENDER_WATER)) ||
             (!arg2 && !(arg0->batches[spAC].flags & FLAGS_8002E904))) {
             curFacesOffset = arg0->batches[spAC].facesOffset;
@@ -4178,13 +4482,32 @@ s32 func_8002FF6C(s32 arg0, unk8011C8B8 *arg1, s32 arg2, Vec2f *arg3) {
             var_f2 = -var_f2;
         }
 
+#ifdef TARGET_PORT
+        // v31 (DKR_SHADOW_CLIP_ONCE): each corner's side of the edge is worked out once, not as the end of one side
+        // and again as the start of the next (the same sum of the same values: the same result).
+        s32 portOnce = sPortClipOnce;
+        f32 portFirst = 0.0f, portNext = 0.0f;
+        if (portOnce && var_s2 > 0) {
+            portFirst = portNext = (temp_f12 * var_s3[0].x) + (var_s3[0].z * temp_f14) + var_f2;
+        }
+#endif
         for (var_t1 = 0, var_t2 = 0; var_t1 < var_s2; var_t1++) {
             var_v1 = var_t1 + 1;
             if (var_v1 >= var_s2) {
                 var_v1 = 0;
             }
+#ifdef TARGET_PORT
+            if (portOnce) {
+                temp_f16 = portNext;
+                temp_f22 = var_v1 == 0 ? portFirst
+                                       : (temp_f12 * var_s3[var_v1].x) + (var_s3[var_v1].z * temp_f14) + var_f2;
+                portNext = temp_f22;
+            } else
+#endif
+            {
             temp_f16 = (temp_f12 * var_s3[var_t1].x) + (var_s3[var_t1].z * temp_f14) + var_f2;
             temp_f22 = (temp_f12 * var_s3[var_v1].x) + (var_s3[var_v1].z * temp_f14) + var_f2;
+            }
             if ((temp_f16 >= 0.0f && temp_f22 < 0.0f) || (temp_f16 < 0.0f && temp_f22 >= 0.0f)) {
                 var_a0 = D_8011B320[var_v0];
                 var_a1 = -1;

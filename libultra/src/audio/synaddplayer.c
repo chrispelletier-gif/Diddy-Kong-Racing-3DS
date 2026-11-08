@@ -20,6 +20,12 @@
 
 #include "synthInternals.h"
 #include <os_internal.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+/* The sound code's interrupt-disabled sections take the sound lock instead (port/src/os/audio_lock.c). */
+OSIntMask port_audio_set_mask(OSIntMask mask);
+#define osSetIntMask port_audio_set_mask
+#endif
 
 void alSynAddPlayer(ALSynth *drvr, ALPlayer *client)
 {

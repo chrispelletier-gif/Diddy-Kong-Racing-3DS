@@ -309,7 +309,7 @@ static volatile struct {
 } sSwitchOverrides[MAX_SWITCH_OVERRIDES];
 volatile int gPlatSwitchEpoch;
 
-int plat_switch(const char *name, int fallback) {
+static int switch_read(const char *name, int fallback) {
     const char *env;
     int i;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
@@ -320,7 +320,79 @@ int plat_switch(const char *name, int fallback) {
         }
     }
     env = plat_getenv(name);
+#ifdef PICA_ALL
+    // The "everything on the PICA200" test build (kept off GitHub): the GPU route's switches on unless env.txt or
+    // the switch bench says otherwise.
+    if (env == NULL) {
+        // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
+        // the user wants it off by default with one bench row turning it on (2026-11-05).
+        // DKR_TEX_VRAM off too: its uploads ran through the first seconds of each race on the Old 3DS (82-117 ms
+        // frames while "textures in VRAM" grew, issue #406) and race starts were 70-130 ms longer than before (#407).
+        static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_NATIVE_DRAW" };
+        if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
+            // Two cores on both consoles: the New 3DS bench row was perfect, user 2026-11-05 21:17 ("default on both").
+            return 1;
+        }
+        for (i = 0; i < (int) (sizeof(sOn) / sizeof(sOn[0])); i++) {
+            if (strcmp(sOn[i], name) == 0) {
+                return 1;
+            }
+        }
+    }
+#endif
     return env != NULL ? atoi(env) : fallback;
+}
+
+/* v27: a switch's answer kept per thread, by the name's address and the fallback, until the bench changes the
+ * overrides (gPlatSwitchEpoch). env.txt is read once, so nothing else can change an answer. The game thread asked
+ * ~3,500 times a frame (set_temp_model_transforms, plat_render_ahead), each a scan of the overrides and env.txt:
+ * 3.6% of its time on PC. DKR_SWITCH_CACHE=0 (env.txt only) reads every time, as before. */
+/* v29: 256 slots in pairs, the name's address hashed (64 direct slots by the address had busy names share one: the
+ * renderer read DKR_SPLIT_RENDER from env.txt every frame). */
+#define SWITCH_CACHE_SLOTS 256
+typedef struct {
+    const char *name;
+    int fallback, value, epoch;
+} SwitchCacheEntry;
+static __thread SwitchCacheEntry sSwitchCache[SWITCH_CACHE_SLOTS];
+static volatile int sSwitchCacheOn = -1;
+
+int plat_switch(const char *name, int fallback) {
+    SwitchCacheEntry *e;
+    int epoch;
+    if (sSwitchCacheOn <= 0) {
+        if (sSwitchCacheOn == 0) {
+            return switch_read(name, fallback);
+        }
+        {
+            const char *env = plat_getenv("DKR_SWITCH_CACHE");
+            sSwitchCacheOn = env == NULL || atoi(env) != 0;
+        }
+        if (!sSwitchCacheOn) {
+            return switch_read(name, fallback);
+        }
+    }
+    epoch = gPlatSwitchEpoch + 1; // + 1: an empty slot (epoch 0) never matches
+    {
+        unsigned h = (unsigned) (((unsigned long) name >> 2) * 2654435761u) >> 24; // 8 bits: SWITCH_CACHE_SLOTS
+        SwitchCacheEntry *a = &sSwitchCache[h & ~1u], *b = a + 1;
+        if (a->name == name && a->fallback == fallback && a->epoch == epoch) {
+            return a->value;
+        }
+        if (b->name == name && b->fallback == fallback && b->epoch == epoch) {
+            return b->value;
+        }
+        // A miss replaces the older answer of the pair (b): the newer one moves up to a.
+        *b = *a;
+        e = a;
+    }
+    {
+        e->value = switch_read(name, fallback);
+        e->name = name;
+        e->fallback = fallback;
+        e->epoch = epoch;
+    }
+    return e->value;
 }
 
 void plat_override_switch(const char *name, int value) {
@@ -526,4 +598,24 @@ void plat_set_60fps_setting(int on) {
 
 float plat_camera_near(void) {
     return plat_aspect_scale() > 1.0f ? 2.5f : 10.0f;
+}
+
+/* A line to the file named by environment variable `name` (one trace file per run, opened on the first call; nothing
+ * when the variable is unset). Used by DKR_SYNTH_TRACE (voices.c). */
+void plat_trace(const char *name, const char *fmt, ...) {
+    static int sInit;
+    static FILE *sFile;
+    va_list ap;
+
+    if (!sInit) {
+        const char *path = plat_getenv(name);
+        sInit = 1;
+        sFile = (path != NULL && path[0] != '\0') ? fopen(path, "w") : NULL;
+    }
+    if (sFile == NULL) {
+        return;
+    }
+    va_start(ap, fmt);
+    vfprintf(sFile, fmt, ap);
+    va_end(ap);
 }

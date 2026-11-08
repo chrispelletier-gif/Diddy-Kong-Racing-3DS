@@ -27,6 +27,9 @@ enum ProfStage {
     PROF_GPU_WAIT,   /* Renderer: waiting for the GPU to finish the previous frame, or the screen to show it. */
     PROF_AUDIO,      /* Audio tasks (synthesis). */
     PROF_GPU_DRAW,   /* The GPU's drawing time (3DS only). */
+    PROF_GPU_FILL,   /* Within it, from the GPU timeline (3DS, gpu_cuts.inc): memory fills (the frame's clears), */
+    PROF_GPU_LISTS,  /* the command lists (the draws) */
+    PROF_GPU_COPY,   /* and copies (the picture to the screen). */
     PROF_STAGE_COUNT
 };
 
@@ -116,6 +119,8 @@ typedef struct ProfStats {
     unsigned int hitches;         /* Game frames that took longer than 50 ms. */
     unsigned int low1FrameUs;     /* The 1% low: 99 in 100 game frames came at least this soon (0: no frames). */
     unsigned int pacedFrames[4];  /* Game frames by the time they took: one retrace (60 fps), two (30), three (20), more. */
+    unsigned int jitterUs;        /* The average change in period from one game frame to the next (steadiness). */
+    unsigned int paceChanges;     /* Game frames whose pace (one, two, three retraces or more) differs from the one before. */
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
     unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
 } ProfStats;
@@ -242,6 +247,7 @@ void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size)
 int prof_monitor_tap(int x, int y);
 #ifdef PORT_RELEASE
 #define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
+#define prof_kind_name(kind) ((void) (kind), "-")
 #define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
 #define prof_object_logic_begin() 0ULL
 #define prof_object_logic_end(bucket, start) ((void) (start))

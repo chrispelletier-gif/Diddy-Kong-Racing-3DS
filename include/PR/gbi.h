@@ -3747,6 +3747,7 @@ typedef union {
 #define	gDPNoOpTag(pkt, tag)	gDPParam(pkt, G_NOOP, tag)
 #define	gsDPNoOpTag(tag)	gsDPParam(G_NOOP, tag)
 
+#include "port_nops.h" /* PICA_ALL native renderer ops (PORT_NATIVE_OPS) */
 #endif /* _LANGUAGE_C */
 
 

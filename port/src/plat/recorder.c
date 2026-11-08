@@ -82,35 +82,98 @@ static void describe_cause(const RecFrame *r, char *out, size_t size) {
 static const char *mode_name(int mode);
 static const RecEvent *event_at(const RecState *s, unsigned int n);
 
-/* A hitch, as it happens: its cause and the events during it (at most three), kept in the hitch ring. */
-static void record_hitch(const RecFrame *r) {
-    RecHitch *h = &sRec.hitches[sRec.hitchCount % REC_HITCHES];
+/* A frame's cause and the events during it (at most three), as a hitch line has them. */
+static void describe_frame(const RecFrame *r, char *text, int size) {
     unsigned int start = r->endMs - r->periodUs / 1000, n, shown = 0, first;
     int length;
     char cause[200];
 
+    describe_cause(r, cause, sizeof(cause));
+    length = snprintf(text, size, "%s level %d%s: %s", mode_name(r->mode), r->level, r->racing ? " racing" : "", cause);
+    if (r->soundGaps && length < size) {
+        length += snprintf(text + length, size - length, "; %u sound gaps", r->soundGaps);
+    }
+    first = sRec.eventCount > 32 ? sRec.eventCount - 32 : 0;
+    for (n = first; n < sRec.eventCount && shown < 3 && length < size; n++) {
+        const RecEvent *ev = event_at(&sRec, n);
+        if (ev != NULL && (int) (ev->ms - start) >= -5 && (int) (ev->ms - r->endMs) <= 5 &&
+            strncmp(ev->text, "watchdog", 8) != 0) {
+            length += snprintf(text + length, size - length, "%s%.60s", shown == 0 ? "; during: " : " | ", ev->text);
+            shown++;
+        }
+    }
+}
+
+/* A hitch, as it happens: its cause and the events during it, kept in the hitch ring. */
+static void record_hitch(const RecFrame *r) {
+    RecHitch *h = &sRec.hitches[sRec.hitchCount % REC_HITCHES];
     h->frame = r->frame;
     h->endMs = r->endMs;
     h->periodUs = r->periodUs;
     h->cause = rec_frame_cause(r);
-    describe_cause(r, cause, sizeof(cause));
-    length = snprintf(h->text, sizeof(h->text), "%s level %d%s: %s", mode_name(r->mode), r->level,
-                      r->racing ? " racing" : "", cause);
-    if (r->soundGaps && length < (int) sizeof(h->text)) {
-        length += snprintf(h->text + length, sizeof(h->text) - length, "; %u sound gaps", r->soundGaps);
-    }
-    first = sRec.eventCount > 32 ? sRec.eventCount - 32 : 0;
-    for (n = first; n < sRec.eventCount && shown < 3 && length < (int) sizeof(h->text); n++) {
-        const RecEvent *ev = event_at(&sRec, n);
-        if (ev != NULL && (int) (ev->ms - start) >= -5 && (int) (ev->ms - r->endMs) <= 5 &&
-            strncmp(ev->text, "watchdog", 8) != 0) {
-            length += snprintf(h->text + length, sizeof(h->text) - length, "%s%.60s", shown == 0 ? "; during: " : " | ",
-                               ev->text);
-            shown++;
-        }
-    }
+    describe_frame(r, h->text, sizeof(h->text));
     sRec.causeCounts[h->cause]++;
     sRec.hitchCount++;
+}
+
+/*
+ * v35: the slowest race frames that were not hitches (over the cap's period by more than 3 ms, but not half as long
+ * again), the four longest since rec_slow_take last listed them: the test run's worst frame column is mostly these
+ * (lean quick test #462: 39 ms on nearly every track, 44-50 on Whale Bay), and nothing said what they were.
+ */
+#define REC_SLOW 4
+#define REC_SLOW_TEXT 400
+typedef struct RecSlow {
+    unsigned int frame, periodUs;
+    char text[REC_SLOW_TEXT];
+} RecSlow;
+static RecSlow sSlow[REC_SLOW];
+static int sSlowCount;
+
+static void record_slow(const RecFrame *r) {
+    int i;
+    for (i = sSlowCount; i > 0 && sSlow[i - 1].periodUs < r->periodUs; i--) {
+        if (i < REC_SLOW) {
+            sSlow[i] = sSlow[i - 1];
+        }
+    }
+    if (i >= REC_SLOW) {
+        return;
+    }
+    sSlow[i].frame = r->frame;
+    sSlow[i].periodUs = r->periodUs;
+    {
+        // v38: then what took the game core's time (port_profile.c), before the events, which may be cut off.
+        char cause[200], detail[200];
+        describe_cause(r, cause, sizeof(cause));
+        port_rec_frame_detail(detail, sizeof(detail));
+        snprintf(sSlow[i].text, sizeof(sSlow[i].text), "%s level %d: %s%s", mode_name(r->mode), r->level, cause,
+                 detail);
+        {
+            size_t length = strlen(sSlow[i].text);
+            char events[REC_HITCH_TEXT];
+            const char *during;
+            describe_frame(r, events, sizeof(events));
+            during = strstr(events, "; during: ");
+            if (during != NULL && length < sizeof(sSlow[i].text)) {
+                snprintf(sSlow[i].text + length, sizeof(sSlow[i].text) - length, "%s", during);
+            }
+        }
+    }
+    if (sSlowCount < REC_SLOW) {
+        sSlowCount++;
+    }
+}
+
+int rec_slow_take(char *out, int size) {
+    int i, length = 0;
+    out[0] = '\0';
+    for (i = 0; i < sSlowCount && length < size; i++) {
+        length += snprintf(out + length, size - length, "- slow frame %u: **%u ms**, %s\n", sSlow[i].frame,
+                           sSlow[i].periodUs / 1000, sSlow[i].text);
+    }
+    sSlowCount = 0;
+    return length < size ? length : size - 1;
 }
 
 static void write_text(const char *name, const char *text) {
@@ -180,6 +243,8 @@ void rec_game_frame(RecFrame *row) {
     port_rec_game_state(row);
     if (row->flags & REC_FLAG_HITCH) {
         record_hitch(row);
+    } else if (row->racing && !row->paused && row->frame > 0 && row->periodUs > sRec.targetUs + 3000) {
+        record_slow(row);
     }
     slot = &sRec.frames[sRec.frameCount % REC_FRAMES];
     *slot = *row;

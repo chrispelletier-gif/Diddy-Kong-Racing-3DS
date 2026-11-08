@@ -740,6 +740,23 @@ GLOBAL_ASM("asm/math_util/mtxf_from_scale.s")
  * Mirrors the asm: the table index is truncated, (small << 10) / big, not rounded.
  */
 static u16 atan2_lookup(u32 small, u32 big) {
+#ifdef TARGET_PORT
+    // The ARM11 has no divide instruction, so the 64-bit divide below is a long library call. The quotient here has
+    // only 11 bits (small < big <= 2^31), so 11 steps of long division give exactly the same index.
+    if (small < big && big <= 0x80000000u) {
+        u32 r = small, q = 0;
+        s32 i;
+        for (i = 0; i < 11; i++) {
+            r <<= 1;
+            q <<= 1;
+            if (r >= big) {
+                r -= big;
+                q |= 1;
+            }
+        }
+        return gArcTanTable[(q & 0xFFE) >> 1];
+    }
+#endif
     return gArcTanTable[(u32) ((((u64) small << 11) / big) & 0xFFE) >> 1];
 }
 
@@ -790,7 +807,19 @@ GLOBAL_ASM("asm/math_util/atan2s.s")
 #ifdef NON_MATCHING
 u16 arctan2_f(f32 y, f32 x) {
     // cvt.w.s rounds to nearest under the N64's default FPU mode; a C cast would truncate.
+#if defined(TARGET_PORT) && defined(__arm__) && defined(__VFP_FP__) && !defined(__SOFTFP__)
+    // vcvtr rounds with the FPSCR's mode (round to nearest even, as rintf does) and saturates like the C cast of
+    // rintf's result, so it gives the same integers in one instruction instead of two calls to the library's rintf.
+    f32 ry, rx;
+    s32 iy, ix;
+    __asm__("vcvtr.s32.f32 %0, %1" : "=t"(ry) : "t"(y * 255.0f));
+    __asm__("vcvtr.s32.f32 %0, %1" : "=t"(rx) : "t"(x * 255.0f));
+    __builtin_memcpy(&iy, &ry, sizeof(iy));
+    __builtin_memcpy(&ix, &rx, sizeof(ix));
+    return atan2s(iy, ix);
+#else
     return atan2s((s32) __builtin_rintf(y * 255.0f), (s32) __builtin_rintf(x * 255.0f));
+#endif
 }
 #else
 GLOBAL_ASM("asm/math_util/arctan2_f.s")

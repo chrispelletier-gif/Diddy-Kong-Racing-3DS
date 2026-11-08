@@ -1,4 +1,5 @@
 #include "thread3_main.h"
+#include "port_drawtag.h"
 
 #include "asset_enums.h"
 #include "asset_loading.h"
@@ -55,6 +56,12 @@ static s32 sPortPauseRequest;
 #include <PR/gu.h>
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
+#ifdef TARGET_PORT
+// Game state hash after each logic step, for checking native rewrites (port/host/state_hash.c; nothing on the 3DS).
+__attribute__((weak)) void port_state_hash(void) {
+}
+void port_game_native_frame(void); // port/src/game/track_cells.c
+#endif
 
 /************ .rodata ************/
 
@@ -116,6 +123,13 @@ FadeTransition D_800DD424 = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FAD
 #define DL_BUFFERS 2
 #endif
 Gfx *gDisplayLists[DL_BUFFERS];
+#ifdef TARGET_PORT
+/* PICA_ALL (DKR_RACER_LOD_ADAPT, default on): nonzero while the game is missing its frame rate cap, so the other
+ * karts use their simpler models at the 4-player distances (src/objects.c). On after two slow frames within eight,
+ * off again after five seconds without one. The game's own retrace count decides, so lockstep runs never change. */
+s32 gPortRacerLodBoost;
+s32 gPortDlBytes; // Each of gDisplayLists' size: the renderer leaves lists inside them alone (gfx_rdp.c nop_static)
+#endif
 Gfx *gCurrDisplayList;
 UNUSED s32 D_801211FC;
 Mtx *gMatrixHeap[DL_BUFFERS];
@@ -260,6 +274,13 @@ void init_game(void) {
  * The main gameplay loop.
  * Contains all game logic, audio and graphics processing.
  */
+#ifdef TARGET_PORT
+/* The host 60 fps step check reads the controllers again between its two half steps, as the 60 fps loop does. */
+static void port_stepdiff_reinput(s32 updateRate) {
+    gSaveDataFlags = input_update(gSaveDataFlags, updateRate);
+}
+#endif
+
 void main_game_loop(void) {
     s32 debugLoopCounter;
     s32 framebufferSize;
@@ -334,9 +355,21 @@ void main_game_loop(void) {
             mode_intro();
             break;
         case GAMEMODE_MENU: // In a menu
+#ifdef TARGET_PORT
+            {
+                extern s32 gCurrentMenuId;
+                plat_step_diff(sLogicUpdateRate, mode_menu, port_stepdiff_reinput, gCurrentMenuId | (gGameMode << 8));
+            }
+#endif
             mode_menu(sLogicUpdateRate);
             break;
         case GAMEMODE_INGAME: // In game (Controlling a character)
+#ifdef TARGET_PORT
+            // Host 60 fps step check (DKR_STEPDIFF): tries this frame both ways in copies of the game first.
+            if (!gIsPaused) {
+                plat_step_diff(sLogicUpdateRate, mode_game, port_stepdiff_reinput, level_id() | (gGameMode << 8));
+            }
+#endif
             mode_game(sLogicUpdateRate);
             break;
         case GAMEMODE_LOCKUP: // EPC (lockup display)
@@ -347,7 +380,9 @@ void main_game_loop(void) {
     // This is a good spot to place custom text if you want it to overlay it over ALL the
     // menus & gameplay.
 
+    port_game_section(PORT_SEC_SOUND);
     sound_update_queue(sLogicUpdateRate);
+    port_game_section(PORT_SEC_TAIL);
     debug_text_print(&gCurrDisplayList);
     render_dialogue_boxes(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList);
     dialogue_close(4);
@@ -403,8 +438,43 @@ void main_game_loop(void) {
     tempLogicUpdateRate = fb_update(gScreenStatus);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
+#if PICA_ALL
+    {
+        static s32 sSlowHistory, sHold, sQuiet;
+        static u32 sLevelSeen;
+        extern unsigned int gPortLevelLoads;
+        // v29: Old 3DS only by default. The slow frames of a level's first seconds (loads, texture decodes) no longer
+        // count: they turned it on at every race start, and five seconds later each kart's full detail models came
+        // back a part at a time as the karts crossed the normal distances (seen on the New 3DS, 2026-11-07).
+        s32 sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", plat_old_3ds() ? 1 : 0) != 0; // Each frame: the bench changes it
+        if (sLevelSeen != gPortLevelLoads) {
+            sLevelSeen = gPortLevelLoads;
+            sQuiet = 90; // Three seconds at 30 fps
+            sSlowHistory = 0;
+            sHold = 0;
+        }
+        if (sQuiet > 0) {
+            sQuiet--;
+        }
+        sSlowHistory = (sSlowHistory << 1) & 0xFF;
+        if (sAdapt && sQuiet == 0 && tempLogicUpdateRate > plat_frame_retraces()) {
+            sSlowHistory |= 1;
+        }
+        if (__builtin_popcount(sSlowHistory) >= 2) {
+            sHold = 150; // Five seconds at 30 fps
+        } else if (sHold > 0) {
+            sHold--;
+        }
+        gPortRacerLodBoost = sAdapt && sHold > 0;
+    }
+#endif
+    port_game_section(PORT_SEC_END_NOTE);
+    port_game_note_frame();
+    port_game_section(PORT_SEC_END_AUTORUN);
     port_autorun_frame(tempLogicUpdateRate);
+    port_game_section(PORT_SEC_END_HUD);
     port_race_hud_frame(tempLogicUpdateRate);
+    port_game_section(PORT_SEC_END_LOOP);
     {
         // A tap on the 3DS bottom screen's menu sounds like the game's own menus.
         static const u16 sUiSounds[] = { 0, SOUND_SELECT2, SOUND_MENU_PICK2, SOUND_MENU_BACK3 };
@@ -491,6 +561,7 @@ void unload_level_game(void) {
 void mode_game(s32 updateRate) {
     s32 buttonPressedInputs, buttonHeldInputs, i, loadContext, sp3C;
 
+    port_game_section(PORT_SEC_GAME);
     loadContext = LEVEL_CONTEXT_NONE;
     buttonHeldInputs = 0;
     buttonPressedInputs = 0;
@@ -514,9 +585,13 @@ void mode_game(s32 updateRate) {
     // Update all objects
     if (!gIsPaused) {
 #ifdef TARGET_PORT
+        port_game_section(PORT_SEC_LOGIC);
         prof_logic_begin();
         obj_update(updateRate);
         prof_logic_end();
+        port_game_section(PORT_SEC_POSTLOGIC);
+        port_state_hash();
+        port_game_native_frame();
 #else
         obj_update(updateRate);
 #endif
@@ -542,6 +617,7 @@ void mode_game(s32 updateRate) {
     gParticlePtrList_flush();
     ainode_update();
     render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+    port_game_section(PORT_SEC_GAMETAIL);
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);
@@ -1472,6 +1548,9 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
 #endif
         totalSize = ((gNumF3dCmdsPerPlayer[num] * sizeof(Gfx))) + ((gNumHudMatPerPlayer[num] * sizeof(Mtx))) +
                     ((gNumHudVertsPerPlayer[num] * sizeof(Vertex))) + ((gNumHudTrisPerPlayer[num] * sizeof(Triangle)));
+#ifdef TARGET_PORT
+        gPortDlBytes = totalSize;
+#endif
         gDisplayLists[0] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[0], COLOUR_TAG_RED);
         gDisplayLists[1] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[1], COLOUR_TAG_YELLOW);
 #ifdef TARGET_PORT
@@ -1548,6 +1627,9 @@ void default_alloc_displaylist_heap(void) {
                 (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)) +
                 (gNumHudTrisPerPlayer[numberOfPlayers] * sizeof(Triangle));
 
+#ifdef TARGET_PORT
+    gPortDlBytes = totalSize;
+#endif
     gDisplayLists[0] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_RED);
     gMatrixHeap[0] = (Mtx *) ((u8 *) gDisplayLists[0] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[0] = (Vertex *) ((u8 *) gMatrixHeap[0] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));

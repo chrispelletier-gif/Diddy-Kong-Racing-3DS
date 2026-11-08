@@ -93,6 +93,8 @@ void rec_game_frame(RecFrame *row);
 /* Game side (port_recorder.c): the game's state for a row, and in words for a report. Game thread only. */
 void port_rec_game_state(RecFrame *row);
 void port_rec_describe(char *out, int size);
+/* The port's detail for a slow frame, while it is recorded (port_profile.c): returns the length written. */
+int port_rec_frame_detail(char *out, int size);
 /* Any thread: a line on the timeline (printf style). Never waits and never touches the SD card. */
 void rec_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* The log's copy of each line (plat_3ds.c / plat_posix.c). */
@@ -122,6 +124,8 @@ int rec_describe_game(char *out, int size, int timeoutMs);
  * it isn't NULL. Returns how many the ring had (a long stretch of hitches can push the oldest out).
  */
 unsigned int rec_hitches_since(unsigned int since, char *out, int size, unsigned int *counts);
+/* The (at most four) slowest race frames that were not hitches since the last call, a line each; then forgets them. */
+int rec_slow_take(char *out, int size);
 /* A cause's name ("game logic", "textures"...). */
 const char *rec_cause_name(int cause);
 /* Frames recorded so far (the next frame's number). */

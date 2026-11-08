@@ -86,7 +86,7 @@ GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/in
                  -I$(ROOT)/libultra/src/os -I$(ROOT)/src/hasm -Iinclude -Isrc
 
 # The N64 compiler treats char as unsigned and plain C semantics for overflow/aliasing are relied upon.
-COMMON_FLAGS := -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
+COMMON_FLAGS := -DPORT_NATIVE_OPS=1 -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector
 # DEBUG=asan: AddressSanitizer, plus the float to integer conversions that behave differently on ARM.
 SANITIZE_FLAGS := -fsanitize=address,float-cast-overflow
 ifeq ($(DEBUG),1)
@@ -155,14 +155,15 @@ ifeq ($(TARGET),3ds)
   PORT_VERSION_MINOR := $(or $(word 2,$(PORT_VERSION_NUMBERS)),0)
   PORT_VERSION_MICRO := $(or $(word 3,$(PORT_VERSION_NUMBERS)),0)
   # Identifies the build in bug reports: git describe from the newest version tag, or the commit before there is one.
-  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)
+  # BUILD_NAME=x (v31) adds "-x" to it, so test builds of one commit (compile levels, variants) tell apart in reports.
+  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)$(if $(BUILD_NAME),-$(BUILD_NAME))
   # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
   PORT_BUILD_COMMIT := $(shell $(GIT) rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
                 -DPORT_VERSION=\"$(PORT_VERSION)\" -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" \
                 -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
-  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer
+  LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer -Wl,--wrap=gxCmdQueueRun -Wl,--wrap=C3Di_UpdateContext -Wl,--wrap=threadCreate
   # One link-time partition, so that the renderer's per-draw functions (plat.h PLAT_HOT) come out in one .text.hot
   # section: with several, each partition's .text.hot lands among the others' cold code (roadmap O9).
   LDFLAGS   += $(if $(filter 1,$(LTO)),-flto-partition=one)
@@ -207,6 +208,13 @@ endef
 $(foreach f,$(GAME_SRC) $(LIBULTRA_SRC),$(eval $(call compile_rule,$(f),$$(GAME_CFLAGS))))
 $(foreach f,$(PORT_GAME_SRC),$(eval $(call compile_rule,$(f),$$(PORT_CFLAGS))))
 $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
+# v30 (Old 3DS bench builds): GAME_OPT=2 or s compiles the game's own code (src/*.c) at that level instead, to cut the
+# instruction cache misses of its large functions (update_car, obj_update, update_player_racer: 14-18 KB each at -O3
+# with link-time inlining, against a 16 KB instruction cache and no L2 on an Old 3DS). The renderer keeps HOT_OPT.
+# (Keeping the maths and collision files at -O3 cost more instruction cache misses than it saved: simulated cache.)
+ifneq ($(strip $(GAME_OPT)),)
+$(foreach f,$(GAME_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(GAME_OPT)
+endif
 ifneq ($(strip $(HOT_FLAGS)),)
 $(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := $(HOT_FLAGS)
 endif

@@ -20,6 +20,9 @@
 #define gfxb_mesh_free refb_mesh_free
 #define gfxb_draw_meshes refb_draw_meshes
 #define gfxb_soft_save_png refb_save_png
+#define gfxb_gpu_kinds_frame refb_gpu_kinds_frame
+#define gfxb_gpu_kind refb_gpu_kind
+#define gfxb_gpu_kind_call refb_gpu_kind_call
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>
 // None of the host renderer's own debug settings apply here.

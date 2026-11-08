@@ -11,6 +11,14 @@
 #include "tracks.h"
 #include "types.h"
 #include <ultra64.h>
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#ifdef TARGET_PORT
+#include <stddef.h>
+#include <stdlib.h>
+#endif
+#include "port_drawtag.h"
+#endif
 
 /************ .data ************/
 
@@ -401,6 +409,63 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
 /**
  * Set wave visiblity variables to zero.
  */
+#ifdef TARGET_PORT
+/* v27: the first level segment whose wave tile is each tile (gWaveModel[i].unkC), so the visibility pass finds a
+ * tile's segment without scanning every segment for every visible tile. Built on first use after the waves are set up
+ * (the tiles are fixed from then on). Same first match as the scans. DKR_WAVES_OLD=1 scans as before. */
+static s16 *sWaveTileFirst;
+static s32 sWaveTileMapSize;
+static s32 sWaveTileMapValid;
+
+static s32 wave_tile_segment(s32 tile) {
+    s32 i, count = gWaveTileCountX * gWaveTileCountZ;
+    if (plat_switch("DKR_WAVES_OLD", 0)) {
+        for (i = 0; i < gNumberOfLevelSegments; i++) {
+            if (gWaveModel[i].unkC == tile) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    if (!sWaveTileMapValid) {
+        if (count > sWaveTileMapSize) {
+            free(sWaveTileFirst);
+            sWaveTileFirst = malloc(count * sizeof(s16));
+            sWaveTileMapSize = sWaveTileFirst != NULL ? count : 0;
+        }
+        if (sWaveTileFirst == NULL || gNumberOfLevelSegments > 0x7FFF) {
+            sWaveTileMapSize = 0;
+            for (i = 0; i < gNumberOfLevelSegments; i++) {
+                if (gWaveModel[i].unkC == tile) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        for (i = 0; i < count; i++) {
+            sWaveTileFirst[i] = -1;
+        }
+        for (i = gNumberOfLevelSegments - 1; i >= 0; i--) {
+            s32 t = gWaveModel[i].unkC;
+            if (t >= 0 && t < count) {
+                sWaveTileFirst[t] = (s16) i;
+            }
+        }
+        sWaveTileMapValid = TRUE;
+    }
+    if (tile < 0 || tile >= count) {
+        // Not a tile the map holds: scan, as the original does.
+        for (i = 0; i < gNumberOfLevelSegments; i++) {
+            if (gWaveModel[i].unkC == tile) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    return sWaveTileFirst[tile];
+}
+#endif
+
 void waves_visibility_reset(void) {
     s32 i;
 
@@ -475,7 +540,12 @@ void waves_visibility(s32 xPosition, s32 yPosition, s32 zPosition, s32 currentVi
                         // clang-format on
                         D_800E30D4[var_t2] |= D_800E30E0[blockDist * gWaveController.waveViewDist + var_s5]
                                               << (var_t5 + var_s4);
+#ifdef TARGET_PORT
+                        i = wave_tile_segment(var_t2);
+                        for (; i >= 0 && i < gNumberOfLevelSegments; i++) {
+#else
                         for (i = 0; i < gNumberOfLevelSegments; i++) {
+#endif
                             if (var_t2 == gWaveModel[i].unkC) {
                                 D_8012A5E8[var_a3].blockID = i;
                                 D_8012A5E8[var_a3].unk2 = (var_t5 + var_s4) >> 3;
@@ -532,7 +602,12 @@ void waves_visibility(s32 xPosition, s32 yPosition, s32 zPosition, s32 currentVi
                     ) {
                         // clang-format on
                         D_800E30D4[var_t2] = D_800E30E0[blockDist * gWaveController.waveViewDist + var_s5];
+#ifdef TARGET_PORT
+                        i = wave_tile_segment(var_t2);
+                        for (; i >= 0 && i < gNumberOfLevelSegments; i++) {
+#else
                         for (i = 0; i < gNumberOfLevelSegments; i++) {
+#endif
                             if (var_t2 == gWaveModel[i].unkC) {
                                 D_8012A5E8[var_a3].blockID = i;
                                 D_8012A5E8[var_a3].unk2 = 0;
@@ -558,9 +633,23 @@ void waves_visibility(s32 xPosition, s32 yPosition, s32 zPosition, s32 currentVi
 s32 waves_block_hq(LevelModelSegment *block) {
     s32 indexNum = 0;
     s32 result = FALSE;
+#ifdef TARGET_PORT
+    // v27: the wave models' blocks are the level's segments in order, so the block's place gives its index straight
+    // away when it is one of them (checked); anything else is looked for as before.
+    if (gNumberOfLevelSegments > 0 && !plat_switch("DKR_WAVES_OLD", 0)) {
+        s32 at = (s32) (block - gWaveModel[0].block);
+        if (at >= 0 && at < gNumberOfLevelSegments && gWaveModel[at].block == block) {
+            indexNum = at; // Each model's block is its own segment (set up in order), so no earlier match exists.
+            goto found;
+        }
+    }
+#endif
     while (indexNum < gNumberOfLevelSegments && block != gWaveModel[indexNum].block) {
         indexNum++;
     };
+#ifdef TARGET_PORT
+found:
+#endif
     if (D_800E30D4[gWaveModel[indexNum].unkC]) {
         result = TRUE;
         gWaveBlockIDs[gVisibleWaveTiles++] = indexNum;
@@ -609,6 +698,71 @@ void func_800B92F4(s32 blockID, s32 viewportID) {
         vertices = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][sp90 * sp98];
         sp98 = D_800E30E4[sp98];
         vertexIdx = 0;
+#ifdef TARGET_PORT
+        // v27: the same loop with the controller's settings and the tables held in locals. The original reads them
+        // from memory for every vertex, as its vertex writes might change them as far as the compiler knows (they
+        // can't). Same operations in the same order, so the same results. DKR_WAVES_OLD=1 is the old loop.
+        if (!plat_switch("DKR_WAVES_OLD", 0)) {
+            const s32 subdivisions = gWaveController.subdivisions, tileCount = gWaveController.tileCount;
+            const s32 doubleDensity = gWaveController.doubleDensity, genCount = gWaveGenCount;
+            const f32 magnitude = gWaveController.magnitude, unk44 = gWaveController.unk44;
+            const f32 unk48 = gWaveController.unk48;
+            const f32 *heightTable = gWaveHeightTable, *scaleRow = D_800E304C[sp98];
+            const Vec2s *heightIndices = gWaveHeightIndices;
+            const u8 *colourTable = D_800E3178;
+            const s32 shade = sp6C->unk14[viewportID >> 1].unk0[D_8012A5E8[k].unk2];
+            s32 unk8 = D_8012A5E8[k].unk8;
+            for (i = 0; i <= subdivisions; i++) {
+                var_s1 = D_8012A5E8[k].unk4;
+                var_s2 = (sp84 * tileCount) + var_s1;
+                for (j = 0; j <= subdivisions; j++) {
+                    vertexY = (heightTable[heightIndices[var_s2].s[0]] + heightTable[heightIndices[var_s2].s[1]]) *
+                              magnitude;
+                    if (genCount > 0) {
+                        D_8012A5E8[k].unk8 = unk8;
+                        vertexY += waves_get_y(blockID, j + sp8C, i + sp88);
+                    }
+                    vertexY *= scaleRow[vertexIdx];
+                    var_v0 = colourTable[unk8];
+                    var_v0 <<= 1;
+                    unk8++;
+                    if (var_v0 < 255) {
+                        vertexY *= unk44 + ((f32) var_v0 * temp_f22);
+                    }
+                    var_v0 += (s32) (vertexY * unk48);
+                    if (var_v0 > 255) {
+                        var_v0 = 255;
+                    } else if (var_v0 < 0) {
+                        var_v0 = 0;
+                    }
+                    var_v0 += ((255 - var_v0) * shade) >> 7;
+                    vertices[vertexIdx].y = vertexY;
+                    vertexCol = var_v0 < 192 ? 255 : ((255 - var_v0) * 4) & 255;
+                    vertices[vertexIdx].r = vertexCol;
+                    vertices[vertexIdx].g = vertexCol;
+                    vertices[vertexIdx].b = vertexCol;
+                    vertexCol = var_v0 < 64 ? (var_v0 * 4) & 255 : 255;
+                    vertices[vertexIdx].a = vertexCol;
+                    vertexIdx++;
+                    var_s1++;
+                    var_s2++;
+                    if (var_s1 >= tileCount) {
+                        var_s1 -= tileCount;
+                        var_s2 -= tileCount;
+                    }
+                }
+                sp84++;
+                if (sp84 >= tileCount) {
+                    sp84 -= tileCount;
+                }
+                if (doubleDensity) {
+                    unk8 += subdivisions;
+                }
+            }
+            D_8012A5E8[k].unk8 = unk8;
+            continue;
+        }
+#endif
         for (i = 0; i <= gWaveController.subdivisions; i++) {
             var_s1 = D_8012A5E8[k].unk4;
             var_s2 = (sp84 * gWaveController.tileCount) + var_s1;
@@ -977,6 +1131,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
     s32 i;
     TextureHeader *tex1;
     TextureHeader *tex2;
+#ifdef PICA_ALL
+    s32 waveMat = -1;
+#endif
 
     if (viewportID != VIEWPORT_LAYOUT_2_PLAYERS || gWavePlayerCount != 2) {
         viewportID = 0;
@@ -1025,6 +1182,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                 gDPSetEnvColor(gWaveDL++, 255, 255, 255, 0);
             }
         }
+#ifdef PICA_ALL
+        waveMat = port_native_material_here(&gWaveDL, gWaveTexture, gWaveController.xlu);
+#endif
         if (gWaveController.doubleDensity) {
             transform.scale = 0.5f;
         } else {
@@ -1058,15 +1218,29 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                                 tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS]
                                                      [j * (gWaveController.subdivisions << 1)];
 
-                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                                if (waveMat >= 0) {
+                                    port_native_record(&gWaveDL, waveMat, vtx, numVerts << 1, tri, numTris, 1, 1);
+                                } else
+#endif
+                                {
+                                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
+                                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                                }
 
                                 var_t0 += gWaveController.subdivisions + 1;
                             }
                         } else {
-                            gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
-                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip * 2]), 2,
-                                       TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                            if (waveMat >= 0) {
+                                port_native_record(&gWaveDL, waveMat, &D_8012A028[gWaveVertexFlip], 4, &D_800E3090[gWaveVertexFlip * 2], 2, 1, 1);
+                            } else
+#endif
+                            {
+                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
+                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip * 2]), 2,
+                                           TRIN_ENABLE_TEXTURE);
+                            }
                         }
                         mtx_pop(&gWaveDL);
                         sp104 >>= 8;
@@ -1083,14 +1257,26 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
                     tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][j * (gWaveController.subdivisions << 1)];
 
-                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+#ifdef PICA_ALL
+                    if (waveMat >= 0) {
+                        port_native_record(&gWaveDL, waveMat, vtx, numVerts << 1, tri, numTris, 1, 1);
+                    } else
+#endif
+                    {
+                        gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
+                        gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                    }
 
                     var_t0 += gWaveController.subdivisions + 1;
                 }
                 mtx_pop(&gWaveDL);
             }
         }
+#ifdef PICA_ALL
+        if (waveMat >= 0) {
+            port_native_end();
+        }
+#endif
         if (gWaveController.xlu) {
             gSPSetGeometryMode(gWaveDL++, G_FOG);
             gDPSetPrimColor(gWaveDL++, 0, 0, 255, 255, 255, 255);
@@ -1452,6 +1638,9 @@ void func_800BBF78(LevelModel *model) {
         D_8012A0E8[i] = 0;
     }
 
+#ifdef TARGET_PORT
+    sWaveTileMapValid = FALSE;
+#endif
     gNumberOfLevelSegments = model->numberOfSegments;
     for (i = 0; i < gNumberOfLevelSegments; i++) {
         temp_t1 = levelSegmentBoundingBoxes[i].x1 - gWaveBlockPosX + 8;

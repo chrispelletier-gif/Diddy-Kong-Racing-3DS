@@ -56,6 +56,11 @@ static int sRcpCore;
 static int sAudioCore;
 static int sSyscoreShare; // The system core's share lent to the renderer (percent), when it runs there.
 static LightLock sConsoleLock;
+/* v30 (DKR_BS_COPY_LOCK, default 1; 0 = old): the screen thread copies its picture to the framebuffer under a lock
+ * of its own, so the game thread's HUD and menu updates (which take sConsoleLock) never wait for a copy and cache
+ * flush done by that low-priority thread, which the walk can hold off for a whole frame on an Old 3DS. */
+static LightLock sCopyLock;
+static int sCopyLockOn = -1;
 static int sNew3DS;
 
 static void watchdog_start(void);
@@ -327,6 +332,7 @@ void plat_3ds_exit(void) {
     port_audio_output_exit();
     // Nothing may use the bottom screen console once the screens are gone: hold its lock for good.
     LightLock_Lock(&sConsoleLock);
+    LightLock_Lock(&sCopyLock); // And no copy may be under way (DKR_BS_COPY_LOCK)
     if (sRendererParked == PLAT_3DS_PARKED_GPU_IDLE) {
         gfxb_3ds_shutdown();
     }
@@ -492,6 +498,61 @@ int plat_split_syscore_share(int on) {
     return 1;
 }
 
+/*
+ * v31 (DKR_PLAYERS_SYSCORE): a call made on the system core, for code whose own thread would otherwise run it on the
+ * game's core (the N64 sound players' frame: audiomgr.c). The caller waits for it (so it is still one thread's work,
+ * run elsewhere), with osThread the N64 thread it runs as. 0 when the system core can't take it: the caller runs it.
+ * Only on an Old 3DS while the two-core renderer has the system core's share raised.
+ */
+static LightEvent sSysCallGo, sSysCallDone;
+static void (*volatile sSysCallFn)(void);
+static void *volatile sSysCallOsThread;
+static int sSysCallState; // 0 not tried, 1 running, -1 unavailable
+
+static void syscall_thread(void *arg) {
+    (void) arg;
+    for (;;) {
+        LightEvent_Wait(&sSysCallGo);
+        plat_set_current_os_thread(sSysCallOsThread);
+        sSysCallFn();
+        LightEvent_Signal(&sSysCallDone);
+    }
+}
+
+int plat_core_id(void) {
+    return svcGetProcessorID();
+}
+
+int plat_syscore_call(void (*fn)(void), void *osThread) {
+    if (sSysCallState == 0) {
+        // v32: not decided before the system core lends its time (the two-core renderer raises the share as a race's
+        // frames start): v31 asked at start-up, found no share and gave up for good, so the sound players never moved
+        // (bench #456's row tested nothing).
+        if (!sNew3DS && sSyscoreShare <= 0) {
+            return 0;
+        }
+        sSysCallState = -1;
+        if (!sNew3DS && sSyscoreShare > 0) {
+            LightEvent_Init(&sSysCallGo, RESET_ONESHOT);
+            LightEvent_Init(&sSysCallDone, RESET_ONESHOT);
+            // Above the renderer's backend there (PRIO_SYSCORE_AUDIO + 1): a short call it waits behind, as the sound
+            // players are above the game on its own core.
+            if (threadCreate(syscall_thread, NULL, 64 * 1024, PRIO_SYSCORE_AUDIO, 1, true) != NULL) {
+                sSysCallState = 1;
+            }
+        }
+        plat_log("system core calls (DKR_PLAYERS_SYSCORE): %s", sSysCallState > 0 ? "on core 1" : "unavailable");
+    }
+    if (sSysCallState < 0 || sSyscoreShare <= 0) {
+        return 0;
+    }
+    sSysCallFn = fn;
+    sSysCallOsThread = osThread;
+    LightEvent_Signal(&sSysCallGo);
+    LightEvent_Wait(&sSysCallDone);
+    return 1;
+}
+
 void plat_split_backend_priority(void) {
     PlatThread *thread = sSplitBackend;
     int prio;
@@ -528,6 +589,34 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
+#if PICA_ALL
+    // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
+    // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
+    // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
+    // divide. DKR_TIME_DIVIDE=1 (env.txt) is the old way.
+    static int sDivide = -1;
+    static __thread unsigned long long sSecondTicks, sSeconds;
+    static __thread int sHaveSecond;
+    unsigned long long rest;
+    if (sDivide < 0) {
+        const char *env = plat_getenv("DKR_TIME_DIVIDE");
+        sDivide = env != NULL && atoi(env) != 0;
+    }
+    if (!sDivide) {
+        if (!sHaveSecond || ticks < sSecondTicks || ticks - sSecondTicks >= 4ULL * SYSCLOCK_ARM11) {
+            sSeconds = ticks / SYSCLOCK_ARM11;
+            sSecondTicks = sSeconds * SYSCLOCK_ARM11;
+            sHaveSecond = 1;
+        }
+        while (ticks - sSecondTicks >= SYSCLOCK_ARM11) {
+            sSecondTicks += SYSCLOCK_ARM11;
+            sSeconds++;
+        }
+        rest = ticks - sSecondTicks;
+        // 1e9 / SYSCLOCK_ARM11 in 32.32 fixed point (3.7298 ns a tick).
+        return sSeconds * 1000000000ULL + ((rest * 16019311343ULL) >> 32);
+    }
+#endif
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 
@@ -552,27 +641,72 @@ void plat_kunlock(void) {
 }
 
 /*
+ * v37 (DKR_KCOND, roadmap P50): the kernel lock's waits without libctru's condition variable, which can lose a
+ * broadcast. Its waiter counts itself in the variable and unlocks the lock before it reaches the kernel's wait; a
+ * broadcast in that gap zeroes the count and wakes no one, and when another waiter has counted itself in by the time
+ * the first one reaches the kernel, the count is below zero again, so the first sleeps on, until its bound (4 ms).
+ * Lean quick test #467 (Old 3DS): 45 such wakes in the last race's 35 s, every one 4.2-5.7 ms after the retrace that
+ * should have woken the game (the walk idle meanwhile): the 38-39 ms worst frame of every track.
+ * Here a waiter counts itself under the lock, reads the variable's broadcast count and sleeps only while the count is
+ * unchanged, which the kernel checks as it puts it to sleep (ARBITRATION_WAIT_IF_LESS_THAN count + 1), so a broadcast
+ * at any moment after the read wakes it. Every broadcast does both kinds, so the switch can change while threads wait
+ * (re-read with the GSP thread's priority, every 64 retraces). 0 = libctru's (old).
+ */
+typedef struct KCond {
+    volatile s32 count;   // Broadcasts so far (wraps; a waiter at the wrap just wakes early)
+    volatile s32 waiters; // Under the kernel lock
+} KCond;
+static KCond sKernelK, sKeyedK[PLAT_KEYED_CONDS];
+static volatile int sKcondNew = 1;
+
+/* Returns whether it timed out (with no broadcast since it started). */
+static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
+    s32 count;
+    Result rc;
+    if (!sKcondNew) {
+        return CondVar_WaitTimeout(old, &sKernelLock, ns) != 0;
+    }
+    k->waiters++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    count = __atomic_load_n(&k->count, __ATOMIC_SEQ_CST);
+    LightLock_Unlock(&sKernelLock);
+    rc = syncArbitrateAddressWithTimeout((s32 *) &k->count, ARBITRATION_WAIT_IF_LESS_THAN_TIMEOUT,
+                                         (s32) ((u32) count + 1), ns);
+    LightLock_Lock(&sKernelLock);
+    k->waiters--;
+    return R_DESCRIPTION(rc) == RD_TIMEOUT && __atomic_load_n(&k->count, __ATOMIC_SEQ_CST) == count;
+}
+
+static void kcond_broadcast(KCond *k, CondVar *old) {
+    CondVar_Broadcast(old); // (No system call when no one waits on it)
+    __atomic_add_fetch(&k->count, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&k->waiters, __ATOMIC_SEQ_CST) > 0) {
+        syncArbitrateAddress((s32 *) &k->count, ARBITRATION_SIGNAL, -1);
+    }
+}
+
+/*
  * Bounded, as every caller loops on its condition: a broadcast the condition variable loses then costs a few
  * milliseconds instead of a frozen game (see QUEUE_WAIT_NS in os_core.c).
  */
 void plat_kwait(void) {
-    CondVar_WaitTimeout(&sKernelCond, &sKernelLock, 4000000LL);
+    kcond_wait(&sKernelK, &sKernelCond, 4000000LL);
 }
 
 int plat_kwait_timeout(unsigned long long ns) {
-    return CondVar_WaitTimeout(&sKernelCond, &sKernelLock, (s64) ns) != 0;
+    return kcond_wait(&sKernelK, &sKernelCond, (s64) ns);
 }
 
 void plat_kbroadcast(void) {
-    CondVar_Broadcast(&sKernelCond);
+    kcond_broadcast(&sKernelK, &sKernelCond);
 }
 
 int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
-    return CondVar_WaitTimeout(&sKeyedConds[PLAT_KEY_SLOT(key)], &sKernelLock, (s64) ns) != 0;
+    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)], (s64) ns);
 }
 
 void plat_kbroadcast_on(const void *key) {
-    CondVar_Broadcast(&sKeyedConds[PLAT_KEY_SLOT(key)]);
+    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {
@@ -601,8 +735,82 @@ int plat_sem_try_wait(PlatSem *sem) {
     return LightSemaphore_TryAcquire(&sem->sem, 1) == 0;
 }
 
+/*
+ * libctru's GSP event thread (gspInit: priority 0x1A, the process's own core, a 4 KB stack) is what wakes a thread
+ * waiting for a retrace (gspWaitForVBlank), runs citro3d's next GPU command list when one ends and its swap at a frame's
+ * end. 0x1A is also the walk's priority (PRIO_RCP), and on an Old 3DS the walk shares that core: 3DS threads of equal
+ * priority never preempt each other, so a retrace that came while the walk ran reached the VI thread only when the
+ * walk next waited. When that was the retrace that ends a frame, the game's frame ran late (lean quick test #462:
+ * five 38.7-39 ms frames each followed by a 28 ms one in an EverFrost Peak race, the worst frame of nearly every race
+ * 39 ms). DKR_GSP_PRIO (v35, roadmap P50): 1 (default on an Old 3DS) raises that thread to 0x18, above the VI thread
+ * and the walk; 0x18-0x3F sets that priority; 0 leaves libctru's 0x1A (old). Read again every 64 retraces (the bench
+ * changes it), and found by wrapping threadCreate (-Wl,--wrap=threadCreate): gspInit is its only caller with that
+ * priority, core and stack.
+ */
+#define GSP_EVENT_PRIO 0x1A
+static Thread sGspEventThread;
+static int sGspPrio = -1;
+
+Thread __real_threadCreate(ThreadFunc entry, void *arg, size_t stack_size, int prio, int core_id, bool detached);
+__attribute__((used)) Thread __wrap_threadCreate(ThreadFunc entry, void *arg, size_t stack_size, int prio, int core_id,
+                                                 bool detached) {
+    Thread thread = __real_threadCreate(entry, arg, stack_size, prio, core_id, detached);
+    if (sGspEventThread == NULL && prio == GSP_EVENT_PRIO && core_id == -2 && stack_size == 0x1000) {
+        sGspEventThread = thread;
+    }
+    return thread;
+}
+
+static void gsp_priority_update(void) {
+    int want;
+    if (sGspEventThread == NULL) {
+        return;
+    }
+    want = plat_switch("DKR_GSP_PRIO", plat_old_3ds());
+    want = want == 0 ? GSP_EVENT_PRIO : want == 1 ? 0x18 : want < 0x18 ? 0x18 : want > 0x3F ? 0x3F : want;
+    if (want != sGspPrio) {
+        Result res = svcSetThreadPriority(threadGetHandle(sGspEventThread), want);
+        sGspPrio = want;
+        plat_log("GPU events thread: priority 0x%X%s", want, R_FAILED(res) ? " (refused)" : "");
+    }
+}
+
+/*
+ * Retraces that reached the VI thread late (v35): more than 3 ms after the time the ones before put them at. Counted
+ * (late_retraces in the test run's results) and each put in the flight recorder, to see whether anything still
+ * holds them up. The time is set again by every retrace that came within 1 ms (the screen's rate is not exactly
+ * VBLANK_US), and after a pause (the HOME menu, a load) of more than 8 retraces.
+ */
+#define VBLANK_US 16714u
+static u64 sVblankRefTick;
+
 void plat_wait_vblank(void) {
+    static unsigned int calls;
+    u64 now;
     gspWaitForVBlank();
+    now = svcGetSystemTick();
+    if (sVblankRefTick != 0) {
+        u32 sinceUs = (u32) ((now - sVblankRefTick) / (SYSCLOCK_ARM11 / 1000000));
+        u32 n = (sinceUs + VBLANK_US / 2) / VBLANK_US;
+        s32 lateUs = (s32) sinceUs - (s32) ((n != 0 ? n : 1) * VBLANK_US);
+        if (n > 8 || lateUs < 1000) {
+            sVblankRefTick = now;
+        } else if (lateUs > 3000) {
+            gPlatCounters[PLAT_COUNTER_LATE_RETRACES]++;
+            rec_event("retrace %.1f ms late (GPU events thread priority 0x%X)", lateUs / 1000.0,
+                      sGspPrio >= 0 ? sGspPrio : GSP_EVENT_PRIO);
+        }
+    } else {
+        sVblankRefTick = now;
+    }
+    if ((calls++ & 63) == 0) {
+        int kcond = plat_switch("DKR_KCOND", 1) != 0;
+        if (kcond != sKcondNew) {
+            sKcondNew = kcond;
+            plat_log("kernel lock waits: %s", kcond ? "can't lose a wake-up" : "libctru's condition variable");
+        }
+        gsp_priority_update();
+    }
 }
 
 const char *const *plat_rom_search_dirs(void) {
@@ -1017,7 +1225,9 @@ void plat_log(const char *fmt, ...) {
  * so the game's threads never wait for the drawing. Until that thread starts (plat_rom_loaded), the caller draws.
  */
 static u16 sImage[BS_WIDTH * BS_HEIGHT];
-static LightEvent sScreenEvent;
+static LightEvent sScreenEvent, sScreenSysEvent;
+static LightLock sDrawLock;
+static volatile int sScreenSysStarted;
 static volatile int sScreenThreadStarted;
 static volatile unsigned long long sScreenBusyNs; // Time its thread has spent drawing (the profiler's P36 line)
 static volatile unsigned long sScreenDraws;       // Areas it has drawn
@@ -1054,8 +1264,23 @@ static void screen_copy(int first, int end) {
             column[-y] = sImage[y * BS_WIDTH + x];
         }
     }
-    // Nothing else flushes the bottom screen's framebuffer from the CPU cache.
-    GSPGPU_FlushDataCache(fb, width * height * 2);
+    // Nothing else flushes the bottom screen's framebuffer from the CPU cache. v31 (DKR_BS_SVC_FLUSH, Old 3DS): only
+    // the columns' part these rows wrote, by a system call on this core instead of a request to the GPU service
+    // (which runs on the system core, where the renderer's backend is short of time): the rows of one area are a
+    // run inside every column, so the flush covers the first to the last column's run.
+    {
+        static int sSvc = -1, sEpoch = -1;
+        if (sEpoch != gPlatSwitchEpoch) {
+            sEpoch = gPlatSwitchEpoch;
+            sSvc = plat_switch("DKR_BS_SVC_FLUSH", !sNew3DS) != 0;
+        }
+        if (sSvc && end > first) {
+            u32 from = (u32) (fb + 239 - (end - 1)), to = (u32) (fb + (BS_WIDTH - 1) * 240 + 239 - first + 1);
+            svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, to - from);
+        } else {
+            GSPGPU_FlushDataCache(fb, width * height * 2);
+        }
+    }
 }
 
 /* Draws what changed. Only one thread at a time: the screen's own, or before it starts the caller (lock held). */
@@ -1074,18 +1299,27 @@ static void screen_draw(unsigned changes) {
 /* After a change (the console lock is held). */
 static void screen_changed(void) {
     if (sScreenThreadStarted) {
-        LightEvent_Signal(&sScreenEvent);
+        // DKR_BS_SYSCORE (v30, Old 3DS, default 1; 0 = old): the screen is drawn by its thread on the system core,
+        // in the time the renderer's backend leaves there, so its drawing no longer evicts the game core's caches.
+        static int sEpoch = -1, sSys;
+        if (sEpoch != gPlatSwitchEpoch) {
+            sEpoch = gPlatSwitchEpoch;
+            sSys = sScreenSysStarted && plat_switch("DKR_BS_SYSCORE", 1) != 0;
+            sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
+        }
+        LightEvent_Signal(sSys ? &sScreenSysEvent : &sScreenEvent);
     } else {
         screen_draw(bs_take_changes());
     }
 }
 
 static void screen_thread(void *arg) {
-    (void) arg;
-    bugreport_watch_thread("screen");
+    LightEvent *event = arg != NULL ? &sScreenSysEvent : &sScreenEvent;
+    bugreport_watch_thread(arg != NULL ? "screen (system core)" : "screen");
     for (;;) {
         unsigned changes;
-        LightEvent_Wait(&sScreenEvent);
+        LightEvent_Wait(event);
+        LightLock_Lock(&sDrawLock); // One of the two threads at a time (DKR_BS_SYSCORE changes between races)
         LightLock_Lock(&sConsoleLock);
         changes = bs_take_changes();
         LightLock_Unlock(&sConsoleLock);
@@ -1098,9 +1332,15 @@ static void screen_thread(void *arg) {
                     int first, end;
                     bs_draw(sImage, area);
                     bs_area_rows(area, &first, &end);
-                    LightLock_Lock(&sConsoleLock);
-                    screen_copy(first, end);
-                    LightLock_Unlock(&sConsoleLock);
+                    if (sCopyLockOn) {
+                        LightLock_Lock(&sCopyLock);
+                        screen_copy(first, end);
+                        LightLock_Unlock(&sCopyLock);
+                    } else {
+                        LightLock_Lock(&sConsoleLock);
+                        screen_copy(first, end);
+                        LightLock_Unlock(&sConsoleLock);
+                    }
                     sScreenDraws++;
                 }
             }
@@ -1108,6 +1348,7 @@ static void screen_thread(void *arg) {
             // is an upper bound.
             sScreenBusyNs += plat_time_ns() - start;
         }
+        LightLock_Unlock(&sDrawLock);
     }
 }
 
@@ -1119,11 +1360,17 @@ static void screen_thread(void *arg) {
 static void screen_thread_start(int core) {
     LightLock_Lock(&sConsoleLock);
     LightEvent_Init(&sScreenEvent, RESET_ONESHOT);
+    LightEvent_Init(&sScreenSysEvent, RESET_ONESHOT);
+    LightLock_Init(&sDrawLock);
     if (threadCreate(screen_thread, NULL, 16 * 1024, 0x3E, core, true) != NULL) {
         sScreenThreadStarted = 1;
         LightEvent_Signal(&sScreenEvent);
     } else {
         plat_log("bottom screen: could not create its thread");
+    }
+    // Old 3DS: a second thread on the system core (DKR_BS_SYSCORE), lowest but one priority there too.
+    if (!sNew3DS && core == 0 && threadCreate(screen_thread, (void *) 1, 16 * 1024, 0x3E, 1, true) != NULL) {
+        sScreenSysStarted = 1;
     }
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1131,6 +1378,7 @@ static void screen_thread_start(int core) {
 /* First thing in main, before plat_init. */
 void plat_3ds_console_init(void) {
     LightLock_Init(&sConsoleLock);
+    LightLock_Init(&sCopyLock);
     gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
     gfxSwapBuffersGpu();
@@ -1151,6 +1399,7 @@ void plat_rom_loaded(void) {
     bs_set_style(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
+    sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
     screen_thread_start(sRcpCore == 1 ? 0 : sRcpCore);
     sLogAsync = !plat_switch("DKR_LOG_SYNC", 0);
 }
@@ -1251,12 +1500,22 @@ void plat_set_race_hud(const RaceHud *hud) {
             return;
         }
     }
+    // DKR_BS_COPY_LOCK: a race HUD update that finds the screen thread holding the lock (it can be held off by the
+    // walk with it) tries again next frame instead of waiting.
+    // The choice is made once: screen_changed() on another thread (the watchdog's status lines) can rewrite
+    // sCopyLockOn between two looks, which would leave the lock untaken here and then released.
+    if (sCopyLockOn > 0 && racing && sShown && hud != NULL) {
+        if (LightLock_TryLock(&sConsoleLock) != 0) {
+            return;
+        }
+    } else {
+        LightLock_Lock(&sConsoleLock);
+    }
     sShown = hud != NULL;
     if (hud != NULL) {
         sLast = *hud;
         sLastNs = now;
     }
-    LightLock_Lock(&sConsoleLock);
     bs_set_race_hud(hud);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
@@ -1513,12 +1772,28 @@ static void watchdog(void *arg) {
                  (int) (now[PLAT_COUNTER_MAIN] - last[PLAT_COUNTER_MAIN]));
         // Sound gaps and drops, textures without memory, free GPU (linear) and CPU (heap) memory in tenths of a MB.
         {
-            struct mallinfo info = mallinfo();
-            unsigned long gpuFree = linearSpaceFree() / (1024 * 1024 / 10);
-            unsigned long heapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+            // v31 (DKR_WATCHDOG_LIGHT, Old 3DS): the free memory is counted every 5th second (when it is logged), not
+            // every second. Counting walks the heap's free lists with its lock held at the highest priority on the
+            // game's core, so the game (and any malloc it makes) waits for it; how long it takes is logged when over
+            // 0.5 ms.
+            static unsigned long sGpuFree, sHeapFree;
+            static int sLight = -1;
+            if (sLight < 0 || seconds % 5 == 0) {
+                sLight = plat_switch("DKR_WATCHDOG_LIGHT", !sNew3DS) != 0;
+            }
+            if (!sLight || seconds % 5 == 0 || seconds <= 1) {
+                unsigned long long start = plat_time_ns(), spent;
+                struct mallinfo info = mallinfo();
+                sGpuFree = linearSpaceFree() / (1024 * 1024 / 10);
+                sHeapFree = (info.fordblks + (__ctru_heap_size - info.arena)) / (1024 * 1024 / 10);
+                spent = plat_time_ns() - start;
+                if (spent > 500000) {
+                    rec_event("watchdog: counting free memory took %.2f ms", spent / 1e6);
+                }
+            }
             snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
-                     now[PLAT_COUNTER_TEXTURE_FAILED], gpuFree / 10, gpuFree % 10, heapFree / 10, heapFree % 10);
+                     now[PLAT_COUNTER_TEXTURE_FAILED], sGpuFree / 10, sGpuFree % 10, sHeapFree / 10, sHeapFree % 10);
         }
         {
             // A full sound event queue loses events (and, before the fix in csplayer.c, froze the game).
@@ -1598,4 +1873,12 @@ void plat_fatal(const char *fmt, ...) {
     }
     gfxExit();
     exit(1);
+}
+
+/* The 60 fps step check runs only in the host build (port/host/host_stepdiff.c). */
+void plat_step_diff(int updateRate, void (*step)(long), void (*reinput)(long), int context) {
+    (void) updateRate;
+    (void) step;
+    (void) reinput;
+    (void) context;
 }

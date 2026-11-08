@@ -3,6 +3,14 @@
 #include "menu.h"
 #include "save_layout.h"
 #include "thread3_main.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#ifdef PICA_ALL
+int port_native_input_on(void);
+void port_input_read_now(OSContPad *data);
+void port_input_frame_done(void);
+#endif
+#endif
 
 s32 sNoControllerPluggedIn =
     FALSE; // Looks to be a boolean for whether a controller is plugged in. FALSE if plugged in, and TRUE if not.
@@ -65,11 +73,21 @@ s32 input_update(s32 saveDataFlags, s32 updateRate) {
     Settings *settings;
     s32 i;
 
+#ifdef PICA_ALL
+    s32 nativeInput = port_native_input_on();
+    if (nativeInput || osRecvMesg(&sSIMesgQueue, &unusedMsg, OS_MESG_NOBLOCK) == 0) {
+#else
     if (osRecvMesg(&sSIMesgQueue, &unusedMsg, OS_MESG_NOBLOCK) == 0) {
+#endif
         // Back up old controller data
         for (i = 0; i < MAXCONTROLLERS; i++) {
             gControllerPrevData[i] = gControllerCurrData[i];
         }
+#ifdef PICA_ALL
+        if (nativeInput) {
+            port_input_read_now(gControllerCurrData); // the buttons as they are now (os_si.c)
+        } else
+#endif
         osContGetReadData(gControllerCurrData);
         if (saveDataFlags != 0) {
             settings = get_settings();
@@ -106,6 +124,11 @@ s32 input_update(s32 saveDataFlags, s32 updateRate) {
             saveDataFlags = 0;
         }
         rumble_update(updateRate);
+#ifdef PICA_ALL
+        if (nativeInput) {
+            port_input_frame_done();
+        } else
+#endif
         osContStartReadData(&sSIMesgQueue);
     }
     for (i = 0; i < MAXCONTROLLERS; i++) {

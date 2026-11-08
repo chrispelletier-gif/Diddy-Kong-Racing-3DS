@@ -29,6 +29,12 @@
 extern u32 cnt_index, drvr_num, drvr_cnt, drvr_max, drvr_min, lastCnt[];
 extern u32 client_num, client_cnt, client_max, client_min;
 #endif
+#include "plat/plat.h"
+#ifdef PICA_ALL
+/* The sound code's interrupt-disabled sections take the sound lock instead (port/src/os/audio_lock.c). */
+OSIntMask port_audio_set_mask(OSIntMask mask);
+#define osSetIntMask port_audio_set_mask
+#endif
 
 #ifndef MIN
 #   define MIN(a,b) (((a)<(b))?(a):(b))

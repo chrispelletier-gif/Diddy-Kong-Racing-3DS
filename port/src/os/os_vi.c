@@ -7,6 +7,10 @@
 #include "port.h"
 #include "plat/plat.h"
 
+#ifdef PICA_ALL
+int port_frames_native(void);
+void port_frames_retrace(void);
+#endif
 static OSMesgQueue *sViEventQueue;
 static OSMesg sViEventMsg;
 static u32 sViRetraceCount = 1;
@@ -24,11 +28,28 @@ void port_vi_retrace(void) {
     sViCurrentFramebuffer = sViNextFramebuffer;
     sViRetraceCounter++;
     gPlatCounters[PLAT_COUNTER_VI]++;
+#ifdef PICA_ALL
+    if (port_frames_native()) {
+        // The native frame queue takes the retrace instead of the scheduler (frames.c).
+        plat_intlock_unlock();
+        port_frames_retrace();
+        return;
+    }
+#endif
     if (sViEventQueue != NULL && sViRetraceCounter >= sViRetraceCount) {
         sViRetraceCounter = 0;
         port_post_mesg(sViEventQueue, sViEventMsg);
     }
     plat_intlock_unlock();
+#ifdef PICA_ALL
+    {
+        extern OSMesgQueue *gPortSchedPumpQ;
+        void port_sched_pump(void);
+        if (sViEventQueue == gPortSchedPumpQ) {
+            port_sched_pump();
+        }
+    }
+#endif
 }
 
 static void vi_thread(void *arg) {

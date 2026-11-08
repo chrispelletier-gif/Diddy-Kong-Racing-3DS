@@ -19,6 +19,16 @@
 #include "plat/settings.h"
 #include "shader_shbin.h"
 
+/* v28: textures in VRAM by default on the Old 3DS in the PICA_ALL build (benches #432/#436: steadier frames on
+ * Whale Bay, even elsewhere); off elsewhere, as before. DKR_TEX_VRAM=0/1 still decides. */
+static int tex_vram_default(void) {
+#ifdef PICA_ALL
+    return plat_old_3ds();
+#else
+    return 0;
+#endif
+}
+
 /* The display transfer converts the RGBA8 target to the screen's RGB8 and, with anti-aliasing, averages each 2x2 (or
  * 2x1) block of pixels. */
 #define DISPLAY_TRANSFER_FLAGS(scaling)                                                                                \
@@ -959,6 +969,10 @@ int plat_antialias(void) {
     return sRenderScale != 2 ? PLAT_AA_OFF : sScaleX == 2 && !s800 ? PLAT_AA_4X : PLAT_AA_2X;
 }
 
+int plat_wide800_active(void) {
+    return s800;
+}
+
 /* The Settings menu's screen page (phase 6, see sWideSetting): each is saved and used from the next frame. */
 void plat_3ds_set_screen_setting(int which, int on) {
     static const char *const sKeys[3] = { "widescreen", "wide800", "stereo3d" };
@@ -1598,6 +1612,11 @@ static int triple_free(void) {
     return -1;
 }
 
+static int fb_vram_wanted(void);   // gpu_cuts.inc
+static int triple_use_set(int vram);
+static u8 *sTripleSets[2][3];
+static int sTripleSetNow = -1;
+
 static int triple_choose(void) {
     int i;
     if (sTripleFrame && !triple_poll(triple_swapped)) {
@@ -1608,24 +1627,21 @@ static int triple_choose(void) {
     if (!sTripleWanted || sStereo || sTripleFail) {
         return 0;
     }
-    if (sTriple[0] == NULL) {
-        // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here left
-        // 35 textures without a GPU copy (bug report #252).
-        if (plat_old_3ds() && linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
-            plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
-                     (unsigned long) (linearSpaceFree() / 1024));
-            sTripleFail = 1;
-            return 0;
-        }
-        for (i = 0; i < 3; i++) {
-            sTriple[i] = linearAlloc(TRIPLE_BYTES);
-            if (sTriple[i] == NULL) {
+    if (fb_vram_wanted() != sTripleSetNow || sTriple[0] == NULL) {
+        // The buffers in VRAM (DKR_FB_VRAM, gpu_cuts.inc), else in linear memory.
+        if (!(fb_vram_wanted() && triple_use_set(1))) {
+            // Textures come first: an Old 3DS has about 5 MB of linear memory for them, and taking 1.7 MB of it here
+            // left 35 textures without a GPU copy (bug report #252).
+            if (sTripleSets[0][0] == NULL && plat_old_3ds() &&
+                linearSpaceFree() < 3 * TRIPLE_BYTES + TRIPLE_TEXTURE_RESERVE) {
+                plat_log("top screen: %lu KB of linear memory free, too little for a third buffer: two kept",
+                         (unsigned long) (linearSpaceFree() / 1024));
+                sTripleFail = 1;
+                return 0;
+            }
+            if (!triple_use_set(0)) {
                 plat_log("top screen: no memory for a third buffer, two kept");
                 sTripleFail = 1;
-                for (i = 0; i < 3; i++) {
-                    linearFree(sTriple[i]);
-                    sTriple[i] = NULL;
-                }
                 return 0;
             }
         }
@@ -2056,6 +2072,9 @@ static void history_sample(void) {
 
     if (sHistoryOn < 0) {
         history_start();
+    }
+    if (sHistorySlots != 0 && plat_switch("DKR_PROF_LEAN", 0)) {
+        return; // v33: the switch bench's lean profiling (port_profile.c), as in a player's build
     }
     if (sHistorySlots == 0 || sRecentFrozen || src == NULL || rows == 0 || rows / step < HISTORY_W || in_vram(src)) {
         return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
@@ -2661,6 +2680,8 @@ static void split_command_list(void) {
     }
 }
 
+#include "gpu_cuts.inc"
+
 /******************************** Stereo ********************************/
 
 /*
@@ -2996,8 +3017,10 @@ static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
     }
     budget = 1000.0f / 60.0f * (float) plat_frame_retraces();
     sAdaptSeen++;
+    gPlatCounters[PLAT_COUNTER_AA_FRAMES]++;
     if (slot->adaptAa == 2) {
         sAdaptLow++;
+        gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES]++;
         if (sAdaptHold > 0 && --sAdaptHold == 0) {
             sAdaptProbe = ADAPT_PROBE;
         }
@@ -3050,6 +3073,8 @@ static void wait_for_gpu(int measure) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
+    timeline_take(sOnGpu); // gpu_cuts.inc
+    probe_take(sOnGpu);
     if (measure && prof_recording()) {
         prof_add(PROF_GPU_WAIT, plat_time_ns() - waitStart);
         if (sOnGpu >= 0) {
@@ -3091,7 +3116,7 @@ static void wait_for_gpu(int measure) {
  * have been drawn, then "passed". If the console hangs meanwhile, the next start finds "testing", writes "hung" and
  * leaves GPU vertex maths off (DKR_GPU_TRANSFORM is ignored) until TRANSFORM_TEST_VERSION changes with a new shader.
  */
-#define TRANSFORM_TEST_VERSION 1
+#define TRANSFORM_TEST_VERSION 2 /* 2: PICA_ALL test build, vertex lighting */
 #define TRANSFORM_TEST_FRAMES 30
 
 static shaderProgram_s sProgramT;
@@ -3102,7 +3127,7 @@ static int sTransformOn;     // This frame is drawn with transform.v.pica
 static int sTransformTestFrame = -1; // The first frame drawn with it this run, until it is known to work
 static int sEyeUniformP, sEyeUniformT; // The eye uniform of each program
 
-enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_COUNT };
+enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_LIGHT, UNIF_COUNT };
 static int sUnifLoc[UNIF_COUNT];
 static float sUnifVal[UNIF_COUNT][4];
 static int sUnifKnown; // sUnifVal holds what citro3d has
@@ -3123,7 +3148,7 @@ static void transform_marker_write(const char *what) {
 
 /* At start-up: finds the transform program's uniforms and reads what happened in earlier runs. */
 static void init_transform(void) {
-    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp" };
+    static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp", "lightv" };
     char path[256], text[32];
     int i, got;
 
@@ -3214,6 +3239,7 @@ static void PLAT_COLD set_cpu_uniforms_now(void) {
     set_unif(UNIF_TEXC, 0.0f, 0.0f, 1.0f, 1.0f);
     set_unif(UNIF_TEXB, 0.0f, 0.0f, 0.0f, 0.0f);
     set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+    set_unif(UNIF_LIGHT, 0.0f, 0.0f, 0.0f, 0.0f);
     sUnifKnown = 1;
     sUnifModel = 0;
 }
@@ -3236,6 +3262,50 @@ static inline void set_cpu_uniforms(void) {
  * matrix only keeps what is left of its offset.
  */
 static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, float su1, float sv1) {
+#ifdef PICA_ALL
+    // PICA_ALL: the camera solve in single precision (the camera is rounded to whole numbers anyway, and only the
+    // final offsets need double), with the 3x3 inverse's cofactors shared by the three unknowns.
+    float a[3][3], b[3], det, cof[3][3];
+    double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 };
+    static const int sCols[3] = { 0, 1, 3 };
+    int r, k;
+
+    for (r = 0; r < 4; r++) {
+        rows[0][r] = p->mtx[r][1];
+        rows[1][r] = -(double) p->mtx[r][0] * sScale3D;
+        rows[2][r] = 0.5 * ((double) p->mtx[r][2] - p->mtx[r][3]);
+        rows[3][r] = p->mtx[r][3];
+    }
+    for (k = 0; k < 3; k++) {
+        for (r = 0; r < 3; r++) {
+            a[k][r] = p->mtx[r][sCols[k]];
+        }
+        b[k] = -p->mtx[3][sCols[k]];
+    }
+    cof[0][0] = a[1][1] * a[2][2] - a[1][2] * a[2][1];
+    cof[0][1] = a[0][2] * a[2][1] - a[0][1] * a[2][2];
+    cof[0][2] = a[0][1] * a[1][2] - a[0][2] * a[1][1];
+    cof[1][0] = a[1][2] * a[2][0] - a[1][0] * a[2][2];
+    cof[1][1] = a[0][0] * a[2][2] - a[0][2] * a[2][0];
+    cof[1][2] = a[0][2] * a[1][0] - a[0][0] * a[1][2];
+    cof[2][0] = a[1][0] * a[2][1] - a[1][1] * a[2][0];
+    cof[2][1] = a[0][1] * a[2][0] - a[0][0] * a[2][1];
+    cof[2][2] = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+    det = a[0][0] * cof[0][0] + a[0][1] * cof[1][0] + a[0][2] * cof[2][0];
+    if (det > 1e-30f || det < -1e-30f) {
+        float inv = 1.0f / det;
+        for (k = 0; k < 3; k++) {
+            float c = (cof[k][0] * b[0] + cof[k][1] * b[1] + cof[k][2] * b[2]) * inv;
+            c = c < -60000.0f ? -60000.0f : c > 60000.0f ? 60000.0f : c;
+            cam[k] = floorf(c + 0.5f);
+        }
+    }
+    for (k = 0; k < 4; k++) {
+        double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
+        set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
+    }
+#else
+
     double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 }, a[3][3], b[3], det;
     static const int sCols[3] = { 0, 1, 3 };
     int r, k;
@@ -3272,6 +3342,7 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
         double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
         set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
     }
+#endif
     set_unif(UNIF_CAMOFF, (float) cam[0], (float) cam[1], (float) cam[2], 0.0f);
     set_unif(UNIF_TEXA, p->texScale[0] * su0, -p->texScale[1] * sv0, p->texScale[2] * su1, -p->texScale[3] * sv1);
     set_unif(UNIF_TEXC, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -3279,9 +3350,15 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
              1.0f - p->texOffset[3] * sv1);
     if (p->fog) {
         // The shader has z' = (z - w) / 2, so z / w = 2 z' / w + 1.
-        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, 0.0f);
+        set_unif(UNIF_FOGP, 2.0f * p->fogMul / 255.0f, (p->fogMul + p->fogOffset) / 255.0f, 1.0f, p->pad[0] ? 1.0f : 0.0f);
     } else {
-        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, 0.0f);
+        set_unif(UNIF_FOGP, 0.0f, 0.0f, 0.0f, p->pad[0] ? 1.0f : 0.0f);
+    }
+    // GPU vertex lighting (PICA_ALL): fogp.w = 1 lights the vertex colours (normals) with lightv.
+    if (p->pad[0]) {
+        set_unif(UNIF_LIGHT, p->light[0], p->light[1], p->light[2], p->light[3]);
+    } else {
+        set_unif(UNIF_LIGHT, 0.0f, 0.0f, 0.0f, 0.0f);
     }
     sUnifKnown = 1;
     sUnifModel = 1;
@@ -3367,6 +3444,15 @@ static void read_switches(void) {
     sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    sColourFill = -1; // gpu_cuts.inc: DKR_COLOUR_FILL, DKR_GPU_TIMELINE, DKR_GPU_KINDS and DKR_FB_VRAM read again
+    sTimeline = -1;
+    sGpuKinds = -1;
+    sFbVram = -1;
+    sTexCacheKeep = -1;
+    sSkipInvisible = -1;
+    sSkipKinds = -1;
+    sGpuDraws = -1;
+    sRectFill = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -3383,10 +3469,18 @@ static void read_switches(void) {
     // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
     sDrawParts = plat_switch("DKR_DRAW_PARTS", !plat_old_3ds()) != 0;
     // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
-    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0;
+    // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
+    sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
+                       plat_switch("DKR_NATIVE_TRACK", 0) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
+#ifdef PICA_ALL
+    // Off in the PICA_ALL build (user 2026-11-06): test run #430 (4x, 800 pixels) spent 80-100% of its frames at the
+    // low resolution after only 0-6 slow anti-aliased frames in 600, the doubled holds keeping it there.
+    sAdaptive = plat_switch("DKR_ADAPTIVE_AA", 0);
+#else
     sAdaptive = plat_switch("DKR_ADAPTIVE_AA", !plat_old_3ds());
+#endif
     recent = plat_switch("DKR_RECENT_FRAMES", 0) != 0;
     if (recent && sRecentCount == 0) {
         allocate_recent_frames();
@@ -3404,7 +3498,7 @@ static void read_switches(void) {
     plat_log("switches: cache flush by %s, depth clear by %s, textures in VRAM %s, edge trimming %s, draws timed in "
              "parts %s",
              sSvcFlush ? "system call" : "GSP service", sDepthFill ? "memory fill" : "drawing",
-             plat_switch("DKR_TEX_VRAM", 0) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
+             plat_switch("DKR_TEX_VRAM", tex_vram_default()) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
              sDrawParts ? "on" : "off");
     plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
@@ -3485,6 +3579,12 @@ void gfxb_start_frame(void) {
     sColourBoost = plat_switch("BENCH_COLOUR", sColourSetting);
     sFrameFirstDraw = 1;
     sDepthFillPending = 0;
+    sColourFillPending = 0;
+    tex_cache_dirty(); // gpu_cuts.inc: the CPU may have written textures while the GPU drew the last frame
+    sKindFrame[sRec] = 0; // gpu_cuts.inc: the slot's last frame has been taken (wait_for_gpu)
+    dp_frame_start();
+    sKindParts[sRec] = 0;
+    sProbe[sRec].after = -1;
     if (sFrameStarted < 0) {
         static const short sFullScreen[4] = { 0, 0, GFX_SCREEN_WIDTH, GFX_SCREEN_HEIGHT };
         gfxb_clear_depth(sFullScreen);
@@ -3590,6 +3690,8 @@ void gfxb_end_frame(void) {
         save_command_list();
     }
     hand_over_draw_parts();
+    gpu_kind_end_frame();
+    dp_frame_end();
     if (sOnceFrame) {
         stereo_once_lists(&sSlots[sRec]);
     }
@@ -3636,7 +3738,9 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
-        if (sDepthFillPending) {
+        if (colour_fill_queue()) {
+            // The colour clear's fill, with the depth clear's if it is one too (gpu_cuts.inc).
+        } else if (sDepthFillPending) {
             // With the GPU idle: the fill runs before the frame's command list in the GPU queue.
             C3D_RenderTargetClear(sTarget, C3D_CLEAR_DEPTH, 0, 0);
             if (sStereo) {
@@ -3653,6 +3757,7 @@ void gfxb_end_frame(void) {
             } else {
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
             }
+            probe_after_part(i);
         }
         adaptive_link(slot);
         sTarget->used = true;
@@ -3674,6 +3779,7 @@ void gfxb_end_frame(void) {
         history_sample();
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
+        timeline_arm();
         if (full_flush()) {
             heap_flush(); // What C3D_FrameEnd(0) would do, timed
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -3688,6 +3794,7 @@ void gfxb_end_frame(void) {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
         sTripleGet = 0;
+        timeline_expect(); // gpu_cuts.inc
         history_note_copy();
         record_recent_frame();
     }
@@ -3993,6 +4100,7 @@ static void upload_level0(u8 *data, const GfxTexture *tex, int format, unsigned 
 #undef UPLOAD_LEVEL0
 
 void gfxb_texture_upload(GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     C3DTexture *t = (C3DTexture *) tex->backendData;
     unsigned int w = tex->width, h = tex->height;
     unsigned int pw = next_pot(w), ph = next_pot(h);
@@ -4073,7 +4181,7 @@ void gfxb_texture_upload(GfxTexture *tex) {
     set_texture_filter(t, tex, tex->filter == GFX_FILTER_POINT);
     C3D_TexSetWrap(&t->tex, wrap_param(tex->wrapS), wrap_param(tex->wrapT));
     gpu_flush(data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
-    if (!t->toVram && plat_switch("DKR_TEX_VRAM", 0)) {
+    if (!t->toVram && plat_switch("DKR_TEX_VRAM", tex_vram_default())) {
         t->toVram = 1; // Copied over by promote_textures.
         sToVram++;
     }
@@ -4123,6 +4231,7 @@ PLAT_COLD static void verify_texture(const GfxTexture *tex) {
 }
 
 void gfxb_texture_free(GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     C3DTexture *t = (C3DTexture *) tex->backendData;
     if (t == NULL) {
         return;
@@ -4153,6 +4262,7 @@ static void defer_delete(C3DTexture *t) {
 }
 
 void gfxb_texture_share(GfxTexture *dst, const GfxTexture *src) {
+    tex_cache_dirty(); // gpu_cuts.inc
     const C3DTexture *s = (const C3DTexture *) src->backendData;
     C3DTexture *t;
     if (s == NULL || (t = malloc(sizeof(C3DTexture))) == NULL) {
@@ -4603,7 +4713,37 @@ PLAT_HOT static void apply_combiner(const GfxDrawState *state) {
         }
     } else if (!sCompiled || memcmp(&in.combiner, &sLast.combiner, sizeof(in.combiner)) != 0 ||
                in.fogStage != sLast.fogStage || in.boost != sLast.boost) {
+#ifdef PICA_ALL
+        // TEV program cache (PICA_ALL test build): the combiners compiled lately, looked up by their inputs, so
+        // alternating between a few combiners doesn't compile them again each time.
+        enum { TEV_CACHE = 16 };
+        static struct {
+            GfxCombiner combiner;
+            unsigned char fogStage, boost, used;
+            TevProgram prog;
+        } sTevCache[TEV_CACHE];
+        static unsigned int sTevNext;
+        unsigned int t;
+        for (t = 0; t < TEV_CACHE; t++) {
+            if (sTevCache[t].used && sTevCache[t].fogStage == in.fogStage && sTevCache[t].boost == in.boost &&
+                memcmp(&sTevCache[t].combiner, &in.combiner, sizeof(in.combiner)) == 0) {
+                break;
+            }
+        }
+        if (t < TEV_CACHE) {
+            sProg = sTevCache[t].prog;
+        } else {
+            compile_combiner(state, &sProg, in.boost);
+            t = sTevNext++ % TEV_CACHE;
+            sTevCache[t].combiner = in.combiner;
+            sTevCache[t].fogStage = in.fogStage;
+            sTevCache[t].boost = in.boost;
+            sTevCache[t].used = 1;
+            sTevCache[t].prog = sProg;
+        }
+#else
         compile_combiner(state, &sProg, in.boost);
+#endif
         sCompiled = 1;
     }
     sLast = in;
@@ -4660,6 +4800,7 @@ PLAT_HOT static void apply_combiner(const GfxDrawState *state) {
 /* The Show mipmap setting changed since a texture's levels were built: builds them again. The GPU may still be
  * drawing the last frame with them, which can show one frame of mixed levels. Off the per-draw path: cold. */
 static void __attribute__((noinline, cold)) retint_levels(C3DTexture *t, GfxTexture *tex) {
+    tex_cache_dirty(); // gpu_cuts.inc
     if (upload_mip_levels(t, tex, gpu_format(tex))) {
         gpu_flush(t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->levels));
     }
@@ -4740,6 +4881,18 @@ static void __attribute__((noinline)) set_scissor(const short rect[4], int flat)
         // Nothing inside: citro3d would wrap an empty rectangle's right - 1 round to 1023, turning the scissor off on
         // that side. Keeping out everything inside the whole screen draws nothing instead.
         C3D_SetScissor(GPU_SCISSOR_INVERT, 0, 0, TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX);
+        return;
+    }
+    if (__builtin_expect(sScissorClamp, 0)) {
+        // The colour fill's edges (gpu_cuts.inc colour_fill): only the lines the fill leaves out.
+        int from = top * sScaleX, to = bottom * sScaleX;
+        if (from < sScissorClampFrom) from = sScissorClampFrom;
+        if (to > sScissorClampTo) to = sScissorClampTo;
+        if (to <= from) {
+            C3D_SetScissor(GPU_SCISSOR_INVERT, 0, 0, TOP_HEIGHT * sRenderScale, TOP_WIDTH * sScaleX);
+            return;
+        }
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, from, right * sRenderScale, to);
         return;
     }
     C3D_SetScissor(GPU_SCISSOR_NORMAL, left * sRenderScale, top * sScaleX, right * sRenderScale, bottom * sScaleX);
@@ -5696,6 +5849,13 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     int timed, twiceReads = 0;
     unsigned long long t0 = 0, t1 = 0, t2 = 0;
 
+    if (skip_invisible(state)) {
+        return;
+    }
+    if (__builtin_expect(sFrameFirstDraw, 0) && numTriangles == 2 && rect_as_fill(state, verts, numVerts, indices)) {
+        return; // A whole-screen solid rectangle before anything else: the frame's memory fill (gpu_cuts.inc 7)
+    }
+    dp_draw(state, numTriangles, 0, verts, numVerts);
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
@@ -5903,9 +6063,14 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
                      const unsigned short *indices, int numTriangles) {
     HangDraw *hangDraw;
     int vertex, i, count = numTriangles * 3, vertBytes = numVerts * (int) sizeof(GfxModelVertex);
-    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    unsigned long long t0;
     u16 *ibo;
 
+    if (skip_invisible(state)) {
+        return;
+    }
+    dp_draw(state, numTriangles, 1, NULL, 0);
+    t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
         return;
@@ -6095,10 +6260,21 @@ static void delete_mesh(void *mesh) {
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts) {
     HangDraw *hangDraw;
-    unsigned long long t0 = prof_enabled() ? plat_ticks() : 0;
+    unsigned long long t0;
     int i, count = 0;
     u16 *ibo;
 
+    if (skip_invisible(state)) {
+        return;
+    }
+    if (__builtin_expect(sDpFrame[sRec], 0)) {
+        for (i = 0; i < numParts; i++) {
+            count += parts[i].numTriangles;
+        }
+        dp_draw(state, count, 2, NULL, 0);
+        count = 0;
+    }
+    t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         for (i = 0; i < numParts; i++) {
             const C3DMesh *m = parts[i].mesh;
@@ -6188,6 +6364,10 @@ static void draw_clear_rect(const short rect[4], u32 rgba, int depthOnly) {
 
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
     // Colour fills are drawn so that they cover only the game's part of the screen, leaving black bars at the sides.
+    // The frame's first, over the whole screen, is a memory fill instead (gpu_cuts.inc, DKR_COLOUR_FILL).
+    if (colour_fill(rect, (r << 24) | (g << 16) | (b << 8) | a)) {
+        return;
+    }
     draw_clear_rect(rect, (r << 24) | (g << 16) | (b << 8) | a, 0);
 }
 
@@ -6210,6 +6390,11 @@ void gfxb_clear_depth(const short rect[4]) {
             GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
         }
         return;
+    }
+    if (rect[0] <= 0 && rect[1] <= 0 && rect[2] >= GFX_SCREEN_WIDTH - 1 && rect[3] >= GFX_SCREEN_HEIGHT - 1) {
+        sDepthDrawnWhole++; // gpu_cuts.inc's count
+    } else {
+        sDepthDrawnPart++;
     }
     draw_clear_rect(rect, 0, 1);
 }

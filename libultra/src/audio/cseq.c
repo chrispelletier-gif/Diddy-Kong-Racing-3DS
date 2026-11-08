@@ -19,6 +19,10 @@
  *====================================================================*/
 
 #include <libaudio.h>
+#include "plat/plat.h"
+#ifdef PICA_ALL
+void port_music_seq_new(ALCSeq *seq, u8 *ptr);
+#endif
 #include <os_internal.h>
 #include <ultraerror.h>
 #include "cseq.h"
@@ -58,6 +62,9 @@ void alCSeqNew(ALCSeq *seq, u8 *ptr)
     }
 
     seq->qnpt = 1.0/(f32)seq->base->division;
+#ifdef PICA_ALL
+    port_music_seq_new(seq, ptr); // the native music player decodes it (port/src/audio/music.c)
+#endif
 }
 
 void alCSeqNextEvent(ALCSeq *seq,ALEvent *evt)

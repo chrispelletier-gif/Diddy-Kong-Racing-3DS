@@ -7,6 +7,7 @@
 
 #include "plat/plat.h"
 #include "port.h"
+#include "structs.h"
 
 s32 gPortHalfStep;
 s32 gPortSkipTick;
@@ -29,4 +30,33 @@ void port_set_logic_rate(s32 updateRate) {
         gPortHalfStep = FALSE;
         gPortSkipTick = FALSE;
     }
+}
+
+/*
+ * The kart stuck on two wheels (0.2 alpha report): update_racer_collision tilts a kart only from wheels 0 and 1 (roll)
+ * and 0 and 2 (pitch). When those are all in the air and the kart rests on the others, say reversing and turning up
+ * a ramp's edge, nothing ever changes its tilt, so it drives on one or two wheels until it falls off something.
+ * On (the default), a kart car on one or two wheels eases its roll and pitch toward level, as the game already does
+ * for its other vehicles (racer.c, func_80046524), until enough wheels land to tilt it from the ground again.
+ */
+s32 port_car_settle(void) {
+    return plat_switch("DKR_CAR_SETTLE", 1) != 0;
+}
+
+/* For the host 60 fps step check: each object's address, behaviour and behaviour data, three words apiece. */
+s32 port_list_objects(u32 *out, s32 max) {
+    extern Object **gObjPtrList;
+    extern s32 gObjectCount;
+    s32 count = 0, i;
+    for (i = 0; i < gObjectCount && count < max; i++) {
+        Object *obj = gObjPtrList[i];
+        if (obj == NULL) {
+            continue;
+        }
+        out[count * 3] = (u32) (uintptr_t) obj;
+        out[count * 3 + 1] = (u32) obj->behaviorId;
+        out[count * 3 + 2] = (u32) (uintptr_t) obj->anyBehaviorData;
+        count++;
+    }
+    return count;
 }

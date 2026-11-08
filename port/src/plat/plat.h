@@ -1,5 +1,7 @@
 #ifndef PORT_PLAT_H
 #define PORT_PLAT_H
+/* Off-GitHub test build: everything on the PICA200 (local branch local/pica-all only). */
+#define PICA_ALL 1
 
 /*
  * Platform abstraction used by the N64 OS emulation layer.
@@ -80,6 +82,9 @@ unsigned long long plat_render_idle_ns(void);
 unsigned long long plat_screen_busy_ns(void);
 /* Nonzero on an Old 3DS (roadmap O8): some switches default differently there. */
 int plat_old_3ds(void);
+/* v31: fn run on the system core as N64 thread osThread, the caller waiting; 0 if it can't be (Old 3DS only). */
+int plat_syscore_call(void (*fn)(void), void *osThread);
+int plat_core_id(void); /* The core the calling thread runs on (-1 if unknown) */
 unsigned long plat_screen_draws(void);
 
 /* Monotonic time. */
@@ -148,12 +153,16 @@ const char *plat_getenv(const char *name);
 /* Out of line: a switch's name comparisons are not to be inlined into the renderer's code (plat_fov_tan_scale reads
  * one, from the vertex load's billboard placing). */
 int plat_switch(const char *name, int fallback) PLAT_NOINLINE;
+void plat_trace(const char *name, const char *fmt, ...);
 void plat_override_switch(const char *name, int value);
 void plat_clear_switch_overrides(void);
 extern volatile int gPlatSwitchEpoch;
 
 /* Scripted input (DKR_INPUT) for automated tests. Returns nonzero when a script is set. */
 int plat_input_script(int poll, unsigned short *buttons, signed char *stickX, signed char *stickY);
+/* The same for a script given as text (DKR_INPUT syntax). */
+int plat_input_script_text(const char *script, int poll, unsigned short *buttons, signed char *stickX,
+                           signed char *stickY);
 
 /* Lists the entries of a directory into names (maxNames entries of nameSize bytes). Returns the count. */
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames);
@@ -261,6 +270,8 @@ int plat_test_results_busy(void);
 enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
 void plat_set_gpu_config(int aa);
 int plat_antialias(void);
+/* Nonzero while the screen shows 800 pixels across (the results' graphics column). */
+int plat_wide800_active(void);
 /*
  * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
  * 3DS's 400x240 top screen. Read by the game thread each frame (src/camera.c); the 3DS Settings menu sets it, the host
@@ -294,6 +305,9 @@ void plat_set_hud_edges(int on);
  * -1 the player's setting: settings.txt "fps60", else DKR_60FPS); the setting is saved by plat_set_60fps_setting.
  */
 int plat_frame_retraces(void);
+/* Host 60 fps step check (port/host/host_stepdiff.c, DKR_STEPDIFF): runs step() as one 30 fps step and as two 60 fps
+ * half steps in forked copies of the game and records what ends up different. Does nothing on the 3DS. */
+void plat_step_diff(int updateRate, void (*step)(long), void (*reinput)(long), int context);
 void plat_set_60fps(int on);
 int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
@@ -323,6 +337,10 @@ enum PlatCounter {
     PLAT_COUNTER_AUDIO_DROPPED,  /* Sound buffers dropped because the output was full. */
     PLAT_COUNTER_TEXTURE_FAILED, /* Textures the GPU had no memory for (drawn white instead). */
     PLAT_COUNTER_FLASHES,        /* Picture flashes seen in the frame history (a few frames unlike those around). */
+    PLAT_COUNTER_AA_FRAMES,      /* Frames drawn while adaptive anti-aliasing was in use (anti-aliased or not). */
+    PLAT_COUNTER_AA_LOW_FRAMES,  /* Of those, frames adaptive anti-aliasing drew at the low resolution. */
+    PLAT_COUNTER_LATE_RETRACES,  /* Retraces that reached the VI thread more than 3 ms late (3DS, plat_wait_vblank). */
+    PLAT_COUNTER_LATE_WAKES,     /* Game threads that ran more than 3 ms after the retrace they waited for (frames.c). */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];

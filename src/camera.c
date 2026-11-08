@@ -12,6 +12,10 @@
 #include "tracks.h"
 #include "video.h"
 #include "weather.h"
+#ifdef TARGET_PORT
+#include "plat/plat.h"
+#include "port_drawtag.h"
+#endif
 
 #define CAMERA_MODEL_STACK_SIZE 5
 
@@ -957,6 +961,35 @@ void set_ortho_matrix_height(f32 value) {
     gOrthoMatrixF[1][1] = value;
 }
 
+
+#ifdef PICA_ALL
+/* With native draws on, the model matrices go to the renderer as floats (PORT_MTXF_TAG): the Mtx a matrix would have
+ * been converted into holds its MtxF instead. */
+static void cam_mtx_store(MtxF *mf, Mtx *m) {
+    if (port_native_draw()) {
+        __builtin_memcpy(m, mf, sizeof(MtxF));
+    } else {
+        mtxf_to_mtx(mf, m);
+    }
+}
+
+static void cam_mtx_load(Gfx **dList, Mtx *m, u32 index) {
+    if (port_native_draw()) {
+        gDPNoOpTag((*dList)++, PORT_MTXF_TAG | index);
+        (*dList)->words.w0 = OS_K0_TO_PHYSICAL(m);
+        (*dList)->words.w1 = 0;
+        (*dList)++;
+    } else {
+        gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL(m), index);
+    }
+}
+#define CAM_MTX_STORE(mf, m) cam_mtx_store(mf, m)
+#define CAM_MTX_LOAD(dl, m, index) cam_mtx_load(dl, m, index)
+#else
+#define CAM_MTX_STORE(mf, m) mtxf_to_mtx(mf, m)
+#define CAM_MTX_LOAD(dl, m, index) gSPMatrixDKR((*(dl))++, OS_K0_TO_PHYSICAL(m), index)
+#endif
+
 /**
  * Sets the current matrix to represent an orthogonal view.
  * Used for drawing triangles on screen as HUD.
@@ -970,14 +1003,14 @@ void mtx_ortho(Gfx **dList, Mtx **mtx) {
     widthAndHeight = fb_size();
     height = GET_VIDEO_HEIGHT(widthAndHeight);
     width = GET_VIDEO_WIDTH(widthAndHeight);
-    mtxf_to_mtx(&gOrthoMatrixF, *mtx);
+    CAM_MTX_STORE(&gOrthoMatrixF, *mtx);
     gModelMatrix[0] = *mtx;
     gViewportStack[gActiveCameraID + 5].vp.vscale[0] = width * 2;
     gViewportStack[gActiveCameraID + 5].vp.vscale[1] = width * 2;
     gViewportStack[gActiveCameraID + 5].vp.vtrans[0] = width * 2;
     gViewportStack[gActiveCameraID + 5].vp.vtrans[1] = height * 2;
     gSPViewport((*dList)++, OS_K0_TO_PHYSICAL(&gViewportStack[gActiveCameraID + 5]));
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_0);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_0);
     gModelMatrixStackPos = 0;
     gMtxOriginID = G_MTX_DKR_INDEX_0;
 
@@ -1001,8 +1034,8 @@ void mtx_perspective(Gfx **dList, Mtx **mtx) {
     mtxf_mul(&gCurrentModelMatrixF, &gPerspectiveMatrixF, &gViewProjMatrixF);
     mtxf_from_inverse_transform(gModelMatrixF[0], &D_800DD2A0);
     mtxf_mul(gModelMatrixF[0], &gViewProjMatrixF, &gCurrentModelMatrixF);
-    mtxf_to_mtx(&gCurrentModelMatrixF, *mtx);
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_0);
+    CAM_MTX_STORE(&gCurrentModelMatrixF, *mtx);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_0);
     gModelMatrixStackPos = 0;
     gMtxOriginID = G_MTX_DKR_INDEX_0;
 }
@@ -1063,9 +1096,9 @@ UNUSED const char D_800E6F44[] = "cameraPushSprMtx: model stack overflow!!\n";
 void mtx_world_origin(Gfx **dList, Mtx **mtx) {
     mtxf_from_translation(gModelMatrixF[gModelMatrixStackPos], 0.0f, 0.0f, 0.0f);
     mtxf_mul(gModelMatrixF[gModelMatrixStackPos], &gViewProjMatrixF, &gCurrentModelMatrixF);
-    mtxf_to_mtx(&gCurrentModelMatrixF, *mtx);
+    CAM_MTX_STORE(&gCurrentModelMatrixF, *mtx);
     gModelMatrix[gModelMatrixStackPos] = *mtx;
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), gMtxOriginID);
+    CAM_MTX_LOAD(dList, (*mtx)++, gMtxOriginID);
 }
 
 /**
@@ -1169,9 +1202,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         gModelMatrixStackPos++;
         mtxf_mul(&gCurrentModelMatrixF, gModelMatrixF[gModelMatrixStackPos - 1], gModelMatrixF[gModelMatrixStackPos]);
         mtxf_mul(gModelMatrixF[gModelMatrixStackPos], &gViewProjMatrixF, &gCurrentModelMatrixF);
-        mtxf_to_mtx(&gCurrentModelMatrixF, *mtx);
+        CAM_MTX_STORE(&gCurrentModelMatrixF, *mtx);
         gModelMatrix[gModelMatrixStackPos] = *mtx;
-        gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_2);
+        CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Push an empty vertex because sprite vertices are hardcoded to start from index 1,
         // and billboard mode is not enabled for vehicle parts.
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(&gVehiclePartVertex), 1, 0);
@@ -1201,9 +1234,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         frameID = obj->animFrame;
         gModelMatrixStackPos++;
         mtxf_billboard(gModelMatrixF[gModelMatrixStackPos], tiltAngle, obj->trans.scale, gVideoAspectRatio);
-        mtxf_to_mtx(gModelMatrixF[gModelMatrixStackPos], *mtx);
+        CAM_MTX_STORE(gModelMatrixF[gModelMatrixStackPos], *mtx);
         gModelMatrix[gModelMatrixStackPos] = *mtx;
-        gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_2);
+        CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Enable billboard mode; subsequent vertices will be rendered relative to the anchor point
         gDkrEnableBillboard((*dList)++);
     }
@@ -1220,14 +1253,24 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
-    // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
-    material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
-                                                              RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
+#ifdef PICA_ALL
+    if (port_native_draw()) {
+        port_native_sprite(dList, sprite->frames[frameID],
+                           sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
+                                                         RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
+                           !(flags & RENDER_Z_UPDATE));
+    } else
+#endif
+    {
+        // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
+        material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
+                                                                  RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
 
-    if (!(flags & RENDER_Z_UPDATE)) {
-        gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        if (!(flags & RENDER_Z_UPDATE)) {
+            gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        }
+        gSPDisplayList((*dList)++, sprite->frames[frameID]);
     }
-    gSPDisplayList((*dList)++, sprite->frames[frameID]);
 
     // Pop the model matrix stack and select the appropriate matrix index for rendering
     gModelMatrixStackPos--;
@@ -1293,9 +1336,9 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     }
     mtxf_from_inverse_transform(&aspectMtxF, &gCameraTransform);
     mtxf_mul(&gCurrentModelMatrixF, &aspectMtxF, gModelMatrixF[gModelMatrixStackPos]);
-    mtxf_to_mtx(gModelMatrixF[gModelMatrixStackPos], *mtx);
+    CAM_MTX_STORE(gModelMatrixF[gModelMatrixStackPos], *mtx);
     gModelMatrix[gModelMatrixStackPos] = *mtx;
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_2);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
     gDkrEnableBillboard((*dList)++);
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
         index = (((u8) index) * sprite->numberOfFrames) >> 8;
@@ -1414,8 +1457,8 @@ void mtx_shear_push(Gfx **dList, Mtx **mtx, Object *obj, Object *objBase, f32 sh
     matrix_mult[3][3] = 1.0f;
 
     mtxf_mul(&matrix_mult, &gViewProjMatrixF, &gCurrentMVPMatrixF);
-    mtxf_to_mtx(&gCurrentMVPMatrixF, *mtx);
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_1);
+    CAM_MTX_STORE(&gCurrentMVPMatrixF, *mtx);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_1);
 }
 
 /**
@@ -1451,7 +1494,7 @@ s32 mtx_cam_push(Gfx **dList, Mtx **mtx, ObjectTransform *trans, f32 scaleY, f32
     mtxf_mul(gModelMatrixF[gModelMatrixStackPos + 1], &gViewProjMatrixF, &gCurrentMVPMatrixF);
 
     // Convert the MVP matrix to fixed-point format and upload to RSP
-    mtxf_to_mtx(&gCurrentMVPMatrixF, *mtx);
+    CAM_MTX_STORE(&gCurrentMVPMatrixF, *mtx);
     gModelMatrixStackPos++;
     gModelMatrix[gModelMatrixStackPos] = *mtx;
 
@@ -1459,7 +1502,7 @@ s32 mtx_cam_push(Gfx **dList, Mtx **mtx, ObjectTransform *trans, f32 scaleY, f32
         stubbed_printf("cameraPushModelMtx: model stack overflow!!\n");
     }
 
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_1);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_1);
 
     // Compute world-space position of the model's origin (0, 0, 0)
     mtxf_transform_point(*gModelMatrixF[gModelMatrixStackPos], 0.0f, 0.0f, 0.0f, &camRelX, &camRelY, &camRelZ);
@@ -1549,8 +1592,8 @@ void mtx_head_push(Gfx **dList, Mtx **mtx, ModelInstance *modInst, s16 headAngle
     headMtxF[3][2] = (-offsetX * -sins_headAngle) + (-offsetZ * coss_headAngle) + offsetZ;
     headMtxF[3][3] = 1.0f;
     mtxf_mul(&headMtxF, &gCurrentMVPMatrixF, &rotationMtxF);
-    mtxf_to_mtx(&rotationMtxF, *mtx);
-    gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL((*mtx)++), G_MTX_DKR_INDEX_2);
+    CAM_MTX_STORE(&rotationMtxF, *mtx);
+    CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
     gSPSelectMatrixDKR((*dList)++, G_MTX_DKR_INDEX_1);
 }
 
@@ -1582,7 +1625,7 @@ void mtx_pop(Gfx **dList) {
     }
 
     if (gModelMatrixStackPos > 0) {
-        gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL(gModelMatrix[gModelMatrixStackPos]), G_MTX_DKR_INDEX_1);
+        CAM_MTX_LOAD(dList, gModelMatrix[gModelMatrixStackPos], G_MTX_DKR_INDEX_1);
     } else {
         gSPSelectMatrixDKR((*dList)++, G_MTX_DKR_INDEX_0);
     }

@@ -205,7 +205,7 @@ static const char *row_hint(int i) {
     if (i == MAIN_PICTURE_DELAY) {
         return "Wait before the picture is taken";
     } else if (i == MAIN_PICTURE) {
-        return "Closes this menu; reopen a page, then wait";
+        return "Closes the menu; open a page and wait";
     } else if (i == MAIN_AA) {
         return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
                                                            : "Smoother edges; the GPU draws 4x";
@@ -392,7 +392,7 @@ static const char *screen_row_hint(int i) {
     } else if (SCREEN_STEREO_ROW(i)) {
         static const char *const sStereoHints[5] = {
             "How deep the 3D looks", "Higher: the kart comes out of the screen", "Where the HUD and text sit in 3D",
-            "Keeps close things from popping out", "How far auto convergence lets things out"
+            "Keeps close things from popping out", "How far things may come out"
         };
         return sStereoHints[i - SCREEN_STEREO_FIRST];
     } else if (i == SCREEN_HUD) {
@@ -441,14 +441,15 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its eight kinds. */
+/* The test run (port_autorun.c): stop the one running, or start one of its ten kinds. */
 static int test_count(void) {
-    return port_autorun_enabled() ? 1 : 8;
+    return port_autorun_enabled() ? 1 : 11;
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[8] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
-                                           "Switch bench", "Whole game", "Whole game (short)", "Shelved switches" };
+    static const char *const sStart[11] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
+                                            "Switch bench", "Whole game", "Whole game (short)", "Shelved switches",
+                                            "Lean switch bench", "Lean quick test", "Lean full test" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -459,10 +460,13 @@ static void test_value(int i, char *out, int size) {
 }
 
 static const char *test_hint(int i) {
-    static const char *const sStart[8] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                           "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
-                                           NULL, "Menus, races, coins, arenas, bosses, hubs, ~5 hours",
-                                           "Every part, 1 lap each, ~1 hour", NULL };
+    static const char *const sStart[11] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
+                                            "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
+                                            NULL, "Every part of the game, ~5 hours",
+                                            "Every part, 1 lap each, ~1 hour", NULL,
+                                            "Switch bench, profiler off as in a player's build",
+                                            "Quick test, profiler off as in a player's build",
+                                            "Full test, profiler off as in a player's build" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -494,8 +498,9 @@ static void test_change(int i, int step) {
         port_autorun_request(0);
     } else {
         // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark, 5 the switch
-        // bench, 6 the whole game run, 7 its short variant, 8 the shelved switches bench.
-        static const long sRequests[8] = { 1, 3, 4, 2, 5, 6, 7, 8 };
+        // bench, 6 the whole game run, 7 its short variant, 8 the shelved switches bench, 9-11 the lean switch bench,
+        // quick test and full test.
+        static const long sRequests[11] = { 1, 3, 4, 2, 5, 6, 7, 8, 9, 10, 11 };
         port_autorun_request(sRequests[i]);
     }
     // The run turns on or off at the game's next frame.

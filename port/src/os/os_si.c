@@ -312,7 +312,7 @@ void osContGetQuery(OSContStatus *data) {
     }
 }
 
-s32 osContStartReadData(OSMesgQueue *mq) {
+static void poll_controllers(void) {
     port_input_poll(sControllers, MAXCONTROLLERS);
     if (port_autorun_enabled()) {
         // The unattended test run drives everything itself (the karts by the AI, the menus by direct calls): a stray
@@ -325,10 +325,41 @@ s32 osContStartReadData(OSMesgQueue *mq) {
         // Except the whole game run's menu pass, which presses its own buttons.
         port_autorun_input(&sControllers[0].buttons, &sControllers[0].stickX, &sControllers[0].stickY);
     }
+}
+
+s32 osContStartReadData(OSMesgQueue *mq) {
+    poll_controllers();
     flush_saves(FALSE);
     port_post_mesg(mq, NULL);
     return 0;
 }
+
+#ifdef PICA_ALL
+/*
+ * Native controller reads (PICA_ALL, DKR_NATIVE_INPUT): the game's joypad code polls the 3DS buttons when it reads
+ * them, instead of starting an N64 controller read at the end of one frame, waiting for its serial interface message
+ * and copying the result the next frame. Input is a frame fresher.
+ */
+int port_native_input_on(void) {
+    static s32 sOn = -1;
+    if (sOn < 0) {
+        sOn = plat_switch("DKR_NATIVE_INPUT", 1) != 0;
+    }
+    return sOn;
+}
+
+static void poll_controllers(void);
+
+void port_input_read_now(OSContPad *data) {
+    poll_controllers();
+    osContGetReadData(data);
+}
+
+/* Where the N64 code started the next read: the saves the frame changed go to the SD card. */
+void port_input_frame_done(void) {
+    flush_saves(FALSE);
+}
+#endif
 
 void osContGetReadData(OSContPad *data) {
     s32 i;

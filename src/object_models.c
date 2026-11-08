@@ -8,6 +8,9 @@
 #include "memory.h"
 #include "objects.h"
 #include "racer.h"
+#ifdef TARGET_PORT
+#include "port_drawtag.h"
+#endif
 #include "textures_sprites.h"
 #include "tracks.h"
 
@@ -462,6 +465,9 @@ static void port_model_dedupe_check(ObjectModel *model, s16 *v0, s32 count) {
  */
 void free_model_data(ObjectModel *mdl) {
     s16 numTextures;
+#ifdef TARGET_PORT
+    gPortTrisEpoch++; // The renderer compares model triangles again (another model may come to this memory)
+#endif
 
     if (mdl == NULL) {
         stubbed_printf("MOD Error: Tryed to deallocate non-existent model!!\n");

@@ -379,7 +379,7 @@ static void describe(void) {
     }
     if (sPage == SETUP_PAGE_LANGUAGE) {
         COPY(s->buttons[2], tr("NEXT", "SUIVANT"));
-        COPY(s->help, tr("Choose with the circle pad, then A", "Choisissez avec le stick, puis A"));
+        COPY(s->help, tr("Choose with the circle pad, then A", "Choisissez au pad circulaire, puis A"));
     } else if (sPage == SETUP_PAGE_STYLE) {
         COPY(s->buttons[0], tr("BACK", "RETOUR"));
         COPY(s->buttons[1], tr("FINE TUNE", "REGLAGES"));

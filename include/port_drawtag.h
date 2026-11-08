@@ -28,6 +28,72 @@ void port_draw_kind_game(int kind, int object);
 /* DKR_SKIP_GAME_KINDS (a bitmask of the kinds above, switch bench cost rows): the game doesn't build these at all, so
  * neither the game thread nor the renderer pays for them; the most a native renderer for that kind could save. */
 int port_skip_game_kind(int kind);
+/* v30: where the game thread's frame goes, for the profiler's "game core sections" line (port_profile.c). Each call
+ * ends the section running and starts this one; only timed frames read the clock. */
+enum {
+    PORT_SEC_TOP,        /* The loop's start: display list set-up, input, the frame's load work */
+    PORT_SEC_GAME,       /* mode_game before the object updates */
+    PORT_SEC_LOGIC,      /* obj_update */
+    PORT_SEC_POSTLOGIC,  /* After obj_update: state hash, native frame, cameras, AI nodes */
+    PORT_SEC_WAVES,      /* waves_update */
+    PORT_SEC_SHADOWS,    /* shadow_update */
+    PORT_SEC_PRELUDE,    /* Colour cycles, fog, texture animations, display list state */
+    PORT_SEC_SKY,        /* Camera, viewport and the sky */
+    PORT_SEC_VIEW,       /* The camera matrix, environment map and wave visibility */
+    PORT_SEC_SEGMENTS,   /* Finding the visible segments and their opaque geometry */
+    PORT_SEC_SORT,       /* sort_objects_by_dist */
+    PORT_SEC_OBJECTS,    /* The opaque and see-through object loops */
+    PORT_SEC_LATE,       /* See-through geometry, the last object pass, particles */
+    PORT_SEC_WEATHER,    /* Weather and lens flare */
+    PORT_SEC_HUD,        /* hud_render_player */
+    PORT_SEC_GAMETAIL,   /* The rest of mode_game (general HUD, race state, menus) */
+    PORT_SEC_SOUND,      /* sound_update_queue */
+    PORT_SEC_TAIL,       /* Dialogue, transitions, the display list's end */
+    PORT_SEC_RWAIT,      /* v31: waiting for the renderer to take the frame (gfxtask_wait_ahead) */
+    PORT_SEC_VSYNC,      /* v31: fb_update (the frame's swap and the wait for its retrace) */
+    PORT_SEC_END_LOD,    /* v31, after the frame's end: the adaptive racer detail */
+    PORT_SEC_END_NOTE,   /* port_game_note_frame */
+    PORT_SEC_END_AUTORUN, /* port_autorun_frame (test runs and benches) */
+    PORT_SEC_END_HUD,    /* port_race_hud_frame (the bottom screen's race HUD) */
+    PORT_SEC_END_LOOP,   /* Menu sounds and the loop back to the next frame's start */
+    PORT_SEC_PROFILER,   /* v32: the profiler's readout and log lines, after the frame is built (DKR_PROF_IDLE_LOG) */
+    PORT_SEC_COUNT
+};
+void port_game_section(int section);
+/*
+ * v31 (DKR_OBJ_PREFETCH, Old 3DS by default): the game's loops over every object (updates, shadows, sorting, the draw
+ * passes) start loading the object two places ahead (its first line, with the position and flags, and the line at
+ * 0x40 with its header, behaviour and parts pointers) and the header of the next one, so the misses on objects spread
+ * all over the heap overlap the work on this one. A hint only: what the loops do is unchanged.
+ */
+extern int gPortObjPrefetch;
+#define PORT_PREFETCH_OBJS(list, i, end)                                                                              \
+    do {                                                                                                              \
+        if (gPortObjPrefetch) {                                                                                       \
+            if ((i) + 2 < (end)) {                                                                                    \
+                const char *pfObj_ = (const char *) (list)[(i) + 2];                                                  \
+                __builtin_prefetch(pfObj_);                                                                           \
+                __builtin_prefetch(pfObj_ + 0x40);                                                                    \
+            }                                                                                                         \
+            if ((i) + 1 < (end) && (list)[(i) + 1] != NULL) {                                                                                    \
+                __builtin_prefetch((list)[(i) + 1]->header);                                                          \
+            }                                                                                                         \
+        }                                                                                                             \
+    } while (0)
+/* The same going down the list. */
+#define PORT_PREFETCH_OBJS_DOWN(list, i, start)                                                                       \
+    do {                                                                                                              \
+        if (gPortObjPrefetch) {                                                                                       \
+            if ((i) - 2 >= (start)) {                                                                                 \
+                const char *pfObj_ = (const char *) (list)[(i) - 2];                                                  \
+                __builtin_prefetch(pfObj_);                                                                           \
+                __builtin_prefetch(pfObj_ + 0x40);                                                                    \
+            }                                                                                                         \
+            if ((i) - 1 >= (start) && (list)[(i) - 1] != NULL) {                                                                                 \
+                __builtin_prefetch((list)[(i) - 1]->header);                                                          \
+            }                                                                                                         \
+        }                                                                                                             \
+    } while (0)
 /*
  * Native model meshes (roadmap NR1, DKR_NATIVE_MESH, a bitmask: 1 the racers, 2 other objects' 3D models): render_mesh
  * puts this tag before each batch's vertex loads and triangles. The renderer then draws the batch from its own tables
@@ -37,6 +103,68 @@ int port_skip_game_kind(int kind);
  */
 #define PORT_NATIVE_TAG 0x504E0000 /* "PN" */
 int port_native_mesh_for(int isRacer);
+/*
+ * Native track (roadmap NR4, DKR_NATIVE_TRACK): render_level_segment puts this tag before each batch's vertex load and
+ * triangles. The renderer then draws the batch from a copy in GPU memory made the first time it is seen (the track
+ * never changes during a level), transformed by the GPU's vertex shader with the camera's matrix, and draws the
+ * level's opaque batches sorted by material, one draw for each material instead of one for each batch. Batches near
+ * the camera, whose triangles the GPU can't draw that big, and anything unusual leave the tag unused, and the commands
+ * after it draw the batch as before. gPortLevelLoads counts the levels loaded, so a level loaded at the same address
+ * as the last one isn't drawn from the last one's copies.
+ */
+#define PORT_TRACK_TAG 0x50540000 /* "PT" */
+int port_native_track(void);
+extern unsigned int gPortLevelLoads;
+/*
+ * GPU vertex lighting (off-GitHub PICA_ALL test build, DKR_GPU_LIGHT): render_mesh puts PORT_LIGHT_TAG | 1 and then
+ * four no-ops whose second words are the light's floats (x, y, z, ambient) before a batch whose vertex colours hold
+ * normals (obj_asm.c), and PORT_LIGHT_TAG alone after it.
+ */
+#define PORT_LIGHT_TAG 0x504C0000 /* "PL" */
+/*
+ * Native draws (PICA_ALL, DKR_NATIVE_DRAW): render_mesh records a batch as PORT_NDRAW_TAG | material followed by two
+ * data words (vertices and triangles; vertex count | split << 8 | textured << 16 and the triangle count) instead of its
+ * N64 commands. A material's first use (or after gPortNMatBad) emits its commands in full, then PORT_NMAT_TAG |
+ * material, for the renderer to keep their state.
+ */
+#define PORT_NDRAW_TAG 0x50420000 /* "PB" */
+#define PORT_NMAT_TAG 0x504D0000  /* "PM" */
+/* A matrix load as floats (PICA_ALL native draws): PORT_MTXF_TAG | index, then a word whose w0 is the address of 16
+ * floats (an MtxF written where the game's fixed point Mtx would have been). */
+#define PORT_MTXF_TAG 0x50580000 /* "PX" */
+/* A texture rectangle without its texture load (PICA_ALL native draws): PORT_NRECT_TAG | material, then the game's
+ * G_TEXRECT and its two G_RDPHALF words. */
+#define PORT_NRECT_TAG 0x50520000 /* "PR" */
+int port_native_rect(Gfx **dl, const void *tex);
+int port_native_draw(void);
+
+int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
+                      const void *tris, int numTris, int textured, int dynamic);
+void port_native_end(void);
+void port_nmat_texture_freed(const void *start, const void *end);
+int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim);
+void port_native_record(Gfx **dl, int id, const void *verts, int numVerts, const void *tris, int numTris, int textured,
+                        int dynamic);
+int port_native_material_here(Gfx **dl, const void *key, int keyFlags);
+int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
+                          const void *tris, int numTris);
+int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
+/* v29 (DKR_TRIS_SKIP): the level and model triangle lists that game code changed in place (texture scrollers,
+ * animators, model UV maps) go in this ring after their changes, and the renderer compares those batches' triangles
+ * with its copies only then (see native_tris_take). Written by the game thread alone. */
+#define PORT_TRIS_RING 2048
+extern const void *volatile gPortTrisRing[PORT_TRIS_RING];
+extern volatile unsigned int gPortTrisHead;
+extern volatile unsigned int gPortTrisEpoch; /* Moved on when a model's memory is freed */
+static inline void port_tris_changed(const void *tris) {
+    unsigned int head = gPortTrisHead;
+    gPortTrisRing[head % PORT_TRIS_RING] = tris;
+    __sync_synchronize(); // The triangles and the entry before the head
+    gPortTrisHead = head + 1;
+}
+struct Vertex;
+int port_gpu_light_get(const struct Vertex *verts, const void *model, float out[4]);
+void port_gpu_light_clear(const struct Vertex *verts);
 #define port_draw_tag(dl, kind)                                                                                        \
     do {                                                                                                               \
         gDPNoOpTag(dl, PORT_DRAW_TAG | (kind));                                                                        \
@@ -51,5 +179,8 @@ int port_native_mesh_for(int isRacer);
 #else
 #define port_draw_tag(dl, kind)
 #define port_draw_tag_object(dl, kind, object)
+#define port_game_section(section) ((void) 0)
+#define PORT_PREFETCH_OBJS(list, i, end) ((void) 0)
+#define PORT_PREFETCH_OBJS_DOWN(list, i, start) ((void) 0)
 #endif
 #endif

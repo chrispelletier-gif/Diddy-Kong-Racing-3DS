@@ -69,6 +69,13 @@ void camera_option_value(int index, char *out, int size) {
     }
 }
 
+const char *camera_option_hint(int index) {
+    if (index == 0) {
+        return port_modern_camera() ? "Follows your turns more closely" : "The N64's own chase camera";
+    }
+    return "Keeps walls from blocking the view";
+}
+
 void camera_option_change(int index, int step) {
     (void) step;
     if (index == 0) {

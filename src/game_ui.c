@@ -25,6 +25,8 @@
 #include "types.h"
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
+#include "port_drawtag.h"
 #endif
 
 /************ .data ************/
@@ -4154,12 +4156,20 @@ void hud_draw_model(ObjectModel *objModel) {
             } else {
                 texPtr = objModel->textures[texIndex].texture;
             }
-            material_set_no_tex_offset(&gHudDL, texPtr, flags & ~RENDER_Z_COMPARE);
-            gSPVertexDKR(gHudDL++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);
             if (texPtr == NULL) {
                 textureEnabled = TRIN_DISABLE_TEXTURE;
             }
-            gSPPolygon(gHudDL++, OS_K0_TO_PHYSICAL(tris), numTris, textureEnabled);
+#ifdef PICA_ALL
+            if (port_native_batch(&gHudDL, texPtr, flags & ~RENDER_Z_COMPARE, 0, verts, numVerts, tris, numTris,
+                                  textureEnabled, 1)) {
+                port_native_end();
+            } else
+#endif
+            {
+                material_set_no_tex_offset(&gHudDL, texPtr, flags & ~RENDER_Z_COMPARE);
+                gSPVertexDKR(gHudDL++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);
+                gSPPolygon(gHudDL++, OS_K0_TO_PHYSICAL(tris), numTris, textureEnabled);
+            }
             numBatches = objModel->numberOfBatches;
         }
     }

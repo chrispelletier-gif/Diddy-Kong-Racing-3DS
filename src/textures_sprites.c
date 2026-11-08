@@ -8,6 +8,8 @@
 #include <ultra64.h>
 #ifdef TARGET_PORT
 #include "port.h"
+#include "plat/plat.h"
+#include "port_drawtag.h"
 #endif
 
 #define MAX_NUM_TEXTURES 700
@@ -619,6 +621,9 @@ void tex_free(TextureHeader *tex) {
                             frame = (TextureHeader *) ((s32) frame + frame->textureSize);
                         }
                         port_gfx_texture_freed(tex, frame);
+#ifdef PICA_ALL
+                        port_nmat_texture_freed(tex, frame); // frame is already one past the texture
+#endif
                     }
 #endif
                     mempool_free(tex);
