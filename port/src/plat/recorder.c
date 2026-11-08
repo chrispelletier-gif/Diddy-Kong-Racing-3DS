@@ -122,7 +122,12 @@ static void record_hitch(const RecFrame *r) {
  * (lean quick test #462: 39 ms on nearly every track, 44-50 on Whale Bay), and nothing said what they were.
  */
 #define REC_SLOW 4
-static RecHitch sSlow[REC_SLOW];
+#define REC_SLOW_TEXT 400
+typedef struct RecSlow {
+    unsigned int frame, periodUs;
+    char text[REC_SLOW_TEXT];
+} RecSlow;
+static RecSlow sSlow[REC_SLOW];
 static int sSlowCount;
 
 static void record_slow(const RecFrame *r) {
@@ -136,10 +141,25 @@ static void record_slow(const RecFrame *r) {
         return;
     }
     sSlow[i].frame = r->frame;
-    sSlow[i].endMs = r->endMs;
     sSlow[i].periodUs = r->periodUs;
-    sSlow[i].cause = rec_frame_cause(r);
-    describe_frame(r, sSlow[i].text, sizeof(sSlow[i].text));
+    {
+        // v38: then what took the game core's time (port_profile.c), before the events, which may be cut off.
+        char cause[200], detail[200];
+        describe_cause(r, cause, sizeof(cause));
+        port_rec_frame_detail(detail, sizeof(detail));
+        snprintf(sSlow[i].text, sizeof(sSlow[i].text), "%s level %d: %s%s", mode_name(r->mode), r->level, cause,
+                 detail);
+        {
+            size_t length = strlen(sSlow[i].text);
+            char events[REC_HITCH_TEXT];
+            const char *during;
+            describe_frame(r, events, sizeof(events));
+            during = strstr(events, "; during: ");
+            if (during != NULL && length < sizeof(sSlow[i].text)) {
+                snprintf(sSlow[i].text + length, sizeof(sSlow[i].text) - length, "%s", during);
+            }
+        }
+    }
     if (sSlowCount < REC_SLOW) {
         sSlowCount++;
     }

@@ -93,6 +93,8 @@ void rec_game_frame(RecFrame *row);
 /* Game side (port_recorder.c): the game's state for a row, and in words for a report. Game thread only. */
 void port_rec_game_state(RecFrame *row);
 void port_rec_describe(char *out, int size);
+/* The port's detail for a slow frame, while it is recorded (port_profile.c): returns the length written. */
+int port_rec_frame_detail(char *out, int size);
 /* Any thread: a line on the timeline (printf style). Never waits and never touches the SD card. */
 void rec_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* The log's copy of each line (plat_3ds.c / plat_posix.c). */
