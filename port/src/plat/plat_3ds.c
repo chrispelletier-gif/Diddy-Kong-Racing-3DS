@@ -1502,10 +1502,13 @@ void plat_set_race_hud(const RaceHud *hud) {
     }
     // DKR_BS_COPY_LOCK: a race HUD update that finds the screen thread holding the lock (it can be held off by the
     // walk with it) tries again next frame instead of waiting.
-    if (sCopyLockOn > 0 && racing && sShown && hud != NULL && LightLock_TryLock(&sConsoleLock) != 0) {
-        return;
-    }
-    if (!(sCopyLockOn > 0 && racing && sShown && hud != NULL)) {
+    // The choice is made once: screen_changed() on another thread (the watchdog's status lines) can rewrite
+    // sCopyLockOn between two looks, which would leave the lock untaken here and then released.
+    if (sCopyLockOn > 0 && racing && sShown && hud != NULL) {
+        if (LightLock_TryLock(&sConsoleLock) != 0) {
+            return;
+        }
+    } else {
         LightLock_Lock(&sConsoleLock);
     }
     sShown = hud != NULL;

@@ -944,9 +944,12 @@ static void handle_meta(NPlayer *np, ALEvent *event) {
         }
     }
     for (i = 0; i < n; i++) {
-        ALMicroTime rel = (ALMicroTime) (sOffs[i].time - np->clock);
+        // libultra relinks the note offs with alLink(node, firstTemp): the first, then the rest in reverse. Equal
+        // times keep their posting order, so the same order is used here.
+        const Item *off = &sOffs[i == 0 ? 0 : n - i];
+        ALMicroTime rel = (ALMicroTime) (off->time - np->clock);
         u32 ticks = rel / oldUspt;
-        q_post_locked(np, &sOffs[i].evt, (ALMicroTime) (ticks * seqp->uspt));
+        q_post_locked(np, &off->evt, (ALMicroTime) (ticks * seqp->uspt));
     }
     q_unlock();
 }

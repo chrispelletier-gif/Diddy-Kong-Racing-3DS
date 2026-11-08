@@ -848,12 +848,13 @@ static void dp_take(int slot, int part, u64 ticks) {
         } else {
             sDpKeysUsed++;
         }
+        // A new key (or an evicted one's slot): every total starts again, as dp_log only empties the table.
         sDpKeys[i].d = *d;
         sDpKeys[i].ticks = 0;
-    } else if (d->idx < sDpKeys[i].d.idx) {
-        sDpKeys[i].d.idx = d->idx;
         sDpKeys[i].count = 0;
         sDpKeys[i].tris = 0;
+    } else if (d->idx < sDpKeys[i].d.idx) {
+        sDpKeys[i].d.idx = d->idx; // Only the first place moves; the totals keep counting together.
     }
     sDpKeys[i].ticks += ticks;
     sDpKeys[i].count++;

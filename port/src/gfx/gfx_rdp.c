@@ -3459,8 +3459,10 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
  * Roadmap NR4 (DKR_NATIVE_TRACK, port_drawtag.h): the level's geometry drawn the way a 3DS game draws its world. A
  * track batch (one vertex load and its triangles, tagged PORT_TRACK_TAG by render_level_segment) is copied once,
  * the first time it is drawn, into the GPU's mesh arena as model vertices and indices (mesh_build, as P31 makes
- * them), with its box. The track never changes while a level is loaded, so unlike P31's meshes nothing is hashed or
- * compared per frame; the table is emptied when another level loads (gPortLevelLoads). Each frame a batch costs a
+ * them), with its box. Most of the track never changes while a level is loaded, so unlike P31's meshes nothing is hashed
+ * or compared per frame; the table is emptied when another level loads (gPortLevelLoads). The batches the game does
+ * change in place (texture scrolls, reported by port_tris_changed) are left to the walk for the rest of the level
+ * (track_tris_mark), so they keep moving and aren't made again every frame. Each frame a batch costs a
  * box test (gfxb_model_check: drawn by the GPU, left out, or near the camera and left to the CPU path, which keeps
  * its triangles inside the GPU's guard band) and the GPU's vertex shader does the maths.
  *
@@ -3482,6 +3484,7 @@ typedef struct TrackMesh {
     u16 numTris;
     u8 numVerts, failed;
     u8 numRuns;
+    u8 changed; // The game changes these triangles in place (port_tris_changed): left to the walk for the level
     s16 boxMin[3], boxMax[3];
     void *mesh;
     MeshRun runs[MESH_MAX_RUNS];
@@ -3513,6 +3516,27 @@ static COLD void track_drop_all(void) {
     __builtin_memset(sTrackMeshes, 0, sizeof(sTrackMeshes));
     sTrackMeshCount = 0;
     sTrackBytes = 0;
+}
+
+/* At a frame's start (native_tris_take): the game changed these triangles in place (a texture scroll). Their mesh is
+ * dropped and the batch left to the walk for the rest of the level. */
+static void track_tris_mark(const void *tris) {
+    u32 h = (u32) (((size_t) tris >> 4) * 2654435761u) & (TRACK_TABLE_SIZE - 1), i;
+    for (i = 0; i < TRACK_PROBES; i++) {
+        TrackMesh *c = &sTrackMeshes[(h + i) & (TRACK_TABLE_SIZE - 1)];
+        if (c->tris == tris) {
+            if (c->mesh != NULL) {
+                gfx_split_mesh_free(c->mesh);
+                c->mesh = NULL;
+            }
+            c->changed = TRUE;
+            c->failed = TRUE;
+            return;
+        }
+        if (c->tris == NULL) {
+            return;
+        }
+    }
 }
 
 /* Draws one bucket's parts as one draw. */
@@ -3655,6 +3679,9 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
     for (i = 0; i < TRACK_PROBES; i++) {
         TrackMesh *c = &sTrackMeshes[(h + i) & (TRACK_TABLE_SIZE - 1)];
         if (c->tris == tris) {
+            if (c->changed) {
+                return NULL; // Changed by the game in place: the walk draws it (track_tris_mark)
+            }
             if (c->src == src && c->numTris == count && c->numVerts == numVerts && c->firstWords[0] == words[0] &&
                 c->firstWords[1] == words[1]) {
                 return c->failed ? NULL : c;
@@ -4382,6 +4409,7 @@ static inline s32 native_tris_same(const Triangle *a, const Triangle *b, s32 cou
  * have the same coordinate stay two, which only costs a vertex. */
 static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
     u32 i, k, n = e->numCorners;
+    s32 wasShared = FALSE;
     if (!e->usable || n > NATIVE_MAX_CORNERS) {
         return FALSE;
     }
@@ -4399,6 +4427,7 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
         __builtin_memcpy(uv, e->cornerUv, n * sizeof(u32));
         e->cornerUv = uv;
         e->shared = 0;
+        wasShared = TRUE;
         sNativeCopies++;
     }
     e->changes = 1;
@@ -4412,7 +4441,13 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
                 sNativeCornerIndex[q] = 0;
                 e->cornerUv[q] = c[k].texCoords;
             } else if (e->cornerUv[q] != c[k].texCoords) {
-                return FALSE; // One corner now has two coordinates (cornerUv is remade by native_build)
+                // One corner now has two coordinates (cornerUv is remade by native_build). The backend may still
+                // read the other tables (triCorners, cornerVertex, backface), so the mesh stays marked shared and
+                // native_build makes every table new instead of rewriting them in place.
+                if (wasShared) {
+                    e->shared = sShareEpoch;
+                }
+                return FALSE;
             }
         }
     }
@@ -4444,6 +4479,9 @@ static NOINLINE void native_tris_take(void) {
     u32 head = gPortTrisHead, start = sTrisTail;
     __sync_synchronize(); // The head before its entries
     if (sTrisLevel != gPortLevelLoads || sTrisEpochSeen != gPortTrisEpoch || head - start > PORT_TRIS_RING) {
+        if (sTrisLevel == gPortLevelLoads && head - start > PORT_TRIS_RING) {
+            track_drop_all(); // Which track batches changed is lost: all are made again from what they hold now
+        }
         sTrisLevel = gPortLevelLoads;
         sTrisEpochSeen = gPortTrisEpoch;
         sTrisValid++;
@@ -4451,12 +4489,15 @@ static NOINLINE void native_tris_take(void) {
         return;
     }
     while (sTrisTail != head) {
-        native_tris_mark((const Triangle *) gPortTrisRing[sTrisTail % PORT_TRIS_RING]);
+        const Triangle *changed = (const Triangle *) gPortTrisRing[sTrisTail % PORT_TRIS_RING];
+        native_tris_mark(changed);
+        track_tris_mark(changed);
         sTrisTail++;
     }
     __sync_synchronize();
     if (gPortTrisHead - start > PORT_TRIS_RING) {
         sTrisValid++; // Entries were written over while being read
+        track_drop_all();
     }
 }
 
@@ -6415,23 +6456,46 @@ static volatile u32 sNopCount[2];
 int gPortNativeOps;
 // sNopStats (above): native ops applied, table lookups that missed (full table)
 
-/* Game thread: the table entry for a pair, added if new. Entries are written before the count that publishes them,
- * and the frame that names one reaches the renderer through the frame queue's lock after it. */
+static PlatSem *sNopLock;
+
+/* The table entry for a pair, added if new. Two threads add entries: the game thread (the gbi macros in
+ * include/port_nops.h) and the renderer walk (nop_static converting a static list), so adding takes a lock and looks
+ * again under it. Entries are written before the count that publishes them, so the lookup without the lock only ever
+ * sees whole entries; the frame that names one reaches the renderer through the frame queue's lock after it. */
 unsigned int port_nop_intern(int table, unsigned int a, unsigned int b) {
-    u32 n = sNopCount[table & 1], i;
+    u32 n = __atomic_load_n(&sNopCount[table & 1], __ATOMIC_ACQUIRE), i;
     u32 (*t)[2] = sNopTable[table & 1];
+    PlatSem *lock;
     for (i = 0; i < n; i++) {
         if (t[i][0] == a && t[i][1] == b) {
             return i;
         }
     }
+    lock = __atomic_load_n(&sNopLock, __ATOMIC_ACQUIRE);
+    if (lock == NULL) {
+        PlatSem *expected = NULL;
+        lock = plat_sem_create(1);
+        if (!__atomic_compare_exchange_n(&sNopLock, &expected, lock, FALSE, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            lock = expected; // The other thread made it first (the one made here is never used: a one-off leak).
+        }
+    }
+    plat_sem_wait(lock);
+    // Entries the other thread added since the look above.
+    for (n = __atomic_load_n(&sNopCount[table & 1], __ATOMIC_ACQUIRE); i < n; i++) {
+        if (t[i][0] == a && t[i][1] == b) {
+            plat_sem_post(lock);
+            return i;
+        }
+    }
     if (n == NOP_TABLE_SIZE) {
         sNopStats[1]++;
+        plat_sem_post(lock);
         return 0;
     }
     t[n][0] = a;
     t[n][1] = b;
     __atomic_store_n(&sNopCount[table & 1], n + 1, __ATOMIC_RELEASE);
+    plat_sem_post(lock);
     return n;
 }
 
