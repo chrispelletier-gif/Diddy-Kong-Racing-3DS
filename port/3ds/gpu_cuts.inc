@@ -38,7 +38,7 @@ static unsigned int sColourFills, sColourDrawn, sColourProbes; // Section 2's (D
 // Clears drawn rather than filled (round 4, to see which they are): colour clears not the frame's first draw / not the
 // full height / too narrow a band / a new colour while a probe is out; depth clears over the whole screen after a draw
 // / over part of it.
-static unsigned int sFillNo[4], sDepthDrawnWhole, sDepthDrawnPart;
+static unsigned int sFillNo[4], sDepthDrawnWhole, sDepthDrawnPart, sRectFills;
 static int sGpuKinds = -1;            // DKR_GPU_KINDS
 static unsigned int sInvisibleSkipped; // Section 5's (DKR_SKIP_INVISIBLE)
 /* Section 6's (DKR_GPU_DRAWS): a frame whose command list is cut after each of a window of draws. */
@@ -55,7 +55,20 @@ static int sDpFrame[2], sDpParts[2], sDpIndex, sDpStart, sDpCount;
 static unsigned int sDpFrames; // Frames timed by draw since the last log line
 static DrawDesc sDpPart[2][MAX_LIST_PARTS + 1], sDpPrev;
 static void dp_take(int slot, int part, u64 ticks);
+/* What a drawn part's draw looked like, for the costliest one (round 5: #469's 1.9 ms full-screen flat draw). */
+typedef struct DrawDetail {
+    float x0, y0, x1, y1;     // Its vertices' box (clip x, y over w), when drawn from vertices
+    u8 shade[4], prim[4], env[4];
+    GfxCCEquation rgb, alpha; // The first cycle
+    short scissor[4];
+    u8 fogOn, hasBox;
+} DrawDetail;
+static DrawDetail sDpDet[2][MAX_LIST_PARTS + 1], sDpPrevDet, sDpBigDet;
+static DrawDesc sDpBig;
+static u64 sDpBigTicks;
 static int dp_wanted(int frame);
+static int sRectFill = -1; // DKR_RECT_FILL (section 7; read_switches resets it)
+static int rect_as_fill(const GfxDrawState *st, const GfxVertex *v, int numVerts, const u16 *indices);
 static void dp_arm(void);
 static void dp_log(void);
 
@@ -160,10 +173,10 @@ static void PLAT_COLD timeline_log(void) {
     plat_log("GPU cuts: colour clear filled %u times (edges drawn %u, colours read back %u), texture cache clears %u "
              "kept, %u taken out, %u draws left out (they couldn't change a pixel); clears drawn: colour %u after a draw, "
              "%u not the full height, %u too narrow, %u a new colour waiting; depth %u whole screen after a draw, %u part "
-             "of it", sColourFills, sColourDrawn, sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped,
-             sFillNo[0], sFillNo[1], sFillNo[2], sFillNo[3], sDepthDrawnWhole, sDepthDrawnPart);
+             "of it; whole-screen solid rectangles filled %u", sColourFills, sColourDrawn, sColourProbes, sTexClearsKept, sTexClearsDropped, sInvisibleSkipped,
+             sFillNo[0], sFillNo[1], sFillNo[2], sFillNo[3], sDepthDrawnWhole, sDepthDrawnPart, sRectFills);
     memset(sFillNo, 0, sizeof(sFillNo));
-    sDepthDrawnWhole = sDepthDrawnPart = 0;
+    sDepthDrawnWhole = sDepthDrawnPart = sRectFills = 0;
     sColourFills = sColourDrawn = sColourProbes = sTexClearsKept = sTexClearsDropped = sInvisibleSkipped = 0;
     sTlFillTicks = sTlListTicks = sTlCopyTicks = sTlOtherTicks = sTlWholeTicks = 0;
     sTlFrames = sTlJobs = 0;
@@ -775,7 +788,7 @@ static void dp_describe(DrawDesc *d, const GfxDrawState *st, int tris, int path)
 
 /* Backend, at a draw's start (after it is known to be drawn): in the window, the list is cut before it, so the part
  * that ends there holds the draw before (sDpPrev). */
-static inline void dp_draw(const GfxDrawState *st, int tris, int path) {
+static inline void dp_draw(const GfxDrawState *st, int tris, int path, const GfxVertex *verts, int numVerts) {
     int idx;
     FrameSlot *slot;
     if (__builtin_expect(!sDpFrame[sRec], 1)) {
@@ -795,9 +808,37 @@ static inline void dp_draw(const GfxDrawState *st, int tris, int path) {
         // the one before the window's first draw is the frame's start, not timed (kind 0xFF).
         if (slot->numParts > before && idx > sDpStart) {
             sDpPart[sRec][before] = sDpPrev;
+            sDpDet[sRec][before] = sDpPrevDet;
         }
     }
     dp_describe(&sDpPrev, st, tris, path);
+    if (idx >= sDpStart && idx <= sDpStart + DP_WINDOW) {
+        DrawDetail *e = &sDpPrevDet;
+        int i;
+        memset(e, 0, sizeof(*e));
+        memcpy(e->prim, st->prim, 4);
+        memcpy(e->env, st->env, 4);
+        e->rgb = st->combiner.rgb[0];
+        e->alpha = st->combiner.alpha[0];
+        memcpy(e->scissor, st->scissor, sizeof(e->scissor));
+        e->fogOn = st->fogEnabled;
+        if (verts != NULL && numVerts > 0) {
+            e->shade[0] = verts[0].r;
+            e->shade[1] = verts[0].g;
+            e->shade[2] = verts[0].b;
+            e->shade[3] = verts[0].a;
+            e->x0 = e->y0 = 1e9f;
+            e->x1 = e->y1 = -1e9f;
+            for (i = 0; i < numVerts && i < 64; i++) {
+                float w = verts[i].w != 0.0f ? verts[i].w : 1.0f, x = verts[i].x / w, y = verts[i].y / w;
+                e->x0 = x < e->x0 ? x : e->x0;
+                e->x1 = x > e->x1 ? x : e->x1;
+                e->y0 = y < e->y0 ? y : e->y0;
+                e->y1 = y > e->y1 ? y : e->y1;
+            }
+            e->hasBox = 1;
+        }
+    }
 }
 
 /* Backend, frame end: the draw count (for the window's next turn) and the window moved on. */
@@ -807,6 +848,7 @@ static inline void dp_frame_end(void) {
     }
     if (sDpIndex > sDpStart && sDpIndex <= sDpStart + DP_WINDOW && sSlots[sRec].numParts <= MAX_LIST_PARTS) {
         sDpPart[sRec][sSlots[sRec].numParts] = sDpPrev; // The window's last draw is the frame's last: the list's rest
+        sDpDet[sRec][sSlots[sRec].numParts] = sDpPrevDet;
     }
     sDpCount = sDpIndex;
     sDpStart += DP_WINDOW;
@@ -830,6 +872,11 @@ static void dp_take(int slot, int part, u64 ticks) {
     }
     sDpTicksAll += ticks;
     sDpTimed++;
+    if (ticks > sDpBigTicks) {
+        sDpBigTicks = ticks;
+        sDpBig = *d;
+        sDpBigDet = sDpDet[slot][part];
+    }
     for (i = 0; i < sDpKeysUsed; i++) {
         if (dp_same(&sDpKeys[i].d, d)) {
             break;
@@ -903,9 +950,136 @@ static void PLAT_COLD dp_log(void) {
         }
         sDpKeys[best].ticks = 0; // Shown (the table is emptied below)
     }
+    if (sDpBigTicks != 0) {
+        const DrawDesc *d = &sDpBig;
+        const DrawDetail *e = &sDpBigDet;
+        plat_log("GPU draws: the costliest single one, %.3f ms, %s #%d, %d tris, tex %dx%d, blend %d depth %d flat %d: box "
+                 "x %.2f..%.2f y %.2f..%.2f%s, shade %d,%d,%d,%d prim %d,%d,%d,%d env %d,%d,%d,%d, colour (%d-%d)*%d+%d "
+                 "alpha (%d-%d)*%d+%d, scissor %d,%d-%d,%d, fog %d",
+                 ticks_ms(sDpBigTicks), d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?", d->idx, d->tris, d->w,
+                 d->h, d->blend, d->depth, d->flat, e->x0, e->x1, e->y0, e->y1, e->hasBox ? "" : " (none)",
+                 e->shade[0], e->shade[1], e->shade[2], e->shade[3], e->prim[0], e->prim[1], e->prim[2], e->prim[3],
+                 e->env[0], e->env[1], e->env[2], e->env[3], e->rgb.a, e->rgb.b, e->rgb.c, e->rgb.d, e->alpha.a,
+                 e->alpha.b, e->alpha.c, e->alpha.d, e->scissor[0], e->scissor[1], e->scissor[2], e->scissor[3],
+                 e->fogOn);
+        sDpBigTicks = 0;
+    }
     sDpKeysUsed = 0;
     sDpTicksAll = 0;
     sDpTimed = 0;
     sDpFrames = 0;
     (void) i;
+}
+
+/******************************** 7. A solid rectangle as the frame's clear ********************************/
+
+/*
+ * DKR_RECT_FILL (on, New 3DS; round 5): bench #469's per-draw list had, as the first draw of race frames, a
+ * rectangle over the whole screen in one flat colour (untextured, opaque, no depth test or write, one cycle) costing
+ * the GPU ~1.9 ms: as much as a clear drawn, after the game's own clear had already been made a memory fill. Drawn
+ * before anything else in the frame, such a rectangle is a clear in another colour, so it goes the same way
+ * (colour_fill: the fill writes the colour the GPU would have drawn, read back once per colour, and any lines at the
+ * edges the fill can't reach are drawn), replacing the earlier fill. 0 draws it, as before.
+ */
+static int rect_colour_input(const GfxDrawState *st, const GfxVertex *v, int numVerts, int input, int ch, u8 *out) {
+    int i;
+    switch (input) {
+        case GFX_CC_ZERO: *out = 0; return 1;
+        case GFX_CC_ONE: *out = 255; return 1;
+        case GFX_CC_PRIM: *out = st->prim[ch]; return 1;
+        case GFX_CC_ENV: *out = st->env[ch]; return 1;
+        case GFX_CC_PRIM_ALPHA: *out = st->prim[3]; return 1;
+        case GFX_CC_ENV_ALPHA: *out = st->env[3]; return 1;
+        case GFX_CC_SHADE:
+        case GFX_CC_SHADE_ALPHA: {
+            int c = input == GFX_CC_SHADE_ALPHA ? 3 : ch;
+            const u8 *p0 = &v[0].r;
+            for (i = 1; i < numVerts; i++) {
+                if ((&v[i].r)[c] != p0[c]) {
+                    return 0; // Shaded across the rectangle
+                }
+            }
+            *out = p0[c];
+            return 1;
+        }
+        default: return 0;
+    }
+}
+
+/* The constant a one-cycle equation gives (only those whose result is one of its inputs: (a - b) * 0 + d, or
+ * (x - x) * c + d), or 0 if none. */
+static int rect_equation(const GfxDrawState *st, const GfxVertex *v, int numVerts, const GfxCCEquation *eq, int ch,
+                         u8 *out) {
+    if (eq->c != GFX_CC_ZERO && eq->a != eq->b) {
+        return 0;
+    }
+    return rect_colour_input(st, v, numVerts, eq->d, ch, out);
+}
+
+static int rect_as_fill(const GfxDrawState *st, const GfxVertex *v, int numVerts, const u16 *indices) {
+    u8 c[4];
+    short rect[4];
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    int i;
+    if (__builtin_expect(sRectFill < 0, 0)) {
+        sRectFill = plat_switch("DKR_RECT_FILL", !plat_old_3ds()) != 0;
+    }
+    if (!sRectFill || sClearing || sStereo || !st->flat || st->textures[0] != NULL || st->blend != GFX_BLEND_OPAQUE ||
+        st->depthTest || st->depthWrite || st->alphaTest || st->fogEnabled || st->combiner.numCycles != 1 ||
+        numVerts < 3 || numVerts > 6) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        if (!rect_equation(st, v, numVerts, &st->combiner.rgb[0], i, &c[i])) {
+            return 0;
+        }
+    }
+    if (!rect_equation(st, v, numVerts, &st->combiner.alpha[0], 3, &c[3])) {
+        return 0;
+    }
+    for (i = 0; i < numVerts; i++) {
+        float w = v[i].w, x, y;
+        if (w <= 0.0f) {
+            return 0;
+        }
+        x = v[i].x / w;
+        y = v[i].y / w;
+        x0 = x < x0 ? x : x0;
+        x1 = x > x1 ? x : x1;
+        y0 = y < y0 ? y : y0;
+        y1 = y > y1 ? y : y1;
+    }
+    // Back to the game's screen (draw_clear_rect's inverse), within the draw's scissor. Two triangles over a box
+    // only cover it if they are its two halves: the area they cover must be the box's.
+    {
+        float area = 0.0f;
+        for (i = 0; i < 6; i += 3) {
+            const GfxVertex *a = &v[indices[i]], *b = &v[indices[i + 1]], *d = &v[indices[i + 2]];
+            if (indices[i] >= numVerts || indices[i + 1] >= numVerts || indices[i + 2] >= numVerts) {
+                return 0;
+            }
+            area += fabsf((b->x / b->w - a->x / a->w) * (d->y / d->w - a->y / a->w) -
+                          (d->x / d->w - a->x / a->w) * (b->y / b->w - a->y / a->w)) *
+                    0.5f;
+        }
+        if (area < (x1 - x0) * (y1 - y0) * 0.999f) {
+            return 0;
+        }
+    }
+    rect[0] = (short) ceilf((x0 + 1.0f) * (GFX_SCREEN_WIDTH / 2.0f) - 0.01f);
+    rect[2] = (short) floorf((x1 + 1.0f) * (GFX_SCREEN_WIDTH / 2.0f) + 0.01f);
+    rect[1] = (short) ceilf((1.0f - y1) * (GFX_SCREEN_HEIGHT / 2.0f) - 0.01f);
+    rect[3] = (short) floorf((1.0f - y0) * (GFX_SCREEN_HEIGHT / 2.0f) + 0.01f);
+    if (rect[0] < st->scissor[0]) rect[0] = st->scissor[0];
+    if (rect[1] < st->scissor[1]) rect[1] = st->scissor[1];
+    if (rect[2] > st->scissor[2]) rect[2] = st->scissor[2];
+    if (rect[3] > st->scissor[3]) rect[3] = st->scissor[3];
+    if (rect[0] > 0 || rect[2] < GFX_SCREEN_WIDTH - 1) {
+        return 0; // Only a whole-screen one (narrower ones would leave the earlier fill's colour beside them)
+    }
+    if (!colour_fill(rect, ((u32) c[0] << 24) | ((u32) c[1] << 16) | ((u32) c[2] << 8) | c[3])) {
+        return 0;
+    }
+    sRectFills++;
+    return 1;
 }
