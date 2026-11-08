@@ -297,9 +297,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // retraces that came late that way. Raced the old way.
     // Lean quick tests #465/#467 (v35/v36): the GSP thread raised cut Whale Bay's GPU time 11.4 -> 9.8 ms; the 39 ms
     // frames stayed, and v36's probe found them: the game thread slept out its 4 ms bound after a lost broadcast
-    // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c). Raced the old way.
-    { "kernel waits that can lose a wake-up (old)", { "DKR_KCOND", NULL, NULL }, 1, 0, 0, 0 },
-    { "GPU events thread at the renderer's priority (old)", { "DKR_GSP_PRIO", NULL, NULL }, 1, 0, 0, 0 },
+    // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c).
+    // Switch bench #472 (combined build fc6df8e8): both kept. The old GSP priority cost 1.2-5.1 ms of GPU a frame;
+    // the old waits had 10-34 late wakes a race against none, a 1% low of 25.8 against 29.2 on Whale Bay and Windmill
+    // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went; no Old 3DS rows left.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -3172,6 +3173,10 @@ void port_autorun_frame(s32 updateRate) {
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
                 sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
                 sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
+                {
+                    char none[8];
+                    rec_slow_take(none, sizeof(none)); // The slowest frames are listed from here, as worst_frame_ms
+                }
                 sAaFramesStart = gPlatCounters[PLAT_COUNTER_AA_FRAMES];
                 sAaLowStart = gPlatCounters[PLAT_COUNTER_AA_LOW_FRAMES];
                 set_phase(PHASE_RACING);
