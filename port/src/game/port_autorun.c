@@ -329,7 +329,11 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Bench #466 (gpu4): it cost Haunted Woods 1.7 ms of GPU and gained nothing elsewhere, so the New 3DS keeps
     // libctru's priority and the row went. Round 4: v37's kernel lock waits that can't lose a broadcast (DKR_KCOND,
     // on for both consoles) raced the old way, for the New 3DS's pacing and render waits (late_wakes column).
-    { "kernel waits that can lose a wake-up (old)", { "DKR_KCOND", NULL, NULL }, 1, 0, 1, 0 },
+    // Bench #469 (v37 in the combined build): the old waits cost Haunted Woods 2.2 ms of GPU and a 33 ms worst frame,
+    // so DKR_KCOND stays on and its row went. Round 5: #469's per-draw list began race frames with a whole-screen
+    // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
+    // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
+    { "whole-screen solid rectangle drawn (old)", { "DKR_RECT_FILL", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

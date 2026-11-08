@@ -3452,6 +3452,7 @@ static void read_switches(void) {
     sSkipInvisible = -1;
     sSkipKinds = -1;
     sGpuDraws = -1;
+    sRectFill = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
@@ -5851,7 +5852,10 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (skip_invisible(state)) {
         return;
     }
-    dp_draw(state, numTriangles, 0);
+    if (__builtin_expect(sFrameFirstDraw, 0) && numTriangles == 2 && rect_as_fill(state, verts, numVerts, indices)) {
+        return; // A whole-screen solid rectangle before anything else: the frame's memory fill (gpu_cuts.inc 7)
+    }
+    dp_draw(state, numTriangles, 0, verts, numVerts);
     // Coordinates for a second texture only when the draw binds one (else it is the white texture).
     fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
     stride = sVfmtStride[fmt];
@@ -6065,7 +6069,7 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     if (skip_invisible(state)) {
         return;
     }
-    dp_draw(state, numTriangles, 1);
+    dp_draw(state, numTriangles, 1, NULL, 0);
     t0 = prof_enabled() ? plat_ticks() : 0;
     if (__builtin_expect(!sTransformOn, 0)) {
         model_draw_on_cpu(state, params, verts, numVerts, indices, numTriangles, 0);
@@ -6267,7 +6271,7 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         for (i = 0; i < numParts; i++) {
             count += parts[i].numTriangles;
         }
-        dp_draw(state, count, 2);
+        dp_draw(state, count, 2, NULL, 0);
         count = 0;
     }
     t0 = prof_enabled() ? plat_ticks() : 0;
