@@ -3513,7 +3513,15 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
             gShadowOpacity = 1.0f;
             waterTex = waterEffect->texture;
             if (waterTex != NULL && updateRate && waterTex->numOfTextures != 0x100) {
+#ifdef TARGET_PORT
+                // Splash/wake animation: one step per 30 fps frame, split over the two 60 fps frames.
+                waterEffect->textureFrame += gPortHalfStep ? (PORT_TICK() ? waterEffect->animationSpeed -
+                                                                                waterEffect->animationSpeed / 2
+                                                                          : waterEffect->animationSpeed / 2)
+                                                           : waterEffect->animationSpeed;
+#else
                 waterEffect->textureFrame += waterEffect->animationSpeed;
+#endif
                 while (waterTex->numOfTextures < waterEffect->textureFrame) {
                     waterEffect->textureFrame -= waterTex->numOfTextures;
                 }

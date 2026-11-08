@@ -12,5 +12,7 @@
 #define PORT_TICK() (1)
 #define PORT_SHIFT(x, n) ((x) >> (n))
 #define PORT_HALF(x) (x)
+#define PORT_ADD_BEFORE_SHIFT(x, n) (x)
+#define PORT_SHR(x, n) ((x) >> (n))
 #endif
 #endif

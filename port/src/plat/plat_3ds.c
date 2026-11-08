@@ -1599,3 +1599,11 @@ void plat_fatal(const char *fmt, ...) {
     gfxExit();
     exit(1);
 }
+
+/* The 60 fps step check runs only in the host build (port/host/host_stepdiff.c). */
+void plat_step_diff(int updateRate, void (*step)(long), void (*reinput)(long), int context) {
+    (void) updateRate;
+    (void) step;
+    (void) reinput;
+    (void) context;
+}

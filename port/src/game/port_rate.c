@@ -7,6 +7,7 @@
 
 #include "plat/plat.h"
 #include "port.h"
+#include "structs.h"
 
 s32 gPortHalfStep;
 s32 gPortSkipTick;
@@ -40,4 +41,22 @@ void port_set_logic_rate(s32 updateRate) {
  */
 s32 port_car_settle(void) {
     return plat_switch("DKR_CAR_SETTLE", 1) != 0;
+}
+
+/* For the host 60 fps step check: each object's address, behaviour and behaviour data, three words apiece. */
+s32 port_list_objects(u32 *out, s32 max) {
+    extern Object **gObjPtrList;
+    extern s32 gObjectCount;
+    s32 count = 0, i;
+    for (i = 0; i < gObjectCount && count < max; i++) {
+        Object *obj = gObjPtrList[i];
+        if (obj == NULL) {
+            continue;
+        }
+        out[count * 3] = (u32) (uintptr_t) obj;
+        out[count * 3 + 1] = (u32) obj->behaviorId;
+        out[count * 3 + 2] = (u32) (uintptr_t) obj->anyBehaviorData;
+        count++;
+    }
+    return count;
 }
