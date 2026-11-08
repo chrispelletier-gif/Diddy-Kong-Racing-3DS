@@ -1801,7 +1801,7 @@ void plat_fatal(const char *fmt, ...) {
 
     // Shown as text on the top screen (the system error dialog does not appear in every emulator).
     consoleInit(GFX_TOP, &sTopConsole);
-    printf("\x1b[2J\x1b[2;1H\x1b[31mDiddy Kong Racing could not start\x1b[0m\n\n%s\n\n\nPress START to exit.\n", buffer);
+    printf("\x1b[2J\x1b[2;1H\x1b[31mDKR 3D could not start\x1b[0m\n\n%s\n\n\nPress START to exit.\n", buffer);
 
     if (threadGetCurrent() != NULL) {
         // Not the main thread: the main loop keeps the application responsive.

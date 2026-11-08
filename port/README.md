@@ -1,4 +1,4 @@
-# Diddy Kong Racing for Nintendo 3DS
+# DKR 3D (Nintendo 3DS)
 
 A native port of the Diddy Kong Racing decompilation to the Nintendo 3DS. The game code is the decompiled C from
 this repository, compiled for ARM. The N64 hardware it expects is provided by a small emulation layer:

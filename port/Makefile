@@ -1,4 +1,4 @@
-# Native port of Diddy Kong Racing.
+# DKR 3D, a native port of the Diddy Kong Racing decompilation to the Nintendo 3DS.
 #
 #   make -C port TARGET=3ds    builds port/build/3ds/dkr.3dsx (needs devkitARM + libctru + citro3d)
 #   make -C port TARGET=host   builds port/build/host/dkr, a headless PC build used for testing

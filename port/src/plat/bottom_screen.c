@@ -1311,7 +1311,7 @@ static void draw_logo(void) {
     if (sLogo.rgba != NULL) {
         picture(&sLogo, (BS_WIDTH - 160) / 2, sStyle == 2 ? 7 : 3); /* Broadcast's top stripe needs room */
     } else {
-        text_centred(FONT_MONO, 0, BS_WIDTH, 20, "Diddy Kong Racing", YELLOW, 1);
+        text_centred(FONT_MONO, 0, BS_WIDTH, 20, "DKR 3D", YELLOW, 1);
         text_centred(FONT_MONO, 0, BS_WIDTH, 36, "Nintendo 3DS port", DIM, 1);
     }
 }
