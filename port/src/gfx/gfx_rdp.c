@@ -1281,6 +1281,7 @@ typedef struct AtlasPage {
 static AtlasPage sAtlas[ATLAS_KINDS * ATLAS_PAGES_PER_KIND];
 static s32 sAtlasLastReset[ATLAS_KINDS];
 static s32 sAtlasOn;
+static u32 sAtlasKinds = 0xFFFFFFFFu; // v40 DKR_TEX_ATLAS_KINDS (read_switches): the kinds (port_drawtag.h, a bit each) the atlas takes
 static unsigned long sAtlasStats[3]; // Commands drawn from a page, textures placed, sets reset (the profiler's log)
 
 int gfx_atlas_take(unsigned long out[3]) {
@@ -1300,7 +1301,7 @@ static inline TexCacheEntry *atlas_entry_of(const GfxTexture *tex) {
 /* Whether a texture can go in a page at all (worked out once for each texture and filter). */
 static s32 atlas_eligible(const GfxTexture *tex) {
     return tex->width <= ATLAS_MAX_TEX && tex->height <= ATLAS_MAX_TEX && (tex->width & (tex->width - 1)) == 0 &&
-           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn == 2 || !gfx_wants_mipmaps(tex));
+           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn >= 2 || !gfx_wants_mipmaps(tex));
 }
 
 static inline u32 atlas_wrap(s32 i, u32 size, u8 wrap) {
@@ -1434,8 +1435,10 @@ static NOINLINE GfxTexture *atlas_page_for(const GfxTexture *tex, TexAxis *u, Te
     // border coordinates up to half a texel outside the texture read only it and the border.
     du = 0.5f / tex->width;
     dv = 0.5f / tex->height;
-    if (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du || tex_axis_coord(v, minV) < -dv ||
-        tex_axis_coord(v, maxV) > 1.0f + dv) {
+    // v40 DKR_TEX_ATLAS=3, a measurement only: coordinates past the texture are taken too (clamped to it in the page,
+    // so what they tile is drawn wrong), to learn what batching every racer piece would save on the Old 3DS.
+    if (sAtlasOn != 3 && (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du ||
+                          tex_axis_coord(v, minV) < -dv || tex_axis_coord(v, maxV) > 1.0f + dv)) {
         return NULL;
     }
     if (e->atlasState[f] == ATLAS_UNPLACED && !atlas_place(e, tex, f)) {
@@ -2381,6 +2384,8 @@ static void read_switches(void) {
     sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
     {
         s32 atlas = plat_switch("DKR_TEX_ATLAS", 0);
+        // The kinds it takes: all of them, but only the racers in the measurement (3).
+        sAtlasKinds = (u32) plat_switch("DKR_TEX_ATLAS_KINDS", atlas == 3 ? 1 << PORT_DRAW_RACERS : -1);
         if (atlas != sAtlasOn) {
             atlas_forget_all();
             sAtlasOn = atlas;
@@ -4067,7 +4072,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         }
     }
     if (tex1) {
-    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+    } else if (tex0 && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && !u0.divide && !v0.divide) {
         s32 minU = 0x7FFF, maxU = -0x8000, minV = 0x7FFF, maxV = -0x8000;
         GfxTexture *page;
         for (i = 0; i < count; i++) {
@@ -4756,7 +4761,7 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
         float shift = texel_centre_shift(tex);
         tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
-    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+    } else if (tex0 && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && !u0.divide && !v0.divide) {
         GfxTexture *page = atlas_page_for(state.textures[0], &u0, &v0, mesh->minU, mesh->maxU, mesh->minV, mesh->maxV);
         if (page != NULL) {
             state.textures[0] = page;
@@ -5799,6 +5804,18 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 flush_cpu_batch();
             }
             nmat_axes(mat, &state, textured, ax);
+            if (direct && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && state.textures[0] != NULL &&
+                state.textures[1] == NULL && !ax[0].divide && !ax[1].divide) {
+                // v40: the backend's draws from the atlas too (DKR_TEX_ATLAS with DKR_TEX_ATLAS_KINDS, Old 3DS
+                // racers: their 23-35 pieces each, one per small texture, then share a page's buckets). The page
+                // is uploaded (after the buckets holding draws from it) before a draw that needs what was added.
+                GfxTexture *page = atlas_page_for(state.textures[0], &ax[0], &ax[1], mesh->minU, mesh->maxU,
+                                                  mesh->minV, mesh->maxV);
+                if (page != NULL) {
+                    atlas_upload(page);
+                    state.textures[0] = page;
+                }
+            }
             g.curMatrix = cur;
             g.vertexIndex = 0;
             g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));

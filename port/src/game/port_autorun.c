@@ -317,6 +317,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the table, frames and game state identical. Bench run 34 (#481, Whale Bay): racers alone 29.8 fps / 99% at 30
     // as usual with GPU and renderer 0.6 ms worse, every piece 2 ms more renderer and 97%, so DKR_WELD stays 0 and
     // its rows went: a vertex's maths is not what a piece costs the Old 3DS.
+    // v40: what a piece does cost is its draw: a PC Whale Bay race start has ~210 draws a frame, ~60 of them the
+    // racers' (one per texture of each piece). The texture atlas now takes the backend's draws too, but most racer
+    // textures tile (coordinates past their edges), which a page can't hold, so only 61 -> 55. A measurement, not a
+    // setting: every racer piece through the atlas, tiled ones drawn clamped (wrong), racer draws 61 -> 17 at the
+    // start and 40 -> 6 over the race. If it saves the Old 3DS real time, pages that tile those textures come next.
+    { "racer pieces batched (measurement, racer textures look wrong)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 3, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
