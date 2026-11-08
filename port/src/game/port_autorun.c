@@ -300,7 +300,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c).
     // Switch bench #472 (combined build fc6df8e8): both kept. The old GSP priority cost 1.2-5.1 ms of GPU a frame;
     // the old waits had 10-34 late wakes a race against none, a 1% low of 25.8 against 29.2 on Whale Bay and Windmill
-    // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went; no Old 3DS rows left.
+    // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went.
+    // The New 3DS's GPU cuts that are off here: the frame's colour clear as a memory fill (DKR_COLOUR_FILL) and the
+    // whole-screen solid rectangle drawn first in race frames as that fill (DKR_RECT_FILL, ~1.9 ms of New 3DS GPU,
+    // bench #469). Whale Bay's slowest frames wait on 18-41 ms GPU frames (#472), so they race here together.
+    { "colour clear and whole-screen rectangle as memory fills (new)", { "DKR_COLOUR_FILL", "DKR_RECT_FILL", NULL }, 0, 1,
+      0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
