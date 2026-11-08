@@ -314,9 +314,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // A racer's model comes in 23-35 pieces that repeat most of their vertices (~300 sent for ~130 different), so
     // the backend's shared corners (DKR_WELD, gfx_rdp.c weld_vertices) work out a vertex seen again in the same
     // matrix, light and fog once: PC Whale Bay, 31-37% of the racers' vertices (36-38% of every piece's) taken from
-    // the table, frames and game state identical. Raced for the racers alone and for every piece.
-    { "shared corners for the racers (new)", { "DKR_WELD", NULL, NULL }, 0, 1, 0, 0 },
-    { "shared corners for everything (new)", { "DKR_WELD", NULL, NULL }, 0, 2, 0, 0 },
+    // the table, frames and game state identical. Bench run 34 (#481, Whale Bay): racers alone 29.8 fps / 99% at 30
+    // as usual with GPU and renderer 0.6 ms worse, every piece 2 ms more renderer and 97%, so DKR_WELD stays 0 and
+    // its rows went: a vertex's maths is not what a piece costs the Old 3DS.
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
