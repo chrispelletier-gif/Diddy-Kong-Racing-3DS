@@ -238,6 +238,10 @@ void port_frames_video_wait(void) {
         rec_event("late wake %.1f ms, walk %.1f ms of it; at the retrace %s, %s",
                   (now - retraceNs) / 1e6, (walkNs - retraceWalkNs) / 1e6, stage != NULL ? stage : "-",
                   retraceWalkStartNs != 0 ? "walking" : "no walk");
+        (void) walkNs; // (Unused where the recorder is left out: release builds)
+        (void) stage;
+        (void) retraceWalkStartNs;
+        (void) retraceWalkNs;
     }
 }
 

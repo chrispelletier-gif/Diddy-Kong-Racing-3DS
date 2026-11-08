@@ -1728,11 +1728,11 @@ static unsigned long long sObjTicks[PROF_OBJ_BUCKETS + 1];
 static unsigned long long sKindTicks[PROF_KINDS];
 static unsigned long long sKindStart, sKindWaited;
 static s32 sKindTimed;  // This frame times each kind (kind_frame_start)
-static s32 sGpuKindMarks; // This frame tells the backend each change of kind (gfxb_gpu_kinds_frame): 2 to time them
+static s32 sGpuKindMarks; // This frame tells the backend each change of kind (gfxb_gpu_kinds_frame): 2 to time them, 3 to time each draw
 
 /* The backend's GPU timeline (3DS gpu_cuts.inc): the draws from here on are of this kind, in order with them. */
 static COLD NOINLINE void gpu_kind_send(u32 kind) {
-    int value = (int) kind | (sGpuKindMarks == 2 ? GFX_KIND_CUT : 0);
+    int value = (int) kind | (sGpuKindMarks == 2 ? GFX_KIND_CUT : sGpuKindMarks == 3 ? GFX_KIND_DRAWS : 0);
     int *p = gfx_split_call_reserve(gfxb_gpu_kind_call, sizeof(int) * 2);
     if (p == NULL) {
         gfxb_gpu_kind(value); // Not queued this frame: the backend's calls are made at once

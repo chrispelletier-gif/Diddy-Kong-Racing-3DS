@@ -300,6 +300,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // v35: the GSP event thread (retraces, the GPU's next command list, the swap) above the walk (DKR_GSP_PRIO,
     // plat_3ds.c): at the walk's priority it waited for the walk, and lean quick test #462's 39 ms worst frames were
     // retraces that came late that way. Raced the old way.
+    // Lean quick tests #465/#467 (v35/v36): the GSP thread raised cut Whale Bay's GPU time 11.4 -> 9.8 ms; the 39 ms
+    // frames stayed, and v36's probe found them: the game thread slept out its 4 ms bound after a lost broadcast
+    // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c). Raced the old way.
+    { "kernel waits that can lose a wake-up (old)", { "DKR_KCOND", NULL, NULL }, 1, 0, 0, 0 },
     { "GPU events thread at the renderer's priority (old)", { "DKR_GSP_PRIO", NULL, NULL }, 1, 0, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
@@ -326,7 +330,10 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // Round 3: the GPU events thread above the renderer's priority on a New 3DS too (DKR_GSP_PRIO=1, v35's Old 3DS
     // default): at equal priority the next list part and the swap waited for the walk, idle GPU time that the
     // timeline can't see.
-    { "GPU events thread above the renderer (new)", { "DKR_GSP_PRIO", NULL, NULL }, 0, 1, 1, 0 },
+    // Bench #466 (gpu4): it cost Haunted Woods 1.7 ms of GPU and gained nothing elsewhere, so the New 3DS keeps
+    // libctru's priority and the row went. Round 4: v37's kernel lock waits that can't lose a broadcast (DKR_KCOND,
+    // on for both consoles) raced the old way, for the New 3DS's pacing and render waits (late_wakes column).
+    { "kernel waits that can lose a wake-up (old)", { "DKR_KCOND", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

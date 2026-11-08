@@ -641,27 +641,72 @@ void plat_kunlock(void) {
 }
 
 /*
+ * v37 (DKR_KCOND, roadmap P50): the kernel lock's waits without libctru's condition variable, which can lose a
+ * broadcast. Its waiter counts itself in the variable and unlocks the lock before it reaches the kernel's wait; a
+ * broadcast in that gap zeroes the count and wakes no one, and when another waiter has counted itself in by the time
+ * the first one reaches the kernel, the count is below zero again, so the first sleeps on, until its bound (4 ms).
+ * Lean quick test #467 (Old 3DS): 45 such wakes in the last race's 35 s, every one 4.2-5.7 ms after the retrace that
+ * should have woken the game (the walk idle meanwhile): the 38-39 ms worst frame of every track.
+ * Here a waiter counts itself under the lock, reads the variable's broadcast count and sleeps only while the count is
+ * unchanged, which the kernel checks as it puts it to sleep (ARBITRATION_WAIT_IF_LESS_THAN count + 1), so a broadcast
+ * at any moment after the read wakes it. Every broadcast does both kinds, so the switch can change while threads wait
+ * (re-read with the GSP thread's priority, every 64 retraces). 0 = libctru's (old).
+ */
+typedef struct KCond {
+    volatile s32 count;   // Broadcasts so far (wraps; a waiter at the wrap just wakes early)
+    volatile s32 waiters; // Under the kernel lock
+} KCond;
+static KCond sKernelK, sKeyedK[PLAT_KEYED_CONDS];
+static volatile int sKcondNew = 1;
+
+/* Returns whether it timed out (with no broadcast since it started). */
+static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
+    s32 count;
+    Result rc;
+    if (!sKcondNew) {
+        return CondVar_WaitTimeout(old, &sKernelLock, ns) != 0;
+    }
+    k->waiters++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    count = __atomic_load_n(&k->count, __ATOMIC_SEQ_CST);
+    LightLock_Unlock(&sKernelLock);
+    rc = syncArbitrateAddressWithTimeout((s32 *) &k->count, ARBITRATION_WAIT_IF_LESS_THAN_TIMEOUT,
+                                         (s32) ((u32) count + 1), ns);
+    LightLock_Lock(&sKernelLock);
+    k->waiters--;
+    return R_DESCRIPTION(rc) == RD_TIMEOUT && __atomic_load_n(&k->count, __ATOMIC_SEQ_CST) == count;
+}
+
+static void kcond_broadcast(KCond *k, CondVar *old) {
+    CondVar_Broadcast(old); // (No system call when no one waits on it)
+    __atomic_add_fetch(&k->count, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&k->waiters, __ATOMIC_SEQ_CST) > 0) {
+        syncArbitrateAddress((s32 *) &k->count, ARBITRATION_SIGNAL, -1);
+    }
+}
+
+/*
  * Bounded, as every caller loops on its condition: a broadcast the condition variable loses then costs a few
  * milliseconds instead of a frozen game (see QUEUE_WAIT_NS in os_core.c).
  */
 void plat_kwait(void) {
-    CondVar_WaitTimeout(&sKernelCond, &sKernelLock, 4000000LL);
+    kcond_wait(&sKernelK, &sKernelCond, 4000000LL);
 }
 
 int plat_kwait_timeout(unsigned long long ns) {
-    return CondVar_WaitTimeout(&sKernelCond, &sKernelLock, (s64) ns) != 0;
+    return kcond_wait(&sKernelK, &sKernelCond, (s64) ns);
 }
 
 void plat_kbroadcast(void) {
-    CondVar_Broadcast(&sKernelCond);
+    kcond_broadcast(&sKernelK, &sKernelCond);
 }
 
 int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
-    return CondVar_WaitTimeout(&sKeyedConds[PLAT_KEY_SLOT(key)], &sKernelLock, (s64) ns) != 0;
+    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)], (s64) ns);
 }
 
 void plat_kbroadcast_on(const void *key) {
-    CondVar_Broadcast(&sKeyedConds[PLAT_KEY_SLOT(key)]);
+    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {
@@ -759,6 +804,11 @@ void plat_wait_vblank(void) {
         sVblankRefTick = now;
     }
     if ((calls++ & 63) == 0) {
+        int kcond = plat_switch("DKR_KCOND", 1) != 0;
+        if (kcond != sKcondNew) {
+            sKcondNew = kcond;
+            plat_log("kernel lock waits: %s", kcond ? "can't lose a wake-up" : "libctru's condition variable");
+        }
         gsp_priority_update();
     }
 }
