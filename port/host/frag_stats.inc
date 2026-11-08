@@ -79,7 +79,8 @@ static void frag_frame_end(void) {
     if (sFragStats == 3) {
         // This frame's share of the running sums: rasterized screens and triangles by kind.
         static FILE *sCsv;
-        static unsigned long long sPrevRaster[PROF_KINDS + 2], sPrevTris[PROF_KINDS + 2], sPrevBlend[PROF_KINDS + 2];
+        static unsigned long long sPrevRaster[PROF_KINDS + 2], sPrevTris[PROF_KINDS + 2], sPrevBlend[PROF_KINDS + 2],
+            sPrevDraws[PROF_KINDS + 2];
         static unsigned long long sFrameNo;
         if (sCsv == NULL) {
             char path[512];
@@ -88,7 +89,7 @@ static void frag_frame_end(void) {
             if (sCsv != NULL) {
                 fprintf(sCsv, "frame,raster,blend,tris");
                 for (k = 0; k < 9; k++) {
-                    fprintf(sCsv, ",raster_%d,tris_%d", k, k);
+                    fprintf(sCsv, ",raster_%d,tris_%d,draws_%d", k, k, k);
                 }
                 fprintf(sCsv, "\n");
             }
@@ -102,7 +103,8 @@ static void frag_frame_end(void) {
             }
             fprintf(sCsv, "%llu,%.3f,%.3f,%.0f", sFrameNo, raster, blend, tris);
             for (k = 0; k < 9; k++) {
-                fprintf(sCsv, ",%.3f,%llu", (sFragRaster[k] - sPrevRaster[k]) / screen, sFragTris[k] - sPrevTris[k]);
+                fprintf(sCsv, ",%.3f,%llu,%llu", (sFragRaster[k] - sPrevRaster[k]) / screen, sFragTris[k] - sPrevTris[k],
+                        sFragDraws[k] - sPrevDraws[k]);
             }
             fprintf(sCsv, "\n");
         }
@@ -110,10 +112,12 @@ static void frag_frame_end(void) {
         memcpy(sPrevRaster, sFragRaster, sizeof(sPrevRaster));
         memcpy(sPrevTris, sFragTris, sizeof(sPrevTris));
         memcpy(sPrevBlend, sFragBlend, sizeof(sPrevBlend));
+        memcpy(sPrevDraws, sFragDraws, sizeof(sPrevDraws));
         if ((sFragFrames + 1) % 300 == 0) {
             memset(sPrevRaster, 0, sizeof(sPrevRaster)); // The sums restart below
             memset(sPrevTris, 0, sizeof(sPrevTris));
             memset(sPrevBlend, 0, sizeof(sPrevBlend));
+            memset(sPrevDraws, 0, sizeof(sPrevDraws));
         }
     }
     memset(sFragLast, 0, sizeof(sFragLast));
