@@ -3897,6 +3897,66 @@ static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds)
 }
 #endif
 
+#if defined(TARGET_PORT) && PICA_ALL
+/*
+ * DKR_RACER_LOD_SMOOTH (Old 3DS 2; 1 eased only; 0 the old instant switch). While the frame rate drops
+ * (gPortRacerLodBoost) the other karts' distances move towards the 4-player row (boostRow bytes on in the table),
+ * eased by gPortRacerLodBlend (~1 s in, ~2 s out) instead of all at once, so karts change one at a time as the
+ * distance passes them; with 2 a kart only gets simpler while it moves away from the camera and more detailed while
+ * it comes closer, as the game's own distance swaps look. Matters at the 1- and 2-player distances (the 3-player row
+ * equals the 4-player one). Blend 0 = exactly port_racer_lod_hold on the usual distances.
+ */
+static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 boostRow) {
+    extern s32 gPortRacerLodBlend;
+    extern unsigned int gPortLevelLoads;
+    static s8 sPrevModel[8];
+    static s16 sPrevDist[8];
+    static u32 sValid; // A bit per racer
+    static unsigned int sLevel;
+    u8 thr[5];
+    s32 blend = gPortRacerLodBlend;
+    s32 target = usual, result, prev, lo, hi, d, k;
+
+    if (sLevel != gPortLevelLoads) {
+        sLevel = gPortLevelLoads;
+        sValid = 0;
+    }
+    if (racer < 0 || racer >= 8 || v < -50 || blend <= 0 || boostRow <= 0) {
+        if (racer >= 0 && racer < 8) {
+            sValid &= ~(1u << racer);
+        }
+        return port_racer_lod_hold(racer, usual, v, row);
+    }
+    d = v >> 1;
+    if (d < 0) {
+        d = 0;
+    }
+    for (k = 0; k < 5; k++) {
+        thr[k] = (u8) (row[k] + ((((s32) row[boostRow + k] - (s32) row[k]) * blend) >> 8));
+    }
+    for (target = 0; target < 5; target++) {
+        if (d < thr[target]) {
+            break;
+        }
+    }
+    result = target;
+    if ((sValid & (1u << racer)) && plat_switch("DKR_RACER_LOD_SMOOTH", plat_old_3ds() ? 2 : 0) >= 2) {
+        lo = (usual < target) ? usual : target;
+        hi = (usual < target) ? target : usual;
+        prev = sPrevModel[racer];
+        prev = (prev < lo) ? lo : (prev > hi) ? hi : prev;
+        result = prev;
+        if ((target > prev && d > sPrevDist[racer]) || (target < prev && d < sPrevDist[racer])) {
+            result = target;
+        }
+    }
+    sPrevModel[racer] = (s8) result;
+    sPrevDist[racer] = (s16) ((d > 32767) ? 32767 : d);
+    sValid |= 1u << racer;
+    return port_racer_lod_hold(racer, result, v, thr);
+}
+#endif
+
 void set_temp_model_transforms(Object *obj) {
     s32 batchNum;
     ObjectModel *objModel;
@@ -3911,6 +3971,7 @@ void set_temp_model_transforms(Object *obj) {
 #if defined(TARGET_PORT) && PICA_ALL
     u8 *racerBaseAsset = NULL; // Non-NULL for another racer's kart (port_racer_lod_hold)
     s32 portRawV = 0;
+    s32 lodBoostRow = 0;
 #endif
     Object_Racer *objRacer;
     f32 ret1;
@@ -3957,14 +4018,17 @@ void set_temp_model_transforms(Object *obj) {
                             {
                                 extern s32 gPortRacerLodBoost;
                                 racerBaseAsset = bossAsset; // Marks another racer's kart for port_racer_lod_hold
-                                if (gPortRacerLodBoost) {
-                                    bias = 3; // The frame rate is dropping: 4-player distances (src/thread3_main.c)
-                                }
+                                (void) gPortRacerLodBoost; // Eased in by gPortRacerLodBlend instead (port_racer_lod_ease)
                             }
 #endif
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }
+#if PICA_ALL
+                            // The frame rate is dropping: towards the 4-player row of the same table (10 bytes a
+                            // layout), eased by gPortRacerLodBlend (src/thread3_main.c, port_racer_lod_ease).
+                            lodBoostRow = (lodLayout < 3) ? (3 - lodLayout) * 10 : 0;
+#endif
                         }
                         bossAsset += lodLayout * 10;
                     }
@@ -4013,7 +4077,7 @@ void set_temp_model_transforms(Object *obj) {
                     }
 #if defined(TARGET_PORT) && PICA_ALL
                     if (racerBaseAsset != NULL) { // Another racer's kart (DKR_RACER_LOD_HOLD)
-                        modelIndex = port_racer_lod_hold(objRacer->racerIndex, modelIndex, portRawV, bossAsset);
+                        modelIndex = port_racer_lod_ease(objRacer->racerIndex, modelIndex, portRawV, bossAsset, lodBoostRow);
                     }
 #endif
                 }

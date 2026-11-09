@@ -326,6 +326,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 0, 0 },
     { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 0, 0 },
     { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
+    // While the frame rate drops, the other karts' distances move to the 4-player ones (DKR_RACER_LOD_ADAPT), which
+    // only changes anything at the 1- and 2-player distances above. That switch is now eased over ~1 s in and 2 s out,
+    // a kart only getting simpler while it moves away (DKR_RACER_LOD_SMOOTH=2, objects.c port_racer_lod_ease); this
+    // row races the game's own distances with the old all-at-once switch (both variables 0), against the row above.
+    { "other karts' detail at the game's own distances, dropped all at once when slow (old)",
+      { "DKR_RACER_LOD", "DKR_RACER_LOD_SMOOTH", NULL }, 2, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

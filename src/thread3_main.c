@@ -128,6 +128,10 @@ Gfx *gDisplayLists[DL_BUFFERS];
  * karts use their simpler models at the 4-player distances (src/objects.c). On after two slow frames within eight,
  * off again after five seconds without one. The game's own retrace count decides, so lockstep runs never change. */
 s32 gPortRacerLodBoost;
+/* DKR_RACER_LOD_SMOOTH (Old 3DS default 2; 0 = the old instant swap): how far the other karts' model distances are
+ * from their usual ones to the 4-player ones, 0-256. It eases in over about a second and out over two instead of
+ * jumping, so karts change model one at a time (src/objects.c). */
+s32 gPortRacerLodBlend;
 s32 gPortDlBytes; // Each of gDisplayLists' size: the renderer leaves lists inside them alone (gfx_rdp.c nop_static)
 #endif
 Gfx *gCurrDisplayList;
@@ -447,6 +451,25 @@ void main_game_loop(void) {
             sHold--;
         }
         gPortRacerLodBoost = sAdapt && sHold > 0;
+        // The 2026-11-09 user report: after the first three seconds the switch to simpler karts was still seen, every
+        // kart between the two distances changing in the same frame. Eased, each kart changes as the distance passes
+        // it (and with 2, only while it moves away: src/objects.c).
+        if (plat_switch("DKR_RACER_LOD_SMOOTH", plat_old_3ds() ? 2 : 0) == 0) {
+            gPortRacerLodBlend = gPortRacerLodBoost ? 256 : 0;
+        } else if (gPortRacerLodBoost) {
+            gPortRacerLodBlend += 8 * tempLogicUpdateRate; // ~1 s at 30 fps (2 retraces a frame)
+            if (gPortRacerLodBlend > 256) {
+                gPortRacerLodBlend = 256;
+            }
+        } else {
+            gPortRacerLodBlend -= 4 * tempLogicUpdateRate; // ~2 s
+            if (gPortRacerLodBlend < 0) {
+                gPortRacerLodBlend = 0;
+            }
+        }
+        if (sQuiet == 90) {
+            gPortRacerLodBlend = 0; // A new level starts with the usual distances
+        }
     }
 #endif
     port_game_section(PORT_SEC_END_NOTE);
