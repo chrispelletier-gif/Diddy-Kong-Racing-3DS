@@ -318,6 +318,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // setting: every racer piece through the atlas, tiled ones drawn clamped (wrong), racer draws 61 -> 17 at the
     // start and 40 -> 6 over the race. If it saves the Old 3DS real time, pages that tile those textures come next.
     { "racer pieces batched (measurement, racer textures look wrong)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 3, 1, 0 },
+    // v41 (user, 2026-11-09: the other karts' simpler models are barely noticeable, can it be avoided?): the Old 3DS
+    // has used 3-player distances for the other karts since run 16 (DKR_RACER_LOD=2), when it was far slower. Since
+    // KCOND (v37) Whale Bay holds 99% of frames at 30 (#481), so the 2-player (1) and the game's own distances (0) are
+    // raced again. And a kart no longer flickers between two models at a threshold (DKR_RACER_LOD_HOLD=4, on by
+    // default: PC Whale Bay 5 -> 2 flips back within a second); raced against the old way.
+    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 0, 0 },
+    { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 0, 0 },
+    { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
