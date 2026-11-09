@@ -345,6 +345,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
     // Raced the old way.
     { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
+    // Old 3DS stereo 3D (2026-11-09, "Get Old 3DS to 30 fps in stereo 3D" thread, its own local branch): what 3D costs
+    // and what wins it back, against the usual races in 2D. DKR_STEREO3D=2 draws in 3D whatever the slider says (as if
+    // all the way up; anti-aliasing is off in 3D, so the GPU fills as many pixels as the usual races' 2x). Today's 3D
+    // sends every draw once for each eye, with a change of target between; made once (P33, DKR_STEREO_ONCE) the GPU
+    // runs the frame's commands twice; and the walk's back face culling (P40), off in 3D until now, tests both eyes
+    // (DKR_STEREO_CULL, gfx_rdp.c face_test). Each a measurement, raced alone.
+    { "3D, every draw sent for each eye (today's 3D)", { "DKR_STEREO3D", NULL, NULL }, 0, 2, 1, 0 },
+    { "3D made once, the GPU running it for each eye (P33)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 2, 1, 0 },
+    { "3D made once, back faces culled for both eyes",
+      { "DKR_STEREO3D", "DKR_STEREO_ONCE", "DKR_STEREO_CULL" }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

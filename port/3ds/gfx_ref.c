@@ -14,6 +14,7 @@
 #define gfxb_texture_share refb_texture_share
 #define gfxb_gpu_transform refb_gpu_transform
 #define gfxb_cpu_cull_ok refb_cpu_cull_ok
+#define gfxb_cpu_cull_margin refb_cpu_cull_margin
 #define gfxb_model_check refb_model_check
 #define gfxb_draw_model refb_draw_model
 #define gfxb_mesh_create refb_mesh_create

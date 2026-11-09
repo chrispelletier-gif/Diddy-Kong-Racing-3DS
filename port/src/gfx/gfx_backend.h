@@ -251,8 +251,11 @@ static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, un
 /* What gfxb_model_check says about a model draw whose model space box is boxMin..boxMax. */
 enum { GFX_MODEL_CPU, GFX_MODEL_GPU, GFX_MODEL_HIDDEN };
 int gfxb_gpu_transform(void);
-/* Whether the walk may cull back faces itself this frame (DKR_CPU_CULL): not while the frame is drawn for two eyes. */
+/* Whether the walk may cull back faces itself this frame (DKR_CPU_CULL): in 3D only with DKR_STEREO_CULL. */
 int gfxb_cpu_cull_ok(void);
+/* With it, how far (in clip x) an eye may move a vertex this frame: the walk drops a triangle only if it faces away
+ * in both eyes, and leaves the GPU's culling on one that faces away in one. 0: no 3D, the plain test. */
+float gfxb_cpu_cull_margin(void);
 int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short boxMax[3]);
 
 /*
