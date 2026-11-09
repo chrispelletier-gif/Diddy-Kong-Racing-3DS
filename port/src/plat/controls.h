@@ -22,6 +22,10 @@ enum {
     CTRL_KEY_ZL,
     CTRL_KEY_ZR,
     CTRL_KEY_SELECT,
+    CTRL_KEY_DUP,
+    CTRL_KEY_DDOWN,
+    CTRL_KEY_DLEFT,
+    CTRL_KEY_DRIGHT,
     CTRL_KEY_COUNT
 };
 
@@ -48,8 +52,12 @@ enum {
 /* Loads controls.txt (once; later calls do nothing). */
 void controls_init(void);
 
-/* The N64 buttons pressed by the held console buttons (bit n = CTRL_KEY_n). */
-unsigned short controls_map_buttons(unsigned int heldKeys);
+/*
+ * The N64 buttons pressed by the held console buttons (bit n = CTRL_KEY_n). With menu set (a menu is on screen, not
+ * the race) the standard layout is used whatever is remapped, so A always confirms, B always goes back and the D-Pad
+ * always moves.
+ */
+unsigned short controls_map_buttons(unsigned int heldKeys, int menu);
 
 /*
  * The N64 stick (-80..80 per axis) for a raw stick position, where fullRange is how far the raw stick reaches from
