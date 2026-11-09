@@ -338,6 +338,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // row races the game's own distances with the old all-at-once switch (both variables 0), against the row above.
     { "other karts' detail at the game's own distances, dropped all at once when slow (old)",
       { "DKR_RACER_LOD", "DKR_RACER_LOD_SMOOTH", NULL }, 2, 0, 1, 0 },
+    // Taj's pond in the Central Area (bug report #482, v39): the view with the pond's ten frogs and Taj drew 150-200
+    // draws a frame on PC against ~55 elsewhere in the hub, and the backend was busy 30 ms a frame there (17 ms
+    // elsewhere). Every solid object's shadow sat between two objects' models, so no two shadows shared a draw: the
+    // shadows now go first, together (DKR_SHADOWS_FIRST, tracks.c), and the frogs' batch. PC hub tour: shadow draws
+    // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
+    // Raced the old way.
+    { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */

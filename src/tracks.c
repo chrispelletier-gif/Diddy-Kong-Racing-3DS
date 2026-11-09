@@ -1890,7 +1890,10 @@ void render_level_geometry_and_objects(void) {
 #ifdef TARGET_PORT
     s32 portFirst, portCount;
     Object **portObjs = objGetObjList(&portFirst, &portCount); // v31: for PORT_PREFETCH_OBJS
+    s32 portShadowsFirst; // DKR_SHADOWS_FIRST (below)
     sPortSegmentsAllowed = gCurrentLevelModel->numberOfSegments > 1 ? 0 : 1;
+#else
+#define portShadowsFirst 0
 #endif
     if (gCurrentLevelModel->numberOfSegments > 1) {
         numberOfSegments = 0;
@@ -1926,6 +1929,31 @@ void render_level_geometry_and_objects(void) {
     sort_objects_by_dist(sp160, objCount - 1);
     port_game_section(PORT_SEC_OBJECTS);
     visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
+#ifdef TARGET_PORT
+    /*
+     * DKR_SHADOWS_FIRST (Old 3DS, Taj's pond in the Central Area, bug report #482): the solid objects' shadows are
+     * drawn together before the objects instead of each just before its own object. A draw costs the Old 3DS
+     * renderer far more than its triangles, and with each shadow between two objects' models no two shadows ever
+     * share a draw; together, the shadows of objects with the same shadow texture (the pond's ten frogs) batch. The
+     * shadows don't write depth and lie on the ground under their objects, so the picture only changes where a
+     * shadow is seen in front of a farther object.
+     */
+    portShadowsFirst = port_shadows_first();
+    if (portShadowsFirst) {
+        for (i = sp160; i < objCount; i++) {
+            obj = get_object(i);
+            objFlags = obj->trans.flags;
+            if (obj->shadow == NULL || (objFlags & (OBJ_FLAGS_PARTICLE | OBJ_FLAGS_UNK_0080 | visibleFlags)) ||
+                obj->opacity != 255) {
+                continue;
+            }
+            if (check_if_in_draw_range(obj) && (objectsVisible[obj->segmentID + 1] || obj->unk34 > 1000.0)) {
+                port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
+                shadow_render(obj, obj->shadow);
+            }
+        }
+    }
+#endif
 
     for (i = sp160; i < objCount; i++) {
         obj = get_object(i);
@@ -1945,7 +1973,7 @@ void render_level_geometry_and_objects(void) {
             if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 continue;
-            } else if (obj->shadow != NULL) {
+            } else if (obj->shadow != NULL && !portShadowsFirst) {
                 port_draw_tag(gTrackDL++, PORT_DRAW_SHADOWS);
                 shadow_render(obj, obj->shadow);
             }
