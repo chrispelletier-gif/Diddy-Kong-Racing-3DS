@@ -485,6 +485,17 @@ int port_native_mesh_for(int isRacer) {
 
 unsigned int gPortLevelLoads;
 
+/* DKR_SHADOWS_FIRST (tracks.c render_scene's objects): 1 on, 0 off; default on for the Old 3DS, whose renderer pays
+ * per draw. */
+int port_shadows_first(void) {
+    static int epoch = -1, on;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        on = plat_switch("DKR_SHADOWS_FIRST", plat_old_3ds() ? 1 : 0) != 0;
+    }
+    return on;
+}
+
 int port_native_track(void) {
     static int epoch = -1, on;
     if (epoch != gPlatSwitchEpoch) {

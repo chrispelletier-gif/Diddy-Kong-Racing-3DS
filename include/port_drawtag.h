@@ -114,6 +114,7 @@ int port_native_mesh_for(int isRacer);
  */
 #define PORT_TRACK_TAG 0x50540000 /* "PT" */
 int port_native_track(void);
+int port_shadows_first(void); // DKR_SHADOWS_FIRST: solid objects' shadows drawn together first (tracks.c)
 extern unsigned int gPortLevelLoads;
 /*
  * GPU vertex lighting (off-GitHub PICA_ALL test build, DKR_GPU_LIGHT): render_mesh puts PORT_LIGHT_TAG | 1 and then
