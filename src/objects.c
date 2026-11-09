@@ -3857,6 +3857,46 @@ void object_undo_player_tumble(Object *obj) {
     }
 }
 
+#if defined(TARGET_PORT) && PICA_ALL
+/*
+ * v41 (DKR_RACER_LOD_HOLD=n, on an Old 3DS 4 by default; 0 the old way): the other karts change model at fixed
+ * distances, and one racing right at a threshold flips between two models every few frames (seen on PC: 3 -> 4 -> 3
+ * -> 4 for one kart within a second), each flip a visible pop. Now a kart moving away keeps its more detailed model
+ * until it is n steps (16 world units each, the units the thresholds are in) past the threshold, and takes it back as
+ * soon as it is closer than the threshold again: one change each way, never a flicker. (The adaptive boost changes
+ * nothing on an Old 3DS: the 3-player distances it starts from equal the 4-player ones for the other karts.)
+ */
+static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds) {
+    static s8 sPrev[8];
+    static u32 sLoads = 0xFFFFFFFFu;
+    extern unsigned int gPortLevelLoads;
+    s32 hold = plat_switch("DKR_RACER_LOD_HOLD", plat_old_3ds() ? 4 : 0), prev;
+    if (racer < 0 || racer >= 8 || hold <= 0) {
+        return want;
+    }
+    if (sLoads != gPortLevelLoads) {
+        sLoads = gPortLevelLoads;
+        __builtin_memset(sPrev, -1, sizeof(sPrev));
+    }
+    prev = sPrev[racer];
+    if (prev >= 0 && prev < want && v >= -50) {
+        // Moving to a less detailed model: only once past every threshold in between by the margin.
+        s32 d = v >> 1, k;
+        if (d < 0) {
+            d = 0;
+        }
+        for (k = prev; k < want && k < 5; k++) {
+            if (d < thresholds[k] + hold) {
+                want = k; // Still within the margin of threshold k: keep model k
+                break;
+            }
+        }
+    }
+    sPrev[racer] = (s8) want;
+    return want;
+}
+#endif
+
 void set_temp_model_transforms(Object *obj) {
     s32 batchNum;
     ObjectModel *objModel;
@@ -3868,6 +3908,10 @@ void set_temp_model_transforms(Object *obj) {
     u8 *var_a1;
     f32 ret2;
     UNUSED s32 pad;
+#if defined(TARGET_PORT) && PICA_ALL
+    u8 *racerBaseAsset = NULL; // Non-NULL for another racer's kart (port_racer_lod_hold)
+    s32 portRawV = 0;
+#endif
     Object_Racer *objRacer;
     f32 ret1;
     s32 firstNonEmptyModelIndex;
@@ -3912,6 +3956,7 @@ void set_temp_model_transforms(Object *obj) {
 #if PICA_ALL
                             {
                                 extern s32 gPortRacerLodBoost;
+                                racerBaseAsset = bossAsset; // Marks another racer's kart for port_racer_lod_hold
                                 if (gPortRacerLodBoost) {
                                     bias = 3; // The frame rate is dropping: 4-player distances (src/thread3_main.c)
                                 }
@@ -3941,6 +3986,9 @@ void set_temp_model_transforms(Object *obj) {
                     obj->trans.scale *= var_f0;
                     var_v1 *= ((f32 *) get_misc_asset(ASSET_MISC_4))[objRacer->characterId];
                     // ASSET_MISC_4 is just 10 floats of 1.0f. One for each playable character.
+#if defined(TARGET_PORT) && PICA_ALL
+                    portRawV = var_v1;
+#endif
                     if (var_v1 < -50) {
                         modelIndex = 5;
                     } else {
@@ -3963,6 +4011,11 @@ void set_temp_model_transforms(Object *obj) {
                             modelIndex = 5;
                         }
                     }
+#if defined(TARGET_PORT) && PICA_ALL
+                    if (racerBaseAsset != NULL) { // Another racer's kart (DKR_RACER_LOD_HOLD)
+                        modelIndex = port_racer_lod_hold(objRacer->racerIndex, modelIndex, portRawV, bossAsset);
+                    }
+#endif
                 }
             }
 
