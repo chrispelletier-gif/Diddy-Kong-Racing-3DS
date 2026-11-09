@@ -69,10 +69,19 @@ static s32 step_of(s32 page) {
     return -1;
 }
 
+/* The play style a style page's tile stands for. A New 3DS's tiles are Classic, Enhanced, Speedy; an Old 3DS's are
+ * Classic, Classic Plus (the 4:3 picture with Enhanced's camera and map, which its GPU keeps up with best) and Enhanced. */
+static s32 style_of_tile(s32 tile) {
+    if (can_60fps()) {
+        return tile;
+    }
+    return tile == 0 ? SETUP_STYLE_CLASSIC : tile == 1 ? SETUP_STYLE_CLASSICPLUS : SETUP_STYLE_ENHANCED;
+}
+
 static s32 tile_count(s32 page) {
     switch (page) {
         case SETUP_PAGE_STYLE:
-            return can_60fps() ? 3 : 2;
+            return 3;
         case SETUP_PAGE_SCREEN:
         case SETUP_PAGE_LOOK:
             return 4;
@@ -96,10 +105,11 @@ static void apply_tile(s32 page, s32 tile) {
             break;
         case SETUP_PAGE_STYLE:
             sStyle = tile;
+            tile = style_of_tile(tile);
             if (can_60fps()) {
                 plat_set_picture_style(tile == SETUP_STYLE_SPEEDY);
             }
-            plat_set_widescreen_style(tile == SETUP_STYLE_CLASSIC ? 0 : 2);
+            plat_set_widescreen_style(tile == SETUP_STYLE_CLASSIC || tile == SETUP_STYLE_CLASSICPLUS ? 0 : 2);
             port_set_modern_camera(tile != SETUP_STYLE_CLASSIC);
             port_set_race_hud_setting(tile == SETUP_STYLE_CLASSIC ? RACE_HUD_TOP : RACE_HUD_BOTTOM);
             break;
@@ -195,6 +205,28 @@ static const TileText sStyleTiles[3] = {
         { "Ecran large", "60 ips", "Camera moderne", "Carte en bas" } },
       { "Everything from Enhanced at 60 frames a second, for the smoothest motion. Edges are rougher.",
         "Comme Ameliore, a 60 images par seconde pour des mouvements plus fluides. Les bords sont moins lisses." } },
+};
+
+/* An Old 3DS's play styles: widescreen costs it frames, so Classic Plus is the one recommended. */
+static const TileText sStyleTilesOld[3] = {
+    { { "CLASSIC", "CLASSIQUE" },
+      { "LIKE THE N64", "COMME LA N64" },
+      { { "4:3 picture", "30 fps, sharp", "Original camera", "Race info on top" },
+        { "Image 4:3", "30 ips, nette", "Camera d'origine", "Infos en haut" } },
+      { "Diddy Kong Racing as it was in 1997: the N64's picture shape, camera and race info.",
+        "Diddy Kong Racing comme en 1997: la forme d'image, la camera et les infos de course de la N64." } },
+    { { "CLASSIC +", "CLASSIQUE +" },
+      { "RECOMMENDED", "RECOMMANDE" },
+      { { "4:3 picture", "30 fps, sharp", "Modern camera", "Map below" },
+        { "Image 4:3", "30 ips, nette", "Camera moderne", "Carte en bas" } },
+      { "The N64's picture shape with the 3DS upgrades: a steady camera, and the map and standings on the touch screen.",
+        "La forme d'image de la N64 avec les ameliorations 3DS: une camera stable, la carte et le classement sur l'ecran tactile." } },
+    { { "ENHANCED", "AMELIORE" },
+      { "WIDESCREEN", "ECRAN LARGE" },
+      { { "Widescreen", "30 fps, may dip", "Modern camera", "Map below" },
+        { "Ecran large", "30 ips, variable", "Camera moderne", "Carte en bas" } },
+      { "A wide picture on top of Classic Plus. It asks more of an Old 3DS, so busy tracks can dip below 30 fps.",
+        "Une image large en plus de Classique +. Elle demande plus a une Old 3DS: les pistes chargees peuvent passer sous 30 ips." } },
 };
 
 static const TileText sPictureTiles[2] = {
@@ -306,7 +338,7 @@ static const TileText *tiles_of(s32 page) {
         case SETUP_PAGE_LANGUAGE:
             return sLanguageTiles;
         case SETUP_PAGE_STYLE:
-            return sStyleTiles;
+            return can_60fps() ? sStyleTiles : sStyleTilesOld;
         case SETUP_PAGE_PICTURE:
             return can_60fps() ? sPictureTiles : sPictureTilesOld;
         case SETUP_PAGE_SCREEN:
@@ -356,7 +388,7 @@ static void describe(void) {
     s->chosen = sChosen;
     for (i = 0; i < s->tileCount; i++) {
         SetupTile *t = &s->tiles[i];
-        t->art = i;
+        t->art = s->page == SETUP_PAGE_STYLE ? style_of_tile(i) : i;
         COPY(t->name, texts[i].name[sFrench]);
         COPY(t->tag, texts[i].tag[sFrench]);
         for (j = 0; j < SETUP_STYLE_LINES && texts[i].lines[sFrench][j] != NULL; j++) {
@@ -499,7 +531,7 @@ void port_setup_update(u32 buttons, s32 stickX, s32 stickY) {
         settings_defer(TRUE); // Every tile applies settings: written once, at the end.
         sFrench = plat_system_french();
         apply_tile(SETUP_PAGE_LANGUAGE, sFrench);
-        apply_tile(SETUP_PAGE_STYLE, SETUP_STYLE_ENHANCED);
+        apply_tile(SETUP_PAGE_STYLE, can_60fps() ? SETUP_STYLE_ENHANCED : 1); // Old 3DS: Classic Plus.
         open_page(SETUP_PAGE_LANGUAGE);
         return;
     }

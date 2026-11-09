@@ -4501,15 +4501,19 @@ static void draw_tile_art(const SetupScreen *s, int i, Rect r) {
         case SETUP_PAGE_LANGUAGE:
             draw_flag(r, i == 1);
             break;
-        case SETUP_PAGE_STYLE:
-            if (i == SETUP_STYLE_CLASSIC) {
+        case SETUP_PAGE_STYLE: {
+            int st = s->tiles[i].art; // The play style (an Old 3DS's tiles aren't in the New 3DS's order).
+            if (st == SETUP_STYLE_CLASSIC) {
                 plain.hud = 1;
                 draw_screen_style(r, 0, plain);
+            } else if (st == SETUP_STYLE_CLASSICPLUS) {
+                draw_screen_style(r, 0, plain); // 4:3 picture, the map and standings below
             } else {
-                plain.ghosts = i == SETUP_STYLE_SPEEDY ? 2 : 0;
+                plain.ghosts = st == SETUP_STYLE_SPEEDY ? 2 : 0;
                 draw_screen_style(r, 2, plain);
             }
             break;
+        }
         case SETUP_PAGE_PICTURE: {
             int d;
             int old = !plat_can_60fps(); // An Old 3DS's second tile is a steady 20 fps, not 60.

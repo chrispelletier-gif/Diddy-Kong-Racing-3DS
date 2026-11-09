@@ -20,7 +20,7 @@ enum {
 };
 
 /* What each tile shows on the play style page (SetupScreen.styles). */
-enum { SETUP_STYLE_CLASSIC, SETUP_STYLE_ENHANCED, SETUP_STYLE_SPEEDY };
+enum { SETUP_STYLE_CLASSIC, SETUP_STYLE_ENHANCED, SETUP_STYLE_SPEEDY, SETUP_STYLE_CLASSICPLUS /* Old 3DS: 4:3 with the upgrades */ };
 
 #define SETUP_TILES 4
 #define SETUP_STEPS 5
