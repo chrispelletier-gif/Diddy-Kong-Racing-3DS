@@ -1981,6 +1981,15 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         }
 
         var_f2 /= 10.0;
+#ifdef TARGET_PORT
+        // At 30 fps this pull is measured after the whole frame's steering has turned the hovercraft, so the gap it
+        // closes includes two retraces of steering. A 60 fps half step has turned it by only one, which made the
+        // pull weaker and the hovercraft turn ~1% faster and lose ~3% speed in long turns. Adding the half step's
+        // steering back makes the gap what the 30 fps frame sees.
+        if (gPortHalfStep) {
+            var_v1 += (s32) velocity; //!@Delta
+        }
+#endif
         var_v1 *= var_f2;
         if (gCurrentRacerInput & A_BUTTON || gCurrentRacerInput & R_TRIG) {
             var_v1 *= 2;
