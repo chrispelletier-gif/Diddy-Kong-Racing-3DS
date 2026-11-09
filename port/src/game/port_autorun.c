@@ -323,8 +323,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // KCOND (v37) Whale Bay holds 99% of frames at 30 (#481), so the 2-player (1) and the game's own distances (0) are
     // raced again. And a kart no longer flickers between two models at a threshold (DKR_RACER_LOD_HOLD=4, on by
     // default: PC Whale Bay 5 -> 2 flips back within a second); raced against the old way.
-    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 0, 0 },
-    { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 0, 0 },
+    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 1, 0 },
+    { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 1, 0 },
+    // v42: the two distance rows race alone (both set DKR_RACER_LOD), so the every-switch race is the hold row's.
     { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
     // While the frame rate drops, the other karts' distances move to the 4-player ones (DKR_RACER_LOD_ADAPT), which
     // only changes anything at the 1- and 2-player distances above. That switch is now eased over ~1 s in and 2 s out,
