@@ -32,7 +32,7 @@ enum { RACE_HUD_TOP, RACE_HUD_BOTTOM, RACE_HUD_BOTH }; // port_set_race_hud_sett
 void plat_set_bottom_style(int style);
 s32 port_bottom_style(void);
 
-/* The fine tuning's pages in order. */
+/* The fine tuning's pages in order; the picture's is left out where 60 fps can't be had (an Old 3DS). */
 #define STEPS 5
 static const s32 sSteps[STEPS] = { SETUP_PAGE_PICTURE, SETUP_PAGE_SCREEN, SETUP_PAGE_CAMERA, SETUP_PAGE_HUD,
                                     SETUP_PAGE_LOOK };
@@ -55,7 +55,7 @@ static s32 can_60fps(void) {
 }
 
 static s32 first_step(void) {
-    return 0; // An Old 3DS's picture page offers a steady 20 fps instead of 60.
+    return can_60fps() ? 0 : 1; // The picture page is 30 or 60 fps: an Old 3DS, with no 60, skips it.
 }
 
 /* Where the page is among the fine tuning's steps (first_step on), or -1. */
@@ -72,16 +72,13 @@ static s32 step_of(s32 page) {
 /* The play style a style page's tile stands for. A New 3DS's tiles are Classic, Enhanced, Speedy; an Old 3DS's are
  * Classic, Classic Plus (the 4:3 picture with Enhanced's camera and map, which its GPU keeps up with best) and Enhanced. */
 static s32 style_of_tile(s32 tile) {
-    if (can_60fps()) {
-        return tile;
-    }
-    return tile == 0 ? SETUP_STYLE_CLASSIC : tile == 1 ? SETUP_STYLE_CLASSICPLUS : SETUP_STYLE_ENHANCED;
+    return tile;
 }
 
 static s32 tile_count(s32 page) {
     switch (page) {
         case SETUP_PAGE_STYLE:
-            return 3;
+            return can_60fps() ? 3 : 2; // No Speedy (60 fps) on an Old 3DS.
         case SETUP_PAGE_SCREEN:
         case SETUP_PAGE_LOOK:
             return 4;
@@ -117,7 +114,7 @@ static void apply_tile(s32 page, s32 tile) {
             if (can_60fps()) {
                 plat_set_picture_style(tile == 1);
             } else {
-                plat_set_frame_rate_setting(tile == 1 ? 20 : 30);
+                plat_set_frame_rate_setting(30);
             }
             break;
         case SETUP_PAGE_SCREEN:
@@ -146,7 +143,7 @@ static s32 current_tile(s32 page) {
         case SETUP_PAGE_STYLE:
             return sStyle;
         case SETUP_PAGE_PICTURE:
-            return can_60fps() ? plat_picture_style() != 0 : plat_frame_rate_setting() == 20;
+            return can_60fps() ? plat_picture_style() != 0 : 0;
         case SETUP_PAGE_SCREEN:
             return plat_widescreen_style();
         case SETUP_PAGE_CAMERA:
@@ -207,28 +204,6 @@ static const TileText sStyleTiles[3] = {
         "Comme Ameliore, a 60 images par seconde pour des mouvements plus fluides. Les bords sont moins lisses." } },
 };
 
-/* An Old 3DS's play styles: widescreen costs it frames, so Classic Plus is the one recommended. */
-static const TileText sStyleTilesOld[3] = {
-    { { "CLASSIC", "CLASSIQUE" },
-      { "LIKE THE N64", "COMME LA N64" },
-      { { "4:3 picture", "30 fps, sharp", "Original camera", "Race info on top" },
-        { "Image 4:3", "30 ips, nette", "Camera d'origine", "Infos en haut" } },
-      { "Diddy Kong Racing as it was in 1997: the N64's picture shape, camera and race info.",
-        "Diddy Kong Racing comme en 1997: la forme d'image, la camera et les infos de course de la N64." } },
-    { { "CLASSIC +", "CLASSIQUE +" },
-      { "RECOMMENDED", "RECOMMANDE" },
-      { { "4:3 picture", "30 fps, sharp", "Modern camera", "Map below" },
-        { "Image 4:3", "30 ips, nette", "Camera moderne", "Carte en bas" } },
-      { "The N64's picture shape with the 3DS upgrades: a steady camera, and the map and standings on the touch screen.",
-        "La forme d'image de la N64 avec les ameliorations 3DS: une camera stable, la carte et le classement sur l'ecran tactile." } },
-    { { "ENHANCED", "AMELIORE" },
-      { "WIDESCREEN", "ECRAN LARGE" },
-      { { "Widescreen", "30 fps, may dip", "Modern camera", "Map below" },
-        { "Ecran large", "30 ips, variable", "Camera moderne", "Carte en bas" } },
-      { "A wide picture on top of Classic Plus. It asks more of an Old 3DS, so busy tracks can dip below 30 fps.",
-        "Une image large en plus de Classique +. Elle demande plus a une Old 3DS: les pistes chargees peuvent passer sous 30 ips." } },
-};
-
 static const TileText sPictureTiles[2] = {
     { { "SHARP", "NETTE" },
       { "RECOMMENDED", "RECOMMANDE" },
@@ -240,20 +215,6 @@ static const TileText sPictureTiles[2] = {
       { { "60 fps,", "rougher edges", NULL }, { "60 ips,", "bords moins lisses", NULL } },
       { "60 frames a second for smoother motion. Anti-aliasing is off so that every frame keeps up.",
         "60 images par seconde pour des mouvements plus fluides. Sans anticrenelage, pour suivre le rythme." } },
-};
-
-/* An Old 3DS's picture page: the 3DS screen refreshes 60 times a second, so a cap holds even at 30 or 20 only. */
-static const TileText sPictureTilesOld[2] = {
-    { { "30 FPS", "30 IPS" },
-      { "RECOMMENDED", "RECOMMANDE" },
-      { { "Up to 30 fps,", "may dip a little", NULL }, { "Jusqu'a 30 ips,", "peut baisser un peu", NULL } },
-      { "Aims for 30 frames a second. Busy tracks, widescreen most of all, can dip a little.",
-        "Vise 30 images par seconde. Les pistes chargees, surtout en large, peuvent baisser un peu." } },
-    { { "20 FPS", "20 IPS" },
-      { "STEADY", "STABLE" },
-      { { "Locked 20 fps,", "never wobbles", NULL }, { "20 ips fixes,", "sans a-coups", NULL } },
-      { "A locked 20 frames a second, timed to the screen: less smooth than 30, but even, with no dips.",
-        "20 images par seconde fixes, calees sur l'ecran: moins fluide que 30, mais regulier, sans baisses." } },
 };
 
 static const TileText sScreenTiles[4] = {
@@ -338,9 +299,9 @@ static const TileText *tiles_of(s32 page) {
         case SETUP_PAGE_LANGUAGE:
             return sLanguageTiles;
         case SETUP_PAGE_STYLE:
-            return can_60fps() ? sStyleTiles : sStyleTilesOld;
+            return sStyleTiles;
         case SETUP_PAGE_PICTURE:
-            return can_60fps() ? sPictureTiles : sPictureTilesOld;
+            return sPictureTiles;
         case SETUP_PAGE_SCREEN:
             return sScreenTiles;
         case SETUP_PAGE_CAMERA:
@@ -531,7 +492,7 @@ void port_setup_update(u32 buttons, s32 stickX, s32 stickY) {
         settings_defer(TRUE); // Every tile applies settings: written once, at the end.
         sFrench = plat_system_french();
         apply_tile(SETUP_PAGE_LANGUAGE, sFrench);
-        apply_tile(SETUP_PAGE_STYLE, can_60fps() ? SETUP_STYLE_ENHANCED : 1); // Old 3DS: Classic Plus.
+        apply_tile(SETUP_PAGE_STYLE, SETUP_STYLE_ENHANCED);
         open_page(SETUP_PAGE_LANGUAGE);
         return;
     }
