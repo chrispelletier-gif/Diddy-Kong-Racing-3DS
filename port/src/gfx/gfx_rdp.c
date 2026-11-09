@@ -1281,6 +1281,7 @@ typedef struct AtlasPage {
 static AtlasPage sAtlas[ATLAS_KINDS * ATLAS_PAGES_PER_KIND];
 static s32 sAtlasLastReset[ATLAS_KINDS];
 static s32 sAtlasOn;
+static u32 sAtlasKinds = 0xFFFFFFFFu; // v40 DKR_TEX_ATLAS_KINDS (read_switches): the kinds (port_drawtag.h, a bit each) the atlas takes
 static unsigned long sAtlasStats[3]; // Commands drawn from a page, textures placed, sets reset (the profiler's log)
 
 int gfx_atlas_take(unsigned long out[3]) {
@@ -1300,7 +1301,7 @@ static inline TexCacheEntry *atlas_entry_of(const GfxTexture *tex) {
 /* Whether a texture can go in a page at all (worked out once for each texture and filter). */
 static s32 atlas_eligible(const GfxTexture *tex) {
     return tex->width <= ATLAS_MAX_TEX && tex->height <= ATLAS_MAX_TEX && (tex->width & (tex->width - 1)) == 0 &&
-           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn == 2 || !gfx_wants_mipmaps(tex));
+           (tex->height & (tex->height - 1)) == 0 && (sAtlasOn >= 2 || !gfx_wants_mipmaps(tex));
 }
 
 static inline u32 atlas_wrap(s32 i, u32 size, u8 wrap) {
@@ -1434,8 +1435,10 @@ static NOINLINE GfxTexture *atlas_page_for(const GfxTexture *tex, TexAxis *u, Te
     // border coordinates up to half a texel outside the texture read only it and the border.
     du = 0.5f / tex->width;
     dv = 0.5f / tex->height;
-    if (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du || tex_axis_coord(v, minV) < -dv ||
-        tex_axis_coord(v, maxV) > 1.0f + dv) {
+    // v40 DKR_TEX_ATLAS=3, a measurement only: coordinates past the texture are taken too (clamped to it in the page,
+    // so what they tile is drawn wrong), to learn what batching every racer piece would save on the Old 3DS.
+    if (sAtlasOn != 3 && (tex_axis_coord(u, minU) < -du || tex_axis_coord(u, maxU) > 1.0f + du ||
+                          tex_axis_coord(v, minV) < -dv || tex_axis_coord(v, maxV) > 1.0f + dv)) {
         return NULL;
     }
     if (e->atlasState[f] == ATLAS_UNPLACED && !atlas_place(e, tex, f)) {
@@ -1960,6 +1963,7 @@ static u32 sOpaqueStats[2]; // Batches held, draws made
  * sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
  */
 static s32 sRemote;
+static s32 sWeldSwitch;   // v39 DKR_WELD (read_switches), see weld_vertices
 static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
 static s32 sRemoteFlush; // v29 DKR_REMOTE_FLUSH (read_switches): a waiting walk batch is drawn ahead of a remote draw
 static u32 sNativeCopies; // v29: shared tables remade beside the old (profiler log)
@@ -2380,6 +2384,8 @@ static void read_switches(void) {
     sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
     {
         s32 atlas = plat_switch("DKR_TEX_ATLAS", 0);
+        // The kinds it takes: all of them, but only the racers in the measurement (3).
+        sAtlasKinds = (u32) plat_switch("DKR_TEX_ATLAS_KINDS", atlas == 3 ? 1 << PORT_DRAW_RACERS : -1);
         if (atlas != sAtlasOn) {
             atlas_forget_all();
             sAtlasOn = atlas;
@@ -2426,6 +2432,7 @@ static void read_switches(void) {
     sNativeHashHigh = plat_switch("DKR_NATIVE_HASH", 1) != 0;
     sPresetOn = plat_switch("DKR_SPRITE_AXES", 1) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
+    sWeldSwitch = plat_switch("DKR_WELD", 0); // v39: the backend's shared corners (see weld_vertices)
     sRemoteFlush = plat_switch("DKR_REMOTE_FLUSH", 1);
     sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
     sTrisSkip = plat_switch("DKR_TRIS_SKIP", 1);
@@ -4065,7 +4072,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         }
     }
     if (tex1) {
-    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+    } else if (tex0 && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && !u0.divide && !v0.divide) {
         s32 minU = 0x7FFF, maxU = -0x8000, minV = 0x7FFF, maxV = -0x8000;
         GfxTexture *page;
         for (i = 0; i < count; i++) {
@@ -4754,7 +4761,7 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
         float shift = texel_centre_shift(tex);
         tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
         tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
-    } else if (tex0 && sAtlasOn && !u0.divide && !v0.divide) {
+    } else if (tex0 && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && !u0.divide && !v0.divide) {
         GfxTexture *page = atlas_page_for(state.textures[0], &u0, &v0, mesh->minU, mesh->maxU, mesh->minV, mesh->maxV);
         if (page != NULL) {
             state.textures[0] = page;
@@ -5127,7 +5134,7 @@ static inline s32 native_dynamic_ok(s32 start, s32 numVerts, s32 cur) {
  */
 enum {
     NP_FOG = 1, NP_LIGHT = 2, NP_CULL = 4, NP_REJECT = 8, NP_SCREEN = 16, NP_FAST_OUTCODE = 32, NP_VFP = 64,
-    NP_ZERO_TEX1 = 128, NP_AXIS_FAST = 256, NP_ORDERED = 512, NP_DONE = 1024, NP_SHARED = 2048
+    NP_ZERO_TEX1 = 128, NP_AXIS_FAST = 256, NP_ORDERED = 512, NP_DONE = 1024, NP_SHARED = 2048, NP_WELD = 4096
 };
 typedef struct NativePiece {
     GfxDrawState state;
@@ -5186,6 +5193,128 @@ static u16 *eng_batch_triangle(const GfxDrawState *state) {
     return &sEngBatchIndices[sEngBatchCount++ * 3];
 }
 
+/*
+ * v39 shared corners (DKR_WELD, Old 3DS work): a racer's model comes in 23-35 pieces, one per texture, and each piece
+ * brings its own copies of the vertices it uses, so its best model sends ~300 vertices for ~130 different ones (the
+ * same point, with the same normal, in several pieces). The backend keeps what it worked out for the vertices it saw
+ * last (position, colour or normal in, clip-space position and lit, fogged colour out) while the matrix, light and
+ * fog stay the same, and a vertex seen again takes that instead of being transformed, lit and fogged once more.
+ * The same sums on the same inputs give the same results, so frames are identical. 1: racers only, 2: every piece.
+ * A table of WELD_SIZE lines of 32 bytes (8 KB: the Old 3DS has no L2 cache), one per hash, the newest kept.
+ */
+#define WELD_BITS 8
+#define WELD_SIZE (1 << WELD_BITS)
+typedef struct WeldEntry {
+    u32 k0, k1, k2; // The vertex's 10 bytes; k2's top half holds the context it was worked out in (sWeldEpoch)
+    float x, y, z, w;
+    u32 rgba;
+} __attribute__((aligned(32))) WeldEntry;
+static WeldEntry sWeld[WELD_SIZE];
+static u32 sWeldEpoch = 1;
+static struct {
+    float m[4][4];
+    float light[4];
+    float fogMul, fogOffset;
+    u32 flags;
+} sWeldCtx;
+static volatile u32 sWeldStats[2];             // Vertices taken from the table, vertices worked out (backend's)
+static u32 sWeldTaken[2];
+
+/* The vertices a frame taken from the table and worked out, since the last call (the profiler's log). */
+int gfx_weld_take(unsigned long out[2]) {
+    u32 now[2] = { sWeldStats[0], sWeldStats[1] };
+    out[0] = now[0] - sWeldTaken[0];
+    out[1] = now[1] - sWeldTaken[1];
+    sWeldTaken[0] = now[0];
+    sWeldTaken[1] = now[1];
+    return sWeldSwitch != 0;
+}
+
+/* Starts a new context when the matrix, light or fog differ from the last piece's (bitwise). */
+static inline void weld_context(const float (*m)[4], const float light[4], float fogMul, float fogOffset, u32 flags) {
+    flags &= NP_LIGHT | NP_FOG;
+    if (sWeldCtx.flags != flags || __builtin_memcmp(sWeldCtx.m, m, sizeof(sWeldCtx.m)) != 0 ||
+        ((flags & NP_LIGHT) && __builtin_memcmp(sWeldCtx.light, light, sizeof(sWeldCtx.light)) != 0) ||
+        ((flags & NP_FOG) && (sWeldCtx.fogMul != fogMul || sWeldCtx.fogOffset != fogOffset))) {
+        __builtin_memcpy(sWeldCtx.m, m, sizeof(sWeldCtx.m));
+        __builtin_memcpy(sWeldCtx.light, light, sizeof(sWeldCtx.light));
+        sWeldCtx.fogMul = fogMul;
+        sWeldCtx.fogOffset = fogOffset;
+        sWeldCtx.flags = flags;
+        if (++sWeldEpoch > 0xFFFF) {
+            __builtin_memset(sWeld, 0, sizeof(sWeld)); // No line keeps an old context's number
+            sWeldEpoch = 1;
+        }
+    }
+}
+
+/* One load's vertices through the table: those seen in this context are copied, runs of the rest go through
+ * transform_vertices and the light and fog as before, then into the table. */
+static NOINLINE HOT void weld_vertices(const Vertex *in, s32 c, RspVertex *verts, float (*m)[4], u32 flags,
+                                       const float light[4], float fogMul, float fogOffset) {
+    u8 miss[MAX_VERTICES];
+    u16 hashes[MAX_VERTICES];
+    s32 k, run, hits = 0;
+    u32 epoch = sWeldEpoch << 16;
+    for (k = 0; k < c; k++) {
+        u32 k0, k1, k2, h;
+        const WeldEntry *e;
+        __builtin_memcpy(&k0, &in[k].x, 4);
+        __builtin_memcpy(&k1, &in[k].z, 4);
+        k2 = (u32) in[k].b | ((u32) in[k].a << 8) | epoch;
+        h = ((k0 * 0x9E3779B1u) ^ (k1 * 0x85EBCA77u) ^ (k2 * 0xC2B2AE3Du)) >> (32 - WELD_BITS);
+        e = &sWeld[h];
+        hashes[k] = (u16) h;
+        if (e->k0 == k0 && e->k1 == k1 && e->k2 == k2) {
+            verts[k].x = e->x;
+            verts[k].y = e->y;
+            verts[k].z = e->z;
+            verts[k].w = e->w;
+            verts[k].rgba = e->rgba;
+            miss[k] = 0;
+            hits++;
+        } else {
+            miss[k] = 1;
+        }
+    }
+    for (k = 0; k < c; k = run) {
+        if (!miss[k]) {
+            run = k + 1;
+            continue;
+        }
+        for (run = k + 1; run < c && miss[run]; run++) {
+        }
+        transform_vertices(in + k, run - k, verts + k, m);
+    }
+    for (k = 0; k < c; k++) {
+        u32 rgba;
+        WeldEntry *e;
+        if (!miss[k]) {
+            continue;
+        }
+        __builtin_memcpy(&rgba, &in[k].r, 4);
+        if (UNLIKELY(flags & NP_LIGHT)) {
+            u8 *cc = (u8 *) &rgba;
+            cc[0] = cc[1] = cc[2] = gfx_light_shade(in[k].r, in[k].g, in[k].b, light);
+        }
+        if (flags & NP_FOG) {
+            rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
+        }
+        verts[k].rgba = rgba;
+        e = &sWeld[hashes[k]];
+        __builtin_memcpy(&e->k0, &in[k].x, 4);
+        __builtin_memcpy(&e->k1, &in[k].z, 4);
+        e->k2 = (u32) in[k].b | ((u32) in[k].a << 8) | epoch;
+        e->x = verts[k].x;
+        e->y = verts[k].y;
+        e->z = verts[k].z;
+        e->w = verts[k].w;
+        e->rgba = rgba;
+    }
+    sWeldStats[0] += (u32) hits;
+    sWeldStats[1] += (u32) (c - hits);
+}
+
 /* native_record's work from its vertex maths on, on the backend thread: the same sums in the same order. */
 static NOINLINE HOT void native_piece_run(void *payload) {
     const NativePiece *np = (const NativePiece *) payload;
@@ -5224,6 +5353,11 @@ static NOINLINE HOT void native_piece_run(void *payload) {
             s32 first = l == 0 ? 0 : np->split, c = np->numLoads == 1 ? total : (l == 0 ? np->split : total - np->split);
             RspVertex *verts = &sEngVerts[first];
             const Vertex *in = src + first;
+            if (flags & NP_WELD) {
+                weld_context((const float(*)[4]) np->m[l], np->light, np->fogMul, np->fogOffset, flags);
+                weld_vertices(in, c, verts, (float(*)[4]) np->m[l], flags, np->light, np->fogMul, np->fogOffset);
+                continue;
+            }
 #ifdef HAVE_VFP_VECTORS
             if (flags & NP_VFP) {
                 transform_vertices_vfp(in, c, verts, (float(*)[4]) np->m[l]);
@@ -5476,7 +5610,8 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
                 (sTriReject ? NP_REJECT : 0) | (sTriReject && sScreenOnce ? NP_SCREEN : 0) |
                 (sFastOutcode ? NP_FAST_OUTCODE : 0) | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
                 (sAxisFast && tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
-                (done ? NP_DONE : 0) | (share ? NP_SHARED : 0);
+                (done ? NP_DONE : 0) | (share ? NP_SHARED : 0) |
+                (!done && (sWeldSwitch >= 2 || (sWeldSwitch == 1 && sDrawKind == PORT_DRAW_RACERS)) ? NP_WELD : 0);
 #ifdef HAVE_VFP_VECTORS
     np->flags |= sVfpVectors && sNativeVfp ? NP_VFP : 0;
 #endif
@@ -5669,6 +5804,18 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 flush_cpu_batch();
             }
             nmat_axes(mat, &state, textured, ax);
+            if (direct && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1) && state.textures[0] != NULL &&
+                state.textures[1] == NULL && !ax[0].divide && !ax[1].divide) {
+                // v40: the backend's draws from the atlas too (DKR_TEX_ATLAS with DKR_TEX_ATLAS_KINDS, Old 3DS
+                // racers: their 23-35 pieces each, one per small texture, then share a page's buckets). The page
+                // is uploaded (after the buckets holding draws from it) before a draw that needs what was added.
+                GfxTexture *page = atlas_page_for(state.textures[0], &ax[0], &ax[1], mesh->minU, mesh->maxU,
+                                                  mesh->minV, mesh->maxV);
+                if (page != NULL) {
+                    atlas_upload(page);
+                    state.textures[0] = page;
+                }
+            }
             g.curMatrix = cur;
             g.vertexIndex = 0;
             g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));

@@ -5,6 +5,7 @@
 #include <ultra64.h>
 #include "types.h"
 #include "port.h"
+#include "plat/plat.h"
 
 s32 port_autorun_enabled(void) {
     return FALSE;
@@ -81,6 +82,10 @@ int port_native_mesh_for(int isRacer) {
 }
 
 unsigned int gPortLevelLoads;
+
+int port_shadows_first(void) {
+    return plat_old_3ds(); // As the switch's default (port_profile.c)
+}
 
 int port_native_track(void) {
     return 0; // NR4 stays off in a player's build until the switch bench puts it on by default

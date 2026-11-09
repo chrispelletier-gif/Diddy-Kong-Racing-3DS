@@ -485,6 +485,17 @@ int port_native_mesh_for(int isRacer) {
 
 unsigned int gPortLevelLoads;
 
+/* DKR_SHADOWS_FIRST (tracks.c render_scene's objects): 1 on, 0 off; default on for the Old 3DS, whose renderer pays
+ * per draw. */
+int port_shadows_first(void) {
+    static int epoch = -1, on;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        on = plat_switch("DKR_SHADOWS_FIRST", plat_old_3ds() ? 1 : 0) != 0;
+    }
+    return on;
+}
+
 int port_native_track(void) {
     static int epoch = -1, on;
     if (epoch != gPlatSwitchEpoch) {
@@ -920,6 +931,13 @@ static void log_rest(int step) {
                     }
                 }
                 {
+                    unsigned long weld[2];
+                    if (gfx_weld_take(weld) && weld[0] + weld[1] > 0) {
+                        port_log("shared corners (DKR_WELD): %lu of %lu vertices a frame taken from the table",
+                                 weld[0] / frames, (weld[0] + weld[1]) / frames);
+                    }
+                }
+                {
                     unsigned long atlas[3];
                     if (gfx_atlas_take(atlas)) {
                         port_log("texture atlas: %lu commands a frame drawn from its pages, %lu textures placed, "
@@ -1137,7 +1155,7 @@ int port_rec_frame_detail(char *out, int size) {
     }
     out[0] = '\0';
     if (plat_old_3ds()) {
-        length += plat_snprintf(out + length, size - length, "; walk/sound on the game core %.1f ms",
+        length += plat_snprintf(out + length, size - length, "; walk/sound under way (working or waiting) %.1f ms",
                                 sDetailOther / 1e6);
     }
     if (sSecStartNs == 0) {

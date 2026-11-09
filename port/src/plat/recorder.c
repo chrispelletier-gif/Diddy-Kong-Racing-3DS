@@ -147,8 +147,8 @@ static void record_slow(const RecFrame *r) {
         char cause[200], detail[200];
         describe_cause(r, cause, sizeof(cause));
         port_rec_frame_detail(detail, sizeof(detail));
-        snprintf(sSlow[i].text, sizeof(sSlow[i].text), "%s level %d: %s%s", mode_name(r->mode), r->level, cause,
-                 detail);
+        snprintf(sSlow[i].text, sizeof(sSlow[i].text), "%s level %d: %s; %u triangles, %u draws%s", mode_name(r->mode),
+                 r->level, cause, r->tris, (unsigned) r->draws, detail);
         {
             size_t length = strlen(sSlow[i].text);
             char events[REC_HITCH_TEXT];

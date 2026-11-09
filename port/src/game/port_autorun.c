@@ -306,11 +306,45 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // Switch bench #472 (combined build fc6df8e8): both kept. The old GSP priority cost 1.2-5.1 ms of GPU a frame;
     // the old waits had 10-34 late wakes a race against none, a 1% low of 25.8 against 29.2 on Whale Bay and Windmill
     // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went.
-    // The New 3DS's GPU cuts that are off here: the frame's colour clear as a memory fill (DKR_COLOUR_FILL) and the
-    // whole-screen solid rectangle drawn first in race frames as that fill (DKR_RECT_FILL, ~1.9 ms of New 3DS GPU,
-    // bench #469). Whale Bay's slowest frames wait on 18-41 ms GPU frames (#472), so they race here together.
-    { "colour clear and whole-screen rectangle as memory fills (new)", { "DKR_COLOUR_FILL", "DKR_RECT_FILL", NULL }, 0, 1,
-      0, 0 },
+    // The New 3DS's GPU cuts that are off here, the frame's colour clear and the whole-screen solid rectangle as memory
+    // fills (DKR_COLOUR_FILL + DKR_RECT_FILL), raced together in bench #476: no GPU time saved on any of the three
+    // tracks (9.8-10.3 ms either way), so they stay off and the row went.
+    // v39: Whale Bay's last 50 ms frames (quick tests #474/#475) come in the first 15 s of a race, with the pack
+    // together: the PC race has twice the usual triangles then (2000 against 970 a frame, the racers 900 of them).
+    // A racer's model comes in 23-35 pieces that repeat most of their vertices (~300 sent for ~130 different), so
+    // the backend's shared corners (DKR_WELD, gfx_rdp.c weld_vertices) work out a vertex seen again in the same
+    // matrix, light and fog once: PC Whale Bay, 31-37% of the racers' vertices (36-38% of every piece's) taken from
+    // the table, frames and game state identical. Bench run 34 (#481, Whale Bay): racers alone 29.8 fps / 99% at 30
+    // as usual with GPU and renderer 0.6 ms worse, every piece 2 ms more renderer and 97%, so DKR_WELD stays 0 and
+    // its rows went: a vertex's maths is not what a piece costs the Old 3DS.
+    // v40: what a piece does cost is its draw: a PC Whale Bay race start has ~210 draws a frame, ~60 of them the
+    // racers' (one per texture of each piece). The texture atlas now takes the backend's draws too, but most racer
+    // textures tile (coordinates past their edges), which a page can't hold, so only 61 -> 55. A measurement, not a
+    // setting: every racer piece through the atlas, tiled ones drawn clamped (wrong), racer draws 61 -> 17 at the
+    // start and 40 -> 6 over the race. If it saves the Old 3DS real time, pages that tile those textures come next.
+    { "racer pieces batched (measurement, racer textures look wrong)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 3, 1, 0 },
+    // v41 (user, 2026-11-09: the other karts' simpler models are barely noticeable, can it be avoided?): the Old 3DS
+    // has used 3-player distances for the other karts since run 16 (DKR_RACER_LOD=2), when it was far slower. Since
+    // KCOND (v37) Whale Bay holds 99% of frames at 30 (#481), so the 2-player (1) and the game's own distances (0) are
+    // raced again. And a kart no longer flickers between two models at a threshold (DKR_RACER_LOD_HOLD=4, on by
+    // default: PC Whale Bay 5 -> 2 flips back within a second); raced against the old way.
+    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 1, 0 },
+    { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 1, 0 },
+    // v42: the two distance rows race alone (both set DKR_RACER_LOD), so the every-switch race is the hold row's.
+    { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
+    // While the frame rate drops, the other karts' distances move to the 4-player ones (DKR_RACER_LOD_ADAPT), which
+    // only changes anything at the 1- and 2-player distances above. That switch is now eased over ~1 s in and 2 s out,
+    // a kart only getting simpler while it moves away (DKR_RACER_LOD_SMOOTH=2, objects.c port_racer_lod_ease); this
+    // row races the game's own distances with the old all-at-once switch (both variables 0), against the row above.
+    { "other karts' detail at the game's own distances, dropped all at once when slow (old)",
+      { "DKR_RACER_LOD", "DKR_RACER_LOD_SMOOTH", NULL }, 2, 0, 1, 0 },
+    // Taj's pond in the Central Area (bug report #482, v39): the view with the pond's ten frogs and Taj drew 150-200
+    // draws a frame on PC against ~55 elsewhere in the hub, and the backend was busy 30 ms a frame there (17 ms
+    // elsewhere). Every solid object's shadow sat between two objects' models, so no two shadows shared a draw: the
+    // shadows now go first, together (DKR_SHADOWS_FIRST, tracks.c), and the frogs' batch. PC hub tour: shadow draws
+    // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
+    // Raced the old way.
+    { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -344,6 +378,10 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
     // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
     { "whole-screen solid rectangle drawn (old)", { "DKR_RECT_FILL", NULL, NULL }, 1, 0, 1, 0 },
+    // Boss fights (2026-11-08, user: "performance during the boss fights seems poor at times"): Wizpig 1's rain is two
+    // whole-screen blended layers every frame. Blended draws that write no depth now drop their alpha 0 pixels with
+    // the GPU's alpha test before the blend (DKR_XLU_ALPHA_TEST, gfx_c3d.c; same picture), raced the old way.
+    { "blended draws' clear pixels blended (old)", { "DKR_XLU_ALPHA_TEST", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else

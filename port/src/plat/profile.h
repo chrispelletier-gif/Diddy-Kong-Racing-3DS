@@ -167,6 +167,8 @@ void prof_set_status(const char *text);
 /* The texture atlas's counts since the last call (commands drawn from a page, textures placed, sets reset); whether
  * it is on. */
 int gfx_atlas_take(unsigned long out[3]);
+/* v39 shared corners (DKR_WELD): the backend's vertices taken from its table and worked out since the last call. */
+int gfx_weld_take(unsigned long out[2]);
 /* The commands and triangles DKR_WALK_REJECT dropped since the last call (gfx_rdp.c). */
 void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris);
 /* Model batches drawn by the native mesh path (NR1) and tags it left to the walk, since the last call. */
