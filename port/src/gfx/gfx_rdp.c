@@ -2363,6 +2363,35 @@ static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
  * back faces cost no vertices, indices or GPU time. Off for 3D (stereo) frames, whose eye offset the test leaves out,
  * and for the host's clipping sweep, which looks at back faces. */
 static s32 sCpuCull;
+/* In 3D (DKR_STEREO_CULL), the most an eye's offset moves a vertex's clip x this frame (gfxb_cpu_cull_margin); 0 in
+ * 2D. */
+static f32 sCullMargin;
+
+enum { FACE_AWAY, FACE_FRONT, FACE_GPU }; // face_test: drop it; draw it unculled; keep the GPU's culling for it
+/*
+ * The walk's back face test (P40) on clip space corners: twice the screen area's sign, times keepSign, is positive
+ * for a front face. In 3D each eye adds +-k (|k| <= sCullMargin) to every corner's x; the area's determinant then
+ * changes by k * d1, d1 the same determinant with the x column all ones. So a triangle facing away by more than
+ * sCullMargin * |d1| faces away in both eyes, one facing front by more faces front in both, and one in between
+ * keeps the GPU's culling (rare: nearly edge-on).
+ */
+PLAT_HOT static inline s32 face_test(const RspVertex *a, const RspVertex *b, const RspVertex *c, f32 keepSign) {
+    f32 det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
+              a->w * (b->x * c->y - c->x * b->y);
+    f32 s = det * keepSign, m, d1;
+    if (sCullMargin == 0.0f) {
+        return s > 0.0f ? FACE_FRONT : FACE_AWAY; // Edge on (no area) is dropped too: nothing would be drawn
+    }
+    d1 = (b->y * c->w - c->y * b->w) - a->y * (c->w - b->w) + a->w * (c->y - b->y);
+    m = sCullMargin * (d1 < 0.0f ? -d1 : d1);
+    if (s > m) {
+        return FACE_FRONT;
+    }
+    if (s < -m) {
+        return FACE_AWAY;
+    }
+    return FACE_GPU;
+}
 static s32 sSwitchEpoch = -1;
 
 /* Reads the renderer's experimental switches when they change (see plat_switch). */
@@ -4134,13 +4163,13 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         }
         if (sCpuCull && state.cullMode != 0 && !flat) {
             // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
-            const RspVertex *a = &g.verts[idx[0]], *b = &g.verts[idx[1]], *c = &g.verts[idx[2]];
-            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
-                        a->w * (b->x * c->y - c->x * b->y);
-            if (!(det * keepSign > 0.0f)) {
+            s32 face = face_test(&g.verts[idx[0]], &g.verts[idx[1]], &g.verts[idx[2]], keepSign);
+            if (face == FACE_AWAY) {
                 continue; // A back face, or edge on (no area: nothing would be drawn)
             }
-            state.cullMode = 0;
+            if (face == FACE_FRONT) {
+                state.cullMode = 0;
+            }
         }
         batchKey = state.cullMode | (flat << 2);
         if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
@@ -4778,15 +4807,14 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
         u16 *out;
         state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
         if (sCpuCull && state.cullMode != 0) {
-            const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];
-            const RspVertex *b = &sNativeVerts[mesh->cornerVertex[tc[1]]];
-            const RspVertex *c = &sNativeVerts[mesh->cornerVertex[tc[2]]];
-            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
-                        a->w * (b->x * c->y - c->x * b->y);
-            if (!(det * keepSign > 0.0f)) {
+            s32 face = face_test(&sNativeVerts[mesh->cornerVertex[tc[0]]], &sNativeVerts[mesh->cornerVertex[tc[1]]],
+                                   &sNativeVerts[mesh->cornerVertex[tc[2]]], keepSign);
+            if (face == FACE_AWAY) {
                 continue;
             }
-            state.cullMode = 0;
+            if (face == FACE_FRONT) {
+                state.cullMode = 0;
+            }
         }
         batchKey = state.cullMode;
         if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
@@ -5426,15 +5454,14 @@ static NOINLINE HOT void native_piece_run(void *payload) {
         }
         state.cullMode = triFlags[i] ? 0 : frontCull;
         if (cpuCull && state.cullMode != 0) {
-            const RspVertex *a = &V[cornerVertex[tc[0]]];
-            const RspVertex *b = &V[cornerVertex[tc[1]]];
-            const RspVertex *c = &V[cornerVertex[tc[2]]];
-            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
-                        a->w * (b->x * c->y - c->x * b->y);
-            if (!(det * keepSign > 0.0f)) {
+            s32 face = face_test(&V[cornerVertex[tc[0]]], &V[cornerVertex[tc[1]]],
+                                   &V[cornerVertex[tc[2]]], keepSign);
+            if (face == FACE_AWAY) {
                 continue;
             }
-            state.cullMode = 0;
+            if (face == FACE_FRONT) {
+                state.cullMode = 0;
+            }
         }
         batchKey = state.cullMode;
         if (ordered) {
@@ -5968,15 +5995,14 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         }
         state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
         if (sCpuCull && state.cullMode != 0) {
-            const RspVertex *a = &sNativeVerts[mesh->cornerVertex[tc[0]]];
-            const RspVertex *b = &sNativeVerts[mesh->cornerVertex[tc[1]]];
-            const RspVertex *c = &sNativeVerts[mesh->cornerVertex[tc[2]]];
-            float det = a->x * (b->y * c->w - c->y * b->w) - a->y * (b->x * c->w - c->x * b->w) +
-                        a->w * (b->x * c->y - c->x * b->y);
-            if (!(det * keepSign > 0.0f)) {
+            s32 face = face_test(&sNativeVerts[mesh->cornerVertex[tc[0]]], &sNativeVerts[mesh->cornerVertex[tc[1]]],
+                                   &sNativeVerts[mesh->cornerVertex[tc[2]]], keepSign);
+            if (face == FACE_AWAY) {
                 continue;
             }
-            state.cullMode = 0;
+            if (face == FACE_FRONT) {
+                state.cullMode = 0;
+            }
         }
         batchKey = state.cullMode;
         if (direct) {
@@ -7509,6 +7535,7 @@ void port_gfx_run_task(void *taskPtr) {
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
     sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch) && gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
+    sCullMargin = sCpuCull ? gfxb_cpu_cull_margin() : 0.0f;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
     track_frame_start();

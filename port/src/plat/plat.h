@@ -228,6 +228,8 @@ extern volatile int gPlatSnapshotSaved;
  * reports to show next to the renderer's frame timing. Kept as raw numbers; only a bug report formats them. */
 typedef struct PlatGameNote {
     short racing, lap, checkpoint, bananas, boost, itemType, itemCount, shield, magnet, hit, paused;
+    /* 1 while the buttons are steering a menu, not the kart: no race, paused, or the race finished. */
+    short menu;
 } PlatGameNote;
 void plat_set_game_note(const PlatGameNote *note);
 /* Copies the latest note from another thread. Returns 0 (and leaves out alone) if the game thread was halfway through

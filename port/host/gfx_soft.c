@@ -943,6 +943,10 @@ int gfxb_cpu_cull_ok(void) {
     return 1;
 }
 
+float gfxb_cpu_cull_margin(void) {
+    return 0.0f; // No 3D here
+}
+
 int gfxb_gpu_transform(void) {
     return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0;
 }

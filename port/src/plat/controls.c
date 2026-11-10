@@ -57,12 +57,16 @@ static const Action sActions[] = {
     { CTRL_N64_CL, "CL", "No effect" },
     { CTRL_N64_CR, "CR", "HUD toggle" },
     { CTRL_N64_START, "START", "Start" },
+    { CTRL_N64_DU, "DU", "D-Pad up" },
+    { CTRL_N64_DD, "DD", "D-Pad down" },
+    { CTRL_N64_DL, "DL", "D-Pad left" },
+    { CTRL_N64_DR, "DR", "D-Pad right" },
     { CTRL_N64_LOOK_BACK, "LOOK", "Look back" },
     { 0, "NONE", "Nothing" },
 };
 #define ACTION_COUNT ((int) (sizeof(sActions) / sizeof(sActions[0])))
 
-static const char *const sKeyNames[CTRL_KEY_COUNT] = { "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "SELECT" };
+static const char *const sKeyNames[CTRL_KEY_COUNT] = { "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "SELECT", "DUP", "DDOWN", "DLEFT", "DRIGHT" };
 
 /* Layouts, as an action per console button. The first is the default. */
 typedef struct Layout {
@@ -73,13 +77,13 @@ typedef struct Layout {
 static const Layout sLayouts[] = {
     { "Standard",
       { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_LOOK_BACK, CTRL_N64_R,
-        CTRL_N64_L } },
+        CTRL_N64_L, CTRL_N64_DU, CTRL_N64_DD, CTRL_N64_DL, CTRL_N64_DR } },
     { "A/B swapped",
       { CTRL_N64_B, CTRL_N64_A, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_Z, CTRL_N64_R, CTRL_N64_LOOK_BACK, CTRL_N64_R,
-        CTRL_N64_L } },
+        CTRL_N64_L, CTRL_N64_DU, CTRL_N64_DD, CTRL_N64_DL, CTRL_N64_DR } },
     { "L/R swapped",
       { CTRL_N64_A, CTRL_N64_B, CTRL_N64_CU, CTRL_N64_CL, CTRL_N64_R, CTRL_N64_Z, CTRL_N64_LOOK_BACK, CTRL_N64_Z,
-        CTRL_N64_L } },
+        CTRL_N64_L, CTRL_N64_DU, CTRL_N64_DD, CTRL_N64_DL, CTRL_N64_DR } },
 };
 #define LAYOUT_COUNT ((int) (sizeof(sLayouts) / sizeof(sLayouts[0])))
 
@@ -252,13 +256,15 @@ void controls_init(void) {
              sSettings.tiltRange);
 }
 
-unsigned short controls_map_buttons(unsigned int heldKeys) {
+unsigned short controls_map_buttons(unsigned int heldKeys, int menu) {
     unsigned short buttons = 0;
+    const unsigned short *map;
     int i;
     controls_init();
+    map = menu ? sLayouts[0].map : sSettings.map;
     for (i = 0; i < CTRL_KEY_COUNT; i++) {
         if (heldKeys & (1u << i)) {
-            buttons |= sSettings.map[i];
+            buttons |= map[i];
         }
     }
     return buttons;
@@ -368,7 +374,8 @@ int controls_option_count(void) {
 const char *controls_option_label(int index) {
     static const char *const sKeyLabels[CTRL_KEY_COUNT] = { "A button",  "B button",  "X button",
                                                             "Y button",  "L button",  "R button",
-                                                            "ZL button", "ZR button", "SELECT button" };
+                                                            "ZL button", "ZR button", "SELECT button", "D-Pad up",
+                                                            "D-Pad down", "D-Pad left", "D-Pad right" };
     index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
         return sKeyLabels[index - OPT_KEY_FIRST];

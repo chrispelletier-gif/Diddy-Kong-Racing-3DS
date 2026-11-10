@@ -30,5 +30,7 @@ void port_game_note_frame(void) {
         note.hit = racer->attackType;
         note.paused = is_game_paused() != 0;
     }
+    // Not racing, paused, or finished: the buttons steer a menu (input_3ds.c keeps A, B and the D-Pad standard then).
+    note.menu = (racer == NULL || note.paused || racer->raceFinished) ? 1 : 0;
     plat_set_game_note(&note);
 }

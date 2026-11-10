@@ -2,8 +2,9 @@
  * 3DS controls, mapped onto an N64 controller. By default:
  *   Circle Pad -> stick        A / B -> A / B        L, ZL -> Z (use item)     R, ZR -> R (hop/drift)
  *   X -> C-Up   Y -> C-Left    C-Stick -> C buttons  D-Pad -> D-Pad            SELECT -> L    START -> START
- * A B X Y L R ZL ZR SELECT can be remapped, and the circle pad's deadzone and response set, from the settings menu
- * (plat/controls.c). START, the D-Pad and the C-Stick stay fixed so the menus can always be reached.
+ * A B X Y L R ZL ZR SELECT and the D-Pad can be remapped for racing, and the circle pad's deadzone and response set,
+ * from the settings menu (plat/controls.c). In menus (and while paused) the standard layout always applies; START and
+ * the C-Stick stay fixed.
  */
 #include <3ds.h>
 #include <math.h>
@@ -22,16 +23,16 @@ typedef struct PortControllerState {
 } PortControllerState;
 
 /* Remappable buttons (controls.c), in CTRL_KEY_* order. */
-static const u32 sRemapKeys[CTRL_KEY_COUNT] = { KEY_A, KEY_B, KEY_X, KEY_Y, KEY_L, KEY_R, KEY_ZL, KEY_ZR, KEY_SELECT };
+static const u32 sRemapKeys[CTRL_KEY_COUNT] = { KEY_A, KEY_B, KEY_X, KEY_Y, KEY_L, KEY_R, KEY_ZL, KEY_ZR, KEY_SELECT,
+                                                   KEY_DUP, KEY_DDOWN, KEY_DLEFT, KEY_DRIGHT };
 
 /* Buttons that always do the same thing. */
 static const struct {
     u32 key;
     u16 n64;
 } sFixedMap[] = {
-    { KEY_START, CTRL_N64_START },    { KEY_DUP, CTRL_N64_DU },         { KEY_DDOWN, CTRL_N64_DD },
-    { KEY_DLEFT, CTRL_N64_DL },       { KEY_DRIGHT, CTRL_N64_DR },      { KEY_CSTICK_UP, CTRL_N64_CU },
-    { KEY_CSTICK_DOWN, CTRL_N64_CD }, { KEY_CSTICK_LEFT, CTRL_N64_CL }, { KEY_CSTICK_RIGHT, CTRL_N64_CR },
+    { KEY_START, CTRL_N64_START },       { KEY_CSTICK_UP, CTRL_N64_CU },       { KEY_CSTICK_DOWN, CTRL_N64_CD },
+    { KEY_CSTICK_LEFT, CTRL_N64_CL },    { KEY_CSTICK_RIGHT, CTRL_N64_CR },
 };
 
 /* How far the circle pad reaches from its centre. */
@@ -118,7 +119,12 @@ void port_input_poll(PortControllerState *state, s32 maxControllers) {
             remapped |= 1u << i;
         }
     }
-    state[0].buttons = controls_map_buttons(remapped);
+    {
+        // In a menu the standard layout is used, so a remapped B still goes back (and A confirms, the D-Pad moves).
+        PlatGameNote note = { 0 };
+        int menu = plat_get_game_note(&note) ? note.menu != 0 : 1;
+        state[0].buttons = controls_map_buttons(remapped, menu);
+    }
     for (i = 0; i < sizeof(sFixedMap) / sizeof(sFixedMap[0]); i++) {
         if (held & sFixedMap[i].key) {
             state[0].buttons |= sFixedMap[i].n64;

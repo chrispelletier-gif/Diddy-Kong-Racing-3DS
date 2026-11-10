@@ -183,6 +183,7 @@ static float sEyeSep, sEyeConv = 130.0f, sHudW = 1.0f;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
 static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
 static int sOnceFrame;       // This frame is
+static int stereo_wanted(float slider);
 #define EYE_CMD_WORDS 64
 /* citro3d's flags (internal.h C3DiF_*): the target, and the groups of settings a frame made once writes again at its
  * start: attributes, buffers, effect, viewport, scissor, program, combiner buffer and fog, texture status, fog table,
@@ -1277,8 +1278,11 @@ static void apply_screen_mode(void) {
     adaptive_restore_main();
     slider = osGet3DSliderState();
     // The switch bench sets DKR_STEREO3D for each race, so the player's 3D setting doesn't change what it measures.
-    int stereo = plat_switch("DKR_STEREO3D", sStereoSetting) && slider > 0.0f &&
-                 __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    // DKR_STEREO3D=2 (the switch bench's 3D races) draws in 3D whatever the slider says: as with it all the way up.
+    int stereo = stereo_wanted(slider) && __C3D_Context.gxQueue.maxEntries >= GX_QUEUE_ENTRIES;
+    if (stereo && slider <= 0.0f) {
+        slider = 1.0f;
+    }
     int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
     int depth24 = plat_switch("DKR_DEPTH24", 0) != 0;
     int aa = stereo ? PLAT_AA_OFF : sWantedAa;
@@ -3399,11 +3403,23 @@ static void transform_frame_drawn(int frame) {
     }
 }
 
+/* Whether the frame may be in 3D: the setting on (or forced by DKR_STEREO3D=2, the switch bench's 3D races) and the
+ * slider up. */
+static int stereo_wanted(float slider) {
+    int setting = plat_switch("DKR_STEREO3D", sStereoSetting);
+    return setting != 0 && (slider > 0.0f || setting == 2);
+}
+
+/* Whether the walk may see a 3D frame: with the two-core renderer sStereo is the backend's, up to two frames behind,
+ * so the slider is read here too, and a raised slider counts before the backend turns 3D on. */
+static int stereo_maybe(void) {
+    return sStereo || (gfx_split_active() && stereo_wanted(osGet3DSliderState()));
+}
+
 /*
- * Whether the walk may drop back faces itself (P40). Not in 3D, where each eye's offset can turn a nearly edge-on
- * triangle round, and not with DKR_NO_CULL. With the two-core renderer sStereo is the backend's, up to two frames
- * behind, so the slider is read here too: while split, a raised slider stops the walk culling before the backend
- * turns 3D on.
+ * Whether the walk may drop back faces itself (P40). Not with DKR_NO_CULL. In 3D each eye's offset can turn a nearly
+ * edge-on triangle round, so the walk only culls there with DKR_STEREO_CULL (Old 3DS 3D work, 2026-11-09), testing
+ * both eyes (gfxb_cpu_cull_margin); without it, not at all, as before.
  */
 int gfxb_cpu_cull_ok(void) {
     static int noCull = -1;
@@ -3411,7 +3427,25 @@ int gfxb_cpu_cull_ok(void) {
     if (noCull < 0) {
         noCull = plat_getenv("DKR_NO_CULL") != NULL;
     }
-    return !noCull && !sStereo && (!gfx_split_active() || osGet3DSliderState() <= 0.0f);
+    return !noCull && (!stereo_maybe() || plat_switch("DKR_STEREO_CULL", 0) != 0);
+}
+
+/*
+ * The walk's both-eyes back face test (DKR_STEREO_CULL). An eye's offset moves a vertex's screen position (shader
+ * eye uniform: pos.y += mul * w + add, write_eye) by add = -+sEyeSep * sEyeConv in clip units, the mul * w part
+ * leaving the triangle's facing as it is. In the walk's clip x that is add / sScale3D (to_screen). So the most any
+ * eye moves x by is sep * conv / scale, taken here at its largest for the frame (slider up, the manual convergence,
+ * which auto convergence never exceeds, the narrow 4:3 scale), as the walk may run a frame ahead of the backend.
+ * 0 when the frame can't be in 3D: the plain test.
+ */
+float gfxb_cpu_cull_margin(void) {
+    float sep, conv;
+    if (!stereo_maybe()) {
+        return 0.0f;
+    }
+    sep = stereo_max_sep() * sTuning[STEREO_DEPTH] / 100.0f;
+    conv = sBaseConv * sTuning[STEREO_CONV] / 100.0f;
+    return 1.125f * sep * conv / NARROW;
 }
 
 int gfxb_gpu_transform(void) {
