@@ -11,7 +11,10 @@
 #include "menu.h"
 #include "objects.h"
 #include "port.h"
+#include "game_text.h"
 #include "plat/plat.h"
+
+extern LevelHeader *gCurrentLevelHeader;
 
 void port_game_note_frame(void) {
     Object *obj = (get_game_mode() == GAMEMODE_INGAME) ? get_racer_object_by_port(PLAYER_ONE) : NULL;
@@ -31,6 +34,10 @@ void port_game_note_frame(void) {
         note.paused = is_game_paused() != 0;
     }
     // Not racing, paused, or finished: the buttons steer a menu (input_3ds.c keeps A, B and the D-Pad standard then).
-    note.menu = (racer == NULL || note.paused || racer->raceFinished) ? 1 : 0;
+    // In the hub world a character talking (a dialogue box) is a menu too: B must answer it whatever is remapped.
+    note.menu = (racer == NULL || note.paused || racer->raceFinished ||
+                 (gCurrentLevelHeader != NULL && gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD && textbox_visible()))
+                    ? 1
+                    : 0;
     plat_set_game_note(&note);
 }
