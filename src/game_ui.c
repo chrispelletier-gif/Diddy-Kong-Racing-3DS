@@ -23,6 +23,7 @@
 #include "thread3_main.h"
 #include "tracks.h"
 #include "types.h"
+#include "port_step.h"
 #ifdef TARGET_PORT
 #include "port.h"
 #include "plat/plat.h"
@@ -1939,7 +1940,7 @@ void hud_race_start(s32 countdown, s32 updateRate) {
                 randomRacer = racerGroup[rand_range(1, numRacerObjects) - 1];
                 racer = randomRacer->racer;
                 if (racer->vehicleID == VEHICLE_CAR) {
-                    if (rand_range(0, 100) >= 96) {
+                    if (PORT_TICK() && rand_range(0, 100) >= 96) { //!@Delta: a chance per 30 fps frame
                         frequency = 1.25 - ((rand_range(0, 7) * 0.5) / 7.0);
                         audspat_play_sound_direct(76, randomRacer->trans.x_position, randomRacer->trans.y_position,
                                                   randomRacer->trans.z_position, AUDIO_POINT_FLAG_ONE_TIME_TRIGGER,
@@ -3220,7 +3221,7 @@ void hud_race_time(Object_Racer *racer, s32 updateRate) {
                 // This section seems to do nothing of consequense.
                 hundredths =
                     gCurrentHud->entry[HUD_RACE_TIME_LABEL].raceTimeLabel.hundredths + ((hundredths / 10) * 10);
-                gCurrentHud->entry[HUD_RACE_TIME_LABEL].raceTimeLabel.hundredths++;
+                gCurrentHud->entry[HUD_RACE_TIME_LABEL].raceTimeLabel.hundredths += PORT_TICK(); //!@Delta
                 if (gCurrentHud->entry[HUD_RACE_TIME_LABEL].raceTimeLabel.hundredths >= 10) {
                     gCurrentHud->entry[HUD_RACE_TIME_LABEL].raceTimeLabel.hundredths = 0;
                 }
