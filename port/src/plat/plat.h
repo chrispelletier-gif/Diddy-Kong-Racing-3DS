@@ -1,6 +1,6 @@
 #ifndef PORT_PLAT_H
 #define PORT_PLAT_H
-/* Off-GitHub test build: everything on the PICA200 (local branch local/pica-all only). */
+/* Everything on the PICA200 (the native renderer's switches and code; on master since PR #468). */
 #define PICA_ALL 1
 
 /*
