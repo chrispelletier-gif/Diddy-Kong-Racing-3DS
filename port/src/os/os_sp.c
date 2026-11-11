@@ -79,13 +79,33 @@ int port_rcp_idle(void) {
     return sRcpTasksBusy == 0;
 }
 
+/*
+ * The render ahead the game thread works with: the setting, taken up only at the end of a frame (gfxtask_wait_ahead),
+ * and going from 2 down to 1 only once no frame is in flight. A frame still being drawn may be using any of the three
+ * per-frame geometry copies, and with two copies the next one could be its copy.
+ */
+static s32 sGameAhead;
+
 s32 port_render_ahead(void) {
-    return plat_render_ahead();
+    if (sGameAhead == 0) {
+        sGameAhead = plat_render_ahead();
+    }
+    return sGameAhead;
+}
+
+/* Game thread, at the end of a frame: whether the setting can be taken up now (FALSE: drain the frames in flight). */
+s32 port_render_ahead_update(s32 framesInFlight) {
+    s32 want = plat_render_ahead();
+    if (want >= port_render_ahead() || framesInFlight == 0) {
+        sGameAhead = want;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* The next of the game's per-frame geometry copies (FRAME_FLIP): two in turn as on the N64, three when two frames may be in flight. */
 int port_frame_flip(int flip) {
-    return (flip + 1) % (plat_render_ahead() + 1);
+    return (flip + 1) % (port_render_ahead() + 1);
 }
 
 /* v31: the walk's time so far and the start of the one running (0: none), for the profiler's sections, which count

@@ -105,6 +105,7 @@ void port_rcp_wait_idle(void);
  * the one being built each have their own.
  */
 s32 port_render_ahead(void);
+s32 port_render_ahead_update(s32 framesInFlight);
 #define PORT_DL_BUFFERS 3
 void port_rcp_gfx_submitted(void);
 int port_rcp_idle(void);
