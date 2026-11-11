@@ -184,7 +184,7 @@ static int sEyeUniform = -1; // The shader's eye uniform register, if found
 static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
 static int sOnceFrame;       // This frame is
 static int stereo_wanted(float slider);
-#define EYE_CMD_WORDS 64
+#define EYE_CMD_WORDS 128
 /* citro3d's flags (internal.h C3DiF_*): the target, and the groups of settings a frame made once writes again at its
  * start: attributes, buffers, effect, viewport, scissor, program, combiner buffer and fog, texture status, fog table,
  * textures and combiner stages. */
@@ -1130,8 +1130,9 @@ void plat_3ds_step_stereo_tuning(int which, int step) {
  * one small thing (a banana, a spark) is not the whole story, or none when fewer than three patches had anything (a
  * sky). auto_convergence then smooths it, quick to follow something coming close and slow to let go, jumping at a
  * camera cut, and brings the screen's depth near enough that the nearest thing comes out of the screen by at most the
- * comfort target: a percentage of how far the farthest things go into it. The vertices are already transformed on the
- * CPU, so nothing has to be read back from the GPU.
+ * comfort target: a percentage of how far the farthest things go into it. The CPU path's vertices are already
+ * transformed; for draws the GPU transforms (P30 models and meshes) near_depth_note_model transforms a sample of their
+ * vertices on the CPU, so nothing has to be read back from the GPU.
  */
 #define NEAR_COLS 8
 #define NEAR_ROWS 4
@@ -1164,6 +1165,21 @@ static void near_depth_note(const GfxVertex *verts, int numVerts) {
             sNear[row * NEAR_COLS + col] = w;
         }
     }
+}
+
+/* A GPU-transformed draw's vertices for auto convergence: up to 32 of them, spread over the model, transformed here. */
+static void near_depth_note_model(const GfxModelParams *params, const GfxModelVertex *verts, int numVerts) {
+    GfxVertex sample[32];
+    int n = 0, step = numVerts > 32 ? (numVerts + 31) / 32 : 1, i;
+    for (i = 0; i < numVerts && n < 32; i += step) {
+        const GfxModelVertex *in = &verts[i];
+        float x = in->x, y = in->y, z = in->z;
+        GfxVertex *v = &sample[n++];
+        v->x = x * params->mtx[0][0] + y * params->mtx[1][0] + z * params->mtx[2][0] + params->mtx[3][0];
+        v->y = x * params->mtx[0][1] + y * params->mtx[1][1] + z * params->mtx[2][1] + params->mtx[3][1];
+        v->w = x * params->mtx[0][3] + y * params->mtx[1][3] + z * params->mtx[2][3] + params->mtx[3][3];
+    }
+    near_depth_note(sample, n);
 }
 
 static float near_depth_take(void) {
@@ -2738,6 +2754,24 @@ static void bind_target(C3D_RenderTarget *target) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
 }
 
+/*
+ * The rest of what C3D_FrameBufBind writes: the buffers' formats and which of them are read and written. A stereo
+ * frame made once has citro3d's framebuffer flag cleared (the body runs once per eye and must not bind a target), so
+ * each eye's list writes these itself rather than rely on an earlier frame (or the HOME menu) having left them so.
+ */
+static void bind_target_formats(C3D_RenderTarget *target) {
+    static const u8 sColorFmtSizes[] = { 2, 1, 0, 0, 0 }; // citro3d's, by GPU_COLORBUF
+    const C3D_FrameBuf *fb = &target->frameBuf;
+    u32 param[4];
+    GPUCMD_AddWrite(GPUREG_DEPTHBUFFER_FORMAT, fb->depthFmt);
+    GPUCMD_AddWrite(GPUREG_COLORBUFFER_FORMAT,
+                    ((u32) fb->colorFmt < 5 ? sColorFmtSizes[fb->colorFmt] : 0) | ((u32) fb->colorFmt << 16));
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, fb->block32 ? 1 : 0);
+    param[0] = param[1] = fb->colorBuf != NULL ? fb->colorMask : 0;
+    param[2] = param[3] = fb->depthBuf != NULL ? fb->depthMask : 0;
+    GPUCMD_AddIncrementalWrites(GPUREG_COLORBUFFER_READ, param, 4);
+}
+
 /* Draws count vertices from vertex on, or the count vertices the indices name, once for each eye (3D). Out of line
  * so that the per-draw path of a frame drawn once (draw_prims) stays short. */
 static void __attribute__((noinline)) draw_prims_stereo(int vertex, int count, const u16 *indices) {
@@ -2789,6 +2823,7 @@ static void stereo_once_lists(FrameSlot *slot) {
     GPUCMD_SetBuffer(slot->eyeCmd, EYE_CMD_WORDS, 0);
     for (i = 0; i < 2; i++) {
         bind_target(i == 0 ? sTarget : sTargetRight);
+        bind_target_formats(i == 0 ? sTarget : sTargetRight);
         write_eye(i == 0 ? sEyeSep : -sEyeSep, i == 0 ? -sEyeSep * sEyeConv : sEyeSep * sEyeConv);
         GPUCMD_Split(&eye[i], &eyeWords[i]);
     }
@@ -3563,7 +3598,9 @@ void gfxb_start_frame(void) {
     adaptive_pick();
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
-    sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending;
+    // A suspend or exit asked for while the renderer was idle (the HOME hook stops waiting after 2 s) is taken here,
+    // before anything is handed to the GPU: an overlapped frame would otherwise only park after drawing.
+    sOverlap = overlap_setting() && sFrameStarted < 0 && !sSnapshotPending && !plat_3ds_renderer_should_park();
     if (!sOverlap) {
         wait_for_gpu(1);
         // The application is closing or suspended: stop here, with the GPU idle and no frame being built.
@@ -6000,7 +6037,8 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (timed) {
         draw_reading(t2, DRAW_PART_WRITE, 1);
     }
-    if (sStereo) {
+    // (As draw_prims: a stereo frame made once draws each eye by running the whole frame again.)
+    if (sStereo && !sOnceFrame) {
         draw_prims_stereo(vertex, count, ibo);
     } else {
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, ibo);
@@ -6132,6 +6170,9 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     }
     if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
         return;
+    }
+    if (sStereo && !state->flat && sTuning[STEREO_AUTO]) {
+        near_depth_note_model(params, verts, numVerts);
     }
     vertex = use_vertex_format(VFMT_MODEL);
     if (vertex + numVerts > 0xFFFF) {
@@ -6343,6 +6384,12 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
     }
     if (count == 0 || !model_draw_begin(state, params, 0, count, count / 3, &hangDraw)) {
         return;
+    }
+    if (sStereo && !state->flat && sTuning[STEREO_AUTO]) {
+        for (i = 0; i < numParts; i++) {
+            const C3DMesh *m = parts[i].mesh;
+            near_depth_note_model(params, &sMeshArena[m->base], m->numVerts);
+        }
     }
     if (sBufMesh != sMeshArena) {
         // The vertex buffer setting points at the arena until a draw from the frame's buffer points it back.
