@@ -886,6 +886,9 @@ void clear_object_pointers(void) {
  */
 void free_all_objects(void) {
     s32 i, len;
+#ifdef TARGET_PORT
+    port_boss_step_forget(NULL);
+#endif
     timetrial_free_staff_ghost();
     gIsP2LeadPlayer = FALSE;
     if (gRollingDemo) {
@@ -2559,6 +2562,9 @@ Object *obj_spawn_attachment(s32 objID) {
  * Official Name: objFreeObject
  */
 void free_object(Object *object) {
+#ifdef TARGET_PORT
+    port_boss_step_forget(object);
+#endif
     func_800245B4(object->objectID | OBJ_FLAGS_PARTICLE);
     gParticlePtrList[gFreeListCount] = object;
     gFreeListCount++;
@@ -3869,8 +3875,15 @@ void object_undo_player_tumble(Object *obj) {
  * soon as it is closer than the threshold again: one change each way, never a flicker. (The adaptive boost changes
  * nothing on an Old 3DS: the 3-player distances it starts from equal the 4-player ones for the other karts.)
  */
+/* Which camera's history a kart's model choice uses: each split-screen view sees the karts from its own distance. */
+static s32 port_racer_lod_view(void) {
+    s32 view = get_current_viewport();
+    return (view >= 0 && view < 4) ? view : 0;
+}
+
 static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds) {
-    static s8 sPrev[8];
+    static s8 sPrevByView[4][8];
+    s8 *sPrev = sPrevByView[port_racer_lod_view()];
     static u32 sLoads = 0xFFFFFFFFu;
     extern unsigned int gPortLevelLoads;
     s32 hold = plat_switch("DKR_RACER_LOD_HOLD", plat_old_3ds() ? 4 : 0), prev;
@@ -3879,7 +3892,7 @@ static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds)
     }
     if (sLoads != gPortLevelLoads) {
         sLoads = gPortLevelLoads;
-        __builtin_memset(sPrev, -1, sizeof(sPrev));
+        __builtin_memset(sPrevByView, -1, sizeof(sPrevByView));
     }
     prev = sPrev[racer];
     if (prev >= 0 && prev < want && v >= -50) {
@@ -3912,21 +3925,26 @@ static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds)
 static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 boostRow) {
     extern s32 gPortRacerLodBlend;
     extern unsigned int gPortLevelLoads;
-    static s8 sPrevModel[8];
-    static s16 sPrevDist[8];
-    static u32 sValid; // A bit per racer
+    static s8 sPrevModelByView[4][8];
+    static s16 sPrevDistByView[4][8];
+    static u32 sValidByView[4]; // A bit per racer
     static unsigned int sLevel;
+    s32 view = port_racer_lod_view();
+    s8 *sPrevModel = sPrevModelByView[view];
+    s16 *sPrevDist = sPrevDistByView[view];
+    u32 sValid;
     u8 thr[5];
     s32 blend = gPortRacerLodBlend;
     s32 target = usual, result, prev, lo, hi, d, k;
 
     if (sLevel != gPortLevelLoads) {
         sLevel = gPortLevelLoads;
-        sValid = 0;
+        __builtin_memset(sValidByView, 0, sizeof(sValidByView));
     }
+    sValid = sValidByView[view];
     if (racer < 0 || racer >= 8 || v < -50 || blend <= 0 || boostRow <= 0) {
         if (racer >= 0 && racer < 8) {
-            sValid &= ~(1u << racer);
+            sValidByView[view] &= ~(1u << racer);
         }
         return port_racer_lod_hold(racer, usual, v, row);
     }
@@ -3955,7 +3973,7 @@ static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 b
     }
     sPrevModel[racer] = (s8) result;
     sPrevDist[racer] = (s16) ((d > 32767) ? 32767 : d);
-    sValid |= 1u << racer;
+    sValidByView[view] = sValid | (1u << racer);
     return port_racer_lod_hold(racer, result, v, thr);
 }
 #endif

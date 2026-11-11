@@ -207,6 +207,7 @@ f32 rotate_racer_in_water(Object *obj, Object_Racer *racer, Vec3f *pos, s8 arg3,
 void update_AI_racer(Object* obj, Object_Racer* racer, s32 updateRate, f32 updateRateF);
 #ifdef TARGET_PORT
 void port_boss_step(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF);
+void port_boss_step_forget(Object *obj);
 #endif
 void func_80042D20(Object *obj, Object_Racer *racer, s32 updateRate);
 void handle_racer_items(Object *obj, Object_Racer *racer, s32 updateRate);
