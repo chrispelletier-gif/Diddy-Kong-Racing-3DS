@@ -344,6 +344,9 @@ void port_set_logic_rate(s32 updateRate);
 /* A kart held up by only one or two wheels levels out (src/racer.c update_racer_collision); DKR_CAR_SETTLE=0 is the
    N64's, which can leave it riding on its side for good. */
 s32 port_car_settle(void);
+/* At 60 fps the bosses (src/racer.c port_boss_step) run their logic in whole 30 fps steps and are drawn halfway
+   between them, so they race exactly as at 30 fps; DKR_BOSS_STEP30=0 steps them every frame like everyone else. */
+s32 port_boss_step30(void);
 
 /*
  * What the game thread is doing (src/thread3_main.c sets it at each step of the main loop), and a line describing the

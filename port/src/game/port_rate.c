@@ -43,6 +43,18 @@ s32 port_car_settle(void) {
     return plat_switch("DKR_CAR_SETTLE", 1) != 0;
 }
 
+/*
+ * The bosses at 60 fps (Bubbler, 2026-11-11: about 20% faster at 60 than at 30, in both fights). A boss races on the
+ * game's full four-sphere kart collision, which re-measures the boss's fall from how far it really moved each frame.
+ * With half steps a boss tipped onto one side settles back at about half the speed, and while a front wheel is off
+ * the water it gets no drag but full throttle, so Bubbler gained speed on every wave. Rather than chase each such step
+ * size effect in the boss physics, a boss runs its logic in whole 30 fps steps (exactly as at 30 fps) on every other
+ * frame, and on the frames between is drawn half a step further along (src/racer.c port_boss_step).
+ */
+s32 port_boss_step30(void) {
+    return plat_switch("DKR_BOSS_STEP30", 1) != 0;
+}
+
 /* For the host 60 fps step check: each object's address, behaviour and behaviour data, three words apiece. */
 s32 port_list_objects(u32 *out, s32 max) {
     extern Object **gObjPtrList;
