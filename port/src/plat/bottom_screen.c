@@ -1919,6 +1919,7 @@ static const Colour LABEL_BLUE = { 170, 195, 240, 255 };
 
 /* The track's map, drawn smooth at the size its panel allows, with its offsets, for the sprite in sMapSprite. */
 static Picture sMap;
+static const unsigned char *sMapBitmap; /* The game's own map picture, if the level has no sprite. */
 static int sMapSprite = -2, sMapMirrored, sMapX, sMapY, sMapTexX, sMapTexY, sMapTexWidth;
 static unsigned char sMapColour[3];
 static int sMapBox[4]; /* The panel the map is fitted to: x0, y0, x1, y1. */
@@ -2329,7 +2330,8 @@ static void format_gap(int gap, char *out, int size) {
 }
 
 /* The track's map from the ROM: its sprite gives the texture and where the texture sits in the sprite. */
-static void load_map(int sprite, int mirrored, const unsigned char *colour, const int *box) {
+static void load_map(int sprite, int mirrored, const unsigned char *colour, const int *box,
+                     const unsigned char *bitmap, int bitmapW, int bitmapH) {
     const unsigned char *table, *data;
     unsigned long tableSize, dataSize, start;
     Picture tex = { 0, 0, NULL };
@@ -2340,8 +2342,21 @@ static void load_map(int sprite, int mirrored, const unsigned char *colour, cons
     sMap.rgba = NULL;
     sMapSprite = sprite;
     sMapMirrored = mirrored;
+    sMapBitmap = bitmap;
     memcpy(sMapColour, colour, 3);
     memcpy(sMapBox, box, sizeof(sMapBox));
+    if (bitmap != NULL) {
+        // The game drew this map itself: its pixels are the texture, with no offset.
+        tex.width = bitmapW;
+        tex.height = bitmapH;
+        tex.rgba = malloc((size_t) bitmapW * bitmapH * 4);
+        if (tex.rgba == NULL) {
+            return;
+        }
+        memcpy(tex.rgba, bitmap, (size_t) bitmapW * bitmapH * 4);
+        sMapTexX = sMapTexY = 0;
+        goto have_texture;
+    }
     table = section(ASSET_SPRITES_TABLE, &tableSize);
     data = section(ASSET_SPRITES, &dataSize);
     if (sprite < 0 || table == NULL || data == NULL || (unsigned long) (sprite + 2) * 4 > tableSize) {
@@ -2356,6 +2371,7 @@ static void load_map(int sprite, int mirrored, const unsigned char *colour, cons
     if (!load_texture_frame(texture, 0, &tex, &sMapTexX, &sMapTexY)) {
         return;
     }
+have_texture:
     sMapTexWidth = tex.width;
     // As large as the panel allows, scaled smoothly: the map is a mask, so its edge is redrawn sharp below.
     sMapScale = (float) (box[2] - box[0] - 10) / tex.width;
@@ -2469,7 +2485,9 @@ static void load_map(int sprite, int mirrored, const unsigned char *colour, cons
  * all the way round (measured on PC on two tracks).
  */
 static void map_point(const RaceHudPoint *r, int *x, int *y) {
-    float u = r->mapX / 4.0f - sMapTexX - 1.5f, v = r->mapY / 4.0f - sMapTexY - 1.0f;
+    // (A sprite's marker anchor sits about a pixel off; the game's own map picture has none.)
+    float u = r->mapX / 4.0f - sMapTexX - (sMapBitmap ? 0.0f : 1.5f);
+    float v = r->mapY / 4.0f - sMapTexY - (sMapBitmap ? 0.0f : 1.0f);
     if (sMapMirrored) {
         u = sMapTexWidth - u;
     }
@@ -2632,6 +2650,9 @@ static void make_race_base(const RaceHud *hud) {
         // (A race's own level is only set by the host preview, which has no track model to take the map from.)
         sprite = level_map(hud->level, colour);
     }
+    if (hud->mapBitmap != NULL) {
+        sprite = -1;
+    }
     map_box(hud->mode, mapBox);
     if (own_race_layout(hud)) {
         // Dock's map: the big one on the left. Glass and Broadcast have none.
@@ -2640,9 +2661,9 @@ static void make_race_base(const RaceHud *hud) {
         mapBox[2] = 150;
         mapBox[3] = 198;
     }
-    if (sprite != sMapSprite || hud->mapMirrored != sMapMirrored || memcmp(colour, sMapColour, 3) ||
+    if (sprite != sMapSprite || hud->mapBitmap != sMapBitmap || hud->mapMirrored != sMapMirrored || memcmp(colour, sMapColour, 3) ||
         memcmp(mapBox, sMapBox, sizeof(mapBox))) {
-        load_map(sprite, hud->mapMirrored, colour, mapBox);
+        load_map(sprite, hud->mapMirrored, colour, mapBox, hud->mapBitmap, hud->mapBitmapW, hud->mapBitmapH);
     } else if (sRaceBaseMade && sRaceBaseMode == hud->mode) {
         return;
     }

@@ -46,6 +46,7 @@ static volatile s32 sSetting = -1; // RACE_HUD_*, -1 until loaded.
 static s32 sActive;                // The bottom screen is showing this race's HUD.
 static s32 sMenuShown;             // It is showing a menu's companion (menu_companion).
 static s32 sMapSprite = -1;        // The current track's map, as minimap_init loaded it.
+static void *sHubMapModel;         // The hub whose own map is drawn (below).
 static void *sMapModel;            // The level model it belongs to: no map until the new level's is loaded.
 static s32 sClock;                 // 60ths of a second since the start.
 static s32 sTracking, sTrackedMode; // In a race (of this RACE_HUD_MODE_), keeping the clock and checkpoints.
@@ -74,6 +75,7 @@ void port_set_race_hud_setting(s32 value) {
 void port_race_hud_map(void *model, s32 spriteIndex) {
     sMapModel = model;
     sMapSprite = spriteIndex;
+    sHubMapModel = NULL; // A new level: a hub's own map is drawn again.
 }
 
 /* Whether game_ui.c leaves this HUD element (HUD_*, or -1 for the track map itself) off the top screen. */
@@ -157,6 +159,147 @@ static s32 hud_mode(Object *player) {
     return -1;
 }
 
+/*
+ * The hubs' own maps. The ROM has no map sprite for a hub (its model's map fields are left over from a track), so the
+ * map is drawn from the hub's geometry: its ground, seen from above, lighter where it is higher. Positions on it are
+ * pixels (times 4) of this picture, north up like the track maps.
+ */
+enum { HUB_MAP_SIZE = 160 };
+#define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
+#define MAX3(a, b, c) ((a) > (b) ? ((a) > (c) ? (a) : (c)) : ((b) > (c) ? (b) : (c)))
+static unsigned char *sHubMaps[2];
+static s32 sHubMapUse;
+static s32 sHubMapW, sHubMapH;
+static f32 sHubMapScale;
+
+static void hub_map_build(LevelModel *model) {
+    s32 width = model->upperXBounds - model->lowerXBounds, depth = model->upperZBounds - model->lowerZBounds;
+    s32 seg, b, t, x, y, n;
+    s32 lowY = 0x7FFF, highY = -0x7FFF;
+    unsigned char *rgba;
+    s16 *height;
+    if (width <= 0 || depth <= 0) {
+        return;
+    }
+    sHubMapScale = (f32) (HUB_MAP_SIZE - 1) / (width > depth ? width : depth);
+    sHubMapW = (s32) (width * sHubMapScale) + 1;
+    sHubMapH = (s32) (depth * sHubMapScale) + 1;
+    sHubMapUse ^= 1;
+    if (sHubMaps[sHubMapUse] == NULL) {
+        sHubMaps[sHubMapUse] = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * 4);
+    }
+    rgba = sHubMaps[sHubMapUse];
+    height = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * sizeof(s16));
+    if (rgba == NULL || height == NULL) {
+        free(height);
+        sHubMapModel = NULL;
+        return;
+    }
+    for (n = 0; n < sHubMapW * sHubMapH * 4; n++) {
+        rgba[n] = 0;
+    }
+    for (n = 0; n < HUB_MAP_SIZE * HUB_MAP_SIZE; n++) {
+        height[n] = -0x7FFF;
+    }
+    for (seg = 0; seg < model->numberOfSegments; seg++) {
+        LevelModelSegment *segment = &model->segments[seg];
+        for (b = 0; b < segment->numberOfBatches; b++) {
+            TriangleBatchInfo *batch = &segment->batches[b];
+            s32 end = segment->batches[b + 1].facesOffset;
+            if (batch->flags & RENDER_WATER) {
+                continue;
+            }
+            for (t = batch->facesOffset; t < end; t++) {
+                Triangle *tri = &segment->triangles[t];
+                Vertex *v[3];
+                f32 px[3], py[3], ax, az, bx, bz, cx, cz, nx, ny, nz, len, area;
+                s32 k, x0, x1, y0, y1;
+                for (k = 0; k < 3; k++) {
+                    s32 index = batch->verticesOffset + tri->verticesArray[k + 1];
+                    if (index < 0 || index >= segment->numberOfVertices) {
+                        break;
+                    }
+                    v[k] = &segment->vertices[index];
+                }
+                if (k < 3) {
+                    continue;
+                }
+                ax = v[1]->x - v[0]->x;
+                az = v[1]->z - v[0]->z;
+                bx = v[2]->x - v[0]->x;
+                bz = v[2]->z - v[0]->z;
+                cx = v[1]->y - v[0]->y;
+                cz = v[2]->y - v[0]->y;
+                // The normal's up part against its length: ground, not walls.
+                nx = cx * bz - az * cz;
+                nz = ax * cz - cx * bx;
+                ny = az * bx - ax * bz;
+                len = sqrtf(nx * nx + ny * ny + nz * nz);
+                if (len <= 0.0f || (ny < 0 ? -ny : ny) / len < 0.35f) {
+                    continue;
+                }
+                for (k = 0; k < 3; k++) {
+                    px[k] = (v[k]->x - model->lowerXBounds) * sHubMapScale;
+                    py[k] = (model->upperZBounds - v[k]->z) * sHubMapScale;
+                }
+                area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+                if (area == 0.0f) {
+                    continue;
+                }
+                // (Whole pixels, a pixel wider each way: the points are never negative once the model's bounds hold.)
+                x0 = (s32) MIN3(px[0], px[1], px[2]) - 1;
+                x1 = (s32) MAX3(px[0], px[1], px[2]) + 1;
+                y0 = (s32) MIN3(py[0], py[1], py[2]) - 1;
+                y1 = (s32) MAX3(py[0], py[1], py[2]) + 1;
+                if (x0 < 0) { x0 = 0; }
+                if (y0 < 0) { y0 = 0; }
+                if (x1 >= sHubMapW) { x1 = sHubMapW - 1; }
+                if (y1 >= sHubMapH) { y1 = sHubMapH - 1; }
+                for (y = y0; y <= y1; y++) {
+                    for (x = x0; x <= x1; x++) {
+                        f32 fx = x + 0.5f, fy = y + 0.5f;
+                        f32 w1 = ((fx - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (fy - py[0])) / area;
+                        f32 w2 = ((px[1] - px[0]) * (fy - py[0]) - (fx - px[0]) * (py[1] - py[0])) / area;
+                        f32 w0 = 1.0f - w1 - w2;
+                        s32 h;
+                        if (w0 < -0.06f || w1 < -0.06f || w2 < -0.06f) {
+                            continue;
+                        }
+                        h = (s32) (w0 * v[0]->y + w1 * v[1]->y + w2 * v[2]->y);
+                        if (h > height[y * HUB_MAP_SIZE + x]) {
+                            height[y * HUB_MAP_SIZE + x] = (s16) h;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (y = 0; y < sHubMapH; y++) {
+        for (x = 0; x < sHubMapW; x++) {
+            s32 h = height[y * HUB_MAP_SIZE + x];
+            if (h != -0x7FFF) {
+                lowY = h < lowY ? h : lowY;
+                highY = h > highY ? h : highY;
+            }
+        }
+    }
+    for (y = 0; y < sHubMapH; y++) {
+        for (x = 0; x < sHubMapW; x++) {
+            s32 h = height[y * HUB_MAP_SIZE + x];
+            unsigned char *o = rgba + (y * sHubMapW + x) * 4;
+            if (h == -0x7FFF) {
+                continue;
+            }
+            // Light for the highest ground, a darker blue-grey for the lowest.
+            n = highY > lowY ? 150 + (h - lowY) * 105 / (highY - lowY) : 255;
+            o[0] = o[1] = o[2] = (unsigned char) n;
+            o[3] = 255;
+        }
+    }
+    free(height);
+    sHubMapModel = model;
+}
+
 /* The racer's place on the map, as minimap_marker_pos works it out, in the map sprite's pixels (y down). */
 static void map_position(RaceHudPoint *out, Object *obj, LevelModel *model) {
     f32 aspect, angleCos, angleSin, scaledX, scaledY, rotX, rotY, x, y;
@@ -166,6 +309,14 @@ static void map_position(RaceHudPoint *out, Object *obj, LevelModel *model) {
 
     if (width == 0 || depth == 0) {
         out->onMap = FALSE;
+        return;
+    }
+    if (model == sHubMapModel) {
+        // The hub's own picture: north up, no rotation or flip.
+        out->onMap = TRUE;
+        out->mapX = (s16) ((obj->trans.x_position - model->lowerXBounds) * sHubMapScale * 4.0f);
+        out->mapY = (s16) ((model->upperZBounds - obj->trans.z_position) * sHubMapScale * 4.0f);
+        out->heading = (u16) obj->trans.rotation.y_rotation;
         return;
     }
     aspect = width / (f32) depth;
@@ -568,6 +719,17 @@ void port_race_hud_frame(s32 updateRate) {
     hud.mode = mode;
     hud.mapSprite = model != NULL && model == sMapModel ? sMapSprite : -1;
     hud.mapMirrored = (get_filtered_cheats() & CHEAT_MIRRORED_TRACKS) != 0;
+    if (mode == RACE_HUD_MODE_HUB && model != NULL) {
+        if (model != sHubMapModel) {
+            hub_map_build(model);
+        }
+        if (model == sHubMapModel) {
+            hud.mapBitmap = sHubMaps[sHubMapUse];
+            hud.mapBitmapW = sHubMapW;
+            hud.mapBitmapH = sHubMapH;
+            hud.mapMirrored = FALSE;
+        }
+    }
     hud.silverCoins = -1;
     if (model != NULL) {
         hud.mapColour[0] = (model->minimapColor >> 16) & 0xFF;

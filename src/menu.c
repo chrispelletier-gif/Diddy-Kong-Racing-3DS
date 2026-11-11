@@ -3432,7 +3432,8 @@ void func_80083098(f32 updateRateF) {
                   ALIGN_MIDDLE_CENTER);
         set_text_font(ASSET_FONTS_BIGFONT);
 #endif
-        D_80126878[i].colourIndex++;
+        // The trail behind each name is its last four 30 fps frames: at 60 fps it moves on every other frame.
+        D_80126878[i].colourIndex += PORT_TICK(); //!@Delta
         if (D_80126878[i].colourIndex >= 4) {
             gTitleCinematicTextColourCount--;
             for (j = i; j < gTitleCinematicTextColourCount; j++) {
@@ -3478,7 +3479,7 @@ void func_80083098(f32 updateRateF) {
         return;
     }
 
-    if (gTitleCinematicTextColourCount < 4) {
+    if (PORT_TICK() && gTitleCinematicTextColourCount < 4) { //!@Delta
         D_80126878[gTitleCinematicTextColourCount].colourIndex = 0;
         D_80126878[gTitleCinematicTextColourCount].text = text;
 #if REGION == REGION_JP
@@ -4865,7 +4866,7 @@ s32 menu_audio_options_loop(s32 updateRate) {
                 playSound = 1;
             } else if (contXAxis && (gOptionsMenuItemIndex == 1 || gOptionsMenuItemIndex == 2)) {
                 if (gOptionsMenuItemIndex == 1) {
-                    gSfxVolumeSliderValue += contXAxis;
+                    gSfxVolumeSliderValue += PORT_TICK() ? contXAxis : 0; //!@Delta: moves at 30 fps
                     if (gSfxVolumeSliderValue < 0) {
                         gSfxVolumeSliderValue = 0;
                     } else if (gSfxVolumeSliderValue > 256) {
@@ -4873,7 +4874,7 @@ s32 menu_audio_options_loop(s32 updateRate) {
                     }
                     sndp_set_global_volume(gSfxVolumeSliderValue);
                 } else if (gOptionsMenuItemIndex == 2) {
-                    gMusicVolumeSliderValue += contXAxis;
+                    gMusicVolumeSliderValue += PORT_TICK() ? contXAxis : 0; //!@Delta: moves at 30 fps
                     if (gMusicVolumeSliderValue < 0) {
                         gMusicVolumeSliderValue = 0;
                     } else if (gMusicVolumeSliderValue > 256) {
@@ -12236,7 +12237,7 @@ void postrace_load(void) {
 
     if (gPostRace.unk0_s32 >= 0) {
         if (gPostRace.unk0_s32 < 10) {
-            gPostRace.unk0_s32++;
+            gPostRace.unk0_s32 += PORT_TICK(); //!@Delta: 10 game frame wait
             return;
         }
 #ifdef AVOID_UB

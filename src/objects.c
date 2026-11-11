@@ -1698,7 +1698,10 @@ void transform_player_vehicle(void) {
     if (gTransformTimer == 0) {
         return;
     }
-    gTransformTimer--;
+    if (!PORT_TICK()) {
+        return; // 60 fps: the delay is counted in 30 fps frames.
+    }
+    gTransformTimer--; //!@Delta
     if (gTransformTimer) {
         return;
     }
@@ -6842,7 +6845,7 @@ void race_check_finish(s32 updateRate) {
             if (prevRacerPos == curRacer->racerOrder) {
                 if (curRacer->unk1B0 < 2) {
                     if (curRacer->vehicleID != VEHICLE_LOOPDELOOP) {
-                        curRacer->unk1B0++;
+                        curRacer->unk1B0 += PORT_TICK(); //!@Delta: place must hold for 2 game frames
                     }
                 } else if (curRacer->racerOrder != curRacer->racePosition) {
                     curRacer->unk1B2 = 10;
@@ -8727,8 +8730,8 @@ s32 *get_misc_asset(s32 index) {
  */
 s32 is_bridge_raised(s32 index) {
     if (index >= 0 && index < 8) {
-        if (gDrawbridgeTimers[0][index] > 0) {
-            gDrawbridgeTimers[0][index]--;
+        if (gDrawbridgeTimers[0][index] > 0 && PORT_TICK()) {
+            gDrawbridgeTimers[0][index]--; //!@Delta: 60 fps counts it down at 30 fps
         }
         return gDrawbridgeTimers[0][index];
     }

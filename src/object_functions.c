@@ -1077,7 +1077,7 @@ void obj_loop_timetrialghost(Object *obj, s32 updateRate) {
         if (vehicleID == VEHICLE_HOVERCRAFT || vehicleID == VEHICLE_PLANE) {
             someObj = attachPoint->obj[0];
             someObj->trans.rotation.y_rotation = 0x4000;
-            someObj->modelIndex++;
+            someObj->modelIndex += PORT_TICK(); //!@Delta: the propeller frames flip at 30 fps
             someObj->modelIndex &= 1;
         }
     }
@@ -1983,7 +1983,7 @@ void obj_loop_vehicleanim(Object *obj, s32 updateRate) {
 
     attachObj = attachPoint->count == 3 ? attachPoint->obj[2] : attachPoint->obj[0];
     attachObj->trans.rotation.y_rotation = 0x4000;
-    attachObj->modelIndex++;
+    attachObj->modelIndex += PORT_TICK(); //!@Delta: the propeller frames flip at 30 fps
     if (attachObj->modelIndex == attachObj->header->numberOfModelIds) {
         attachObj->modelIndex = 0;
     }
@@ -6216,7 +6216,7 @@ void obj_loop_butterfly(Object *butterflyObj, s32 updateRate) {
                     if (((xDiff * xDiff) + (zDiff * zDiff)) > 22500.0f) {
                         butterfly->unkFD = 3;
                     } else {
-                        if (rand_range(0, 0x64) >= 0x63) {
+                        if (PORT_TICK() && rand_range(0, 0x64) >= 0x63) { //!@Delta: a 1% chance per 30 fps frame
                             butterfly->unk106 = -butterfly->unk106;
                         }
                         butterflyObj->trans.rotation.y_rotation += updateRate * butterfly->unk106;

@@ -3618,7 +3618,7 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
             angle += 0xFFFF;
         }
         if (racer->camera_zoom < 0.4) {
-            racer->camera_zoom += 1 / 180.0;
+            racer->camera_zoom += PORT_STEP(1 / 180.0); //!@Delta
         } else {
             racer->camera_zoom = 0.4f;
         }
@@ -4347,7 +4347,11 @@ void update_player_racer(Object *obj, s32 updateRate) {
     gCurrentCourseHeight = header->course_height;
     tempRacer->throttleReleased = FALSE;
     if (tempRacer->playerIndex == PLAYER_COMPUTER) {
+#ifdef TARGET_PORT
+        port_boss_step(obj, tempRacer, updateRate, updateRateF);
+#else
         update_AI_racer(obj, tempRacer, updateRate, updateRateF);
+#endif
     } else {
         // Print player 1's coordinates to the screen if the debug cheat is enabled.
         if (gRaceStartTimer == 0 && tempRacer->playerIndex == PLAYER_ONE) {
@@ -4882,10 +4886,12 @@ void update_car(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Racer 
     } else {
         if (racer->unk1D4 != 0) {
             gCurrentButtonsPressed &= ~(Z_TRIG | R_TRIG);
-            if (racer->unk1D4 > 0) {
-                racer->unk1D4 -= 4;
+            if (!PORT_TICK()) {
+                // 60 fps: counted down at 30 fps.
+            } else if (racer->unk1D4 > 0) {
+                racer->unk1D4 -= 4; //!@Delta
             } else {
-                racer->unk1D4 += 4;
+                racer->unk1D4 += 4; //!@Delta
             }
         }
         if (gCurrentRacerInput & B_BUTTON && racer->drift_direction != 0) {
@@ -4999,7 +5005,13 @@ void update_car(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Racer 
         if (var_v1 < -0x8000) {
             var_v1 += 0xFFFF;
         }
+#ifdef TARGET_PORT
+        // Heading eases a quarter of the gap per retrace (half per 30 fps frame). Two 60 fps half steps of
+        // a quarter close only 7/16, so a half step takes 1 - sqrt(1/2) (~75/256) of the gap instead.
+        var_v1 = gPortHalfStep ? (var_v1 * 75) >> 8 : var_v1 >> 2;
+#else
         var_v1 >>= 2;
+#endif
         if (var_v1 > 0x2EE) {
             var_v1 = 0x2EE;
         }
@@ -5326,7 +5338,7 @@ void update_player_car_velocity_ground(Object *obj, Object_Racer *racer, s32 upd
                 sp58 = 1;
             }
         }
-        if ((racer->miscAnimCounter & 7) < 2) {
+        if (PORT_TICK() && (racer->miscAnimCounter & 7) < 2) { //!@Delta: miscAnimCounter steps at 30 fps
             racer->unk1D1 = rand_range(-25, 25);
         }
         gCurrentStickX += racer->unk1D1;
@@ -8160,6 +8172,19 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
 #endif
 
     dialogueAngle = gDialogueCameraAngle / 10240.0f; // Goes between 0-1
+#ifdef TARGET_PORT
+    {
+        // The camera closes this share of its gap to the dialogue spot each frame: at 60 fps, the per-retrace share.
+        f32 dialogueShare = PORT_LERP(dialogueAngle); //!@Delta
+        gCameraObject->x_velocity = (((obj->trans.x_position + (91.75 * racer->ox1) + (90.0 * racer->ox3)) -
+                                      gCameraObject->trans.x_position) *
+                                     dialogueShare);
+        gCameraObject->z_velocity = (((obj->trans.z_position + (91.75 * racer->oz1) + (90.0 * racer->oz3)) -
+                                      gCameraObject->trans.z_position) *
+                                     dialogueShare);
+        gCameraObject->y_velocity = (((get_npc_pos_y() + 48.5) - gCameraObject->trans.y_position) * dialogueShare);
+    }
+#else
     gCameraObject->x_velocity =
         (((obj->trans.x_position + (91.75 * racer->ox1) + (90.0 * racer->ox3)) - gCameraObject->trans.x_position) *
          dialogueAngle);
@@ -8167,9 +8192,12 @@ void update_player_camera(Object *obj, Object_Racer *racer, f32 updateRateF) {
         (((obj->trans.z_position + (91.75 * racer->oz1) + (90.0 * racer->oz3)) - gCameraObject->trans.z_position) *
          dialogueAngle);
     gCameraObject->y_velocity = (((get_npc_pos_y() + 48.5) - gCameraObject->trans.y_position) * dialogueAngle);
+#endif
     gCameraObject->pitch = -gCameraObject->trans.rotation.x_rotation * dialogueAngle;
     gCameraObject->trans.x_position += gCameraObject->x_velocity;
-    gCameraObject->trans.y_position += gCameraObject->y_velocity + gCameraObject->shakeMagnitude;
+    // The shake is added to the camera's height every frame and eased out by the chase cameras' height easing: at
+    // 60 fps half of it a frame, so a hit or a hard landing jolts the camera as far as at 30 fps.
+    gCameraObject->trans.y_position += gCameraObject->y_velocity + PORT_STEP(gCameraObject->shakeMagnitude); //!@Delta
     gCameraObject->trans.z_position += gCameraObject->z_velocity;
     if (gRaceStartTimer == 0 && gDialogueCameraAngle == 0) {
         gCameraObject->x_velocity *= 0.95;
@@ -8497,6 +8525,12 @@ void update_camera_finish_challenge(UNUSED f32 updateRate, Object *obj, Object_R
     gCameraObject->trans.x_position = obj->trans.x_position + xOffset;
     temp_f12 = (gCameraObject->trans.y_position - (obj->trans.y_position + 45.0f)) * 0.25;
     if (temp_f12 < -2.0) {
+#ifdef TARGET_PORT
+        if (gPortHalfStep) {
+            // 60 fps: the per-retrace share of "a quarter of the gap and 2 more" each 30 fps frame.
+            gCameraObject->trans.y_position -= temp_f12 * 4.0f * PORT_LERP(0.25f) + 1.0f; //!@Delta
+        } else
+#endif
         gCameraObject->trans.y_position = (gCameraObject->trans.y_position - (temp_f12 + 2.0));
     }
     if (temp_f12 > 0.0f) {
@@ -9150,6 +9184,91 @@ void racer_enter_door(Object_Racer *racer, s32 updateRate) {
  * Mostly the same as how the player controlled one works, minus controller input and includes some decision making
  * logic.
  */
+#ifdef TARGET_PORT
+/*
+ * update_AI_racer, except that at 60 fps a boss steps in whole 30 fps steps (see port_boss_step30 in port_rate.c):
+ * on one frame of each pair it runs a 30 fps step, and on the other it is drawn half that step further along. The
+ * half step's nudge is taken back before the next real step, so the boss's own logic only ever sees 30 fps steps.
+ */
+static Object *sBossStepObj;
+static f32 sBossStepMove[3], sBossStepNudge[3];
+static s16 sBossStepTurn[3], sBossStepTurnNudge[3];
+static s32 sBossStepNudged;
+
+void port_boss_step(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
+    f32 before[3];
+    s16 turnBefore[3];
+    s32 halfStep, skipTick, i;
+
+    if (racer->vehicleID < VEHICLE_BOSSES || !port_boss_step30()) {
+        update_AI_racer(obj, racer, updateRate, updateRateF);
+        return;
+    }
+    if (sBossStepObj != obj) {
+        sBossStepObj = obj;
+        sBossStepNudged = FALSE;
+        for (i = 0; i < 3; i++) {
+            sBossStepMove[i] = 0.0f;
+            sBossStepTurn[i] = 0;
+        }
+    }
+    if (sBossStepNudged) {
+        obj->trans.x_position -= sBossStepNudge[0];
+        obj->trans.y_position -= sBossStepNudge[1];
+        obj->trans.z_position -= sBossStepNudge[2];
+        obj->trans.rotation.y_rotation -= sBossStepTurnNudge[0];
+        obj->trans.rotation.x_rotation -= sBossStepTurnNudge[1];
+        obj->trans.rotation.z_rotation -= sBossStepTurnNudge[2];
+        sBossStepNudged = FALSE;
+    }
+    halfStep = gPortHalfStep;
+    if (halfStep && !PORT_TICK()) {
+        // The frame between two 30 fps steps: draw the boss half the last step further along.
+        for (i = 0; i < 3; i++) {
+            sBossStepNudge[i] = sBossStepMove[i] * 0.5f;
+            sBossStepTurnNudge[i] = sBossStepTurn[i] / 2;
+        }
+        obj->trans.x_position += sBossStepNudge[0];
+        obj->trans.y_position += sBossStepNudge[1];
+        obj->trans.z_position += sBossStepNudge[2];
+        obj->trans.rotation.y_rotation += sBossStepTurnNudge[0];
+        obj->trans.rotation.x_rotation += sBossStepTurnNudge[1];
+        obj->trans.rotation.z_rotation += sBossStepTurnNudge[2];
+        sBossStepNudged = TRUE;
+        return;
+    }
+    before[0] = obj->trans.x_position;
+    before[1] = obj->trans.y_position;
+    before[2] = obj->trans.z_position;
+    turnBefore[0] = obj->trans.rotation.y_rotation;
+    turnBefore[1] = obj->trans.rotation.x_rotation;
+    turnBefore[2] = obj->trans.rotation.z_rotation;
+    if (halfStep) {
+        skipTick = gPortSkipTick;
+        gPortHalfStep = FALSE;
+        gPortSkipTick = FALSE;
+        update_AI_racer(obj, racer, updateRate * 2, updateRateF * 2);
+        gPortHalfStep = halfStep;
+        gPortSkipTick = skipTick;
+    } else {
+        update_AI_racer(obj, racer, updateRate, updateRateF);
+    }
+    sBossStepMove[0] = obj->trans.x_position - before[0];
+    sBossStepMove[1] = obj->trans.y_position - before[1];
+    sBossStepMove[2] = obj->trans.z_position - before[2];
+    sBossStepTurn[0] = (s16) (obj->trans.rotation.y_rotation - turnBefore[0]);
+    sBossStepTurn[1] = (s16) (obj->trans.rotation.x_rotation - turnBefore[1]);
+    sBossStepTurn[2] = (s16) (obj->trans.rotation.z_rotation - turnBefore[2]);
+    if (!halfStep && updateRate > 0) {
+        // A step of another length (a slow frame): the nudge is half a 30 fps step's worth of it.
+        for (i = 0; i < 3; i++) {
+            sBossStepMove[i] *= 2.0f / updateRate;
+            sBossStepTurn[i] = sBossStepTurn[i] * 2 / updateRate;
+        }
+    }
+}
+#endif
+
 void update_AI_racer(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
     s32 var_t2;
     Object **objects;

@@ -71,6 +71,10 @@ typedef struct RaceHud {
     int mapSprite;   /* The track map's sprite (the ROM's index), or -1. */
     int mapMirrored; /* Adventure 2's mirrored tracks: the map is drawn flipped. */
     unsigned char mapColour[3];
+    /* A map the game drew itself (the hubs have no map sprite): RGBA, mapBitmapW x mapBitmapH, or NULL. Points on it are
+     * pixels times 4 (RaceHudPoint). A new picture is a new pointer. */
+    const unsigned char *mapBitmap;
+    int mapBitmapW, mapBitmapH;
     int racerCount;
     RaceHudRacer racers[RACE_HUD_RACERS]; /* In race order: racers[0] leads. */
     int position;                         /* The player's, from 1. */

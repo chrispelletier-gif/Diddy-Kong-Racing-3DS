@@ -1265,6 +1265,15 @@ s32 func_80027568(void) {
  * It utilises spectate points then points at the race leader.
  * Uses lookat smoothing when changing which player, otherwise, snaps if the camera itself changes.
  */
+#ifdef TARGET_PORT
+/* The share of its angle gap the T.T. camera closes in a 60 fps half step: the per-retrace version of the 30 fps
+   frame's 1 / (16 * timer / 180) (which can pass 1 near the end, where it is left as it is). */
+static f32 ttcam_half_step_share(void) {
+    f32 share = 1.0f / (16.0f * (gTTCamSmoothTimer / 180.0f));
+    return share < 1.0f ? PORT_LERP(share) : share;
+}
+#endif
+
 void ttcam_update(s32 updateRate) {
     s16 angleDiff;
     f32 xDelta;
@@ -1336,12 +1345,22 @@ void ttcam_update(s32 updateRate) {
             if (angleDiff > 0x8000) {
                 angleDiff = -(0xFFFF - angleDiff);
             }
+#ifdef TARGET_PORT
+            if (gPortHalfStep) {
+                camera->trans.rotation.y_rotation += ((s32) (angleDiff * ttcam_half_step_share())) & 0xFFFF;
+            } else
+#endif
             camera->trans.rotation.y_rotation += ((s32) (angleDiff / (16.0f * (gTTCamSmoothTimer / 180.0f)))) & 0xFFFF;
             angleDiff = atan2s(yDelta, xzSqr) - camera->trans.rotation.x_rotation;
             //!@bug Never true, since angleDiff is signed. Should be >=.
             if (angleDiff > 0x8000) {
                 angleDiff = -(0xFFFF - angleDiff);
             }
+#ifdef TARGET_PORT
+            if (gPortHalfStep) {
+                camera->trans.rotation.x_rotation += ((s32) (angleDiff * ttcam_half_step_share())) & 0xFFFF;
+            } else
+#endif
             camera->trans.rotation.x_rotation += ((s32) (angleDiff / (16.0f * (gTTCamSmoothTimer / 180.0f)))) & 0xFFFF;
             gTTCamSmoothTimer -= updateRate;
             if (gTTCamSmoothTimer < 0) {
