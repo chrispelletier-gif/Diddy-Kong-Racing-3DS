@@ -71,11 +71,19 @@ void port_set_race_hud_setting(s32 value) {
     settings_set("racehud", value);
 }
 
-/* Called by minimap_init (src/game_ui.c) with the track's map sprite, before it is loaded over the index. */
+static s32 hub_map_ready(LevelModel *model);
+
+/*
+ * Called by minimap_init (src/game_ui.c) with the track's map sprite, before it is loaded over the index. A hub's own
+ * map is drawn here, during the load, rather than on its first frame (a stall there on the Old 3DS).
+ */
 void port_race_hud_map(void *model, s32 spriteIndex) {
     sMapModel = model;
     sMapSprite = spriteIndex;
     sHubMapModel = NULL; // A new level: a hub's own map is drawn again.
+    if (model != NULL && level_type() == RACETYPE_HUBWORLD && port_race_hud_setting() != RACE_HUD_TOP) {
+        hub_map_ready(model);
+    }
 }
 
 /* Whether game_ui.c leaves this HUD element (HUD_*, or -1 for the track map itself) off the top screen. */
@@ -162,39 +170,47 @@ static s32 hud_mode(Object *player) {
 /*
  * The hubs' own maps. The ROM has no map sprite for a hub (its model's map fields are left over from a track), so the
  * map is drawn from the hub's geometry: its ground, seen from above, lighter where it is higher. Positions on it are
- * pixels (times 4) of this picture, north up like the track maps.
+ * pixels (times 4) of this picture, north up like the track maps: -z (where a kart at heading 0 drives) is up. In
+ * Adventure 2 the world is mirrored left to right, and so is the picture.
  */
 enum { HUB_MAP_SIZE = 160 };
-#define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
-#define MAX3(a, b, c) ((a) > (b) ? ((a) > (c) ? (a) : (c)) : ((b) > (c) ? (b) : (c)))
 static unsigned char *sHubMaps[2];
 static s32 sHubMapUse;
-static s32 sHubMapW, sHubMapH;
+static s32 sHubMapW, sHubMapH, sHubMapMirrored, sHubMapId;
 static f32 sHubMapScale;
+static s32 sHubPicture; // This frame's positions are on the hub's picture (set before any map_position).
 
-static void hub_map_build(LevelModel *model) {
+/* The picture's x for a world x. */
+static f32 hub_map_x(LevelModel *model, f32 x) {
+    return (sHubMapMirrored ? model->upperXBounds - x : x - model->lowerXBounds) * sHubMapScale;
+}
+
+static void hub_map_build(LevelModel *model, s32 mirrored) {
     s32 width = model->upperXBounds - model->lowerXBounds, depth = model->upperZBounds - model->lowerZBounds;
     s32 seg, b, t, x, y, n;
     s32 lowY = 0x7FFF, highY = -0x7FFF;
     unsigned char *rgba;
     s16 *height;
+    sHubMapModel = NULL;
     if (width <= 0 || depth <= 0) {
         return;
     }
+    height = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * sizeof(s16));
+    if (sHubMaps[sHubMapUse ^ 1] == NULL) {
+        sHubMaps[sHubMapUse ^ 1] = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * 4);
+    }
+    rgba = sHubMaps[sHubMapUse ^ 1];
+    if (rgba == NULL || height == NULL) {
+        free(height);
+        return;
+    }
+    // Drawn into the buffer that isn't on show, then switched to.
+    sHubMapUse ^= 1;
+    sHubMapId++;
+    sHubMapMirrored = mirrored;
     sHubMapScale = (f32) (HUB_MAP_SIZE - 1) / (width > depth ? width : depth);
     sHubMapW = (s32) (width * sHubMapScale) + 1;
     sHubMapH = (s32) (depth * sHubMapScale) + 1;
-    sHubMapUse ^= 1;
-    if (sHubMaps[sHubMapUse] == NULL) {
-        sHubMaps[sHubMapUse] = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * 4);
-    }
-    rgba = sHubMaps[sHubMapUse];
-    height = malloc(HUB_MAP_SIZE * HUB_MAP_SIZE * sizeof(s16));
-    if (rgba == NULL || height == NULL) {
-        free(height);
-        sHubMapModel = NULL;
-        return;
-    }
     for (n = 0; n < sHubMapW * sHubMapH * 4; n++) {
         rgba[n] = 0;
     }
@@ -206,13 +222,14 @@ static void hub_map_build(LevelModel *model) {
         for (b = 0; b < segment->numberOfBatches; b++) {
             TriangleBatchInfo *batch = &segment->batches[b];
             s32 end = segment->batches[b + 1].facesOffset;
-            if (batch->flags & RENDER_WATER) {
+            // Water and what the level renderer never draws (hidden collision) are not ground anyone sees.
+            if (batch->flags & (RENDER_WATER | RENDER_HIDDEN)) {
                 continue;
             }
             for (t = batch->facesOffset; t < end; t++) {
                 Triangle *tri = &segment->triangles[t];
                 Vertex *v[3];
-                f32 px[3], py[3], ax, az, bx, bz, cx, cz, nx, ny, nz, len, area;
+                f32 px[3], py[3], ax, az, bx, bz, cx, cz, nx, ny, nz, len, area, inverse, up;
                 s32 k, x0, x1, y0, y1;
                 for (k = 0; k < 3; k++) {
                     s32 index = batch->verticesOffset + tri->verticesArray[k + 1];
@@ -230,27 +247,30 @@ static void hub_map_build(LevelModel *model) {
                 bz = v[2]->z - v[0]->z;
                 cx = v[1]->y - v[0]->y;
                 cz = v[2]->y - v[0]->y;
-                // The normal's up part against its length: ground, not walls.
+                // The normal's up part against its length: ground, not walls. Only faces seen from above count (a
+                // ceiling seen from below would cover the floor under it), unless they are drawn from both sides.
                 nx = cx * bz - az * cz;
                 nz = ax * cz - cx * bx;
                 ny = az * bx - ax * bz;
                 len = sqrtf(nx * nx + ny * ny + nz * nz);
-                if (len <= 0.0f || (ny < 0 ? -ny : ny) / len < 0.35f) {
+                up = (tri->flags & 0x40) ? (ny < 0 ? -ny : ny) : ny; // (Seen from above, the hubs' ground has ny > 0.)
+                if (len <= 0.0f || up / len < 0.35f) {
                     continue;
                 }
                 for (k = 0; k < 3; k++) {
-                    px[k] = (v[k]->x - model->lowerXBounds) * sHubMapScale;
-                    py[k] = (model->upperZBounds - v[k]->z) * sHubMapScale;
+                    px[k] = hub_map_x(model, v[k]->x);
+                    py[k] = (v[k]->z - model->lowerZBounds) * sHubMapScale;
                 }
                 area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
                 if (area == 0.0f) {
                     continue;
                 }
+                inverse = 1.0f / area;
                 // (Whole pixels, a pixel wider each way: the points are never negative once the model's bounds hold.)
-                x0 = (s32) MIN3(px[0], px[1], px[2]) - 1;
-                x1 = (s32) MAX3(px[0], px[1], px[2]) + 1;
-                y0 = (s32) MIN3(py[0], py[1], py[2]) - 1;
-                y1 = (s32) MAX3(py[0], py[1], py[2]) + 1;
+                x0 = (s32) MIN(MIN(px[0], px[1]), px[2]) - 1;
+                x1 = (s32) MAX(MAX(px[0], px[1]), px[2]) + 1;
+                y0 = (s32) MIN(MIN(py[0], py[1]), py[2]) - 1;
+                y1 = (s32) MAX(MAX(py[0], py[1]), py[2]) + 1;
                 if (x0 < 0) { x0 = 0; }
                 if (y0 < 0) { y0 = 0; }
                 if (x1 >= sHubMapW) { x1 = sHubMapW - 1; }
@@ -258,8 +278,8 @@ static void hub_map_build(LevelModel *model) {
                 for (y = y0; y <= y1; y++) {
                     for (x = x0; x <= x1; x++) {
                         f32 fx = x + 0.5f, fy = y + 0.5f;
-                        f32 w1 = ((fx - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (fy - py[0])) / area;
-                        f32 w2 = ((px[1] - px[0]) * (fy - py[0]) - (fx - px[0]) * (py[1] - py[0])) / area;
+                        f32 w1 = ((fx - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (fy - py[0])) * inverse;
+                        f32 w2 = ((px[1] - px[0]) * (fy - py[0]) - (fx - px[0]) * (py[1] - py[0])) * inverse;
                         f32 w0 = 1.0f - w1 - w2;
                         s32 h;
                         if (w0 < -0.06f || w1 < -0.06f || w2 < -0.06f) {
@@ -300,6 +320,15 @@ static void hub_map_build(LevelModel *model) {
     sHubMapModel = model;
 }
 
+/* The hub's picture, made if this hub (or its mirroring) has none yet. FALSE if it couldn't be made. */
+static s32 hub_map_ready(LevelModel *model) {
+    s32 mirrored = (get_filtered_cheats() & CHEAT_MIRRORED_TRACKS) != 0;
+    if (model != sHubMapModel || mirrored != sHubMapMirrored) {
+        hub_map_build(model, mirrored);
+    }
+    return model == sHubMapModel;
+}
+
 /* The racer's place on the map, as minimap_marker_pos works it out, in the map sprite's pixels (y down). */
 static void map_position(RaceHudPoint *out, Object *obj, LevelModel *model) {
     f32 aspect, angleCos, angleSin, scaledX, scaledY, rotX, rotY, x, y;
@@ -311,12 +340,13 @@ static void map_position(RaceHudPoint *out, Object *obj, LevelModel *model) {
         out->onMap = FALSE;
         return;
     }
-    if (model == sHubMapModel) {
-        // The hub's own picture: north up, no rotation or flip.
+    if (sHubPicture) {
+        // The hub's own picture: -z up, no rotation, mirrored as the world is.
         out->onMap = TRUE;
-        out->mapX = (s16) ((obj->trans.x_position - model->lowerXBounds) * sHubMapScale * 4.0f);
-        out->mapY = (s16) ((model->upperZBounds - obj->trans.z_position) * sHubMapScale * 4.0f);
-        out->heading = (u16) obj->trans.rotation.y_rotation;
+        out->mapX = (s16) (hub_map_x(model, obj->trans.x_position) * 4.0f);
+        out->mapY = (s16) ((obj->trans.z_position - model->lowerZBounds) * sHubMapScale * 4.0f);
+        heading = obj->trans.rotation.y_rotation & 0xFFFF;
+        out->heading = (u16) (sHubMapMirrored ? 0xFFFF - heading : heading);
         return;
     }
     aspect = width / (f32) depth;
@@ -719,16 +749,14 @@ void port_race_hud_frame(s32 updateRate) {
     hud.mode = mode;
     hud.mapSprite = model != NULL && model == sMapModel ? sMapSprite : -1;
     hud.mapMirrored = (get_filtered_cheats() & CHEAT_MIRRORED_TRACKS) != 0;
-    if (mode == RACE_HUD_MODE_HUB && model != NULL) {
-        if (model != sHubMapModel) {
-            hub_map_build(model);
-        }
-        if (model == sHubMapModel) {
-            hud.mapBitmap = sHubMaps[sHubMapUse];
-            hud.mapBitmapW = sHubMapW;
-            hud.mapBitmapH = sHubMapH;
-            hud.mapMirrored = FALSE;
-        }
+    // A hub (driving round it, or Taj's challenges on it) has its own picture, and the positions are on that.
+    sHubPicture = model != NULL && level_type() == RACETYPE_HUBWORLD && hub_map_ready(model);
+    if (sHubPicture) {
+        hud.mapBitmap = sHubMaps[sHubMapUse];
+        hud.mapBitmapW = sHubMapW;
+        hud.mapBitmapH = sHubMapH;
+        hud.mapBitmapId = sHubMapId;
+        hud.mapMirrored = FALSE; // (Mirrored in the picture already.)
     }
     hud.silverCoins = -1;
     if (model != NULL) {

@@ -1920,6 +1920,7 @@ static const Colour LABEL_BLUE = { 170, 195, 240, 255 };
 /* The track's map, drawn smooth at the size its panel allows, with its offsets, for the sprite in sMapSprite. */
 static Picture sMap;
 static const unsigned char *sMapBitmap; /* The game's own map picture, if the level has no sprite. */
+static int sMapBitmapId;                /* Its RaceHud.mapBitmapId. */
 static int sMapSprite = -2, sMapMirrored, sMapX, sMapY, sMapTexX, sMapTexY, sMapTexWidth;
 static unsigned char sMapColour[3];
 static int sMapBox[4]; /* The panel the map is fitted to: x0, y0, x1, y1. */
@@ -2331,7 +2332,7 @@ static void format_gap(int gap, char *out, int size) {
 
 /* The track's map from the ROM: its sprite gives the texture and where the texture sits in the sprite. */
 static void load_map(int sprite, int mirrored, const unsigned char *colour, const int *box,
-                     const unsigned char *bitmap, int bitmapW, int bitmapH) {
+                     const unsigned char *bitmap, int bitmapW, int bitmapH, int bitmapId) {
     const unsigned char *table, *data;
     unsigned long tableSize, dataSize, start;
     Picture tex = { 0, 0, NULL };
@@ -2343,6 +2344,7 @@ static void load_map(int sprite, int mirrored, const unsigned char *colour, cons
     sMapSprite = sprite;
     sMapMirrored = mirrored;
     sMapBitmap = bitmap;
+    sMapBitmapId = bitmapId;
     memcpy(sMapColour, colour, 3);
     memcpy(sMapBox, box, sizeof(sMapBox));
     if (bitmap != NULL) {
@@ -2661,9 +2663,11 @@ static void make_race_base(const RaceHud *hud) {
         mapBox[2] = 150;
         mapBox[3] = 198;
     }
-    if (sprite != sMapSprite || hud->mapBitmap != sMapBitmap || hud->mapMirrored != sMapMirrored || memcmp(colour, sMapColour, 3) ||
-        memcmp(mapBox, sMapBox, sizeof(mapBox))) {
-        load_map(sprite, hud->mapMirrored, colour, mapBox, hud->mapBitmap, hud->mapBitmapW, hud->mapBitmapH);
+    if (sprite != sMapSprite || hud->mapBitmap != sMapBitmap ||
+        (hud->mapBitmap != NULL && hud->mapBitmapId != sMapBitmapId) || hud->mapMirrored != sMapMirrored ||
+        memcmp(colour, sMapColour, 3) || memcmp(mapBox, sMapBox, sizeof(mapBox))) {
+        load_map(sprite, hud->mapMirrored, colour, mapBox, hud->mapBitmap, hud->mapBitmapW, hud->mapBitmapH,
+                 hud->mapBitmapId);
     } else if (sRaceBaseMade && sRaceBaseMode == hud->mode) {
         return;
     }
