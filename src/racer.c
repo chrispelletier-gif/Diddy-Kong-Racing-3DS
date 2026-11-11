@@ -4347,7 +4347,11 @@ void update_player_racer(Object *obj, s32 updateRate) {
     gCurrentCourseHeight = header->course_height;
     tempRacer->throttleReleased = FALSE;
     if (tempRacer->playerIndex == PLAYER_COMPUTER) {
+#ifdef TARGET_PORT
+        port_boss_step(obj, tempRacer, updateRate, updateRateF);
+#else
         update_AI_racer(obj, tempRacer, updateRate, updateRateF);
+#endif
     } else {
         // Print player 1's coordinates to the screen if the debug cheat is enabled.
         if (gRaceStartTimer == 0 && tempRacer->playerIndex == PLAYER_ONE) {
@@ -9150,6 +9154,91 @@ void racer_enter_door(Object_Racer *racer, s32 updateRate) {
  * Mostly the same as how the player controlled one works, minus controller input and includes some decision making
  * logic.
  */
+#ifdef TARGET_PORT
+/*
+ * update_AI_racer, except that at 60 fps a boss steps in whole 30 fps steps (see port_boss_step30 in port_rate.c):
+ * on one frame of each pair it runs a 30 fps step, and on the other it is drawn half that step further along. The
+ * half step's nudge is taken back before the next real step, so the boss's own logic only ever sees 30 fps steps.
+ */
+static Object *sBossStepObj;
+static f32 sBossStepMove[3], sBossStepNudge[3];
+static s16 sBossStepTurn[3], sBossStepTurnNudge[3];
+static s32 sBossStepNudged;
+
+void port_boss_step(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
+    f32 before[3];
+    s16 turnBefore[3];
+    s32 halfStep, skipTick, i;
+
+    if (racer->vehicleID < VEHICLE_BOSSES || !port_boss_step30()) {
+        update_AI_racer(obj, racer, updateRate, updateRateF);
+        return;
+    }
+    if (sBossStepObj != obj) {
+        sBossStepObj = obj;
+        sBossStepNudged = FALSE;
+        for (i = 0; i < 3; i++) {
+            sBossStepMove[i] = 0.0f;
+            sBossStepTurn[i] = 0;
+        }
+    }
+    if (sBossStepNudged) {
+        obj->trans.x_position -= sBossStepNudge[0];
+        obj->trans.y_position -= sBossStepNudge[1];
+        obj->trans.z_position -= sBossStepNudge[2];
+        obj->trans.rotation.y_rotation -= sBossStepTurnNudge[0];
+        obj->trans.rotation.x_rotation -= sBossStepTurnNudge[1];
+        obj->trans.rotation.z_rotation -= sBossStepTurnNudge[2];
+        sBossStepNudged = FALSE;
+    }
+    halfStep = gPortHalfStep;
+    if (halfStep && !PORT_TICK()) {
+        // The frame between two 30 fps steps: draw the boss half the last step further along.
+        for (i = 0; i < 3; i++) {
+            sBossStepNudge[i] = sBossStepMove[i] * 0.5f;
+            sBossStepTurnNudge[i] = sBossStepTurn[i] / 2;
+        }
+        obj->trans.x_position += sBossStepNudge[0];
+        obj->trans.y_position += sBossStepNudge[1];
+        obj->trans.z_position += sBossStepNudge[2];
+        obj->trans.rotation.y_rotation += sBossStepTurnNudge[0];
+        obj->trans.rotation.x_rotation += sBossStepTurnNudge[1];
+        obj->trans.rotation.z_rotation += sBossStepTurnNudge[2];
+        sBossStepNudged = TRUE;
+        return;
+    }
+    before[0] = obj->trans.x_position;
+    before[1] = obj->trans.y_position;
+    before[2] = obj->trans.z_position;
+    turnBefore[0] = obj->trans.rotation.y_rotation;
+    turnBefore[1] = obj->trans.rotation.x_rotation;
+    turnBefore[2] = obj->trans.rotation.z_rotation;
+    if (halfStep) {
+        skipTick = gPortSkipTick;
+        gPortHalfStep = FALSE;
+        gPortSkipTick = FALSE;
+        update_AI_racer(obj, racer, updateRate * 2, updateRateF * 2);
+        gPortHalfStep = halfStep;
+        gPortSkipTick = skipTick;
+    } else {
+        update_AI_racer(obj, racer, updateRate, updateRateF);
+    }
+    sBossStepMove[0] = obj->trans.x_position - before[0];
+    sBossStepMove[1] = obj->trans.y_position - before[1];
+    sBossStepMove[2] = obj->trans.z_position - before[2];
+    sBossStepTurn[0] = (s16) (obj->trans.rotation.y_rotation - turnBefore[0]);
+    sBossStepTurn[1] = (s16) (obj->trans.rotation.x_rotation - turnBefore[1]);
+    sBossStepTurn[2] = (s16) (obj->trans.rotation.z_rotation - turnBefore[2]);
+    if (!halfStep && updateRate > 0) {
+        // A step of another length (a slow frame): the nudge is half a 30 fps step's worth of it.
+        for (i = 0; i < 3; i++) {
+            sBossStepMove[i] *= 2.0f / updateRate;
+            sBossStepTurn[i] = sBossStepTurn[i] * 2 / updateRate;
+        }
+    }
+}
+#endif
+
 void update_AI_racer(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
     s32 var_t2;
     Object **objects;
