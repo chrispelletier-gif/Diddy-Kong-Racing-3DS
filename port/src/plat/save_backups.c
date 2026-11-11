@@ -48,7 +48,8 @@ int save_backups_scan(SaveBackupList *list) {
     list->count = 0;
     snprintf(path, sizeof(path), "%s/" BACKUP_DIR, plat_data_dir());
     // The whole arrays, not sFolders[0]: the fortified strcpy would take that for a single 48 byte name.
-    folders = plat_list_dir(path, (char *) sFolders, sizeof(sFolders[0]), MAX_FOLDERS);
+    // The newest MAX_FOLDERS by name (dated names sort by age), whatever order the SD card lists them in.
+    folders = plat_list_dir_last(path, (char *) sFolders, sizeof(sFolders[0]), MAX_FOLDERS);
     // Sorted before the newest are picked: the SD card lists folders oldest first.
     qsort(sFolders, folders, sizeof(sFolders[0]), newest_first);
     for (i = 0; i < folders && list->count < SAVE_BACKUPS_MAX; i++) {

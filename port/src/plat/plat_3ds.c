@@ -893,6 +893,9 @@ int plat_log_recent(char *out, int size) {
 
 enum { JOB_WRITE, JOB_CLOSE, JOB_SAVE };
 
+/* Queued saves that failed (plat_saves_failed). */
+static unsigned int sSaveFailures;
+
 typedef struct WriteJob {
     struct WriteJob *next;
     int kind;
@@ -932,7 +935,9 @@ static void run_job(WriteJob *job) {
             }
             break;
         case JOB_SAVE:
-            plat_save_file(job->path, job->data, job->size);
+            if (!plat_save_file(job->path, job->data, job->size)) {
+                __atomic_add_fetch(&sSaveFailures, 1, __ATOMIC_RELEASE);
+            }
             break;
     }
     free(job->data);
@@ -1075,6 +1080,10 @@ void plat_log_drain(void) {
 
 void plat_saves_drain(void) {
     plat_log_drain();
+}
+
+unsigned int plat_saves_failed(void) {
+    return __atomic_load_n(&sSaveFailures, __ATOMIC_ACQUIRE);
 }
 
 /* Saves a file on the writer thread; data comes from malloc and is freed there. */

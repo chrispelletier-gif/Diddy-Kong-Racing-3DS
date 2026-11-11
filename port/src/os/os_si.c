@@ -130,9 +130,30 @@ static void write_dirty_saves(void) {
     }
 }
 
+/*
+ * A timed save queued on the background writer that then failed leaves nothing marked, since the game's thread had
+ * already moved on: both saves are marked again here so they are written again (they hold the latest progress).
+ */
+static void retry_failed_later_saves(void) {
+    static u32 sSeen;
+    static s32 sReported;
+    u32 failed = plat_saves_failed();
+
+    if (failed != sSeen) {
+        sSeen = failed;
+        sEepromDirty = TRUE;
+        sMempakDirty = TRUE;
+        sLastSaveWrite = plat_time_ns();
+        if (sReported++ < 5) {
+            plat_log("saves: a queued write to the SD card failed, will try again");
+        }
+    }
+}
+
 static void flush_saves(s32 force) {
     if (!force) {
         do_save_request();
+        retry_failed_later_saves();
     }
     if (!sEepromDirty && !sMempakDirty) {
         return;
@@ -145,6 +166,7 @@ static void flush_saves(s32 force) {
         sMempakDirty = FALSE;
     } else if (force) {
         plat_saves_drain();
+        retry_failed_later_saves();
         write_dirty_saves();
     } else if (plat_time_ns() - sLastSaveWrite >= SAVE_FLUSH_DELAY_NS) {
         sWriteLater = plat_switch("DKR_SAVE_LATER", 1);

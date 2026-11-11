@@ -94,13 +94,20 @@ static void temp_path(char *out, size_t size, const char *path) {
     snprintf(out, size, "%s.tmp", path);
 }
 
-/* Moves the finished temporary copy over the file. The 3DS's SD card driver won't rename over a file that exists. */
+/*
+ * Moves the finished temporary copy over the file. The 3DS's SD card driver won't rename over a file that exists.
+ * Returns 1 when done, 0 when it failed with the old file still there, and -1 when it failed after the old file was
+ * removed: the temporary copy is then the only one, and open_for_reading renames it in later.
+ */
 static int replace_with_temp(const char *temp, const char *path) {
     if (rename(temp, path) == 0) {
         return 1;
     }
-    remove(path);
-    return rename(temp, path) == 0;
+    if (remove(path) != 0) {
+        // Nothing to remove (a first save), or the old file can't be removed and stays.
+        return rename(temp, path) == 0;
+    }
+    return rename(temp, path) == 0 ? 1 : -1;
 }
 
 /* Opens a file, first finishing a save that stopped between removing the old file and renaming the new one in. */
@@ -179,7 +186,8 @@ int plat_load_file_start(const char *path, void *data, unsigned int size) {
 
 /*
  * Written to a temporary file which then replaces the old one, so that losing power or crashing part way leaves either
- * the old file or the new one, never a cut-off one. Returns 0 if anything failed (the old file is then kept).
+ * the old file or the new one, never a cut-off one. Returns 0 if anything failed: the old file is then kept, or if it
+ * was already removed, the new one is kept as the temporary copy that the next read renames in.
  */
 static int save_file(const char *path, const void *data, unsigned int size);
 
@@ -203,11 +211,20 @@ static int save_file(const char *path, const void *data, unsigned int size) {
     ok = fwrite(data, 1, size, f) == size;
     ok = fflush(f) == 0 && ok;
     ok = fclose(f) == 0 && ok;
-    if (!ok || !replace_with_temp(temp, path)) {
+    if (!ok) {
         remove(temp);
         return 0;
     }
-    return 1;
+    switch (replace_with_temp(temp, path)) {
+        case 1:
+            return 1;
+        case 0:
+            remove(temp);
+            return 0;
+        default:
+            // The old file is gone: keep the new copy, the only one left, for open_for_reading to rename in.
+            return 0;
+    }
 }
 
 int plat_append_file(const char *path, const void *data, unsigned int size) {
@@ -447,6 +464,38 @@ int plat_list_dir_prefix(const char *dir, const char *prefix, char *names, int n
         }
         strcpy(names + count * nameSize, entry->d_name);
         count++;
+    }
+    closedir(d);
+    return count;
+}
+
+int plat_list_dir_last(const char *dir, char *names, int nameSize, int maxNames) {
+    DIR *d = opendir(dir);
+    struct dirent *entry;
+    int count = 0, i, lowest;
+
+    if (d == NULL) {
+        return 0;
+    }
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.' || (int) strlen(entry->d_name) >= nameSize) {
+            continue;
+        }
+        if (count < maxNames) {
+            strcpy(names + count * nameSize, entry->d_name);
+            count++;
+            continue;
+        }
+        // Full: the new name takes the place of the one that sorts first, if it sorts after it.
+        lowest = 0;
+        for (i = 1; i < count; i++) {
+            if (strcmp(names + i * nameSize, names + lowest * nameSize) < 0) {
+                lowest = i;
+            }
+        }
+        if (count > 0 && strcmp(entry->d_name, names + lowest * nameSize) > 0) {
+            strcpy(names + lowest * nameSize, entry->d_name);
+        }
     }
     closedir(d);
     return count;
