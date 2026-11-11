@@ -58,6 +58,7 @@ typedef struct TmemLoad {
     const u8 *addr;
     u32 size;       // Bytes loaded
     u32 rowStride;  // Bytes between rows in RDRAM (LoadTile), or 0 for LoadBlock
+    u32 tmemLine;   // LoadTile: bytes between rows in TMEM (the load tile's line)
     u8 lineSwapped; // LoadBlock without dxt: odd rows are stored pre-swapped
     u8 valid;
 } TmemLoad;
@@ -655,6 +656,8 @@ static u8 wrap_mode(u8 cm, u8 mask) {
  * Whether a cache entry has to keep its texture: the batch waiting to be drawn uses it, or the draw being set up
  * ("pinned") already looked it up for its other tile. Replacing it would draw those triangles with another texture.
  */
+static s32 track_buckets_use(const GfxTexture *a, const GfxTexture *b);
+
 static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
     const GfxTexture *other = e->hasOtherFilter ? &e->otherFilter : &e->tex;
     if (&e->tex == pinned || other == pinned) {
@@ -670,6 +673,9 @@ static s32 texture_in_use(const TexCacheEntry *e, const GfxTexture *pinned) {
             other == st->textures[1]) {
             return TRUE;
         }
+    }
+    if (track_buckets_use(&e->tex, other)) {
+        return TRUE;
     }
     return sBatchCount > 0 && (&e->tex == sBatchState.textures[0] || &e->tex == sBatchState.textures[1] ||
                                other == sBatchState.textures[0] || other == sBatchState.textures[1]);
@@ -911,7 +917,8 @@ static inline u32 tex_memo_mode_bits(void) {
 static inline s32 tex_memo_key(TexMemoEntry *k, const Tile *tile) {
     const TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
     u32 tlutHashBytes;
-    if (!load->valid || (load->size | load->rowStride) > 0xFFFF || !tile_palette(tile, &k->tlut, &tlutHashBytes)) {
+    if (!load->valid || (tile->tmem & 7) || (load->size | load->rowStride) > 0xFFFF ||
+        !tile_palette(tile, &k->tlut, &tlutHashBytes)) {
         return FALSE;
     }
     k->addr = load->addr;
@@ -1071,19 +1078,26 @@ __attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const G
     u8 filter, wrapS, wrapT, tlutType;
     TexCacheEntry *e;
 
-    if (!load->valid) {
+    if (!load->valid || (tile->tmem & 7)) {
         // Loaded at an unaligned TMEM address, or inside a bigger load. Search for the load covering it, and start
-        // where the tile does.
-        for (i = 0; i < 64; i++) {
-            if (g.tmem[i].valid && i * 8 <= tile->tmem && tile->tmem < i * 8 + (g.tmem[i].size + 7) / 8) {
-                u32 skip = (tile->tmem - i * 8) * 8;
+        // where the tile does. The nearest one before the tile is the newest: a later load over an earlier one's
+        // start would have ended it (forget_covered_loads).
+        load = &g.tmem[64]; // (Never valid: the extra slot.)
+        for (i = (tile->tmem / 8) & 63; (s32) i >= 0; i--) {
+            if (g.tmem[i].valid && tile->tmem < i * 8 + (g.tmem[i].size + 7) / 8) {
+                u32 skip = (tile->tmem - i * 8) * 8, rows;
                 shifted = g.tmem[i];
                 if (shifted.rowStride == 0) {
                     shifted.addr += skip;
                     shifted.size -= skip;
-                } else if (skip % shifted.rowStride == 0) {
-                    shifted.addr += skip;
-                    shifted.size -= skip;
+                } else if (shifted.tmemLine != 0 && skip % shifted.tmemLine == 0) {
+                    // TMEM rows are the load tile's line apart, RDRAM rows rowStride apart.
+                    rows = skip / shifted.tmemLine;
+                    if (rows * shifted.rowStride >= shifted.size) {
+                        break;
+                    }
+                    shifted.addr += rows * shifted.rowStride;
+                    shifted.size -= rows * shifted.rowStride;
                 } else {
                     break;
                 }
@@ -1315,11 +1329,13 @@ static inline u32 atlas_wrap(s32 i, u32 size, u8 wrap) {
 }
 
 static void flush_batch_for_atlas(void);
+static inline void sky_draw_if_held(void);
 
 /* Frees a set of pages: every texture in them is placed afresh when next drawn. */
 static void atlas_reset_kind(s32 kind) {
     s32 i, p;
     flush_batch_for_atlas(); // The batch may draw from them
+    sky_draw_if_held();      // So may the sky held back to be drawn last (DKR_SKY_LAST)
     for (p = kind * ATLAS_PAGES_PER_KIND; p < (kind + 1) * ATLAS_PAGES_PER_KIND; p++) {
         AtlasPage *page = &sAtlas[p];
         if (page->used) {
@@ -1553,6 +1569,9 @@ static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
     u32 blendBits;
     u32 p, a, m, b;
     s32 usesTex0 = FALSE, usesTex1 = FALSE;
+
+    // States are compared a word at a time (draw_states_equal), padding included: a stack copy must not carry garbage.
+    __builtin_memset(s, 0, sizeof(*s));
 
     s->combiner = g.combiner;
     s->combiner.numCycles = (cyc == G_CYC_2CYCLE) ? 2 : 1;
@@ -2167,6 +2186,10 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         if (UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1) {
             no_textures();
         }
+        // (Before a sky batch is held: sky_draw_held uploads nothing, and the page may be new.)
+        if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
+            atlas_upload(sBatchState.textures[0]);
+        }
         if (UNLIKELY(sSkyLast) && sky_hold()) {
             sBatchCount = 0;
             sBatchVertices = 0;
@@ -2177,9 +2200,6 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             trace_batch();
         }
         part = walk_switch(WALK_DRAWS);
-        if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
-            atlas_upload(sBatchState.textures[0]);
-        }
 #ifdef PICA_ALL
         if (opaque_hold()) {
             prof_count(PROF_TRIANGLES, sBatchCount);
@@ -3381,7 +3401,7 @@ static COLD s32 model_triangles(const Triangle *tris, s32 count, s32 textured) {
     u32 generation;
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1, batchedCull = 0xFF, l;
 
-    if (count <= 0 || (l = sSlotLoad[tris[0].vi0]) == NO_LOAD) {
+    if (count <= 0 || tris[0].vi0 >= MAX_VERTICES || (l = sSlotLoad[tris[0].vi0]) == NO_LOAD) {
         return FALSE;
     }
     for (i = 0; i < count; i++) {
@@ -3541,6 +3561,21 @@ static s32 sTrackBucketCount;
 static TrackBucket sTrackLate[TRACK_LATE]; // In order, one part each unless merged with the one before
 static s32 sTrackLateCount;
 static u32 sTrackStats[5]; // Batches drawn by the GPU, left out, left to the CPU, meshes made, draws
+
+/* Whether a native track bucket still waiting to be drawn (track_flush) uses either texture (texture_in_use). */
+static s32 track_buckets_use(const GfxTexture *a, const GfxTexture *b) {
+    s32 i;
+    if (!sTrackPending) {
+        return FALSE;
+    }
+    for (i = 0; i < sTrackBucketCount + sTrackLateCount; i++) {
+        const GfxDrawState *st = i < sTrackBucketCount ? &sTrackBuckets[i].state : &sTrackLate[i - sTrackBucketCount].state;
+        if (st->textures[0] == a || st->textures[1] == a || st->textures[0] == b || st->textures[1] == b) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
 
 static COLD void track_drop_all(void) {
     u32 i;
@@ -3823,11 +3858,16 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
     (void) w0;
     (void) w1;
     m = g.matrices[g.curMatrix];
-    if (count <= 0 || (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
-        return 0;
+    e = NULL;
+    if (count > 0 && !(m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
+        e = track_find(tris, count, src, numVerts);
     }
-    e = track_find(tris, count, src, numVerts);
     if (e == NULL) {
+        // A track batch the walk draws itself (scrolled in place, too big, a flat matrix...): like the CPU verdict
+        // below, it must not come before the sorted triangles it may lie on.
+        if (sTrackPending) {
+            track_flush();
+        }
         return 0;
     }
     model_params_matrix(m, &params);
@@ -5719,6 +5759,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (count <= 0 || numVerts > MAX_VERTICES || (numVerts <= 0 && !(dl[1].words.w0 & 0x40000))) {
         return 2;
     }
+    if (start > numVerts) {
+        start = numVerts; // (Bad data: the first load would have run past the vertex slots, sNativeVerts.)
+    }
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
@@ -6605,6 +6648,7 @@ static void load_tile(u32 tile, u32 uls10_2, u32 ult10_2, u32 lrt10_2) {
     u32 stride = g.timg.width * bpp4 / 4;
     load->addr = g.timg.addr + ult * stride + uls * bpp4 / 4;
     load->rowStride = stride;
+    load->tmemLine = t->line * 8;
     load->size = (lrt - ult + 1) * stride;
     load->lineSwapped = FALSE;
     load->valid = TRUE;
@@ -7358,7 +7402,15 @@ static void prewarm_textures(void) {
     s32 savedTlutFirst;
     s32 decoded = 0, freed = 0, swept = 0, i;
     unsigned long long start, elapsed;
+    static u32 sDropsSeen;
+    u32 drops = __atomic_load_n(&sTexQueueDropped, __ATOMIC_RELAXED);
 
+    if (drops != sDropsSeen) {
+        // A full queue lost a free notice: forget every remembered hash, so a new texture loaded where a freed one
+        // was (same size, within DKR_TEX_REHASH frames) is hashed afresh instead of matching the old one's entry.
+        sDropsSeen = drops;
+        __builtin_memset(sHashCache, 0, sizeof(sHashCache));
+    }
     if (tail == head) {
         return;
     }

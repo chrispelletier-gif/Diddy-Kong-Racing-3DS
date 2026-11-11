@@ -194,7 +194,7 @@ int plat_renderer_syscore_share(void) {
  * back as it was when it goes off, so the switch bench's other races run with the system's services as usual.
  */
 void plat_split_render_cores(int on) {
-    static int sRaised;
+    static int sRaised, sFailedShare = -1;
     static u32 sBefore;
     if (sRcpCore != 0) {
         return;
@@ -202,17 +202,22 @@ void plat_split_render_cores(int on) {
     if (on && sRaised) {
         // Called every frame while split: the switch bench changes the share between races (DKR_SPLIT_SHARE).
         int share = plat_switch("DKR_SPLIT_SHARE", 80);
-        if (share != sSyscoreShare && share >= 5 && share <= 89) {
+        if (share != sSyscoreShare && share != sFailedShare && share >= 5 && share <= 89) {
             Result res = APT_SetAppCpuTimeLimit(share);
             plat_log("system core time limit %d%% for the two-core renderer: %s (0x%08lX)", share,
                      R_SUCCEEDED(res) ? "ok" : "failed", (unsigned long) res);
             if (R_SUCCEEDED(res)) {
                 sSyscoreShare = share;
+            } else {
+                sFailedShare = share; // Not asked again every frame: only for another share
             }
         }
     } else if (on) {
         int share = plat_switch("DKR_SPLIT_SHARE", 80);
         Result res;
+        if (share == sFailedShare) {
+            return; // Refused before (the renderer works on core 0 meanwhile): not every frame again
+        }
         if (R_FAILED(APT_GetAppCpuTimeLimit(&sBefore))) {
             sBefore = 0;
         }
@@ -222,6 +227,8 @@ void plat_split_render_cores(int on) {
         if (R_SUCCEEDED(res)) {
             sRaised = 1;
             sSyscoreShare = share;
+        } else {
+            sFailedShare = share;
         }
     } else if (!on && sRaised) {
         Result res = APT_SetAppCpuTimeLimit(sBefore >= 5 ? sBefore : 5);
@@ -893,6 +900,9 @@ int plat_log_recent(char *out, int size) {
 
 enum { JOB_WRITE, JOB_CLOSE, JOB_SAVE };
 
+/* Queued saves that failed (plat_saves_failed). */
+static unsigned int sSaveFailures;
+
 typedef struct WriteJob {
     struct WriteJob *next;
     int kind;
@@ -932,7 +942,9 @@ static void run_job(WriteJob *job) {
             }
             break;
         case JOB_SAVE:
-            plat_save_file(job->path, job->data, job->size);
+            if (!plat_save_file(job->path, job->data, job->size)) {
+                __atomic_add_fetch(&sSaveFailures, 1, __ATOMIC_RELEASE);
+            }
             break;
     }
     free(job->data);
@@ -1075,6 +1087,10 @@ void plat_log_drain(void) {
 
 void plat_saves_drain(void) {
     plat_log_drain();
+}
+
+unsigned int plat_saves_failed(void) {
+    return __atomic_load_n(&sSaveFailures, __ATOMIC_ACQUIRE);
 }
 
 /* Saves a file on the writer thread; data comes from malloc and is freed there. */

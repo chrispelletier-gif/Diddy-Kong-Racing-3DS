@@ -1679,6 +1679,9 @@ s16 gCreditsImageIndices[2] = { -1, 0 };
 #define CREDITS_NEW_TITLE(seconds) (CREDITS_NEW_TITLE_FLAG | ((s16) (seconds * 60.0)))
 #define CREDITS_CONTINUE_TITLE(seconds) (CREDITS_CONTINUE_TITLE_FLAG | ((s16) (seconds * 60.0)))
 #define CREDITS_NEXT_LEVEL (CREDITS_NEXT_LEVEL_FLAG)
+#ifdef TARGET_PORT
+#define CREDITS_PORT_PAGE_END 1 // In a CREDITS_NEXT_LEVEL's low bits: the end of the port's own page.
+#endif
 #define CREDITS_BEST_RACE_TIMES(seconds) (CREDITS_BEST_RACE_TIMES_FLAG | ((s16) (seconds * 60.0)))
 
 // Number of seconds for each section in the credits.
@@ -1692,6 +1695,14 @@ typedef struct CreditsBackgroundLevelData {
     s8 cutsceneId;
     s8 unk3;
 } CreditsBackgroundLevelData;
+
+#ifdef TARGET_PORT
+/*
+ * The credits' background scenes (ASSET_MISC_69) go one per CREDITS_NEXT_LEVEL. The port's own page has no scene of
+ * its own in the ROM's list, so the scene it was shown over is shown again for the next page.
+ */
+static s32 sCreditsSceneAgain;
+#endif
 
 // clang-format off
 
@@ -1770,7 +1781,7 @@ s16 gCreditsControlData[] = {
 #ifdef TARGET_PORT
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     87, 88, // "Nintendo 3DS Port", the port's author
-    CREDITS_NEXT_LEVEL,
+    CREDITS_NEXT_LEVEL | CREDITS_PORT_PAGE_END, // (The background list has no scene for it: see sCreditsSceneAgain.)
 #endif
     CREDITS_NEW_TITLE(CREDITS_DEFAULT_TITLE_TIME),
     84, // "THE END"
@@ -14676,6 +14687,9 @@ void menu_credits_init(void) {
     gMenuDelay = 0;
     gCreditsControlDataIndex = 0;
     D_80126BCC = 0;
+#ifdef TARGET_PORT
+    sCreditsSceneAgain = FALSE;
+#endif
     gMenuStage = 0;
     gOpacityDecayTimer = 40;
     gMenuCurIndex = 0;
@@ -14998,6 +15012,11 @@ s32 menu_credits_loop(s32 updateRate) {
 
                 // continue to the next level in the credits
                 case CREDITS_NEXT_LEVEL_FLAG:
+#ifdef TARGET_PORT
+                    if (gCreditsControlData[gCreditsControlDataIndex] & CREDITS_PORT_PAGE_END) {
+                        sCreditsSceneAgain = TRUE;
+                    }
+#endif
                     gCreditsControlDataIndex++;
                     // show the characters in a circle?
                     D_80126BD8 = TRUE;
@@ -15059,6 +15078,13 @@ s32 menu_credits_loop(s32 updateRate) {
             gOpacityDecayTimer += updateRate;
             if (gOptionBlinkTimer <= 0) {
                 gMenuStage = 0;
+#ifdef TARGET_PORT
+                if (sCreditsSceneAgain) {
+                    // The port's page was shown over this scene: the pages after it keep their N64 scenes.
+                    sCreditsSceneAgain = FALSE;
+                    D_80126BCC--;
+                }
+#endif
                 D_80126BCC++;
                 if ((D_80126BCC + creditsBackgroundLevelData)->levelId < 0) {
                     D_80126BCC = 0;

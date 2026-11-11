@@ -469,10 +469,18 @@ unsigned int plat_log_total(void) {
     return 0;
 }
 
+static unsigned int sSaveFailures;
+
 /* On PC a save is quick: written here. */
 void plat_save_file_later(const char *path, void *data, unsigned int size) {
-    plat_save_file(path, data, size);
+    if (!plat_save_file(path, data, size)) {
+        sSaveFailures++;
+    }
     free(data);
+}
+
+unsigned int plat_saves_failed(void) {
+    return sSaveFailures;
 }
 
 void plat_saves_drain(void) {

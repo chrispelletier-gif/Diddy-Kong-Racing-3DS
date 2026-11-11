@@ -9195,12 +9195,39 @@ static f32 sBossStepMove[3], sBossStepNudge[3];
 static s16 sBossStepTurn[3], sBossStepTurnNudge[3];
 static s32 sBossStepNudged;
 
+/*
+ * Forgets the boss being stepped when its object is freed (NULL: all objects), so a boss made next in the same place
+ * in the object pool (a retried boss race) doesn't take back the old one's nudge.
+ */
+void port_boss_step_forget(Object *obj) {
+    if (obj == NULL || obj == sBossStepObj) {
+        sBossStepObj = NULL;
+        sBossStepNudged = FALSE;
+    }
+}
+
+/* Takes back the half step the boss was drawn further along, before it moves again. */
+static void boss_step_undo_nudge(Object *obj) {
+    if (sBossStepNudged && sBossStepObj == obj) {
+        obj->trans.x_position -= sBossStepNudge[0];
+        obj->trans.y_position -= sBossStepNudge[1];
+        obj->trans.z_position -= sBossStepNudge[2];
+        obj->trans.rotation.y_rotation -= sBossStepTurnNudge[0];
+        obj->trans.rotation.x_rotation -= sBossStepTurnNudge[1];
+        obj->trans.rotation.z_rotation -= sBossStepTurnNudge[2];
+    }
+    sBossStepNudged = FALSE;
+}
+
 void port_boss_step(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
     f32 before[3];
     s16 turnBefore[3];
     s32 halfStep, skipTick, i;
 
-    if (racer->vehicleID < VEHICLE_BOSSES || !port_boss_step30()) {
+    // The bosses only: Taj's carpet (VEHICLE_CARPET, after the bosses) steps every frame like everyone else.
+    if (racer->vehicleID < VEHICLE_BOSSES || racer->vehicleID == VEHICLE_CARPET || !port_boss_step30()) {
+        // (The switch turned off between two steps: the boss isn't left half a step along.)
+        boss_step_undo_nudge(obj);
         update_AI_racer(obj, racer, updateRate, updateRateF);
         return;
     }
@@ -9212,15 +9239,7 @@ void port_boss_step(Object *obj, Object_Racer *racer, s32 updateRate, f32 update
             sBossStepTurn[i] = 0;
         }
     }
-    if (sBossStepNudged) {
-        obj->trans.x_position -= sBossStepNudge[0];
-        obj->trans.y_position -= sBossStepNudge[1];
-        obj->trans.z_position -= sBossStepNudge[2];
-        obj->trans.rotation.y_rotation -= sBossStepTurnNudge[0];
-        obj->trans.rotation.x_rotation -= sBossStepTurnNudge[1];
-        obj->trans.rotation.z_rotation -= sBossStepTurnNudge[2];
-        sBossStepNudged = FALSE;
-    }
+    boss_step_undo_nudge(obj);
     halfStep = gPortHalfStep;
     if (halfStep && !PORT_TICK()) {
         // The frame between two 30 fps steps: draw the boss half the last step further along.

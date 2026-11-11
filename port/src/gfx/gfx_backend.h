@@ -240,7 +240,7 @@ typedef struct GfxModelParams {
     float light[4];         // Light direction (x, y, z, over 127-unit normals) and ambient, as gfx_light_shade takes them
 } GfxModelParams;
 
-/* GPU vertex lighting (off-GitHub PICA_ALL build): the grey of a vertex whose colour holds its normal (signed bytes). */
+/* GPU vertex lighting (PICA_ALL): the grey of a vertex whose colour holds its normal (signed bytes). */
 static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
     float d = (signed char) r * l[0] + (signed char) g * l[1] + (signed char) b * l[2];
     float v = l[3] + (d > 0.0f ? d : 0.0f);

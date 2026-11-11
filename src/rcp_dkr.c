@@ -431,10 +431,13 @@ s32 gfxtask_wait(void) {
  */
 s32 gfxtask_wait_ahead(void) {
     OSMesg *mesg = NULL;
-    s32 allowed = port_render_ahead() - 1;
+    s32 allowed;
     if (gGfxTaskIsRunning == FALSE) {
+        port_render_ahead_update(0);
         return 0;
     }
+    // A change of the setting from 2 to 1 waits for every frame in flight first (port_render_ahead_update).
+    allowed = port_render_ahead_update(gGfxTasksOutstanding) ? port_render_ahead() - 1 : 0;
     while (gGfxTasksOutstanding > allowed) {
         PORT_WAIT_GFX_DONE(mesg);
         gGfxTasksOutstanding--;
@@ -442,6 +445,7 @@ s32 gfxtask_wait_ahead(void) {
     if (gGfxTasksOutstanding == 0) {
         gGfxTaskIsRunning = FALSE;
     }
+    port_render_ahead_update(gGfxTasksOutstanding);
     return mesg != NULL ? (s32) mesg[1] : 0;
 }
 #endif

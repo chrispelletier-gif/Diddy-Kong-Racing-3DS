@@ -140,7 +140,11 @@ s32 alResampleParam(void *filter, s32 paramID, void *param)
             data.i = (s32) param;
             r->ratio = data.f;
 #ifdef TARGET_PORT
-            // Pitches are relative to the game's own output rate; the mixer may run at a higher one.
+            // Pitches are relative to the game's own output rate; the mixer may run at a higher one. The N64's cap
+            // (MAX_RATIO, in alResamplePull) is on the game's rate, so it is applied before the scaling too.
+            if (r->ratio > MAX_RATIO) {
+                r->ratio = MAX_RATIO;
+            }
             r->ratio *= gPortAudioRateScale;
 #endif
             break;

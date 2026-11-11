@@ -353,6 +353,11 @@ static void post_event(const Event *ev) {
 }
 
 /* Translates one queued parameter change of a voice. */
+/* A voice's pitch ratio as libultra's resampler plays it: never more than MAX_RATIO, about an octave up. */
+static f32 pv_pitch(f32 ratio) {
+    return ratio > (f32) MAX_RATIO ? (f32) MAX_RATIO : ratio;
+}
+
 static void handle_param(ALSynth *drvr, s32 voice, ALParam *p) {
     PVoice *pv = &sPVoices[voice];
     Event ev;
@@ -380,7 +385,7 @@ static void handle_param(ALSynth *drvr, s32 voice, ALParam *p) {
             ev.type = EV_START;
             ev.sample = sample_decode(a->wave);
             ev.unity = a->unity != 0;
-            ev.pitch = a->pitch;
+            ev.pitch = pv_pitch(a->pitch);
             ev.volume = a->volume;
             ev.pan = a->pan;
             ev.fxMix = (a->fxMix > 127) ? 127 : a->fxMix;
@@ -412,7 +417,7 @@ static void handle_param(ALSynth *drvr, s32 voice, ALParam *p) {
             break;
         case AL_FILTER_SET_PITCH:
             ev.type = EV_PITCH;
-            ev.pitch = p->data.f;
+            ev.pitch = pv_pitch(p->data.f);
             break;
         case AL_FILTER_FREE_VOICE: {
             ALFreeParam *f = (ALFreeParam *) p;
@@ -499,6 +504,7 @@ static double played_samples(void) {
 #define PV_STALL_FRAMES 64
 static u32 sLastQueueFrame;
 static s32 sMuted;
+static u32 sUnderruns; // Times the output clock restarted after running past the game's audio (pv_frame_tick)
 
 void pv_output_queue(unsigned numBytes) {
     // Under the lock: the DSP callback reads the 64-bit count and moves sFrame0 (pv_frame_tick), and a 64-bit value
@@ -687,6 +693,17 @@ void pv_frame_tick(void) {
         now = played_samples();
         plat_log("voices: the output was %.0f ms behind the game (the DSP was held): skipped ahead, %d events pending",
                  behind * 1000.0 / sSynthRate, (int) sEventCount);
+    } else if (sClockStarted && now - (double) (sQueuedBytes / 4) > (double) sSynthRate / 30) {
+        /*
+         * The other way: the output ran on past what the game queued (its sound thread stalled: a load, a busy
+         * core). Kept as a debt, the game would size its next frames at about twice real time to pay it back, and
+         * music and sound timers would run fast for as long as the stall lasted. As on the N64 (and the CPU mixer),
+         * the gap is just lost: the clock restarts from what was queued.
+         */
+        sFrame0 = pv_backend_frames() - (u32) ((double) (sQueuedBytes / 4) * PV_OUTPUT_RATE /
+                                               ((double) sSynthRate * PV_FRAME_SAMPLES));
+        now = played_samples();
+        sUnderruns++;
     }
     // Events whose time has come, in the order they were queued; later ones wait (they stay in order).
     n = 0;
@@ -781,10 +798,10 @@ const char *pv_status(void) {
         playing += sVoices[i].playing ? 1 : 0;
     }
     sprintf(sText, "%d playing (peak %d), %u events late by %.0f avg %.0f max samples, %u dropped, %u pending, "
-                   "%s, %u resumes, aux frames %u/%u",
+                   "%s, %u resumes, %u underruns, aux frames %u/%u",
             (int) playing, (int) sPeakPlaying, (unsigned) sLateCount, sLateCount ? sLateSum / sLateCount : 0.0,
             sLateMax, (unsigned) sEventsDropped, (unsigned) sEventCount, sMuted ? "muted" : "unmuted",
-            (unsigned) sResyncs, (unsigned) sAuxFrames[0], (unsigned) sAuxFrames[1]);
+            (unsigned) sResyncs, (unsigned) sUnderruns, (unsigned) sAuxFrames[0], (unsigned) sAuxFrames[1]);
     return sText;
 }
 

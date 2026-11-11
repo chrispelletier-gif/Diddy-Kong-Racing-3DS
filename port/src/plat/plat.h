@@ -1,6 +1,6 @@
 #ifndef PORT_PLAT_H
 #define PORT_PLAT_H
-/* Off-GitHub test build: everything on the PICA200 (local branch local/pica-all only). */
+/* Everything on the PICA200 (the native renderer's switches and code; on master since PR #468). */
 #define PICA_ALL 1
 
 /*
@@ -133,6 +133,8 @@ int plat_save_file(const char *path, const void *data, unsigned int size);
 void plat_save_file_later(const char *path, void *data, unsigned int size);
 /* Waits for every queued background write. */
 void plat_saves_drain(void);
+/* How many plat_save_file_later writes have failed since start-up, so the caller can write those saves again. */
+unsigned int plat_saves_failed(void);
 /* Adds data to the end of a file, making it if there is none. Returns 0 if anything failed. */
 int plat_append_file(const char *path, const void *data, unsigned int size);
 /* Reads up to size bytes from the start of a file. Returns the number read, or -1 if it cannot be opened. */
@@ -168,6 +170,8 @@ int plat_input_script_text(const char *script, int poll, unsigned short *buttons
 int plat_list_dir(const char *dir, char *names, int nameSize, int maxNames);
 /* The same, only the entries whose names start with prefix. */
 int plat_list_dir_prefix(const char *dir, const char *prefix, char *names, int nameSize, int maxNames);
+/* Like plat_list_dir, but when there are more than maxNames entries it keeps the ones that sort last (unordered). */
+int plat_list_dir_last(const char *dir, char *names, int nameSize, int maxNames);
 
 /* NULL terminated list of directories to search for a ROM with any name. */
 const char *const *plat_rom_search_dirs(void);
