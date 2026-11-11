@@ -451,7 +451,8 @@ void main_game_loop(void) {
         // count: they turned it on at every race start, and five seconds later each kart's full detail models came
         // back a part at a time as the karts crossed the normal distances (seen on the New 3DS, 2026-11-07).
         s32 sAdapt = plat_switch("DKR_RACER_LOD_ADAPT", plat_old_3ds() ? 1 : 0) != 0; // Each frame: the bench changes it
-        if (sLevelSeen != gPortLevelLoads) {
+        s32 newLevel = sLevelSeen != gPortLevelLoads;
+        if (newLevel) {
             sLevelSeen = gPortLevelLoads;
             sQuiet = 90; // Three seconds at 30 fps
             sSlowHistory = 0;
@@ -486,7 +487,7 @@ void main_game_loop(void) {
                 gPortRacerLodBlend = 0;
             }
         }
-        if (sQuiet == 90) {
+        if (newLevel) {
             gPortRacerLodBlend = 0; // A new level starts with the usual distances
         }
     }
