@@ -13,6 +13,9 @@
  *   DKR_AUTORUN_RESTART=1           Start from the first race instead of resuming.
  *   DKR_AUTORUN_SNAPSHOT=1          Also save a snapshot (GPU and reference images) after each race finishes.
  *   DKR_AUTORUN_TIME_TRIAL=1        Race in time trial (alone, with the ghosts) instead of against the field.
+ *   DKR_AUTORUN_LINGER=seconds      Stay this long after the finish line (8), pressing A three times from 2 seconds on
+ *                                   (2.5 seconds apart) to bring up the post-race screen and its framed replay, as a
+ *                                   player would. For checking that screen on the PC build.
  *
  * The GPU benchmark is a short run instead: the heaviest races of the hardware test runs, each raced once with every
  * render setting of sBenchConfigs (anti-aliasing 4x, 2x or off, 30 or 60 fps), with the
@@ -2051,6 +2054,12 @@ static const char *menu_pass_frame(s32 updateRate) {
     return NULL;
 }
 
+/* How long a test run stays after the finish line (DKR_AUTORUN_LINGER, in seconds). */
+static s32 linger_seconds(void) {
+    const char *env = plat_getenv("DKR_AUTORUN_LINGER");
+    return env != NULL ? port_atoi(env) : FINISH_LINGER_SECONDS;
+}
+
 /* DKR_AUTORUN_MANUAL: when the script takes over the player's kart, in 60ths of a second into the race (-1 never). */
 static s32 manual_start(void) {
     const char *env = plat_getenv("DKR_AUTORUN_MANUAL");
@@ -2069,6 +2078,15 @@ int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char
         *stickY = 0;
         return plat_input_script_text(plat_getenv("DKR_MANUAL_INPUT"), sRaceRetraces - manual_start(), buttons,
                                       stickX, stickY);
+    }
+    if (sEnabled > 0 && sPhase == PHASE_FINISHED && plat_getenv("DKR_AUTORUN_LINGER") != NULL) {
+        // DKR_AUTORUN_LINGER: A shrinks the replay into its frame, then on through the results to the options (a
+        // fourth press would pick TRY AGAIN).
+        s32 t = sLingerRetraces - 120;
+        *buttons = (t >= 0 && t < 3 * 150 && t % 150 < 12) ? A_BUTTON : 0;
+        *stickX = 0;
+        *stickY = 0;
+        return 1;
     }
     if (sEnabled <= 0 || sMode != MODE_WHOLE || sPhase != PHASE_RACING || sNext >= sNumRaces ||
         sRaces[sNext].kind != STOP_MENUS) {
@@ -3014,7 +3032,8 @@ s32 port_autorun_quit_race(void) {
         sQuitPending = FALSE;
         return TRUE;
     }
-    if (sEnabled > 0 && sPhase == PHASE_FINISHED && sLingerRetraces >= FINISH_LINGER_SECONDS * 60) {
+    if (sEnabled > 0 && sPhase == PHASE_FINISHED &&
+        sLingerRetraces >= linger_seconds() * 60) {
         set_phase(PHASE_LEAVING);
         sNext++;
         if (sNext >= sNumRaces) {

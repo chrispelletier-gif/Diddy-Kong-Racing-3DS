@@ -524,6 +524,22 @@ void bgdraw_render(Gfx **dList, Mtx **mtx, s32 drawBG) {
             // Used for secondary viewport backgrounds. This does not need to be 1 cycle, this could easily work with
             // fillmode.
             if (copy_viewport_background_size_to_coords(0, &x1, &y1, &x2, &y2)) {
+#ifdef TARGET_PORT
+                // Widescreen: the 3D drawn in this view (the post-race replay, the track preview) is plat_aspect_scale()
+                // times as wide as on the N64 about the screen's middle, while a rectangle is placed as 4:3. Spread
+                // the backing out as far, or the scene's see-through parts (water, gaps in the sky) at the view's
+                // left and right edges show the tiles behind instead of this colour.
+                if (plat_aspect_scale() != 1.0f) {
+                    x1 = SCREEN_WIDTH_HALF - (s32) ((SCREEN_WIDTH_HALF - x1) * plat_aspect_scale() + 0.999f);
+                    x2 = SCREEN_WIDTH_HALF + (s32) ((x2 - SCREEN_WIDTH_HALF) * plat_aspect_scale() + 0.999f);
+                    if (x1 < 0) {
+                        x1 = 0;
+                    }
+                    if (x2 > w - 1) {
+                        x2 = w - 1;
+                    }
+                }
+#endif
                 gDPSetCycleType((*dList)++, G_CYC_1CYCLE);
                 gDPSetPrimColor((*dList)++, 0, 0, sBGPrimColourR, sBGPrimColourG, sBGPrimColourB, 255);
                 gDPSetCombineMode((*dList)++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);

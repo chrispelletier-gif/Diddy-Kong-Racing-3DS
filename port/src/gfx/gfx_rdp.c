@@ -1704,14 +1704,16 @@ static inline s32 draw_states_equal(const GfxDrawState *a, const GfxDrawState *b
 
 static void trace_state(const GfxDrawState *st, s32 count) {
     TRACE("  DRAW %d tris: cc rgb0(%d,%d,%d,%d) a0(%d,%d,%d,%d) rgb1(%d,%d,%d,%d) a1(%d,%d,%d,%d) cyc%d tex %p %p "
-          "prim %02X%02X%02X%02X env %02X%02X%02X%02X blend %d at %d/%d z %d/%d fog %d cull %d",
+          "prim %02X%02X%02X%02X env %02X%02X%02X%02X blend %d at %d/%d z %d/%d fog %d cull %d sc %d %d %d %d flat %d "
+          "vp %.1f %.1f %.1f %.1f",
           (int) count, st->combiner.rgb[0].a, st->combiner.rgb[0].b, st->combiner.rgb[0].c, st->combiner.rgb[0].d,
           st->combiner.alpha[0].a, st->combiner.alpha[0].b, st->combiner.alpha[0].c, st->combiner.alpha[0].d,
           st->combiner.rgb[1].a, st->combiner.rgb[1].b, st->combiner.rgb[1].c, st->combiner.rgb[1].d,
           st->combiner.alpha[1].a, st->combiner.alpha[1].b, st->combiner.alpha[1].c, st->combiner.alpha[1].d,
           st->combiner.numCycles, (void *) st->textures[0], (void *) st->textures[1], st->prim[0], st->prim[1],
           st->prim[2], st->prim[3], st->env[0], st->env[1], st->env[2], st->env[3], st->blend, st->alphaTest,
-          st->alphaRef, st->depthTest, st->depthWrite, st->fogEnabled, st->cullMode);
+          st->alphaRef, st->depthTest, st->depthWrite, st->fogEnabled, st->cullMode, st->scissor[0], st->scissor[1],
+          st->scissor[2], st->scissor[3], st->flat, g.vpScale[0], g.vpTrans[0], g.vpScale[1], g.vpTrans[1]);
 }
 
 /* The traced frame's log of a batch about to be drawn. */
