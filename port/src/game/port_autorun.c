@@ -387,11 +387,19 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // so DKR_KCOND stays on and its row went. Round 5: #469's per-draw list began race frames with a whole-screen
     // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
     // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
-    { "whole-screen solid rectangle drawn (old)", { "DKR_RECT_FILL", NULL, NULL }, 1, 0, 1, 0 },
     // Boss fights (2026-11-08, user: "performance during the boss fights seems poor at times"): Wizpig 1's rain is two
     // whole-screen blended layers every frame. Blended draws that write no depth now drop their alpha 0 pixels with
-    // the GPU's alpha test before the blend (DKR_XLU_ALPHA_TEST, gfx_c3d.c; same picture), raced the old way.
-    { "blended draws' clear pixels blended (old)", { "DKR_XLU_ALPHA_TEST", NULL, NULL }, 1, 0, 1, 0 },
+    // the GPU's alpha test before the blend (DKR_XLU_ALPHA_TEST, gfx_c3d.c; same picture). Benches #488 and #502:
+    // the old way cost Haunted Woods 2.9-3.0 ms of GPU and saved nothing elsewhere, so it stays on and its row went.
+    // Benches #488/#502 also had the rectangle fill above costing Crescent Island and Jungle Falls 1.0-1.2 ms, and the
+    // 200-race runs #494/#505 (800 pixels) 1 ms more GPU on every track than #483: its fill needs an edge drawn each
+    // side, and each edge was drawn as the whole rectangle cut by the scissor, which the GPU pays for in full
+    // (#505's per-draw log: two 1.5 ms "COLOUR CLEAR drawn" a frame). The edges are now drawn as strips just over
+    // their lines (DKR_FILL_EDGE_STRIP, gpu_cuts.inc draw_fill_edge; same pixels), raced the old way.
+    // Bench #511 (combined build ec64ffb): usual GPU on Crescent Island 14.0 -> 11.2 ms and Jungle Falls 10.6 -> 7.8 ms
+    // against #502, and the rectangle fill now saves 1.8-2.1 ms on all three tracks, so its row went. The edge row
+    // measured nothing there (its switch wasn't read again between races; fixed), so it races once more.
+    { "fill edges drawn as the whole clear (old)", { "DKR_FILL_EDGE_STRIP", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
