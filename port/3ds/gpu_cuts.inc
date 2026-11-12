@@ -401,16 +401,17 @@ static float flat_line(float x) {
  * the lines, and the clear's outer side keeps the place it had, so the same pixels get the same colour.
  * DKR_FILL_EDGE_STRIP=0 draws the whole rectangle as before.
  */
+static int sFillEdgeStrip = -1; // DKR_FILL_EDGE_STRIP (read_switches resets it)
+
 static void draw_fill_edge(const short rect[4], u32 rgba, int from, int to) {
-    static int sStrip = -1;
     GfxDrawState state;
     GfxVertex v[6];
     int lines = sTarget->frameBuf.height, i;
     float x0, x1, y0, y1, lo, hi;
-    if (sStrip < 0) {
-        sStrip = plat_switch("DKR_FILL_EDGE_STRIP", 1) != 0;
+    if (sFillEdgeStrip < 0) {
+        sFillEdgeStrip = plat_switch("DKR_FILL_EDGE_STRIP", 1) != 0;
     }
-    if (!sStrip) {
+    if (!sFillEdgeStrip) {
         draw_clear_rect(rect, rgba, 0);
         return;
     }

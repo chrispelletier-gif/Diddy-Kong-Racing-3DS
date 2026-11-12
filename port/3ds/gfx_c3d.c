@@ -3532,6 +3532,7 @@ static void read_switches(void) {
     sGpuDraws = -1;
     sRectFill = -1;
     sXluAlphaTest = -1;
+    sFillEdgeStrip = -1;
     // Re-read on their next use (the head flicker bench switches them between races).
     sFull = -1;
     sStateCache = -1;
