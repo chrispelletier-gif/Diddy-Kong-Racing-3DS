@@ -1653,8 +1653,15 @@ void func_80046524(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         var_f2 = 32.0f;
     }
     var_v1 = gCurrentStickX - racer->steerAngle;
+#ifdef TARGET_PORT
+    // 2/var_f2 of the gap per 30 fps frame: a 60 fps half step takes 1 - sqrt(1 - 2/var_f2), and the smallest
+    // step of 1 once per 30 fps frame.
+    var_a3 = gPortHalfStep ? var_v1 * (1.0f - sqrtf(1.0f - 2.0f / var_f2)) : (var_v1 * updateRateF) / var_f2;
+    if ((var_v1 != 0) && (var_a3 == 0) && PORT_TICK()) {
+#else
     var_a3 = (var_v1 * updateRateF) / var_f2;
     if ((var_v1 != 0) && (var_a3 == 0)) {
+#endif
         if (var_v1 > 0) {
             var_a3 = 1;
         }
@@ -6574,7 +6581,12 @@ void update_onscreen_AI_racer(Object *obj, Object_Racer *racer, s32 updateRate, 
     slowly_reset_head_angle(racer);
     angle = gCurrentCarSteerVel - (u16) racer->y_rotation_vel;
     WRAP(angle, -0x8000, 0x8000);
+#ifdef TARGET_PORT
+    // As in update_car: a quarter of the gap per retrace closes 7/16 per 30 fps frame at 60 fps, not 1/2.
+    angle = gPortHalfStep ? (angle * 75) >> 8 : angle >> 2;
+#else
     angle >>= 2;
+#endif
     CLAMP(angle, -0x2EE, 0x2EE);
     racer->y_rotation_vel += (angle * updateRate);
     obj->trans.rotation.y_rotation = racer->steerVisualRotation + racer->y_rotation_vel;
@@ -7864,9 +7876,16 @@ void handle_base_steering(Object_Racer *racer, UNUSED s32 updateRate, f32 update
     s32 turnVel;
 
     steering = gCurrentStickX - racer->steerAngle;
+#ifdef TARGET_PORT
+    // A quarter of the gap per 30 fps frame: at 60 fps each half step takes 1 - sqrt(3/4) of it, and the
+    // smallest step of 1 is taken once per 30 fps frame.
+    turnVel = gPortHalfStep ? steering * (1.0f - 0.8660254f) : (steering * updateRateF) * 0.125;
+    if (steering != 0 && turnVel == 0 && PORT_TICK()) {
+#else
     turnVel = (steering * updateRateF) * 0.125;
 
     if (steering != 0 && turnVel == 0) {
+#endif
         if (steering > 0) {
             turnVel = 1;
         }
@@ -9652,6 +9671,12 @@ void func_8005B818(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
         i = (racer->unk1BE & 0xFFFF) - (racer->unk1C2 & 0xFFFF);
         WRAP(i, -0x8000, 0x8000);
         i = ABS(i);
+#ifdef TARGET_PORT
+        // How far the path turned since the last frame: a 60 fps frame sees half the turn of a 30 fps one.
+        if (gPortHalfStep) {
+            i *= 2;
+        }
+#endif
 
         i -= 200;
         if (i < 0) {
