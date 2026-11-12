@@ -871,7 +871,10 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
     if (sWide) {
         wideState = *drawState;
         wideState.scissor[0] = frame_x(drawState->scissor[0], drawState->flat);
-        wideState.scissor[2] = frame_x(drawState->scissor[2], drawState->flat);
+        // A scissor ending at x = 319 reaches the wide screen's edge, as on the 3DS (gfx_c3d.c set_scissor).
+        wideState.scissor[2] = drawState->scissor[2] >= GFX_SCREEN_WIDTH - 1
+                                   ? W
+                                   : frame_x(drawState->scissor[2], drawState->flat);
         state = &wideState;
     }
     for (t = 0; t < numTriangles; t++) {
