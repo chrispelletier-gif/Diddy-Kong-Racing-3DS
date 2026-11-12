@@ -392,6 +392,73 @@ static float flat_line(float x) {
 }
 
 /*
+ * One of the fill's edges: the clear's lines [from, to) of the target, drawn in the clear's colour. Drawn as
+ * draw_clear_rect's whole rectangle with the scissor narrowed to the lines (as before 2026-11-12), each edge cost a New
+ * 3DS as much GPU time as the whole clear (#505's per-draw log: two "COLOUR CLEAR drawn" a frame at 1.5 ms each, the
+ * PICA's scissor doesn't save it the rectangle's pixels), so the 800 pixel mode's whole-screen rectangle fill
+ * (DKR_RECT_FILL), which needs an edge each side, cost 1.1 ms more a frame than drawing the rectangle once. Here the
+ * triangles only reach a little past the lines, so the GPU only works on those. The scissor still cuts them to exactly
+ * the lines, and the clear's outer side keeps the place it had, so the same pixels get the same colour.
+ * DKR_FILL_EDGE_STRIP=0 draws the whole rectangle as before.
+ */
+static void draw_fill_edge(const short rect[4], u32 rgba, int from, int to) {
+    static int sStrip = -1;
+    GfxDrawState state;
+    GfxVertex v[6];
+    int lines = sTarget->frameBuf.height, i;
+    float x0, x1, y0, y1, lo, hi;
+    if (sStrip < 0) {
+        sStrip = plat_switch("DKR_FILL_EDGE_STRIP", 1) != 0;
+    }
+    if (!sStrip) {
+        draw_clear_rect(rect, rgba, 0);
+        return;
+    }
+    // The clear's own sides in clip x as the GPU gets them (to_screen_flat), and the lines' (a margin of two lines
+    // inwards; flat_line's inverse, the viewport's lines running the opposite way to x).
+    x0 = rect[0] / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f;
+    x1 = rect[2] / (GFX_SCREEN_WIDTH / 2.0f) - 1.0f;
+    x0 = sWide ? gfx_flat_x(x0, 1.0f, NARROW, GFX_FLAT_STRETCH) : x0 * NARROW;
+    x1 = sWide ? gfx_flat_x(x1, 1.0f, NARROW, GFX_FLAT_STRETCH) : x1 * NARROW;
+    lo = 1.0f - 2.0f * (float) (to + 2) / (float) lines;
+    hi = 1.0f - 2.0f * (float) (from - 2) / (float) lines;
+    if (lo < x0) lo = x0;
+    if (hi > x1) hi = x1;
+    if (hi <= lo) {
+        return;
+    }
+    // Drawn as a 3D draw, whose clip x the GPU gets times sScale3D (to_screen): no 4:3 or wide reshaping.
+    lo /= sScale3D;
+    hi /= sScale3D;
+    y0 = 1.0f - rect[1] / (GFX_SCREEN_HEIGHT / 2.0f);
+    y1 = 1.0f - rect[3] / (GFX_SCREEN_HEIGHT / 2.0f);
+    {
+        const float xs[6] = { lo, lo, hi, hi, lo, hi };
+        const float ys[6] = { y0, y1, y0, y0, y1, y1 };
+        memset(&state, 0, sizeof(state));
+        state.combiner.numCycles = 1;
+        state.combiner.rgb[0].a = state.combiner.rgb[0].b = state.combiner.rgb[0].c = GFX_CC_ZERO;
+        state.combiner.rgb[0].d = GFX_CC_SHADE;
+        state.combiner.alpha[0] = state.combiner.rgb[0];
+        memcpy(state.scissor, rect, sizeof(state.scissor));
+        for (i = 0; i < 6; i++) {
+            memset(&v[i], 0, sizeof(v[i]));
+            v[i].x = xs[i];
+            v[i].y = ys[i];
+            v[i].z = 1.0f;
+            v[i].w = 1.0f;
+            v[i].r = rgba >> 24;
+            v[i].g = rgba >> 16;
+            v[i].b = rgba >> 8;
+            v[i].a = rgba;
+        }
+    }
+    sClearing = 1;
+    gfxb_draw_triangles(&state, v, 2);
+    sClearing = 0;
+}
+
+/*
  * Backend: the colour clear of rect, before anything else is drawn this frame. Returns whether it was taken (filled,
  * with any edges drawn); 0 leaves it to be drawn as before.
  */
@@ -492,13 +559,13 @@ static int colour_fill(const short rect[4], u32 rgba) {
             sScissorClampFrom = scFrom;
             sScissorClampTo = from;
             forget_gpu_state();
-            draw_clear_rect(rect, rgba, 0);
+            draw_fill_edge(rect, rgba, scFrom, from);
         }
         if (to < scTo) {
             sScissorClampFrom = to;
             sScissorClampTo = scTo;
             forget_gpu_state();
-            draw_clear_rect(rect, rgba, 0);
+            draw_fill_edge(rect, rgba, to, scTo);
         }
         sScissorClamp = 0;
         forget_gpu_state();
