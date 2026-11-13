@@ -1552,6 +1552,7 @@ static volatile unsigned int sTripleQueued, sTripleSwaps;
 static u8 *sTriple[3];
 static int sTripleNext, sTripleShown = -1, sTripleMaybe = -1, sTriplePresented = -1, sTripleFail;
 static unsigned int sTripleId;
+static int sTripleSetNow = -1; // 0: the buffers are in main memory, 1: in VRAM (triple_use_set)
 
 u8 *__real_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height);
 __attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide_t side, u16 *width, u16 *height) {
@@ -1565,7 +1566,11 @@ __attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide
 /* What libctru's gfxPresentFramebuffer does for the top screen, with our buffer (in linear memory). */
 static void triple_present(bool hasStereo) {
     GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
-    u32 mode = format | (1 << 8);
+    // Bits 8-9 say where the buffer lives: 1 main memory, 3 VRAM (as libctru's gfxPresentFramebuffer sets them). The
+    // screen shows either way, but the HOME menu's picture of the game is read the way they say: a VRAM buffer
+    // (DKR_FB_VRAM) marked as main memory came out as a white and grey box when the HOME menu opened and closed
+    // ("Fix grey box after HOME resume", 2026-11-12).
+    u32 mode = format | ((sTripleSetNow == 1 ? 3u : 1u) << 8);
     const u8 *fbA = sTriple[sTripleNext], *fbB = fbA;
     if (gfxIs3D()) {
         mode |= BIT(5);
@@ -1644,7 +1649,6 @@ static int triple_free(void) {
 static int fb_vram_wanted(void);   // gpu_cuts.inc
 static int triple_use_set(int vram);
 static u8 *sTripleSets[2][3];
-static int sTripleSetNow = -1;
 
 static int triple_choose(void) {
     int i;
