@@ -446,6 +446,28 @@ void music_dynamic_set(u16 channelMask) {
     }
 }
 
+#ifdef TARGET_PORT
+/**
+ * While a new sequence is waiting for the old one to finish stopping, the stop
+ * event resets the player's channel mask to all-on, which would undo a channel
+ * mute done right after music_play (menus doing this played every instrument
+ * at once, like two tracks at the same time). Remember the wanted mask so
+ * music_sequence_init applies it when the new sequence really starts.
+ */
+static void music_pending_channel(u8 channel, s32 on) {
+    if (gMusicNextSeqID != SEQUENCE_NONE) {
+        if (gDynamicMusicChannelMask == MUSIC_CHAN_MASK_NONE) {
+            gDynamicMusicChannelMask = 0xFFFF;
+        }
+        if (on) {
+            gDynamicMusicChannelMask |= (1 << channel);
+        } else {
+            gDynamicMusicChannelMask &= ~(1 << channel);
+        }
+    }
+}
+#endif
+
 /**
  * Mute the sequence channel, preventing it from playing any sound.
  * Official Name: amTuneMuteChl
@@ -453,6 +475,9 @@ void music_dynamic_set(u16 channelMask) {
 void music_channel_off(u8 channel) {
     if (channel < AUDIO_CHANNELS) {
         alSeqChOff(gMusicPlayer, channel);
+#ifdef TARGET_PORT
+        music_pending_channel(channel, FALSE);
+#endif
     }
 }
 
@@ -470,6 +495,9 @@ s32 music_channel_active(s32 channel) {
 void music_channel_on(u8 channel) {
     if (channel < AUDIO_CHANNELS) {
         alSeqChOn(gMusicPlayer, channel);
+#ifdef TARGET_PORT
+        music_pending_channel(channel, TRUE);
+#endif
     }
 }
 
