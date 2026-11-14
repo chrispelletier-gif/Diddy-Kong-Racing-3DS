@@ -265,14 +265,6 @@ void port_census_hit(const void *cmd, int depth, int kind, int cls, int op, cons
         unsigned int own = site_of(cmd);
         sCaller[idx + 1] = own != 0 ? own : sCaller[idx];
     }
-    if (getenv("DKR_CENSUS_DEBUG") != NULL && strstr(sSites[site], "via unknown") != NULL && cls == CENSUS_TMEM) {
-        static int sShown;
-        if (sShown++ < 40) {
-            const unsigned int *w = (const unsigned int *) cmd;
-            fprintf(stderr, "census debug: %p depth %d kind %d class %d op %d words %08x %08x, previous %08x %08x\n", cmd,
-                    depth, kind, cls, op, w[0], w[1], w[-2], w[-1]);
-        }
-    }
     key = make_key(sLevel, sPhase, kind, cls, op, 0, site);
     add_row(key, 1);
     if (cls == CENSUS_TMEM || cls == CENSUS_LIST_CALL || cls == CENSUS_STATE) {
