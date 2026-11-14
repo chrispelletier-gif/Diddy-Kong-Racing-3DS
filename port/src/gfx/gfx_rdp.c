@@ -14,6 +14,7 @@
 #include "plat/profile.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "gfx_census.h"
 #include "port_drawtag.h"
 
 #define MAX_VERTICES 64
@@ -3920,6 +3921,17 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
 /* At the start of a frame: this frame's switch, and the table emptied for a new level or with the switch off. */
 #ifdef PICA_ALL
 static s32 sOpCountOn = -1;
+static s32 sCensusOn = -1; // DKR_WALK_CENSUS=1: the walk census (census_command)
+static u32 sCensusFrames;
+static s32 sCensusSkip = TRUE; // This frame is not counted (native ops off)
+static void census_note(const Gfx *tag, s32 cls, s32 op);
+static void census_log(void);
+#define CENSUS_NOTE(tag, cls, op)                                                                                      \
+    do {                                                                                                               \
+        if (UNLIKELY(sCensusOn > 0) && !sCensusSkip) {                                                                 \
+            census_note(tag, cls, op);                                                                                 \
+        }                                                                                                              \
+    } while (0)
 static u32 sOpCount[256];
 static u32 sOpKind[PORT_DRAW_KINDS][256]; // DKR_OPCOUNT=1: also by draw kind (N64 commands only, not port tags)
 #endif
@@ -3954,6 +3966,13 @@ static void track_frame_start(void) {
     if (sOpCountOn < 0) {
         const char *e = plat_getenv("DKR_OPCOUNT");
         sOpCountOn = (e != NULL && e[0] == '1');
+    }
+    if (sCensusOn < 0) {
+        const char *e = plat_getenv("DKR_WALK_CENSUS");
+        sCensusOn = (e != NULL && e[0] == '1');
+    }
+    if (sCensusOn > 0 && sCensusFrames > 0 && sFrameCount % 600 == 0) {
+        census_log();
     }
     if (sOpCountOn && sFrameCount % 600 == 0 && sFrameCount > 0) {
         char line[1024];
@@ -5767,6 +5786,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: not captured", (unsigned long) id);
         }
@@ -5779,6 +5799,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 mat->valid = FALSE;
                 gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
                 sNDrawStats[2]++;
+                CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
                 if (UNLIKELY(sTracing)) {
                     plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
                 }
@@ -5788,6 +5809,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         }
     }
     if (dl[1].words.w0 & 0x40000) {
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
         native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5801,6 +5823,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         // (DKR_NATIVE_DYNAMIC): its vertices are transformed fresh here anyway, and a list whose triangles changed
         // gets its tables remade in place (native_find).
     } else if (dynamic || g.billboard) {
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5835,6 +5858,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     }
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured); // No tables: through the slots
         sNDrawStats[0]++;
         return 2;
@@ -6885,6 +6909,139 @@ static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
 }
 #endif
 
+#if defined(PICA_ALL) && defined(PORT_NATIVE_OPS)
+/*
+ * The walk census (DKR_WALK_CENSUS=1, gfx_census.h): every command the walk executes, counted by draw kind and class,
+ * so the commands that are still N64-shaped (vertex slots, texture loads, fixed matrices, list calls) are listed.
+ * Counts are logged every 600 frames ("census"); host builds also name the source line behind each command and
+ * write census.csv (port/host/census_sites.c, port/tools/census_report.py). Off: one test per command.
+ */
+static u32 sCensusCount[PORT_DRAW_KINDS][CENSUS_CLASSES];
+static s32 sCensusDepth; /* The depth of the list being walked, for the records' notes */
+extern s32 level_id(void);
+
+static inline void census_add(const Gfx *at, s32 depth, s32 cls, s32 op, const void *list) {
+    u32 kind = (u32) sDrawKind < PORT_DRAW_KINDS ? sDrawKind : 0;
+    sCensusCount[kind][cls]++;
+    CENSUS_HOST_HIT(at, depth, (s32) kind, cls, op, list);
+}
+
+/* A record the renderer takes through the vertex slots after all, or drops (native_record), counted inside the records. */
+static NOINLINE COLD void census_note(const Gfx *tag, s32 cls, s32 op) {
+    census_add(tag, sCensusDepth, cls, op, NULL);
+}
+
+static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 depth) {
+    u32 op = w0 >> 24;
+    sCensusDepth = depth;
+    if (op == OP(G_NOOP)) {
+        if (w0 & NOP_MARK) {
+            u32 id = (w0 >> 19) & 15;
+            if (id == NOP_EXT) {
+                switch ((w0 >> 15) & 15) {
+                    case NOPX_LOADTLUT: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADTLUT, NULL); break;
+                    case NOPX_CALL:
+                        census_add(at, depth, CENSUS_LIST_CALL, CENSUS_OP_CALL,
+                                   bad_list_address(w1) ? NULL : (const void *) seg_addr(w1));
+                        break;
+                    case NOPX_VTX: census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_VTX, NULL); break;
+                    case NOPX_TRI: census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_TRI, NULL); break;
+                    case NOPX_MTX: census_add(at, depth, CENSUS_MATRIX, CENSUS_OP_MTX, NULL); break;
+                    case NOPX_TEXRECT: census_add(at, depth, CENSUS_RECT, CENSUS_OP_TEXRECT, NULL); break;
+                    case NOPX_VIEWPORT: census_add(at, depth, CENSUS_STATE, CENSUS_OP_VIEWPORT, NULL); break;
+                    case NOPX_END:
+                    case NOPX_DATA: break;
+                    default: census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL); break;
+                }
+            } else {
+                switch (id) {
+                    case NOP_TILE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_TILE, NULL); break;
+                    case NOP_TILESIZE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_TILESIZE, NULL); break;
+                    case NOP_LOADBLOCK: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADBLOCK, NULL); break;
+                    case NOP_LOADTILE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADTILE, NULL); break;
+                    case NOP_IMAGE:
+                        if (((w0 >> 17) & 3) >= 2) {
+                            census_add(at, depth, CENSUS_TMEM, CENSUS_OP_IMAGE_TEX, NULL);
+                        } else {
+                            census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL);
+                        }
+                        break;
+                    case NOP_FILLRECT: census_add(at, depth, CENSUS_RECT, CENSUS_OP_FILLRECT, NULL); break;
+                    default: census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL); break;
+                }
+            }
+            return;
+        }
+        if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_KIND_TAG, NULL);
+        } else if (w1 == PORT_NATIVE_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_MESH, NULL);
+        } else if (w1 == PORT_TRACK_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_TRACK, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+            u32 flags = at[2].words.w0; /* The record's second data word (written with the tag) */
+            census_add(at, depth, CENSUS_RECORD,
+                       (flags & 0x40000) ? CENSUS_OP_SPRITE : ((flags & 0x20000) ? CENSUS_OP_NDRAW_DYNAMIC : CENSUS_OP_NDRAW),
+                       NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_NMAT, NULL);
+            CENSUS_MATERIAL();
+        } else if ((w1 & 0xFFFF0000) == PORT_NRECT_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NRECT, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_MTXF, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_LIGHT_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_LIGHT_TAG, NULL);
+        }
+        return;
+    }
+    switch (op) {
+        case OP(G_ENDDL):
+        case OP(G_RDPHALF_1):
+        case OP(G_RDPHALF_2): break;
+        case OP(G_VTX): census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_VTX, NULL); break;
+        case OP(G_TRIN): census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_TRI, NULL); break;
+        default: census_add(at, depth, CENSUS_RAW_N64, CENSUS_OP_RAW + (s32) op, NULL); break;
+    }
+}
+
+/* The census's counts a frame, in the log (every 600 frames, with DKR_WALK_CENSUS=1). */
+static COLD void census_log(void) {
+    static const char *const sNames[CENSUS_CLASSES] = {"records", "state ops", "vertex slots", "texture ops", "fixed matrices",
+                                                         "list calls", "raw N64", "rects", "slot records", "dropped records"};
+    static const char *const sKindNames[PORT_DRAW_KINDS] = {"other", "track", "racers", "objects", "sky",
+                                                              "see-through", "effects", "shadows", "hud"};
+    char line[512];
+    u32 total[CENSUS_CLASSES], frames = sCensusFrames, c, k;
+    s32 n = 0;
+    for (c = 0; c < CENSUS_CLASSES; c++) {
+        total[c] = 0;
+        for (k = 0; k < PORT_DRAW_KINDS; k++) {
+            total[c] += sCensusCount[k][c];
+        }
+        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %u.%u", c > 0 ? ", " : "", sNames[c],
+                           (unsigned) (total[c] / frames), (unsigned) ((total[c] * 10 / frames) % 10));
+    }
+    plat_log("census over %u frames, a frame: %s", (unsigned) frames, line);
+    for (k = 0; k < PORT_DRAW_KINDS; k++) {
+        n = 0;
+        for (c = 0; c < CENSUS_CLASSES; c++) {
+            /* The leftovers only: vertex slots, texture ops, fixed matrices, list calls, raw N64, rects, slot records, drops */
+            if (c >= CENSUS_VERTEX_SLOT && c != CENSUS_RECORD && sCensusCount[k][c] >= frames / 10 + 1) {
+                n += plat_snprintf(line + n, sizeof(line) - n, " %s %u.%u", sNames[c],
+                                   (unsigned) (sCensusCount[k][c] / frames),
+                                   (unsigned) ((sCensusCount[k][c] * 10 / frames) % 10));
+            }
+        }
+        if (n > 0) {
+            plat_log("  census %s:%s", sKindNames[k], line);
+        }
+    }
+    __builtin_memset(sCensusCount, 0, sizeof(sCensusCount));
+    sCensusFrames = 0;
+}
+#endif
+
 #ifdef PICA_ALL
 /* Stall finder (PICA_ALL test build): logs any command, or frame start/end step, that takes 40 ms or more. */
 static unsigned long long sStallT, sStallLimit;
@@ -6926,6 +7083,9 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             // Each command timed (DKR_STALL_EACH): a clock read, a system call on the 3DS, for every command, so
             // only when looking for a stall; the frame's steps are always timed.
             STALL_MARK("command", w0, w1);
+        }
+        if (UNLIKELY(sCensusOn > 0) && !sCensusSkip && !sPrewarming) { // (The texture prewarm runs load lists outside any frame)
+            census_command(dl, w0, w1, depth);
         }
         if (UNLIKELY(sOpCountOn > 0)) {
             sOpCount[op]++;
@@ -7616,6 +7776,12 @@ void port_gfx_run_task(void *taskPtr) {
     gPlatGfxStage = "running a display list";
     STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
     walk_begin();
+    sCensusSkip = TRUE;
+    if (UNLIKELY(sCensusOn > 0) && gPortNativeOps) { // (Frames before the first level load still write N64 commands)
+        sCensusSkip = FALSE;
+        sCensusFrames++;
+        CENSUS_FRAME_BEGIN(level_id(), gPortLevelLoads);
+    }
     run_dl((const Gfx *) task->t.data_ptr, -1);
     STALL_MARK("track flush", 0, 0);
     track_flush();
@@ -7623,6 +7789,9 @@ void port_gfx_run_task(void *taskPtr) {
     flush_batch();
     sky_draw_if_held();
     sDepthDrawn = FALSE;
+    if (UNLIKELY(sCensusOn > 0) && !sCensusSkip) {
+        CENSUS_FRAME_END();
+    }
     kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);
