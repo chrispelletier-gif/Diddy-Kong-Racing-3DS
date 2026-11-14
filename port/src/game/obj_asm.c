@@ -161,6 +161,7 @@ int port_gpu_light_get(const Vertex *verts, const void *model, float out[4]) {
  * level is always a capture) or when full.
  */
 #define NMAT_KEYS 1024
+static int sTexHandle; // R3 DKR_NATIVE_TEXHANDLE: captures name their texture by handle (nmat_texture)
 typedef struct NMatKey {
     const void *tex;
     s32 flags, texOffset, blocked;
@@ -192,7 +193,11 @@ static void nmat_level_reset(void) {
         // commands with native draws still on).
         gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
 #endif
+<<<<<<< HEAD
         sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", 0) != 0;
+=======
+        sTexHandle = sNativeDraw && plat_switch("DKR_NATIVE_TEXHANDLE", 0) != 0;
+>>>>>>> pr531
     }
 }
 
@@ -276,6 +281,39 @@ extern s16 gForceFlags;
 extern TextureHeader *gCurrentTextureHeader;
 void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset);
 
+/* A texture's load list (TextureHeader.cmd, count commands) in a capture: with DKR_NATIVE_TEXHANDLE the texture by
+ * handle (port_drawtag.h PORT_NTEX_TAG: the renderer sets what the list would have, from the textures it decoded at
+ * load), else the list call as ever. The renderer reads the list only if it has to learn the texture then, as it
+ * would have run it anyway. */
+static void nmat_texture(Gfx **dl, const Gfx *cmd, int count) {
+    Gfx *g;
+    if (!sTexHandle || count <= 0 || count > 0xFF) {
+        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(cmd), count);
+        return;
+    }
+    gDPNoOpTag((*dl)++, PORT_NTEX_TAG | (u32) count);
+    g = (*dl)++;
+    g->words.w0 = 0; // An RSP no-op to a renderer that skips the tag
+    g->words.w1 = OS_K0_TO_PHYSICAL(cmd);
+}
+
+void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset) {
+    TextureHeader *tex = (TextureHeader *) texture;
+    gForceFlags = TRUE;
+    gCurrentTextureHeader = NULL;
+    if (sTexHandle && tex != NULL) {
+        // The frame material_set will pick (its rule), by handle. As the current texture, material_set then leaves
+        // out its own load and sets only the settings, which are the same either way (gForceFlags).
+        if (texOffset && (texOffset < tex->numOfTextures << 8)) {
+            tex = (TextureHeader *) ((s8 *) tex + ((texOffset >> 16) * tex->textureSize));
+        }
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
+        gCurrentTextureHeader = tex;
+    }
+    material_set(dl, (TextureHeader *) texture, flags, texOffset);
+    gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+}
+
 /* One batch as a native draw record (the material's commands first when the renderer hasn't kept them). dynamic:
  * vertices or triangles made anew each frame (drawn through the renderer's vertex slots). Returns 0 with native draws
  * off, for the caller's own commands. */
@@ -288,10 +326,7 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
     }
     id = port_nmat_key(texture, flags, texOffset, &capture);
     if (capture) {
-        gForceFlags = TRUE;
-        gCurrentTextureHeader = NULL;
-        material_set(dl, (TextureHeader *) texture, flags, texOffset);
-        gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+        port_nmat_capture(dl, id, texture, flags, texOffset);
     }
     port_native_record(dl, id, verts, numVerts, tris, numTris, textured, dynamic);
     return 1;
@@ -338,7 +373,7 @@ int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture,
     id = port_nmat_key(texture, (int) (0x40000000u | (u32) index), 0, &capture);
     if (capture) {
         gfx_init_basic_xlu(dl, (u32) index, prim, env);
-        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
         gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
     } else {
         gDPSetPrimColorRGBA((*dl)++, prim);
@@ -357,7 +392,7 @@ void material_load_simple(Gfx **dList, s32 flags);
  * the game does. */
 int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
     const Gfx *c, *dma = NULL;
-    u32 vtxAddr = 0, vtxCount = 0;
+    u32 vtxAddr = 0, vtxCount = 0, dmaCount = 0;
     s32 n;
     if (!port_native_draw() || frame == NULL) {
         return 0;
@@ -367,6 +402,7 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
         s32 kind = port_cmd(c->words.w0, c->words.w1, &pc);
         if (kind == PCMD_CALL && pc.count != 0) {
             dma = c;
+            dmaCount = pc.count;
         } else if (kind == PCMD_VTX) {
             vtxAddr = pc.addr;
             vtxCount = pc.count;
@@ -379,7 +415,11 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
                 gForceFlags = TRUE;
                 material_load_simple(dl, flags);
                 if (dma != NULL) {
-                    *(*dl)++ = *dma;
+                    if (sTexHandle) {
+                        nmat_texture(dl, (const Gfx *) (uintptr_t) dma->words.w1, (int) dmaCount);
+                    } else {
+                        *(*dl)++ = *dma;
+                    }
                 }
                 gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
             }
@@ -415,7 +455,7 @@ int port_native_rect(Gfx **dl, const void *texture) {
     }
     id = port_nmat_key(texture, 0x08000000, 0, &capture);
     if (capture) {
-        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
         gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
     }
     gDPNoOpTag((*dl)++, PORT_NRECT_TAG | id);

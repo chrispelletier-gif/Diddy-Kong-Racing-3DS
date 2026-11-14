@@ -348,6 +348,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
     // Raced the old way.
     { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
+    // R3 (2026-11-14, "Give textures native handles"): materials name their texture by handle instead of loading it
+    // through TMEM (no texture load ops or hashing when a material is caught), and a texture freed while a frame is
+    // built stays until that frame is drawn (the objects that went missing for a frame at level loads). PC frames
+    // identical but for those objects. One lap to check textures (Crescent Island water, door numbers, HUD), then a
+    // race for the walk's time.
+    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     // Old 3DS stereo 3D (2026-11-09, "Get Old 3DS to 30 fps in stereo 3D" thread, its own local branch): what 3D costs
     // and what wins it back, against the usual races in 2D. DKR_STEREO3D=2 draws in 3D whatever the slider says (as if
     // all the way up; anti-aliasing is off in 3D, so the GPU fills as many pixels as the usual races' 2x). Today's 3D
@@ -377,6 +384,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
     // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
     // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
+    // R3 (2026-11-14): textures by handle (see the Old 3DS list): a one-lap check, then a race.
+    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     // GPU time (gfx_c3d.c gpu_cuts.inc). Bench #451 (2026-11-07): the colour clear as a memory fill saved 1.5-3.2 ms
     // of GPU (stays on, row gone); the top screen's buffers in VRAM took the copy to the screen from 1.2 to 0.55 ms
     // on every track (now on, raced the old way once more: one Haunted Woods race was worse); the texture cache kept
