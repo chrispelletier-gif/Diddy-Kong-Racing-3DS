@@ -7863,6 +7863,32 @@ static void apply_frees_later(s32 all) {
 }
 
 /* A free notice at queue position seq: now, or once its frame has been walked. */
+/*
+ * A free kept for later still ends its entries' life as textures the game can load again: the memory is the game's to
+ * load something else into, and a sampled hash can take the new texture for the old one (one hub's 64x64 I4
+ * texture, a near copy of the previous level's, kept the old pixels). So the entries no longer match a lookup (their
+ * hash is turned over, and the lookup memo checks it again), and a texture loaded there is decoded afresh, as it is
+ * when the free goes at once. Records and handles that already hold an entry keep drawing it until the free goes.
+ */
+static void retire_entries(const u8 *start, const u8 *end, u32 seq) {
+    s32 i, any = FALSE;
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        if (sTexCacheAddr[i] >= start && sTexCacheAddr[i] < end && sTexCache[i].used &&
+            (s32) (sTexCache[i].seq - seq) <= 0) {
+            sTexCache[i].hash = ~sTexCache[i].hash;
+            any = TRUE;
+        }
+    }
+    if (any) {
+        for (i = 0; i < TEX_MEMO_SETS * TEX_MEMO_WAYS; i++) {
+            const u8 *a = sTexCacheAddr[sTexMemo[i].entry & (TEX_CACHE_SIZE - 1)];
+            if (a >= start && a < end) {
+                sTexMemo[i].frame = (u32) sFrameCount - 1; // Confirmed again (tex_memo_confirm), against the hash
+            }
+        }
+    }
+}
+
 static void free_notice(const u8 *start, const u8 *end, u32 seq) {
     drop_hashes(start, end);
     if (!sTexHandleOn || sFrameHeadsKnown < 2 || (s32) (seq - sFrameHeads[0]) < 0) {
@@ -7874,6 +7900,7 @@ static void free_notice(const u8 *start, const u8 *end, u32 seq) {
         __builtin_memmove(&sTexFreeLater[0], &sTexFreeLater[1], sizeof(sTexFreeLater[0]) * (TEX_FREES_LATER - 1));
         sTexFreeLaterCount--;
     }
+    retire_entries(start, end, seq);
     sTexFreeLater[sTexFreeLaterCount].start = start;
     sTexFreeLater[sTexFreeLaterCount].end = end;
     sTexFreeLater[sTexFreeLaterCount].seq = seq;
