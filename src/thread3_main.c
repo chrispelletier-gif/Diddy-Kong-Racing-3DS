@@ -1554,6 +1554,19 @@ void mark_write_eeprom_settings(void) {
     gSaveDataFlags |= SAVE_DATA_FLAG_WRITE_EEPROM_SETTINGS; // Set bit 9
 }
 
+#ifdef TARGET_PORT
+void *port_native_heap_alloc(s32 size);
+
+/* A display list set of the new size where the old one was in the pool (as on the N64), or, with DKR_NATIVE_HEAP, a
+ * native block of exactly that size (the old one is already freed, so nothing has to stay at its address). */
+static void *dl_resize_alloc(s32 size, u8 *oldAddress, u32 colourTag) {
+    void *native = port_native_heap_alloc(size);
+    return (native != NULL) ? native : mempool_alloc_fixed(size, oldAddress, colourTag);
+}
+#else
+#define dl_resize_alloc mempool_alloc_fixed
+#endif
+
 /**
  * Allocates an amount of memory for the number of players passed in.
  */
@@ -1575,10 +1588,10 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
 #ifdef TARGET_PORT
         gPortDlBytes = totalSize;
 #endif
-        gDisplayLists[0] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[0], COLOUR_TAG_RED);
-        gDisplayLists[1] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[1], COLOUR_TAG_YELLOW);
+        gDisplayLists[0] = (Gfx *) dl_resize_alloc(totalSize, (u8 *) gDisplayLists[0], COLOUR_TAG_RED);
+        gDisplayLists[1] = (Gfx *) dl_resize_alloc(totalSize, (u8 *) gDisplayLists[1], COLOUR_TAG_YELLOW);
 #ifdef TARGET_PORT
-        gDisplayLists[2] = (Gfx *) mempool_alloc_fixed(totalSize, (u8 *) gDisplayLists[2], COLOUR_TAG_YELLOW);
+        gDisplayLists[2] = (Gfx *) dl_resize_alloc(totalSize, (u8 *) gDisplayLists[2], COLOUR_TAG_YELLOW);
         if (gDisplayLists[0] == NULL || gDisplayLists[1] == NULL || gDisplayLists[2] == NULL) {
 #else
         if ((gDisplayLists[0] == NULL) || gDisplayLists[1] == NULL) {
@@ -1654,18 +1667,18 @@ void default_alloc_displaylist_heap(void) {
 #ifdef TARGET_PORT
     gPortDlBytes = totalSize;
 #endif
-    gDisplayLists[0] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_RED);
+    gDisplayLists[0] = (Gfx *) mempool_alloc_big(totalSize, COLOUR_TAG_RED);
     gMatrixHeap[0] = (Mtx *) ((u8 *) gDisplayLists[0] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[0] = (Vertex *) ((u8 *) gMatrixHeap[0] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));
     gTriangleHeap[0] = (Triangle *) ((u8 *) gVertexHeap[0] + (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)));
 
-    gDisplayLists[1] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_YELLOW);
+    gDisplayLists[1] = (Gfx *) mempool_alloc_big(totalSize, COLOUR_TAG_YELLOW);
     gMatrixHeap[1] = (Mtx *) ((u8 *) gDisplayLists[1] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[1] = (Vertex *) ((u8 *) gMatrixHeap[1] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));
     gTriangleHeap[1] = (Triangle *) ((u8 *) gVertexHeap[1] + (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)));
 #ifdef TARGET_PORT
     // A third set, for running two frames ahead of the renderer (port_render_ahead).
-    gDisplayLists[2] = (Gfx *) mempool_alloc_safe(totalSize, COLOUR_TAG_YELLOW);
+    gDisplayLists[2] = (Gfx *) mempool_alloc_big(totalSize, COLOUR_TAG_YELLOW);
     gMatrixHeap[2] = (Mtx *) ((u8 *) gDisplayLists[2] + (gNumF3dCmdsPerPlayer[numberOfPlayers] * sizeof(Gfx)));
     gVertexHeap[2] = (Vertex *) ((u8 *) gMatrixHeap[2] + (gNumHudMatPerPlayer[numberOfPlayers] * sizeof(Mtx)));
     gTriangleHeap[2] = (Triangle *) ((u8 *) gVertexHeap[2] + (gNumHudVertsPerPlayer[numberOfPlayers] * sizeof(Vertex)));
