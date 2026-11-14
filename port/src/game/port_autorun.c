@@ -358,6 +358,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "3D made once, the GPU running it for each eye (P33)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 2, 1, 0 },
     { "3D made once, back faces culled for both eyes",
       { "DKR_STEREO3D", "DKR_STEREO_ONCE", "DKR_STEREO_CULL" }, 0, 2, 1, 0 },
+    // T1, gate G-T (2026-11-14, "Fix track GPU maths and tunnel dropouts"): the vanishing tunnel walls (#234, #306).
+    // libctru hands the GSP the frame's memory fills and its first command lists together, so a fill can still be
+    // clearing the depth buffer while the GPU draws (gfx_c3d.c fill_wait). That fits run 22 (no flashes with the
+    // depth clear drawn instead of filled). DKR_FILL_WAIT=1 lets the fills finish first. Rows: the native track (NR4)
+    // as it was; the depth fill back on with the wait (the cause: should be clean, and the fill was cheaper); and the
+    // native track with both. Jungle Falls is in the list for its tunnel; watch the tunnel and the flashes column.
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    { "depth clear as a memory fill, finished before drawing", { "DKR_DEPTH_FILL", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
+    { "native track, depth fill finished before drawing",
+      { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -403,6 +413,14 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // against #502, and the rectangle fill now saves 1.8-2.1 ms on all three tracks, so its row went. The edge row
     // measured nothing there (its switch wasn't read again between races; fixed), so it races once more.
     { "fill edges drawn as the whole clear (old)", { "DKR_FILL_EDGE_STRIP", NULL, NULL }, 1, 0, 1, 0 },
+    // T1, gate G-T (2026-11-14, "Fix track GPU maths and tunnel dropouts"): the vanishing tunnel walls (#234, #306).
+    // libctru hands the GSP the frame's memory fills (colour + depth) and its first command lists together, so a fill
+    // can still be clearing the depth buffer while the GPU draws (gfx_c3d.c fill_wait). DKR_FILL_WAIT=1 lets the fills
+    // finish first. Rows: the native track (NR4) as it was (expect the tunnel dropouts), the native track with the
+    // wait (should be clean), and the wait alone (its cost on today's path). Watch Jungle Falls' tunnel.
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    { "native track, fills finished before drawing", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
+    { "fills finished before drawing", { "DKR_FILL_WAIT", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
@@ -854,9 +872,11 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     // Haunted Woods and Crescent Island for the head flicker, Jungle Falls for its tunnel with the native track (NR4).
+    // Whale Bay added for the native track's bench (T1, 2026-11-14).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND,
-                                              ASSET_LEVEL_JUNGLEFALLS };
-    static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13 }; // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst)
+                                              ASSET_LEVEL_JUNGLEFALLS, 8 };
+    // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst); Jungle Falls for its tunnel (T1, 2026-11-14).
+    static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13, 29 };
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
