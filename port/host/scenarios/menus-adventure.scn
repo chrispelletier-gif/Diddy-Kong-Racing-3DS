@@ -1,0 +1,6 @@
+# Adventure mode from the title with a complete save: player select, game select, file select, the hub, then the
+# pause menu with Options and Quit Game
+about = player select, game select, file select, the Adventure hub and its pause menu pages
+frames = 3400
+save = eeprom_complete.bin
+input = 700:START 706: 800:A 806: 860:A 866: 920:A 926: 1100:A 1106: 1260:A 1266: 1900:START 1906: 2100:STICK=0,-90 2115: 2200:A 2206: 2400:B 2406: 2600:STICK=0,-90 2615: 2700:A 2706: 2900:B 2906:

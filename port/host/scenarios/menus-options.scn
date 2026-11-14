@@ -1,0 +1,5 @@
+# the title screen's Options: the main page, then Audio, Video, Camera, Control, Save Options and Magic Codes
+# (stick down on the title picks OPTIONS; each page opens with A and closes with B)
+about = the title's Options menu and its seven pages
+frames = 3200
+input = 700:START 706: 790:STICK=0,-90 810: 880:START 886: 1000:STICK=0,-90 1015: 1045:STICK=0,-90 1060: 1090:STICK=0,-90 1105: 1135:A 1141: 1245:B 1251: 1355:STICK=0,-90 1370: 1425:A 1431: 1535:B 1541: 1645:STICK=0,-90 1660: 1715:A 1721: 1825:B 1831: 1935:STICK=0,-90 1950: 2005:A 2011: 2115:B 2121: 2225:STICK=0,-90 2240: 2295:A 2301: 2405:B 2411: 2515:STICK=0,-90 2530: 2585:A 2591: 2695:B 2701: 2805:STICK=0,-90 2820:

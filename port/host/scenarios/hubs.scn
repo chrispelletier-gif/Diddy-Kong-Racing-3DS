@@ -1,0 +1,5 @@
+# the Adventure hub worlds
+about = the Adventure hub worlds
+warp = 0,2,12,14,24,35
+warp_seconds = 8
+frames = auto

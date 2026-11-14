@@ -180,6 +180,12 @@ else
   EXE       := $(BUILD_DIR)/dkr
 endif
 
+# The host build names the source line behind each command the walk census counts (port/host/census_sites.c).
+ifneq ($(TARGET),3ds)
+  GAME_DEFINES += -DPORT_CENSUS_SITES=1
+  SYS_CFLAGS += -DPORT_CENSUS_SITES=1
+endif
+
 GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
                -include port_swap.h -w -Werror=implicit-function-declaration
 PORT_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \
