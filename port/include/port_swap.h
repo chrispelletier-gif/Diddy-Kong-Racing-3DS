@@ -46,6 +46,7 @@ void port_swap_level_header(void *header);
 void port_swap_level_model(struct LevelModel *model);
 void port_swap_object_model(struct ObjectModel *model);
 void port_swap_object_animation(void *anim);
+int port_native_object_animation(void *anim, int numAnimVerts, int animLength, int dataSize);
 void port_swap_texture_header(struct TextureHeader *tex);
 void port_swap_texture(struct TextureHeader *tex, s32 numberOfFrames);
 void port_swap_sprite_asset(void *asset);
