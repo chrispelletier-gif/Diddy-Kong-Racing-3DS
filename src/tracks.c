@@ -279,9 +279,9 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     // All shadow groups are double buffered. Environment shadows never change, so they could've single buffered them.
     for (i = 0; i < ARRAY_COUNT(gShadowHeapData); i++) {
         gShadowHeapData[i] =
-            (ShadowHeapProperties *) mempool_alloc_safe(sizeof(ShadowHeapProperties) * 400, COLOUR_TAG_YELLOW);
-        gShadowHeapTris[i] = (Triangle *) mempool_alloc_safe(sizeof(Triangle) * 800, COLOUR_TAG_YELLOW);
-        gShadowHeapVerts[i] = (Vertex *) mempool_alloc_safe(sizeof(Vertex) * 2000, COLOUR_TAG_YELLOW);
+            (ShadowHeapProperties *) mempool_alloc_big(sizeof(ShadowHeapProperties) * 400, COLOUR_TAG_YELLOW);
+        gShadowHeapTris[i] = (Triangle *) mempool_alloc_big(sizeof(Triangle) * 800, COLOUR_TAG_YELLOW);
+        gShadowHeapVerts[i] = (Vertex *) mempool_alloc_big(sizeof(Vertex) * 2000, COLOUR_TAG_YELLOW);
     }
 
     for (i = 0; i < FRAME_BUFFERS; i++) {
@@ -531,7 +531,7 @@ void void_init(s32 viewportCount) {
     triLimit = (gVoidPrimLimit + 5) * 2 * sizeof(Triangle);
 
     gVoidMesh = mempool_alloc_safe(viewportCount * sizeof(VoidMesh), COLOUR_TAG_CYAN);
-    gVoidData = mempool_alloc_safe(sp30 + sp2C + (vtxLimit + triLimit) * FRAME_BUFFERS * viewportCount, COLOUR_TAG_CYAN);
+    gVoidData = mempool_alloc_big(sp30 + sp2C + (vtxLimit + triLimit) * FRAME_BUFFERS * viewportCount, COLOUR_TAG_CYAN);
 
     ptr = gVoidData;
 

@@ -145,6 +145,10 @@ void port_load_game_frame(s32 gameMode, s32 levelId) {
 /* Renderer: a frame has been handed to the GPU. The first one after a load finishes the load's log line. */
 void port_gfx_log_cache(void);
 
+void port_mempool_stats(u32 *used, u32 *largestFree, u32 *slotsUsed);
+s32 port_native_heap_on(void);
+void port_native_heap_stats(u32 *blocks, u32 *bytes, u32 *peakBytes, u32 *peakBlocks);
+
 void port_load_frame_done(void) {
     unsigned long long now;
     if (sWaitFirstFrame) {
@@ -159,6 +163,22 @@ void port_load_frame_done(void) {
             plat_log("%s; first frame +%d ms", sLine, (int) ((now - sLoadEndNs) / 1000000ULL));
         }
         plat_log_memory("after the load");
+        {
+            u32 used, big, slots;
+            port_mempool_stats(&used, &big, &slots);
+            extern u32 gPortPoolPeakUsed;
+            plat_log("game pool after the load: %lu KB used, largest free block %lu KB, %lu slots; most used at a load "
+                     "%lu KB",
+                     (unsigned long) (used / 1024), (unsigned long) (big / 1024), (unsigned long) slots,
+                     (unsigned long) (gPortPoolPeakUsed / 1024));
+            if (port_native_heap_on()) {
+                u32 blocks, bytes, peakBytes, peakBlocks;
+                port_native_heap_stats(&blocks, &bytes, &peakBytes, &peakBlocks);
+                plat_log("native heap after the load: %lu blocks, %lu KB (at most %lu blocks, %lu KB so far)",
+                         (unsigned long) blocks, (unsigned long) (bytes / 1024), (unsigned long) peakBlocks,
+                         (unsigned long) (peakBytes / 1024));
+            }
+        }
         port_gfx_log_cache();
     }
 }

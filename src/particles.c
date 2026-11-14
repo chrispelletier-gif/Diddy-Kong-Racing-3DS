@@ -337,14 +337,14 @@ void init_particle_buffers(s32 maxTriangleParticles, s32 maxRectangleParticles, 
     free_particle_vertices_triangles();
 
     gParticleVertexBuffer =
-        (Vertex *) mempool_alloc_safe(((maxTriangleParticles * 3) + (maxRectangleParticles * 4) + (unused_arg * 0) +
+        (Vertex *) mempool_alloc_big(((maxTriangleParticles * 3) + (maxRectangleParticles * 4) + (unused_arg * 0) +
                                        (maxLineParticles * 6) + (maxPointParticles * 16)) *
                                           sizeof(Vertex),
                                       COLOUR_TAG_SEMITRANS_GREY);
 
     // @fake - 0 is required at start of allocation size calculation for match
     fake_0 = 0;
-    gParticleTriangleBuffer = (Triangle *) mempool_alloc_safe(
+    gParticleTriangleBuffer = (Triangle *) mempool_alloc_big(
         (fake_0 + maxTriangleParticles + (maxRectangleParticles * 2) + (unused_arg * 0)) * sizeof(Triangle),
         COLOUR_TAG_SEMITRANS_GREY);
 
@@ -353,27 +353,27 @@ void init_particle_buffers(s32 maxTriangleParticles, s32 maxRectangleParticles, 
 
     if (gMaxTriangleParticles > 0) {
         gNumTriangleParticles = 0;
-        gTriangleParticleBuffer = (Particle *) mempool_alloc_safe(
+        gTriangleParticleBuffer = (Particle *) mempool_alloc_big(
             maxTriangleParticles * (sizeof(Particle) + sizeof(ParticleModel)), COLOUR_TAG_SEMITRANS_GREY);
     }
     if (gMaxRectangleParticles > 0) {
         gNumRectangleParticles = 0;
-        gRectangleParticleBuffer = (Particle *) mempool_alloc_safe(
+        gRectangleParticleBuffer = (Particle *) mempool_alloc_big(
             maxRectangleParticles * (sizeof(Particle) + sizeof(ParticleModel)), COLOUR_TAG_SEMITRANS_GREY);
     }
     if (gMaxSpriteParticles > 0) {
         gNumSpriteParticles = 0;
         gSpriteParticleBuffer =
-            (Particle *) mempool_alloc_safe(maxSpriteParticles * sizeof(Particle), COLOUR_TAG_SEMITRANS_GREY);
+            (Particle *) mempool_alloc_big(maxSpriteParticles * sizeof(Particle), COLOUR_TAG_SEMITRANS_GREY);
     }
     if (gMaxLineParticles > 0) {
         gNumLineParticles = 0;
-        gLineParticleBuffer = (Particle *) mempool_alloc_safe(
+        gLineParticleBuffer = (Particle *) mempool_alloc_big(
             maxLineParticles * (sizeof(Particle) + sizeof(ParticleModel)), COLOUR_TAG_SEMITRANS_GREY);
     }
     if (gMaxPointParticles > 0) {
         gNumPointParticles = 0;
-        gPointParticleBuffer = (PointParticle *) mempool_alloc_safe(
+        gPointParticleBuffer = (PointParticle *) mempool_alloc_big(
             maxPointParticles * (sizeof(PointParticle) + sizeof(ParticleModel)), COLOUR_TAG_SEMITRANS_GREY);
     }
 

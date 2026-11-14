@@ -181,7 +181,7 @@ void waves_alloc(void) {
                                                         (gWaveController.subdivisions + 1),
                                                     COLOUR_TAG_CYAN);
     allocSize = ((gWaveController.subdivisions + 1) << 2) * (gWaveController.subdivisions + 1);
-    D_800E304C[0] = mempool_alloc_safe(allocSize * ARRAY_COUNT(D_800E304C), COLOUR_TAG_CYAN);
+    D_800E304C[0] = mempool_alloc_big(allocSize * ARRAY_COUNT(D_800E304C), COLOUR_TAG_CYAN);
     for (i = 1; i < ARRAY_COUNT(D_800E304C); i++) {
         D_800E304C[i] = (f32 *) (((u32) D_800E304C[0]) + (allocSize * i));
     }
@@ -189,12 +189,12 @@ void waves_alloc(void) {
     allocSize = (temp * 250 * (gWaveController.subdivisions + 1));
     // One set of FRAME_BUFFERS copies for each player's viewport (set k is at index k * FRAME_BUFFERS).
     temp = gWavePlayerCount != 2 ? FRAME_BUFFERS : FRAME_BUFFERS * 2;
-    gWaveVertices[0] = (Vertex *) mempool_alloc_safe(allocSize * temp, COLOUR_TAG_CYAN);
+    gWaveVertices[0] = (Vertex *) mempool_alloc_big(allocSize * temp, COLOUR_TAG_CYAN);
     for (i = 1; i < temp; i++) {
         gWaveVertices[i] = (Vertex *) (((u32) gWaveVertices[0]) + allocSize * i);
     }
     allocSize = (gWaveController.subdivisions * 32) * gWaveController.subdivisions;
-    gWaveTriangles[0] = (Triangle *) mempool_alloc_safe(allocSize * temp, COLOUR_TAG_CYAN);
+    gWaveTriangles[0] = (Triangle *) mempool_alloc_big(allocSize * temp, COLOUR_TAG_CYAN);
     for (i = 1; i < temp; i++) {
         gWaveTriangles[i] = (Triangle *) (((u32) gWaveTriangles[0]) + allocSize * i);
     }
