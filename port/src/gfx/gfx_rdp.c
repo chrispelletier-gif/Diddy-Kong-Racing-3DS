@@ -4310,8 +4310,8 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
 }
 
 /* The same from vertices the caller made (record_vertices), not the RSP's slots. */
-static NOINLINE HOT void draw_record_triangles(const RspVertex *verts, s32 flatBits, const Triangle *tris, s32 count,
-                                               s32 textured) {
+static NOINLINE void draw_record_triangles(const RspVertex *verts, s32 flatBits, const Triangle *tris, s32 count,
+                                           s32 textured) {
     draw_triangles_impl(verts, FALSE, flatBits, tris, count, textured);
 }
 
