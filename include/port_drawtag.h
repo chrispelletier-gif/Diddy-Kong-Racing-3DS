@@ -136,6 +136,15 @@ extern unsigned int gPortLevelLoads;
 /* A texture rectangle without its texture load (PICA_ALL native draws): PORT_NRECT_TAG | material, then the game's
  * G_TEXRECT and its two G_RDPHALF words. */
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */
+/* A texture by handle (roadmap R3, DKR_NATIVE_TEXHANDLE, PICA_ALL): PORT_NTEX_TAG | its load list's command count,
+ * then a word whose w1 is the load list (TextureHeader.cmd), in place of a list call to it. The renderer sets the
+ * tiles and TMEM state the list would have left from its table of the textures decoded at load (gfx_rdp.c
+ * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
+ * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
+#define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
+ * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
+void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);
 int port_native_rect(Gfx **dl, const void *tex);
 int port_native_draw(void);
 
