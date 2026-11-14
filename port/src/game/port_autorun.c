@@ -403,6 +403,11 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // against #502, and the rectangle fill now saves 1.8-2.1 ms on all three tracks, so its row went. The edge row
     // measured nothing there (its switch wasn't read again between races; fixed), so it races once more.
     { "fill edges drawn as the whole clear (old)", { "DKR_FILL_EDGE_STRIP", NULL, NULL }, 1, 0, 1, 0 },
+    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
+    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
+    // then a full race for the speed.
+    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
@@ -440,6 +445,11 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
     // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
+    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
+    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
+    // then a full race for the speed.
+    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
     // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
     // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2). The first row races them
     // together for the walk and renderer time on the four Old 3DS tracks; the check row is one lap on a tree, particle
