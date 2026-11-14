@@ -3502,6 +3502,8 @@ int gfxb_gpu_transform(void) {
  */
 static int sSwitchEpoch = -1;
 static int sSplitMode, sEarlyDepth, sDepthFill;
+static int sFillWait;          // DKR_FILL_WAIT: the frame's memory fills finish before its command list starts (fill_wait)
+static int sCheckBandSafe = 1; // DKR_CHECK_BAND: gfxb_model_check's band, the narrowest the next frame may need
 static int sDrawLean; // DKR_DRAW_LEAN: the one-pass draw, see gfxb_draw_indexed
 static void set_frame_band(void);
 static int sFastState = 1; // DKR_FAST_STATE (roadmap P23): the cheaper per-draw settings path
@@ -3524,6 +3526,8 @@ static void read_switches(void) {
     // Off on an Old 3DS: switch bench run 22 (v46) counted no Jungle Falls tunnel flashes in two races with the depth
     // clear drawn, 5-11 in every other pair (#306: walls and ceiling missing for a frame or two).
     sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
+    sFillWait = plat_switch("DKR_FILL_WAIT", 0) != 0;
+    sCheckBandSafe = plat_switch("DKR_CHECK_BAND", 1) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
     sColourFill = -1; // gpu_cuts.inc: DKR_COLOUR_FILL, DKR_GPU_TIMELINE, DKR_GPU_KINDS and DKR_FB_VRAM read again
@@ -3585,6 +3589,8 @@ static void read_switches(void) {
              plat_switch("DKR_TEX_VRAM", tex_vram_default()) ? "on" : "off", sFastClip ? "drops what is wholly outside" : "clips all",
              sDrawParts ? "on" : "off");
     plat_log("switches: draw path %s", sDrawLean ? "lean (vertices tested and written in one pass)" : "full");
+    plat_log("switches: fills %s, model box check %s", sFillWait ? "finished before the command list" : "queued with it",
+             sCheckBandSafe ? "narrowest band" : "last frame's band");
     plat_log("switches: GPU vertex maths %s%s, stereo frames %s", sTransformWanted ? "on" : "off",
              sTransformHung ? " (but it hung before: left off)" : !sProgramTUsable ? " (shader not usable)" : "",
              sStereoOnce ? "made once, drawn twice" : "made for each eye");
@@ -3754,6 +3760,38 @@ PLAT_COLD static void draw_test_pattern(void) {
     gfxb_draw_triangles(&state, v, 2);
 }
 
+/*
+ * Gate G-T (T1, the vanishing tunnel walls #234/#306): the frame's fills (the depth clear, P18, and the colour clear,
+ * P44) are queued ahead of its command list, but libctru's GPU queue hands the GSP up to three jobs at once
+ * (gxqueue.c MAX_PARALLEL_CMDS) and the GSP only turns a job down when one "of the same kind" is running (3dbrew, GSP
+ * Shared Memory). So the fill and the first command lists can run together: what the GPU draws early in the frame
+ * (the sky, then the track's first buckets: often the walls round the camera) gets its depth wiped as the fill sweeps
+ * past, and what lies behind them, drawn later, shows through for that frame. Turning the fill off made the flashes
+ * go on the Old 3DS (bench run 22). DKR_FILL_WAIT=1 runs the queue with only the fills in it and waits for them
+ * (the GPU is idle here, and a fill takes well under a millisecond), so the command list starts on a cleared buffer.
+ * The citro3d frame stays open; the queue is left stopped and empty, as C3D_FrameBegin left it.
+ */
+static unsigned long long sFillWaitTicks;
+static u32 sFillWaits;
+static void fill_wait(void) {
+    gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
+    unsigned long long t0;
+    if (!sFillWait) {
+        return;
+    }
+    t0 = svcGetSystemTick();
+    gxCmdQueueRun(queue);
+    gxCmdQueueWait(queue, -1);
+    gxCmdQueueStop(queue);
+    gxCmdQueueClear(queue);
+    sFillWaitTicks += svcGetSystemTick() - t0;
+    if (++sFillWaits == 600) {
+        plat_log("fill wait: %.3f ms a frame before the command list", sFillWaitTicks * 1000.0 / SYSCLOCK_ARM11 / 600.0);
+        sFillWaits = 0;
+        sFillWaitTicks = 0;
+    }
+}
+
 void gfxb_end_frame(void) {
     if (sBackendLoadMs > 0) {
         // DKR_BACKEND_LOAD (tunnel bench): this core kept busy that long, as a heavier frame would.
@@ -3826,12 +3864,14 @@ void gfxb_end_frame(void) {
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
         if (colour_fill_queue()) {
             // The colour clear's fill, with the depth clear's if it is one too (gpu_cuts.inc).
+            fill_wait();
         } else if (sDepthFillPending) {
             // With the GPU idle: the fill runs before the frame's command list in the GPU queue.
             C3D_RenderTargetClear(sTarget, C3D_CLEAR_DEPTH, 0, 0);
             if (sStereo) {
                 C3D_RenderTargetClear(sTargetRight, C3D_CLEAR_DEPTH, 0, 0);
             }
+            fill_wait();
         }
         if (!sFull && sFlushTest == 1) {
             heap_flush();
@@ -5358,10 +5398,25 @@ static float band_for(int pixels) {
  * as it always did; the GPU self test draws before the first frame). Clip x runs along the target's height (the
  * screen's 400 or 800 pixels across), clip y along its width. */
 static void set_frame_band(void) {
+    float checkX, checkY;
     sBandX = band_for(sTarget->frameBuf.height);
     sBandY = band_for(sTarget->frameBuf.width);
-    sCheckBandX = sBandX;
-    sCheckBandY = sBandY;
+    checkX = sBandX;
+    checkY = sBandY;
+    // DKR_CHECK_BAND (gate G-T, T1): with the two-core renderer the walk checks the next frame's model draws against
+    // this frame's band, and adaptive anti-aliasing can switch the target in between (4x: 400 <-> 800 pixels across,
+    // so a band of 2 against the real 1.5). Corners past 1000 pixels are what the PICA drops (#147), so the check
+    // takes the narrowest band of the targets the next frame may use.
+    if (sCheckBandSafe && sAdaptive) {
+        C3D_RenderTarget *other = sLowActive ? sMainTarget : sLowTarget;
+        if (other != NULL) {
+            float x = band_for(other->frameBuf.height), y = band_for(other->frameBuf.width);
+            checkX = x < checkX ? x : checkX;
+            checkY = y < checkY ? y : checkY;
+        }
+    }
+    sCheckBandX = checkX;
+    sCheckBandY = checkY;
 }
 
 /* Which sides of the band a vertex is beyond: bit p for clip_distance's plane p, OUTSIDE_BEHIND for w <= 0. */
