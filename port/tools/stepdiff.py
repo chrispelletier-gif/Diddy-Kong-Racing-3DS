@@ -114,7 +114,7 @@ def main():
             starts = [o[0] for o in objs]
             pool = None
             for i, a in enumerate(addrs):
-                if names[i][0] == 'gPortMainPool':
+                if names[i][0] == 'gPortMainPoolArea':
                     pool = (a + delta, a + delta + names[i][1])
             while True:
                 addr, b, a3, a6 = struct.unpack_from('<4I', data, pos); pos += 16
