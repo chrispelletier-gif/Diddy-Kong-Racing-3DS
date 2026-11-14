@@ -1,0 +1,5 @@
+# the title, character select, options background, intro and story sequences and trophy animations
+about = the title, character select, options background, intro and story sequences and trophy animations
+warp = 21,22,23,36,39,42,43,44,45,47,48,49,50,51,56,57,58,59,60,61,62
+warp_seconds = 8
+frames = auto

@@ -1,0 +1,5 @@
+# a complete save, into Adventure mode and the Dino Domain hub (the CI scenario "adventure")
+about = a complete save, into Adventure mode and the Dino Domain hub
+frames = 1500
+save = eeprom_complete.bin
+input = 700:START 706: 800:A 806: 860:A 866: 920:A 926: 980:A 986: 1040:A 1046: 1100:A 1106: 1160:A 1166: 1220:A 1226: 1280:A 1286: 1340:A 1346: 1400:A 1406: 1460:A 1466:
