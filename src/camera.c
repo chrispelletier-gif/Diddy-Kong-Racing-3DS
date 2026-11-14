@@ -1343,11 +1343,19 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
         index = (((u8) index) * sprite->numberOfFrames) >> 8;
     }
-    material_load_simple(dList, sprite->drawFlags | flags);
     if (index >= sprite->numberOfFrames) {
         index = sprite->numberOfFrames - 1;
     }
-    gSPDisplayList((*dList)++, sprite->frames[index]);
+#ifdef PICA_ALL
+    if (port_native_leftovers()) {
+        // DKR_NATIVE_LEFTOVERS: one draw record per tile instead of the frame's list (its loads and vertex slots).
+        port_native_sprite(dList, sprite->frames[index], sprite->drawFlags | flags, FALSE);
+    } else
+#endif
+    {
+        material_load_simple(dList, sprite->drawFlags | flags);
+        gSPDisplayList((*dList)++, sprite->frames[index]);
+    }
     if (--gModelMatrixStackPos == 0) {
         index = G_MTX_DKR_INDEX_0;
     } else {
