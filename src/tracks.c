@@ -2215,7 +2215,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
         } else {
 #ifdef PICA_ALL
-            if (nativeDraw) {
+            // With the native track (NR4, DKR_NATIVE_TRACK) the batch goes to gfx_rdp.c native_track instead, which
+            // draws it from a GPU copy with the GPU's vertex maths (T1, 2026-11-14: the records left it unused).
+            if (nativeDraw && !nativeTrack) {
                 // Native draw (port_drawtag.h PORT_NDRAW_TAG): the material's commands once, then a record.
                 int capture; s32 id = port_nmat_key(texture, batchFlags, texOffset, &capture);
                 if (capture) {
