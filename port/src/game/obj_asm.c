@@ -172,7 +172,7 @@ extern s16 gUseDirectionalLighting;
 static NMatKey sNMatKeys[NMAT_KEYS];
 static u32 sNMatCount;
 static unsigned int sNMatLevel = 0xFFFFFFFFu;
-static int sNativeDraw;
+static int sNativeDraw, sNativeLeftovers;
 volatile unsigned char gPortNMatBad[NMAT_KEYS];
 
 static void nmat_level_reset(void) {
@@ -181,6 +181,7 @@ static void nmat_level_reset(void) {
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
         sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
+        sNativeLeftovers = sNativeDraw && plat_switch("DKR_NATIVE_LEFTOVERS", 0) != 0;
 #ifdef PORT_NATIVE_OPS
         // The game's draw-state calls write native ops with native draws (include/port_nops.h; DKR_NATIVE_OPS=0: N64
         // commands with native draws still on).
@@ -199,6 +200,11 @@ static inline __attribute__((always_inline)) void nmat_level_check(void) {
 int port_native_draw(void) {
     nmat_level_check();
     return sNativeDraw;
+}
+
+int port_native_leftovers(void) {
+    nmat_level_check();
+    return sNativeLeftovers;
 }
 
 /* The game freed texture memory [start, end): the materials made with it are caught again on their next use, as the

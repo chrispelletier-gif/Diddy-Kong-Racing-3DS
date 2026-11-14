@@ -138,6 +138,9 @@ extern unsigned int gPortLevelLoads;
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */
 int port_native_rect(Gfx **dl, const void *tex);
 int port_native_draw(void);
+/* DKR_NATIVE_LEFTOVERS (needs native draws): the menus' and HUD's sprite frames and the pulsing-light track batches are
+ * draw records instead of display lists. */
+int port_native_leftovers(void);
 
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);
