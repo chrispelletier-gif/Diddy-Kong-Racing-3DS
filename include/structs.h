@@ -642,6 +642,9 @@ typedef struct ObjectModel_44 {
         /* 0x00 */ u8 *animData;
     };
     /* 0x04 */ s32 animLength; // Animation length is the result of 16-frame length keyframes.
+#ifdef TARGET_PORT
+    s32 native; // Keyframe headers converted to native halfwords (DKR_NATIVE_ANIM, port_native_object_animation).
+#endif
 } ObjectModel_44;
 
 typedef struct CollisionFacetPlanes {

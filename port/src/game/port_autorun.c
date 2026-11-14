@@ -440,6 +440,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
     // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
+    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
+    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -463,6 +466,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
     // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
+    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #endif
