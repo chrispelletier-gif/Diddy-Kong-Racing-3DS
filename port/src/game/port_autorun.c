@@ -375,6 +375,18 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "depth clear as a memory fill, finished before drawing", { "DKR_DEPTH_FILL", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
     { "native track, depth fill finished before drawing",
       { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
+    // N1 (NC10): object animation and shading as native code (read at level load; bit-exact on the PC).
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1, 0 },
+    // R2 (PR #529): sprite, billboard and flat records without the RSP vertex slots; one lap to check, then a full race.
+    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
+    // G2 (PR #528): HUD/menu sprite frames and blinking-light batches as native records; check row (one lap), then speed.
+    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 0 },
+    // G3 (PR #530): billboard anchors and the weather matrix as records (with the R2 records); check row is one lap.
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -436,6 +448,15 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // then a full race for the speed.
     { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
     { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
+    // N1 (NC10): object animation and shading as native code (read at level load; bit-exact on the PC).
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1, 0 },
+    // G2 (PR #528): HUD/menu sprite frames and blinking-light batches as native records; check row (one lap), then speed.
+    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 0 },
+    // G3 (PR #530): billboard anchors and the weather matrix as records (with the R2 records); check row is one lap.
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
