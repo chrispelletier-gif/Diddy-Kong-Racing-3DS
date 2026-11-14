@@ -7290,6 +7290,18 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_rect(dl, w1 & 0xFFFF);
                     dl += used;
                     remaining -= used;
+                } else if (w1 == PORT_ANCHOR_TAG && remaining >= 1) {
+                    // G3 (DKR_NATIVE_CAMERA): the game's one vertex load into slot 0, as a record. Made at once (a load
+                    // that is only noted would have to be resolved before the billboard's vertices use it anyway).
+                    if (sAnyPending) {
+                        forget_slots(0, 1);
+                    }
+                    g.vertexIndex = 0;
+                    load_vertices_now((const Vertex *) seg_addr(dl->words.w0), 1, 0, g.matrices[g.curMatrix],
+                                      (g.geometryMode & G_FOG) != 0, g.billboard);
+                    g.vertexIndex = 1;
+                    dl++;
+                    remaining--;
                 } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
                     u32 index = w1 & 3;
                     __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));

@@ -133,6 +133,11 @@ extern unsigned int gPortLevelLoads;
 /* A matrix load as floats (PICA_ALL native draws): PORT_MTXF_TAG | index, then a word whose w0 is the address of 16
  * floats (an MtxF written where the game's fixed point Mtx would have been). */
 #define PORT_MTXF_TAG 0x50580000 /* "PX" */
+/* A billboard's anchor (G3, DKR_NATIVE_CAMERA): PORT_ANCHOR_TAG, then a word whose w0 is the address of one Vertex. It
+ * stands for the game's own one vertex load into slot 0 (the sprite's position, before the billboard matrix), which
+ * the renderer makes at once instead of through the RSP's lazy loads. */
+#define PORT_ANCHOR_TAG 0x50410000 /* "PA" */
+int port_native_camera(void);
 /* A texture rectangle without its texture load (PICA_ALL native draws): PORT_NRECT_TAG | material, then the game's
  * G_TEXRECT and its two G_RDPHALF words. */
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */

@@ -143,6 +143,7 @@ Camera *cam_get_active_camera(void);
 Camera *cam_get_cameras(void);
 MtxF *get_projection_matrix_f32(void);
 Mtx *get_projection_matrix_s16(void);
+s32 cam_load_perspective(Gfx **dList, u32 index); // PICA_ALL builds (DKR_NATIVE_CAMERA)
 MtxF *get_camera_matrix(void);
 f32 get_distance_to_camera(f32 x, f32 y, f32 z);
 void set_camera_shake_by_distance(f32 x, f32 y, f32 z, f32 dist, f32 magnitude);

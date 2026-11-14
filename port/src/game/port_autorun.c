@@ -476,6 +476,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // lights), then the performance row.
     { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
     { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2). The first row races them
+    // together for the walk and renderer time on the four Old 3DS tracks; the check row is one lap on a tree, particle
+    // and snow track for bugs (sprites in place, flicker, weather).
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -506,6 +513,12 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // the performance row.
     { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
     { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 0 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2), at the bench's settings and
+    // (the usual 400 pixel races) CPU savings; the check row is one lap.
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #endif

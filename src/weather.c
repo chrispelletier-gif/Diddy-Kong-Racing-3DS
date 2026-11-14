@@ -544,6 +544,9 @@ void snow_render(void) {
         if (gSnowVertCount >= 4) {
             i = 0;
             mtx = get_projection_matrix_s16();
+#ifdef PICA_ALL
+            if (!cam_load_perspective(&gCurrWeatherDisplayList, G_MTX_DKR_INDEX_0))
+#endif
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
 #ifdef PICA_ALL

@@ -172,7 +172,12 @@ extern s16 gUseDirectionalLighting;
 static NMatKey sNMatKeys[NMAT_KEYS];
 static u32 sNMatCount;
 static unsigned int sNMatLevel = 0xFFFFFFFFu;
+<<<<<<< HEAD
 static int sNativeDraw, sNativeLeftovers;
+=======
+static int sNativeDraw;
+static int sNativeCamera; // DKR_NATIVE_CAMERA (G3)
+>>>>>>> pr530
 volatile unsigned char gPortNMatBad[NMAT_KEYS];
 
 static void nmat_level_reset(void) {
@@ -187,6 +192,7 @@ static void nmat_level_reset(void) {
         // commands with native draws still on).
         gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
 #endif
+        sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", 0) != 0;
     }
 }
 
@@ -202,9 +208,17 @@ int port_native_draw(void) {
     return sNativeDraw;
 }
 
+<<<<<<< HEAD
 int port_native_leftovers(void) {
     nmat_level_check();
     return sNativeLeftovers;
+=======
+/* G3 (DKR_NATIVE_CAMERA, default 0, read at each level load): billboard anchors and the weather's projection matrix
+ * as records (camera.c, weather.c). */
+int port_native_camera(void) {
+    nmat_level_check();
+    return sNativeCamera;
+>>>>>>> pr530
 }
 
 /* The game freed texture memory [start, end): the materials made with it are caught again on their next use, as the
