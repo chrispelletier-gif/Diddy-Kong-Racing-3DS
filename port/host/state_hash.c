@@ -12,7 +12,8 @@
 
 extern char __executable_start[], _end[];
 
-extern unsigned char gPortMainPool[];
+extern unsigned char gPortMainPoolArea[];
+#define gPortMainPool gPortMainPoolArea
 #define POOL_SIZE (8 * 1024 * 1024)
 
 static FILE *sFile;
