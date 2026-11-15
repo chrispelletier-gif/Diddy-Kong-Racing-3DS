@@ -360,6 +360,13 @@ line also goes to the log, followed on the 3DS by a `renderer parts` line that s
 calls (what is left is the display list walk) and, within them, the guard band clipping, the GPU settings and the
 vertex writes, in ms per frame.
 
+On an Old 3DS the renderer's display list walk runs on the game's core, above the game, so it interrupts the game
+while it builds a frame. That time is shown apart from `scene` (and `logic`) as `+ renderer on this core` under the
+`game` line, `shared` in the log line and `shared_core_ms` in the test run's results, so `scene` is the game's own
+work; the `game` total and the `held back by` answer still count it, as it is the game core's load. A New 3DS's walk
+has a core of its own, so nothing changes there. `DKR_PROF_SHARED_CORE=0` in `env.txt` counts it in `scene` again,
+as before 2026-11-15 (older Old 3DS results' `scene_ms` is about today's `scene_ms + shared_core_ms`).
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the

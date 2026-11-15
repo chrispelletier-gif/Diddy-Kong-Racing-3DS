@@ -365,6 +365,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "3D made once, the GPU running it for each eye (P33)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 2, 1, 0 },
     { "3D made once, back faces culled for both eyes",
       { "DKR_STEREO3D", "DKR_STEREO_ONCE", "DKR_STEREO_CULL" }, 0, 2, 1, 0 },
+    // Profiler (2026-11-15, "Fix profiler scene time on Old 3DS"): the renderer's walk preempts the game on this core,
+    // and its time was counted as the game's scene. DKR_PROF_SHARED_CORE shows it apart (shared_core_ms) and leaves
+    // scene the game's own. Bug check, one lap each, both ways: expect logic + scene + shared_core with it on to match
+    // logic + scene with it off (within 0.3 ms), shared_core near rdp, scene about 5-7 ms. Drop both once confirmed.
+    { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
+    { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -1501,7 +1507,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
-                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes\n",
+                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes,shared_core_ms\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1548,8 +1554,11 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // was not in use), the average change in period between consecutive frames, and how often the pace changed.
     // Then (2026-11-07) the GPU timeline's parts of gpu_draw_ms: the memory fills, the command lists and the copies,
     // and (v35) the retraces that reached the VI thread more than 3 ms late (plat_wait_vblank), (v36) the game's waits
-    // for a retrace it ran more than 3 ms after (frames.c).
-    plat_snprintf(line + length, sizeof(line) - length, ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u,%u\n",
+    // for a retrace it ran more than 3 ms after (frames.c). Then (2026-11-15, DKR_PROF_SHARED_CORE) the renderer's time
+    // on the game's core while the game built its frames (Old 3DS), now out of logic_ms and scene_ms: Old 3DS
+    // scene_ms from before this column is about scene_ms + shared_core_ms now.
+    plat_snprintf(line + length, sizeof(line) - length,
+                  ",%u,%u,%s,%s,%.1f,%d,%d,%d,%d,%u,%d,%.2f,%u,%.2f,%.2f,%.2f,%u,%u,%.2f\n",
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN] - sAudioGapsStart),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED] - sAudioDropsStart),
                   plat_audio_setup(), graphics_setup(), stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
@@ -1560,7 +1569,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   ms(stats, PROF_GPU_FILL, stats->renderedFrames), ms(stats, PROF_GPU_LISTS, stats->renderedFrames),
                   ms(stats, PROF_GPU_COPY, stats->renderedFrames),
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_RETRACES] - sLateStart),
-                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_WAKES] - sWakesStart));
+                  stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_WAKES] - sWakesStart),
+                  ms(stats, PROF_SHARED_CORE, stats->gameFrames));
     append_file(results_file(), line, header);
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
