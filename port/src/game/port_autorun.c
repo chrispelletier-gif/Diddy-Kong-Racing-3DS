@@ -183,10 +183,10 @@ static const BenchConfig sBenchConfigs[] = {
 
 /*
  * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
- * is raced at its usual setting and, by itself, at its test setting; a switch can set up to three variables together,
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set up to five variables together,
  * and several switches can share a variable (one that the others need).
  */
-#define BENCH_SWITCH_VARS 3
+#define BENCH_SWITCH_VARS 5
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
     const char *env[BENCH_SWITCH_VARS];
@@ -365,6 +365,18 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "3D made once, the GPU running it for each eye (P33)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 2, 1, 0 },
     { "3D made once, back faces culled for both eyes",
       { "DKR_STEREO3D", "DKR_STEREO_ONCE", "DKR_STEREO_CULL" }, 0, 2, 1, 0 },
+    // R4 (2026-11-15, "Build the native frame stream (R4)"): with every native switch on, the frame is run as records
+    // by its own dispatcher (gfx/nframe.c, DKR_NATIVE_FRAME) instead of the display list walk. PC frames identical to
+    // the walk's with the same switches. One lap with all five on to check for anything missing or misplaced, then the
+    // five against the four walked: the profiler's "display list walk" line is the one to watch.
+    { "native frame stream, all native switches (bug check, 1 lap)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 1 },
+    { "native frame stream (all native switches)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 0 },
+    { "all native switches, walked (old)",
+      { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -418,6 +430,18 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // then a full race for the speed.
     { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
     { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
+    // R4 (2026-11-15, "Build the native frame stream (R4)"): with every native switch on, the frame is run as records
+    // by its own dispatcher (gfx/nframe.c, DKR_NATIVE_FRAME) instead of the display list walk. PC frames identical to
+    // the walk's with the same switches. One lap with all five on to check for anything missing or misplaced, then the
+    // five against the four walked: the profiler's "display list walk" line is the one to watch.
+    { "native frame stream, all native switches (bug check, 1 lap)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 1 },
+    { "native frame stream (all native switches)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 0 },
+    { "all native switches, walked (old)",
+      { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
