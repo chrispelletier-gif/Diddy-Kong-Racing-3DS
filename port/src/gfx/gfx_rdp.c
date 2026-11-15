@@ -661,7 +661,6 @@ static void tex_memo_forget(void);
  * frame's start (dropped and stale textures), where no batch of the walk's own uses them.
  */
 #define TEX_DYING_MAX 64
-static s32 sTexFreeQueue; // (read_switches)
 static u16 sTexDying[TEX_DYING_MAX];
 static s32 sTexDyingCount;
 
@@ -715,7 +714,7 @@ static void free_entry(TexCacheEntry *e) {
 /* v33: free_entry through the backend's queue: the walk doesn't wait for the backend to catch up. */
 static void free_entry_later(TexCacheEntry *e) {
     u32 ticket = 0;
-    if (!sTexFreeQueue || !gfx_split_active()) {
+    if (!gfx_split_active()) {
         free_entry(e);
         return;
     }
@@ -1884,13 +1883,10 @@ static u32 sOpaqueStats[2]; // Batches held, draws made
  */
 static s32 sRemote;
 static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
-static s32 sRemoteFlush; // v29 DKR_REMOTE_FLUSH (read_switches): a waiting walk batch is drawn ahead of a remote draw
 static u32 sNativeCopies; // v29: shared tables remade beside the old (profiler log)
 static u32 sNativeUnshares; // v29: drains for shared tables (profiler log)
-static s32 sTrisSkip;            // v29 DKR_TRIS_SKIP (read_switches): 1 on, 2 also compares to count missed changes
 static u32 sTrisSkipped, sTrisMissed; // Track batches not compared, and changes found that skipping would have missed
 static s32 sWalkPrefetch; // v31 DKR_WALK_PREFETCH (read_switches): native_record starts loading the next record's data
-static s32 sRemoteShare; // v29 DKR_REMOTE_SHARE (read_switches): the backend reads unchanged mesh tables in place
 static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
 #define ENG_PENDING (*(sRemote ? &sEngPending : &sOpaquePending))
@@ -2242,19 +2238,7 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
-static s32 sTriReject;  // DKR_TRI_REJECT (PICA_ALL): a triangle wholly past one edge of the screen is not written
-static s32 sNativeDynamic; // DKR_NATIVE_DYNAMIC (PICA_ALL): batches made anew each frame drawn natively too
 static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
-static s32 sNativeOnceAFrame; // DKR_NATIVE_ONCE (PICA_ALL): a mesh's triangles compared once a frame
-static s32 sNativeBucket; // DKR_NATIVE_BUCKET (PICA_ALL): opaque native draws written straight into their bucket
-static s32 sNativeVfp; // DKR_NATIVE_VFP (PICA_ALL): native draws transform with VFP vectors when DKR_VFP_VECTORS is on
-static s32 sFastOutcode; // DKR_FAST_OUTCODE (PICA_ALL): screen edge bits from sign bits, see vertex_outcode
-static s32 sPresetOn = 1;      // DKR_SPRITE_AXES (v29): sprite tiles take their material's axes
-static s32 sNativeHashHigh = 1; // DKR_NATIVE_HASH (v29), see native_find
-static u32 sNativeTableLimit = 2048 * 3 / 4, sNativePoolLimit = 640 * 1024; // DKR_NATIVE_BIG (see NATIVE_TABLE_SIZE)
-static s32 sScreenOnce; // DKR_SCREEN_ONCE (PICA_ALL v28): native corners reuse the screen x/y of the edge test
-static s32 sAxisFast;  // DKR_AXIS_FAST (PICA_ALL): native corners' first texture coordinates without the axis calls
-static s32 sNMatFast;   // DKR_NMAT_FAST (PICA_ALL): a native draw's fixed set-up cost cut (see native_record)
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
@@ -2349,31 +2333,11 @@ static void read_switches(void) {
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
 #ifdef PICA_ALL
-    sTriReject = plat_switch("DKR_TRI_REJECT", 1) != 0;
-    sNMatFast = plat_switch("DKR_NMAT_FAST", 1) != 0;
-    sNativeDynamic = plat_switch("DKR_NATIVE_DYNAMIC", 1) != 0;
     sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", 0) != 0;
-    sNativeOnceAFrame = plat_switch("DKR_NATIVE_ONCE", 1) != 0;
-    sNativeBucket = plat_switch("DKR_NATIVE_BUCKET", 1) != 0;
-    sNativeVfp = plat_switch("DKR_NATIVE_VFP", 1) != 0;
-    sFastOutcode = plat_switch("DKR_FAST_OUTCODE", 1) != 0;
-    sAxisFast = plat_switch("DKR_AXIS_FAST", 1) != 0;
-    sScreenOnce = plat_switch("DKR_SCREEN_ONCE", 1) != 0;
-    sNativeHashHigh = plat_switch("DKR_NATIVE_HASH", 1) != 0;
-    sPresetOn = plat_switch("DKR_SPRITE_AXES", 1) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
-    sRemoteFlush = plat_switch("DKR_REMOTE_FLUSH", 1);
-    sRemoteShare = plat_switch("DKR_REMOTE_SHARE", 1);
-    sTrisSkip = plat_switch("DKR_TRIS_SKIP", 1);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
-    sTexFreeQueue = plat_switch("DKR_TEX_FREE_QUEUE", 1) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", 0);
-    {
-        s32 big = plat_switch("DKR_NATIVE_BIG", 1) != 0;
-        sNativeTableLimit = big ? 2048 * 3 / 4 : 384;
-        sNativePoolLimit = big ? 640 * 1024 : 160 * 1024;
-    }
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
 #endif
 }
@@ -2669,14 +2633,11 @@ static inline u32 float_sign(float f) {
 
 static inline u32 vertex_outcode(const RspVertex *v, const Viewport *vp) {
     float w = v->w, x = v->x * vp->scaleX + w * vp->transX, y = v->y * vp->scaleY + w * vp->transY;
-    if (sFastOutcode) {
-        // The same edges from the signs of differences (DKR_FAST_OUTCODE): five float compares each move the VFP's
-        // flags to the ARM core, which waits for them, while the sign bits come over as plain words. x > w is
-        // w - x < 0, and so on; w <= 1e-3 is 1e-3 - w >= 0, a clear sign bit (an exact zero difference is +0).
-        return float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) | (float_sign(y + w) << 3) |
-               ((float_sign(1e-3f - w) ^ 1u) << 4);
-    }
-    return (x > w ? 1u : 0u) | (x < -w ? 2u : 0u) | (y > w ? 4u : 0u) | (y < -w ? 8u : 0u) | (w <= 1e-3f ? 16u : 0u);
+    // The edges from the signs of differences: five float compares each move the VFP's flags to the ARM core, which
+    // waits for them, while the sign bits come over as plain words. x > w is w - x < 0, and so on; w <= 1e-3 is
+    // 1e-3 - w >= 0, a clear sign bit (an exact zero difference is +0).
+    return float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) | (float_sign(y + w) << 3) |
+           ((float_sign(1e-3f - w) ^ 1u) << 4);
 }
 
 static void viewport_init(Viewport *vp) {
@@ -4118,7 +4079,7 @@ static inline __attribute__((always_inline)) void draw_triangles_impl(const RspV
         if (UNLIKELY(sAuditFrame) && !flat) {
             audit_triangle(V, idx, state.cullMode != 0, keepSign, &vp);
         }
-        if (sTriReject && !flat &&
+        if (!flat &&
             (vertex_outcode(&V[idx[0]], &vp) & vertex_outcode(&V[idx[1]], &vp) &
              vertex_outcode(&V[idx[2]], &vp)) != 0) {
             sWalkRejectedTris++;
@@ -4229,9 +4190,10 @@ static NOINLINE void draw_record_triangles(const RspVertex *verts, s32 flatBits,
  */
 #define NATIVE_TABLE_SIZE 2048         // Meshes remembered (a power of two); full at three quarters, then all forgotten
 #define NATIVE_POOL_BYTES (640 * 1024) // Their tables; full, all are forgotten
-/* v28 (DKR_NATIVE_BIG, PICA_ALL): four times the meshes and room. A Whale Bay race draws ~590 different triangle lists
- * in 700 frames (shadows and water among them), more than the old 384, so every ~100 frames all were forgotten and
- * remade (a burst of ~150 table builds in one frame). DKR_NATIVE_BIG=0 keeps the old limits within the bigger table. */
+/* Four times the meshes and room of the first version: a Whale Bay race draws ~590 different triangle lists, more than
+ * the old 384, so all were forgotten and remade every ~100 frames. */
+#define NATIVE_TABLE_LIMIT (NATIVE_TABLE_SIZE * 3 / 4)
+#define NATIVE_POOL_LIMIT NATIVE_POOL_BYTES
 
 #define NATIVE_MAX_CORNERS 1024
 #define NATIVE_MAX_LOADS 4
@@ -4308,7 +4270,7 @@ static void *native_alloc(u32 bytes) {
             return NULL;
         }
     }
-    if (sNativePoolUsed + bytes > sNativePoolLimit) {
+    if (sNativePoolUsed + bytes > NATIVE_POOL_LIMIT) {
         return NULL;
     }
     p = sNativePool + sNativePoolUsed;
@@ -4514,9 +4476,7 @@ static NOINLINE void native_tris_take(void) {
  * port_tris_changed changes in place. */
 /* Has every mesh kept for these triangles (any count) compared at its next draw. */
 static void native_tris_mark(const Triangle *tris) {
-    u32 h = sNativeHashHigh ? (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11)
-                            : (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1),
-        probes;
+    u32 h = (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11), probes;
     for (probes = 0; probes < NATIVE_TABLE_SIZE; probes++) {
         NativeMesh *e = &sNativeMeshes[(h + probes) & (NATIVE_TABLE_SIZE - 1)];
         if (e->tris == NULL) {
@@ -4529,11 +4489,9 @@ static void native_tris_mark(const Triangle *tris) {
 }
 
 static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic, s32 track) {
-    // v29 (DKR_NATIVE_HASH=0: the old low bits): triangle lists are 16-byte aligned, so the product's low bits only
-    // ever started a search in a quarter of the table; its top bits are spread over all of it.
-    u32 h = sNativeHashHigh ? (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11)
-                            : (u32) (((size_t) tris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1),
-        probes;
+    // Triangle lists are 16-byte aligned, so the product's low bits would only start a search in a quarter of the
+    // table; its top bits are spread over all of it.
+    u32 h = (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11), probes;
     NativeMesh *e;
     if (count <= 0 || count > 0xFFFF) {
         return NULL;
@@ -4552,25 +4510,24 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
             return e->usable ? e : NULL;
         }
         if (e->tris == tris && e->numTris == count) {
-            if (sNativeOnceAFrame && !dynamic && e->checkedFrame == (u32) sFrameCount) {
+            if (!dynamic && e->checkedFrame == (u32) sFrameCount) {
                 // Already checked this frame (DKR_NATIVE_ONCE): a model drawn for several objects (trees, props,
                 // the same kart part twice) compares its triangles once.
                 return e->usable ? e : NULL;
             }
             s32 skip = 0;
-            if (track && sTrisSkip) {
+            if (track) {
                 // v29 (DKR_TRIS_SKIP): unchanged since its last comparison unless the game said it changed them
                 // (native_tris_take). Every 64th frame in turn they are compared anyway, which counts any change made
                 // without port_tris_changed (sTrisMissed).
                 skip = e->trisStamp == sTrisValid;
-                if (skip && sTrisSkip == 1 && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
+                if (skip && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
                     e->checkedFrame = (u32) sFrameCount;
                     sTrisSkipped++;
                     return e->usable ? e : NULL;
                 }
             }
-            if (sNMatFast ? native_tris_same(e->copy, tris, count)
-                          : __builtin_memcmp(e->copy, tris, count * sizeof(Triangle)) == 0) {
+            if (native_tris_same(e->copy, tris, count)) {
                 e->checkedFrame = (u32) sFrameCount;
                 e->trisStamp = track ? sTrisValid : 0;
                 return e->usable ? e : NULL;
@@ -4584,19 +4541,19 @@ static NOINLINE NativeMesh *native_find(const Triangle *tris, s32 count, s32 dyn
             }
             e->checkedFrame = (u32) sFrameCount;
             e->trisStamp = track ? sTrisValid : 0;
-            if (sNMatFast && e->copy != NULL && native_uv_update(e, tris, count)) {
+            if (e->copy != NULL && native_uv_update(e, tris, count)) {
                 return e->usable ? e : NULL;
             }
             // Changed: new tables (the old ones' room is only won back when all are forgotten, unless they are
             // remade in place)
-            if (!native_build(e, tris, count, sNMatFast && e->copy != NULL)) {
+            if (!native_build(e, tris, count, e->copy != NULL)) {
                 native_forget_all();
                 return NULL;
             }
             return e->usable ? e : NULL;
         }
     }
-    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= sNativeTableLimit) {
+    if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= NATIVE_TABLE_LIMIT) {
         native_forget_all();
         return NULL;
     }
@@ -4959,7 +4916,7 @@ static inline void nmat_axes(NMat *mat, const GfxDrawState *state, s32 textured,
  * from the same tiles and textures the triangles would have used (sTriState, set just before). */
 static inline void native_preset_axes(NMat *mat, s32 textured) {
     sPresetAxes = NULL;
-    if (sNMatFast && sPresetOn && textured) {
+    if (textured) {
         TexAxis ax[4];
         nmat_axes(mat, &sTriState, textured, ax);
         sPresetAxes = mat->axReady ? mat->axes : NULL;
@@ -5572,7 +5529,7 @@ static void native_remote_take(void) {
 
 /* The material's texture axes, as native_record works them out (and keeps them, DKR_NMAT_FAST). */
 static inline void nmat_axes(NMat *mat, const GfxDrawState *state, s32 textured, TexAxis ax[4]) {
-    if (sNMatFast && mat->axReady) {
+    if (mat->axReady) {
         ax[0] = mat->axes[0], ax[1] = mat->axes[1], ax[2] = mat->axes[2], ax[3] = mat->axes[3];
         return;
     }
@@ -5588,7 +5545,7 @@ static inline void nmat_axes(NMat *mat, const GfxDrawState *state, s32 textured,
         tex_axis_init(&ax[2], mat->tiles[1].shifts, mat->tiles[1].uls, tex->width, shift);
         tex_axis_init(&ax[3], mat->tiles[1].shiftt, mat->tiles[1].ult, tex->height, shift);
     }
-    if (sNMatFast && textured) {
+    if (textured) {
         mat->axes[0] = ax[0], mat->axes[1] = ax[1], mat->axes[2] = ax[2], mat->axes[3] = ax[3];
         mat->axReady = TRUE;
     }
@@ -5601,7 +5558,7 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
                                         s32 numLoads, s32 split, const s32 matrices[2], u8 frontCull, s32 ordered,
                                         s32 done) {
     u32 numCorners = mesh->numCorners, vertBytes = (u32) total * (done ? sizeof(RspVertex) : sizeof(Vertex));
-    s32 share = sRemoteShare && !mesh->changes;
+    s32 share = !mesh->changes;
     u32 bytes = NP_ALIGN(sizeof(NativePiece)) + vertBytes +
                 (share ? 0u : numCorners * 4u + (u32) count * 6u + numCorners + (u32) count);
     u8 *p = (u8 *) remote_begin(native_piece_run, bytes), *at;
@@ -5630,12 +5587,11 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
     np->frontCull = frontCull;
     np->kind = (u8) sDrawKind;
     np->flags = (mat->fog ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
-                (sTriReject ? NP_REJECT : 0) | (sTriReject && sScreenOnce ? NP_SCREEN : 0) |
-                (sFastOutcode ? NP_FAST_OUTCODE : 0) | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
-                (sAxisFast && tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
+                NP_REJECT | NP_SCREEN | NP_FAST_OUTCODE | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
+                (tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
                 (done ? NP_DONE : 0) | (share ? NP_SHARED : 0);
 #ifdef HAVE_VFP_VECTORS
-    np->flags |= sVfpVectors && sNativeVfp ? NP_VFP : 0;
+    np->flags |= sVfpVectors ? NP_VFP : 0;
 #endif
     at = p + NP_ALIGN(sizeof(NativePiece));
     if (share) {
@@ -5670,7 +5626,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     } loads[2];
     NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
     s32 numLoads = 0, numVerts, start, textured, count, total, i, k, tex0, tex1, zeroTex1, cur = g.curMatrix, dynamic;
-    s32 direct, directTris = 0, *vcount = NULL, axisFast, screenOnce;
+    s32 direct, directTris = 0, *vcount = NULL, axisFast;
     float su0 = 0.0f, ou0 = 0.0f, sv0 = 0.0f, ov0 = 0.0f;
     GfxVertex *vbase;
     OpaqueBucket *bucket = NULL;
@@ -5698,8 +5654,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         const NMat *nextMat = &sNMats[dl[2].words.w1 & (NMAT_MAX - 1)];
         const u8 *nextVtx = seg_addr(dl[3].words.w0);
         size_t nextTris = (size_t) seg_addr(dl[3].words.w1);
-        u32 h = sNativeHashHigh ? (u32) ((u32) (nextTris >> 4) * 2654435761u) >> (32 - 11)
-                                : (u32) ((nextTris >> 2) * 2654435761u) & (NATIVE_TABLE_SIZE - 1);
+        u32 h = (u32) ((u32) (nextTris >> 4) * 2654435761u) >> (32 - 11);
         __builtin_prefetch(nextMat);
         __builtin_prefetch((const u8 *) nextMat + 32);
         __builtin_prefetch((const u8 *) nextMat + 64);
@@ -5754,7 +5709,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         forget_slots(0, numVerts);
     }
     dynamic = (dl[1].words.w0 & 0x20000) != 0;
-    if (dynamic && sNativeDynamic && !g.billboard && native_dynamic_ok(start, numVerts, cur)) {
+    if (dynamic && !g.billboard && native_dynamic_ok(start, numVerts, cur)) {
         // Geometry made anew each frame (shadows, water, particles, snow) through the tables too
         // (DKR_NATIVE_DYNAMIC): its vertices are transformed fresh here anyway, and a list whose triangles changed
         // gets its tables remade in place (native_find).
@@ -5803,7 +5758,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         sNDrawStats[0]++;
         return 2;
     }
-    if (sTriReject && numLoads == 1 && sDrawKind == PORT_DRAW_TRACK && !dynamic && !UNLIKELY(sTracing)) {
+    if (numLoads == 1 && sDrawKind == PORT_DRAW_TRACK && !dynamic && !UNLIKELY(sTracing)) {
         // The track's batches keep their vertices (DKR_TRI_REJECT): one past an edge of the screen as a whole is
         // left out before its vertices are transformed, by its box's eight corners.
         if (UNLIKELY(mesh->boxSrc != vtx || mesh->boxLoads != gPortLevelLoads)) {
@@ -5822,13 +5777,13 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
-    if (sRemote && (sBatchCount == 0 || sRemoteFlush) && sModelCount == 0 && sMeshPartCount == 0) {
+    if (sRemote && sModelCount == 0 && sMeshPartCount == 0) {
         // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
         // waiting, the walk works out the screen edges first (below), as a draw wholly off the screen leaves it be.
         s32 ordered;
         nmat_state(mat, &state, textured);
         state.flat = 0;
-        direct = sNativeBucket && opaque_direct_ok(&state); // Always the backend's with its buckets
+        direct = opaque_direct_ok(&state); // Always the backend's with its buckets
         ordered = !direct && (sNativeRemote & 2) && ordered_remote_ok(&state);
         if (direct || ordered) {
             TexAxis ax[4];
@@ -5872,7 +5827,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
 #ifdef HAVE_VFP_VECTORS
         // The VFP's short vectors, as the old path's loads use them on the Old 3DS (DKR_VFP_VECTORS; the native path
         // had been left on the scalar transform, DKR_NATIVE_VFP).
-        if (sVfpVectors && sNativeVfp) {
+        if (sVfpVectors) {
             transform_vertices_vfp(src, c, verts, m);
         } else
 #endif
@@ -5900,33 +5855,17 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sNDrawStats[0]++;
 
     viewport_init(&vp);
-    screenOnce = sTriReject && sScreenOnce;
-    if (screenOnce) {
-        // v28 (DKR_SCREEN_ONCE): the screen x and y each vertex's edges are found from are kept for its corners,
-        // which worked them out again (the same sums, so the same values).
+    {
+        // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
+        // again (the same sums, so the same values). A batch wholly past one edge is done here.
         u32 all = 0x1F;
         for (i = 0; i < total; i++) {
             const RspVertex *v = &sNativeVerts[i];
             float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
-            u32 oc = sFastOutcode ? float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |
-                                        (float_sign(y + w) << 3) | ((float_sign(1e-3f - w) ^ 1u) << 4)
-                                  : (x > w ? 1u : 0u) | (x < -w ? 2u : 0u) | (y > w ? 4u : 0u) | (y < -w ? 8u : 0u) |
-                                        (w <= 1e-3f ? 16u : 0u);
+            u32 oc = float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |
+                     (float_sign(y + w) << 3) | ((float_sign(1e-3f - w) ^ 1u) << 4);
             sNativeSx[i] = x;
             sNativeSy[i] = y;
-            sNativeOut[i] = (u8) oc;
-            all &= oc;
-        }
-        if (all != 0) {
-            sWalkRejected++;
-            sWalkRejectedTris += (u32) count;
-            return 2;
-        }
-    } else if (sTriReject) {
-        // Each vertex's edges once (DKR_TRI_REJECT); a batch wholly past one edge is done here.
-        u32 all = 0x1F;
-        for (i = 0; i < total; i++) {
-            u32 oc = vertex_outcode(&sNativeVerts[i], &vp);
             sNativeOut[i] = (u8) oc;
             all &= oc;
         }
@@ -5940,7 +5879,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
     tex1 = state.textures[1] != NULL;
-    if (sNMatFast && mat->axReady) {
+    if (mat->axReady) {
         // The material's tiles and textures are its own, so their axes are worked out once (DKR_NMAT_FAST).
         u0 = mat->axes[0], v0 = mat->axes[1], u1 = mat->axes[2], v1 = mat->axes[3];
     } else {
@@ -5956,7 +5895,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             tex_axis_init(&u1, tile1->shifts, tile1->uls, tex->width, shift);
             tex_axis_init(&v1, tile1->shiftt, tile1->ult, tex->height, shift);
         }
-        if (sNMatFast && textured) {
+        if (textured) {
             mat->axes[0] = u0, mat->axes[1] = v0, mat->axes[2] = u1, mat->axes[3] = v1;
             mat->axReady = TRUE;
         }
@@ -5966,11 +5905,11 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (!opaque_sortable(&state)) {
         OPAQUE_FLUSH();
     }
-    axisFast = sAxisFast && tex0 && !u0.divide && !v0.divide;
+    axisFast = tex0 && !u0.divide && !v0.divide;
     if (axisFast) {
         su0 = u0.scale, ou0 = u0.offset, sv0 = v0.scale, ov0 = v0.offset;
     }
-    direct = sNativeBucket && opaque_direct_ok(&state);
+    direct = opaque_direct_ok(&state);
     if (direct && sRemote) {
         // A batch was waiting (see above): it is drawn, and the backend takes the finished vertices.
         TexAxis ax[4] = {u0, v0, u1, v1};
@@ -5997,7 +5936,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
         u16 *out;
-        if (sTriReject && (sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
+        if ((sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
                            sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
             sWalkRejectedTris++;
             continue;
@@ -6060,13 +5999,8 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             out[k] = index;
             v = &vbase[index];
             in = &sNativeVerts[mesh->cornerVertex[cn]];
-            if (screenOnce) {
-                v->x = sNativeSx[mesh->cornerVertex[cn]];
-                v->y = sNativeSy[mesh->cornerVertex[cn]];
-            } else {
-                v->x = in->x * vp.scaleX + in->w * vp.transX;
-                v->y = in->y * vp.scaleY + in->w * vp.transY;
-            }
+            v->x = sNativeSx[mesh->cornerVertex[cn]];
+            v->y = sNativeSy[mesh->cornerVertex[cn]];
             v->z = in->z;
             v->w = in->w;
             __builtin_memcpy(&v->r, &in->rgba, 4);
