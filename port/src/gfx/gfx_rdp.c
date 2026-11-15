@@ -7348,12 +7348,11 @@ static COLD void census_log(void) {
 }
 #endif
 
-#ifdef PICA_ALL
-/* Stall finder (PICA_ALL test build): logs any command, or frame start/end step, that takes 40 ms or more. */
+#if PLAT_DEBUG_TOOLS
+/* Stall finder (debug builds): logs any frame start/end step that takes 40 ms or more. */
 static unsigned long long sStallT, sStallLimit;
 static u32 sStallW0, sStallW1;
 static const char *sStallWhat;
-static s32 sStallEach; // DKR_STALL_EACH: every command marked, not only the frame's steps
 static void stall_mark(const char *what, u32 w0, u32 w1) {
     unsigned long long t = plat_ticks();
     if (sStallLimit == 0) {
@@ -7385,11 +7384,6 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         u32 op = w0 >> 24;
         u32 info = sOpInfo[op];
 #ifdef PICA_ALL
-        if (UNLIKELY(sStallEach)) {
-            // Each command timed (DKR_STALL_EACH): a clock read, a system call on the 3DS, for every command, so
-            // only when looking for a stall; the frame's steps are always timed.
-            STALL_MARK("command", w0, w1);
-        }
         if (UNLIKELY(sCensusOn > 0) && !sCensusSkip && !sPrewarming) { // (The texture prewarm runs load lists outside any frame)
             census_command(dl, w0, w1, depth);
         }
@@ -8169,7 +8163,6 @@ void port_gfx_run_task(void *taskPtr) {
 #endif
     STALL_MARK(NULL, 0, 0);
     STALL_MARK("frame set-up", 0, 0);
-    sStallEach = plat_switch("DKR_STALL_EACH", 0) != 0;
     REF_CALL(refb_start_frame());
     sTracing = sFrameCount == sTraceFrame;
     read_switches();
