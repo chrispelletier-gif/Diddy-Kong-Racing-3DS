@@ -28,6 +28,8 @@
 #include "asset_enums.h"
 #include "textures_sprites.h"
 #include <stdlib.h>
+extern CheckpointNode *gTrackCheckpoints;
+extern s32 gNumberOfMainCheckpoints, gNumberOfTotalCheckpoints;
 
 /* The bottom screen's side (plat_3ds.c; on PC bottom_preview.c draws it for DKR_BOTTOM_RACE). */
 void plat_set_race_hud(const RaceHud *hud);
@@ -817,6 +819,29 @@ void port_race_hud_frame(s32 updateRate) {
             map_position(&out->at, racers[order[j]], model);
         }
     }
+#ifndef __3DS__
+    /* Host only (DKR_DUMP_PATHS=file): each level's checkpoints once, as map points, for the bottom screen's
+       centre-line table (tools/map_paths) */
+    if (model != NULL && plat_getenv("DKR_DUMP_PATHS") != NULL && gNumberOfTotalCheckpoints > 0) {
+        static s32 sDumped[128];
+        s32 lv = level_id();
+        if (lv >= 0 && lv < 128 && !sDumped[lv]) {
+            static char sBuf[16384];
+            s32 c, n;
+            sDumped[lv] = 1;
+            n = plat_snprintf(sBuf, sizeof(sBuf), "level %d sprite %d main %d total %d mode %d\n", (int) lv, (int) sMapSprite,
+                              (int) gNumberOfMainCheckpoints, (int) gNumberOfTotalCheckpoints, (int) mode);
+            for (c = 0; c < gNumberOfTotalCheckpoints && n < (s32) sizeof(sBuf) - 100; c++) {
+                RaceHudPoint pt;
+                map_position(&pt, gTrackCheckpoints[c].obj, model);
+                n += plat_snprintf(sBuf + n, sizeof(sBuf) - n, "cp %d id %d alt %d x %d y %d scale %d\n", (int) c,
+                                   (int) gTrackCheckpoints[c].checkpointID, (int) gTrackCheckpoints[c].altRouteID,
+                                   (int) pt.mapX, (int) pt.mapY, (int) (gTrackCheckpoints[c].scale * 100));
+            }
+            plat_append_file(plat_getenv("DKR_DUMP_PATHS"), sBuf, (unsigned int) n);
+        }
+    }
+#endif
     hud.position = me->racePosition;
     // The race types whose top screen HUD counts laps (game_ui.c): the races, Horseshoe Gulch's and the bosses'.
     hud.laps = (level_type() == RACETYPE_DEFAULT || level_type() == RACETYPE_HORSESHOE_GULCH ||
@@ -877,12 +902,14 @@ const char *race_hud_option_label(int index) {
     return index == 1 ? "Bottom screen look" : "Race HUD on";
 }
 
-static const char *const sLookNames[4] = { "Classic", "Glass", "Broadcast", "Dock" };
+/* 0-3 the base looks, 4-7 their colour variants (bottom_screen.c sVariant; plat_set_bottom_style maps them) */
+#define LOOK_COUNT 8
+static const char *const sLookNames[LOOK_COUNT] = { "Classic", "Glass", "Broadcast", "Dock", "Carbon", "Jungle", "Sunset", "Daylight" };
 
 s32 port_bottom_style(void) {
     const char *env = plat_getenv("DKR_BOTTOM_STYLE");
     s32 value = env != NULL ? atoi(env) : settings_get("bottomstyle", 0);
-    return (value < 0 || value > 3) ? 0 : value;
+    return (value < 0 || value >= LOOK_COUNT) ? 0 : value;
 }
 
 void race_hud_option_value(int index, char *out, int size) {
@@ -899,7 +926,7 @@ void race_hud_option_change(int index, int step) {
     static const s32 sOrder[3] = { RACE_HUD_BOTTOM, RACE_HUD_BOTH, RACE_HUD_TOP };
     s32 at = 0;
     if (index == 1) {
-        s32 look = (port_bottom_style() + (step < 0 ? 3 : 1)) % 4;
+        s32 look = (port_bottom_style() + (step < 0 ? LOOK_COUNT - 1 : 1)) % LOOK_COUNT;
         settings_set("bottomstyle", look);
         plat_set_bottom_style(look);
         return;
@@ -912,8 +939,10 @@ void race_hud_option_change(int index, int step) {
 
 const char *race_hud_option_hint(int index) {
     if (index == 1) {
-        static const char *const sHints[4] = { "The game's own boxes", "Soft glass cards, round buttons",
-                                               "Race TV slabs in red and yellow", "Few boxes, icon bar below" };
+        static const char *const sHints[LOOK_COUNT] = { "The game's own boxes", "Soft glass cards, round buttons",
+                                               "Race TV slabs in red and yellow", "Few boxes, icon bar below",
+                                               "Broadcast in black and teal", "Dock in jungle green",
+                                               "Glass in sunset red", "Glass in light blue" };
         return sHints[port_bottom_style()];
     }
     switch (port_race_hud_setting()) {
