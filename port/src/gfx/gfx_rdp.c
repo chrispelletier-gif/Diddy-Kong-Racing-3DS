@@ -1732,8 +1732,6 @@ static COLD void flush_mesh_batch(void);
  * what they cost and how much was wasted, since the profiler last took them. Plain counters: the walk's thread writes
  * them, and a take that lands mid-frame is off by part of a frame. */
 static u8 sDrawKind;
-static u32 sSkipKinds; // DKR_SKIP_KINDS (read_switches)
-static u32 sNoTexKinds; // DKR_NOTEX_KINDS (read_switches): kinds drawn in their shade colour only, no textures
 static u8 sDrawObj = PROF_OBJ_NONE; // The object kind whose tag came last (profile.h ProfObjMix)
 static ProfDrawMix sMix;
 static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
@@ -1848,19 +1846,6 @@ static void kind_frame_end(void) {
         kind_switch(PORT_DRAW_OTHER);
         sKindTimed = FALSE;
     }
-}
-
-
-/* The batch drawn in its shade colour only (DKR_NOTEX_KINDS, the switch bench's texture cost row). */
-static COLD NOINLINE void no_textures(void) {
-    GfxCombiner *c = &sBatchState.combiner;
-    sBatchState.textures[0] = sBatchState.textures[1] = NULL;
-    c->numCycles = 1;
-    c->rgb[0].a = c->rgb[0].b = c->rgb[0].c = GFX_CC_ZERO;
-    c->rgb[0].d = GFX_CC_SHADE;
-    c->alpha[0] = c->rgb[0];
-    c->rgb[1] = c->rgb[0];
-    c->alpha[1] = c->alpha[0];
 }
 
 /* Draws the batch of transformed triangles. */
@@ -2071,8 +2056,7 @@ static s32 opaque_hold(void) {
  * conditions under which opaque_hold would have taken its batch. */
 static inline s32 opaque_direct_ok(const GfxDrawState *st) {
     return sOpaqueSortSwitch && opaque_sortable(st) && sDrawKind != PORT_DRAW_SKY && !REF_ACTIVE() &&
-           !UNLIKELY(sTracing) && (st->textures[0] == NULL || !st->textures[0]->atlas) &&
-           !(UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1);
+           !UNLIKELY(sTracing) && (st->textures[0] == NULL || !st->textures[0]->atlas);
 }
 
 /* The bucket of this state (made if need be), for a native draw writing into it directly. */
@@ -2098,9 +2082,6 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
-        if (UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1) {
-            no_textures();
-        }
         if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
             atlas_upload(sBatchState.textures[0]);
         }
@@ -2366,11 +2347,6 @@ static void read_switches(void) {
         sGpuKinds = 0;
     }
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
-    // The switch bench's cost rows: the kinds (port_drawtag.h, a bit each) whose triangles are not drawn, so a race
-    // without them shows what they cost the GPU (the profiler times only the renderer's share per kind).
-    sSkipKinds = (u32) plat_switch("DKR_SKIP_KINDS", 0);
-    // The switch bench's texture cost row: these kinds (a bit each, as DKR_SKIP_KINDS) are drawn without textures.
-    sNoTexKinds = (u32) plat_switch("DKR_NOTEX_KINDS", 0);
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
 #ifdef PICA_ALL
     sTriReject = plat_switch("DKR_TRI_REJECT", 1) != 0;
@@ -3754,7 +3730,7 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
     u8 frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
 
     if (!sNativeTrack || remaining < 2 || g.billboard || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame) ||
-        UNLIKELY(gGfxSweep) || UNLIKELY(sSkipKinds != 0) || REF_ACTIVE()) {
+        UNLIKELY(gGfxSweep) || REF_ACTIVE()) {
         return 0;
     }
     {
@@ -4027,9 +4003,6 @@ static inline __attribute__((always_inline)) void draw_triangles_impl(const RspV
     u32 generation;
     float keepSign; // The sign of a kept triangle's determinant, for the culling below
 
-    if (UNLIKELY(sSkipKinds != 0) && (sSkipKinds >> sDrawKind) & 1) {
-        return;
-    }
     sObjTris[sDrawObj] += count;
     if (slots && sAnyPending) {
         if (model_triangles(tris, count, textured)) {
@@ -4687,7 +4660,7 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
         }
     }
     if (used == 0 || numLoads == 0 || total > MAX_VERTICES || g.billboard || UNLIKELY(sTracing) ||
-        UNLIKELY(sAuditFrame) || UNLIKELY(gGfxSweep) || sAnyPending || UNLIKELY(sSkipKinds != 0) ||
+        UNLIKELY(sAuditFrame) || UNLIKELY(gGfxSweep) || sAnyPending ||
         (sGpuTransform && ((sGpuKinds >> sDrawKind) & 1))) {
         sNativeDeclined++;
         return 0;
@@ -5571,11 +5544,10 @@ static NOINLINE HOT void native_piece_run(void *payload) {
 }
 
 /* Whether a native draw whose order matters can go to the backend's batch: the walk's batch would have drawn it
- * without anything of its own (flush_cpu_batch: no sky hold, trace, atlas page or no-texture kind). */
+ * without anything of its own (flush_cpu_batch: no trace or atlas page). */
 static inline s32 ordered_remote_ok(const GfxDrawState *st) {
     return !opaque_sortable(st) && sDrawKind != PORT_DRAW_SKY && !REF_ACTIVE() && !UNLIKELY(sTracing) &&
-           (st->textures[0] == NULL || !st->textures[0]->atlas) &&
-           !(UNLIKELY(sNoTexKinds != 0) && (sNoTexKinds >> sDrawKind) & 1);
+           (st->textures[0] == NULL || !st->textures[0]->atlas);
 }
 
 /* Counts the backend's native draws' triangles and rejects with the walk's (the profiler's), a frame late. */
