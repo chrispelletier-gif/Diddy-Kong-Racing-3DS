@@ -61,7 +61,7 @@ enum GfxBlendMode {
     GFX_BLEND_ALPHA_CVG /* opaque, alpha tested (cutout) */
 };
 
-/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn (the sky drawn last, DKR_SKY_LAST). */
+/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn. Nothing sets it now; it goes with the next simplify batch. */
 #define GFX_DEPTH_FAR 2
 
 enum GfxTextureFilter { GFX_FILTER_POINT, GFX_FILTER_BILINEAR };
