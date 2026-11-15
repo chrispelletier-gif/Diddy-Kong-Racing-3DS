@@ -7,7 +7,37 @@
 #include <string.h>
 
 /* The game's whole heap. On the N64 this is the RAM between the end of BSS and the end of RDRAM. */
-u8 gPortMainPool[PORT_MAIN_POOL_SIZE] __attribute__((aligned(64)));
+u8 *gPortMainPool;
+u32 gPortMainPoolSize = PORT_MAIN_POOL_SIZE;
+#ifndef __3DS__
+/* The host build keeps the pool in the program's data (the state hash and the step diff read it there). */
+u8 gPortMainPoolArea[PORT_MAIN_POOL_SIZE] __attribute__((aligned(64)));
+#endif
+
+u32 port_native_heap_pool_size(void);
+
+/* Sets up the pool, at the start of the game thread. On a 3DS it is allocated here, at the size DKR_NATIVE_HEAP asks for,
+ * so what the big switch leaves over is free for everything else; it is zeroed, as the static array was. */
+void port_main_pool_init(void) {
+    if (gPortMainPool != NULL) {
+        return;
+    }
+    gPortMainPoolSize = port_native_heap_pool_size();
+#ifdef __3DS__
+    {
+        u8 *raw = (u8 *) plat_malloc(gPortMainPoolSize + 64);
+        if (raw == NULL) {
+            port_fatal("no memory for the game's pool (%u KB)", (unsigned) (gPortMainPoolSize / 1024));
+        }
+        gPortMainPool = (u8 *) (((uintptr_t) raw + 63) & ~(uintptr_t) 63);
+        bzero(gPortMainPool, gPortMainPoolSize);
+    }
+#else
+    gPortMainPool = gPortMainPoolArea;
+#endif
+    plat_log("game pool: %u KB%s", (unsigned) (gPortMainPoolSize / 1024),
+             gPortMainPoolSize < PORT_MAIN_POOL_SIZE ? " (native heap)" : "");
+}
 
 /* Microcode symbols. Only their addresses are used, to fill in OSTask structures. */
 long long int rspbootTextStart[1], rspbootTextEnd[1];

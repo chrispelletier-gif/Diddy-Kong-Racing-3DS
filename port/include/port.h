@@ -368,6 +368,7 @@ void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noret
 
 /* Main memory pool. The game carves its whole heap out of this. */
 #define PORT_MAIN_POOL_SIZE (8 * 1024 * 1024)
-extern u8 gPortMainPool[];
+extern u8 *gPortMainPool;
+extern u32 gPortMainPoolSize;
 
 #endif
