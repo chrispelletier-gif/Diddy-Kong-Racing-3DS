@@ -983,6 +983,39 @@ static void cam_mtx_load(Gfx **dList, Mtx *m, u32 index) {
         gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL(m), index);
     }
 }
+/* G3 (DKR_NATIVE_CAMERA): a billboard's anchor (or a vehicle part's empty vertex) as one record instead of the game's
+ * own vertex load. Returns FALSE (nothing written) with the switch off. */
+static s32 cam_anchor(Gfx **dList, Vertex *v) {
+    if (!port_native_camera()) {
+        return FALSE;
+    }
+    gDPNoOpTag((*dList)++, PORT_ANCHOR_TAG);
+    (*dList)->words.w0 = OS_K0_TO_PHYSICAL(v);
+    (*dList)->words.w1 = 0;
+    (*dList)++;
+    return TRUE;
+}
+
+/* G3 (DKR_NATIVE_CAMERA): the perspective matrix loaded as floats (a PORT_MTXF_TAG record) instead of the game's fixed
+ * point gPerspectiveMatrix (weather.c). The renderer reads the floats when it runs the frame, which is after the game
+ * has moved on, so each load takes a copy of its own. Returns FALSE (nothing written) with the switch off. */
+#define CAM_PROJ_COPIES 16
+s32 cam_load_perspective(Gfx **dList, u32 index) {
+    static MtxF sProjCopies[CAM_PROJ_COPIES];
+    static u32 sProjNext;
+    MtxF *copy;
+
+    if (!port_native_camera()) {
+        return FALSE;
+    }
+    copy = &sProjCopies[sProjNext++ % CAM_PROJ_COPIES];
+    __builtin_memcpy(copy, &gPerspectiveMatrixF, sizeof(MtxF));
+    gDPNoOpTag((*dList)++, PORT_MTXF_TAG | index);
+    (*dList)->words.w0 = OS_K0_TO_PHYSICAL(copy);
+    (*dList)->words.w1 = 0;
+    (*dList)++;
+    return TRUE;
+}
 #define CAM_MTX_STORE(mf, m) cam_mtx_store(mf, m)
 #define CAM_MTX_LOAD(dl, m, index) cam_mtx_load(dl, m, index)
 #else
@@ -1207,6 +1240,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Push an empty vertex because sprite vertices are hardcoded to start from index 1,
         // and billboard mode is not enabled for vehicle parts.
+#ifdef PICA_ALL
+        if (!cam_anchor(dList, &gVehiclePartVertex))
+#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(&gVehiclePartVertex), 1, 0);
     } else {
         // For non-vehicle parts, set up a standard billboard.
@@ -1220,6 +1256,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
+#ifdef PICA_ALL
+        if (!cam_anchor(dList, *vtx))
+#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 

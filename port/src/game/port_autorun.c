@@ -455,6 +455,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // then a full race for the speed.
     { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
     { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2). The first row races them
+    // together for the walk and renderer time on the four Old 3DS tracks; the check row is one lap on a tree, particle
+    // and snow track for bugs (sprites in place, flicker, weather).
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
     // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1 },
@@ -481,6 +488,12 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
     // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2), at the bench's settings and
+    // (the usual 400 pixel races) CPU savings; the check row is one lap.
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
     // G2 (2026-11-14): HUD/menu sprite frames and blinking-light batches as native records; check row (one lap), then
     // the performance row.
     { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
