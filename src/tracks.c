@@ -570,18 +570,14 @@ void void_free(void) {
 }
 
 // root func for the out of bounds void rendering
-#ifdef PICA_ALL
 static s32 sVoidNative;
-#endif
 
 /* The void mesh gathered so far, drawn. */
 static void void_draw_batch(void) {
-#ifdef PICA_ALL
     if (sVoidNative && port_native_batch(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE, 0, gVoidCurrVerts,
                                          gVoidVertCount, gVoidCurrTris, gVoidVertCount >> 1, 0, 1)) {
         return;
     }
-#endif
     gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrVerts), gVoidVertCount, 0);
     gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(gVoidCurrTris), gVoidVertCount >> 1, TRIN_DISABLE_TEXTURE);
 }
@@ -608,10 +604,8 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
         gVoidTris[var_s0] = gVoidMesh[viewportIndex].tris[var_s0];
         gVoidVerts[var_s0] = gVoidMesh[viewportIndex].verts[var_s0];
     }
-#ifdef PICA_ALL
     sVoidNative = port_native_draw();
     if (!sVoidNative)
-#endif
         material_set_no_tex_offset(&gTrackDL, NULL, RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
     D_8011D49C = 0;
     D_8011D49E = 0;
@@ -727,11 +721,9 @@ void void_check(u8 *segmentIds, s32 numberOfSegments, s32 viewportIndex) {
     if (gVoidVertCount != 0) {
         void_draw_batch();
     }
-#ifdef PICA_ALL
     if (sVoidNative) {
         port_native_end();
     }
-#endif
     gTrackVtxPtr = vtx;
     gTrackTriPtr = tri;
 }
@@ -1631,11 +1623,9 @@ void trackbg_render_flashy(void) {
     }
 
     texHeader = set_animated_texture_header(texHeader, gTrackTexAnimOffset << 8);
-#ifdef PICA_ALL
     if (port_native_batch_xlu(&gTrackDL, 1, var_a2, var_a3, texHeader, gTrackVtxPtr, 9, gTrackTriPtr, 8)) {
         port_native_end();
     } else
-#endif
     {
         gfx_init_basic_xlu(&gTrackDL, 1, var_a2, var_a3);
         gDkrDmaDisplayList(gTrackDL++, OS_K0_TO_PHYSICAL(texHeader->cmd), texHeader->numberOfCommands);
@@ -1712,11 +1702,9 @@ void trackbg_render_gradient(void) {
     headerGreen1 = gCurrentLevelHeader2->BGColourBottomG;
     headerBlue1 = gCurrentLevelHeader2->BGColourBottomB;
     rendermode_reset(&gTrackDL);
-#ifdef PICA_ALL
     if (port_native_batch(&gTrackDL, NULL, RENDER_FOG_ACTIVE, 0, verts, 4, tris, 2, 0, 1)) {
         port_native_end();
     } else
-#endif
     {
         material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
         gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
@@ -2099,10 +2087,8 @@ void render_level_geometry_and_objects(void) {
  * Since opaque and transparent are done in two separate runs, it will skip over the other.
  * Has a special case for the flashing lights in Spaceport Alpha, too.
  */
-#ifdef PICA_ALL
 extern s16 gForceFlags;
 extern TextureHeader *gCurrentTextureHeader;
-#endif
 void render_level_segment(s32 segmentId, s32 nonOpaque) {
     LevelModelSegment *segment;
     s32 i;
@@ -2124,9 +2110,7 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
     s32 textureFlags;
 #ifdef TARGET_PORT
     s32 nativeTrack;
-#ifdef PICA_ALL
     s32 nativeDraw, anyNative = FALSE;
-#endif
     if (port_portrait_active()) {
         return; // The portrait camera shows the model alone.
     }
@@ -2134,9 +2118,7 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         return;
     }
     nativeTrack = port_native_track();
-#ifdef PICA_ALL
     nativeDraw = port_native_draw();
-#endif
 #endif
     port_draw_tag(gTrackDL++, nonOpaque ? PORT_DRAW_SEE_THROUGH : PORT_DRAW_TRACK);
     //! @bug: batchInfo is uninitalized
@@ -2274,13 +2256,11 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
     }
-#ifdef PICA_ALL
     if (anyNative) {
         // The renderer's settings are the last captured material's: the next material_set sets everything again.
         gForceFlags = TRUE;
         gCurrentTextureHeader = NULL;
     }
-#endif
 }
 
 /**
@@ -3673,7 +3653,6 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
-#ifdef PICA_ALL
                 if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
                                       &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
                                       gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
@@ -3683,7 +3662,6 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                     i++;
                     continue;
                 }
-#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 // I hope we can clean this part up.
                 tri2 = triCount = gCurrShadowHeapData[i].triCount; // Fakematch
@@ -3734,7 +3712,6 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gCurrShadowTris = gShadowHeapTris[gWaterEffectIndex];
             gCurrShadowVerts = gShadowHeapVerts[gWaterEffectIndex];
             while (i < effect->meshEnd) {
-#ifdef PICA_ALL
                 if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
                                       &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
                                       gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
@@ -3744,7 +3721,6 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
                     i++;
                     continue;
                 }
-#endif
                 material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtxCount = gCurrShadowHeapData[i].vtxCount; // Fakematch

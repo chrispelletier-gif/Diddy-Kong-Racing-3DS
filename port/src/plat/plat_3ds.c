@@ -590,7 +590,6 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
-#if PICA_ALL
     // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
     // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
     // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
@@ -617,7 +616,6 @@ unsigned long long plat_time_ns(void) {
         // 1e9 / SYSCLOCK_ARM11 in 32.32 fixed point (3.7298 ns a tick).
         return sSeconds * 1000000000ULL + ((rest * 16019311343ULL) >> 32);
     }
-#endif
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 

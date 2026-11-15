@@ -4160,12 +4160,10 @@ void hud_draw_model(ObjectModel *objModel) {
             if (texPtr == NULL) {
                 textureEnabled = TRIN_DISABLE_TEXTURE;
             }
-#ifdef PICA_ALL
             if (port_native_batch(&gHudDL, texPtr, flags & ~RENDER_Z_COMPARE, 0, verts, numVerts, tris, numTris,
                                   textureEnabled, 1)) {
                 port_native_end();
             } else
-#endif
             {
                 material_set_no_tex_offset(&gHudDL, texPtr, flags & ~RENDER_Z_COMPARE);
                 gSPVertexDKR(gHudDL++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);

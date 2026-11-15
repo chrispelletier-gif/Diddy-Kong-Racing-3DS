@@ -58,7 +58,6 @@ static inline void store_shade(Vertex *v, s32 value) {
     v->a = second & 0xFF;
 }
 
-#ifdef PICA_ALL
 /*
  * GPU vertex lighting (off-GitHub "everything on the PICA200" test build, DKR_GPU_LIGHT): the two simple shading
  * routines below store each vertex's normal (signed bytes, 127 = 1) in its colour instead of the lit grey, and note
@@ -528,7 +527,6 @@ static void gpu_light_set(ObjectModel *model, Object *obj, GpuLight *gl, s32 dir
     gl->l[2] = dirZ * c;
     gl->l[3] = ambient / 255.0f;
 }
-#endif
 
 /**
  * Updates the vertices of an animated object model for the object's current animation and frame.
@@ -797,7 +795,6 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
     dirX = shading->shadowDirX;
     dirY = shading->shadowDirY;
     dirZ = shading->shadowDirZ;
-#ifdef PICA_ALL
     {
         GpuLight *gl = gpu_light_take(obj, model);
         if (gl != NULL) {
@@ -806,7 +803,6 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
             return;
         }
     }
-#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;
@@ -881,7 +877,6 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
     dirX = (s32) dir.f[0];
     dirY = (s32) dir.f[1];
     dirZ = (s32) dir.f[2];
-#ifdef PICA_ALL
     {
         GpuLight *gl = gpu_light_take(obj, model);
         if (gl != NULL) {
@@ -890,7 +885,6 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
             return;
         }
     }
-#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;

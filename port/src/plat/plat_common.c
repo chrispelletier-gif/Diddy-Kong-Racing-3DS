@@ -338,9 +338,7 @@ static int switch_read(const char *name, int fallback) {
         }
     }
     env = plat_getenv(name);
-#ifdef PICA_ALL
-    // The "everything on the PICA200" build (PICA_ALL, on master since PR #468): the GPU route's switches on unless
-    // env.txt or the switch bench says otherwise.
+    // The GPU route's switches default on unless env.txt or the switch bench says otherwise.
     if (env == NULL) {
         // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
         // the user wants it off by default with one bench row turning it on (2026-11-05).
@@ -353,7 +351,6 @@ static int switch_read(const char *name, int fallback) {
             }
         }
     }
-#endif
     return env != NULL ? atoi(env) : fallback;
 }
 

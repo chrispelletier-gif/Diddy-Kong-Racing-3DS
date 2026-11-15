@@ -622,7 +622,7 @@ void gfx_split_mesh_free(void *mesh) {
 }
 
 /*
- * v28 (DKR_NATIVE_REMOTE, PICA_ALL): work of the walk's own run on the backend thread, in order with the draws: room
+ * v28 (DKR_NATIVE_REMOTE): work of the walk's own run on the backend thread, in order with the draws: room
  * for bytes of the caller's (8-aligned), or NULL when the calls aren't queued this frame or the record is too big for
  * the ring (the caller then drains the queue and makes the call itself).
  */

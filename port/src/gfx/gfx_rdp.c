@@ -179,8 +179,7 @@ static u32 sBatchGeneration;
 static GfxDrawState sTriState;
 static s32 sTriStateValid;
 static s32 sFrameCount;
-#ifdef PICA_ALL
-static unsigned long sNDrawStats[3]; // Native draws (PICA_ALL): drawn, materials captured, dropped
+static unsigned long sNDrawStats[3]; // Native draws: drawn, materials captured, dropped
 static s32 sOpaquePending; // Sorted opaque CPU batches wait to be drawn (opaque_flush)
 static void opaque_flush(void);
 #define OPAQUE_FLUSH()                                                                                                 \
@@ -189,9 +188,6 @@ static void opaque_flush(void);
             opaque_flush();                                                                                            \
         }                                                                                                              \
     } while (0)
-#else
-#define OPAQUE_FLUSH() ((void) 0)
-#endif
 
 /*
  * Where the display list walk's time goes while the profiler is on (P26; the profile.h PROF_PART_WALK parts). The
@@ -1525,7 +1521,6 @@ static inline s32 scissor_right(u32 cyc) {
 }
 
 
-#ifdef PICA_ALL
 /* A native rectangle being drawn (PORT_NRECT_TAG): its material's textures and tiles stand in for TMEM's. */
 static s32 sRectOverride;
 static GfxTexture *sRectTex[2];
@@ -1541,7 +1536,6 @@ static u32 sHandleStats[6]; // ... and live handles pushed out of a full bucket
 #define TEX_HANDLES (TEX_HANDLE_WAYS * TEX_HANDLE_BUCKETS)
 static const Gfx *sTexHandleKey[TEX_HANDLES] __attribute__((aligned(32))); // Each handle's list; NULL when unused
 static Tile sRectTiles[2];
-#endif
 
 /* Builds the draw state for the current RSP/RDP state. Out of line: one copy, for triangles and rectangles. */
 static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
@@ -1644,7 +1638,6 @@ static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
         s->scissor[2] = scissor_right(cyc);
     }
 
-#ifdef PICA_ALL
     if (isRect && sRectOverride) {
         // A native rectangle (PORT_NRECT_TAG): its material's textures, not what TMEM holds now.
         s->textures[0] = (usesTex0 || cyc == G_CYC_COPY) ? sRectTex[0] : NULL;
@@ -1658,7 +1651,6 @@ static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
         }
         return;
     }
-#endif
     if (usesTex0 || cyc == G_CYC_COPY) {
         s->textures[0] = lookup_texture(isRect ? (g.rdpHalf1 >> 0) & 7 : 0, NULL);
     }
@@ -1854,9 +1846,8 @@ static inline s32 opaque_sortable(const GfxDrawState *st) {
     return st->blend == GFX_BLEND_OPAQUE && st->depthTest && st->depthWrite && !st->decal && !st->flat;
 }
 
-#ifdef PICA_ALL
 /*
- * Opaque batch sorting (PICA_ALL test build, the brief's billboard and particle batching): batches drawn by the CPU
+ * Opaque batch sorting (the brief's billboard and particle batching): batches drawn by the CPU
  * path whose order doesn't matter (opaque_sortable: alpha-tested tree billboards, solid particles, props) are held in
  * buckets by draw state and drawn as one draw per state when anything whose order does matter comes (a blended or
  * decal draw, a clear, a texture change, the frame's end). Blended particles keep their order.
@@ -1873,7 +1864,7 @@ static s32 sOpaqueCount;
 static u32 sOpaqueStats[2]; // Batches held, draws made
 
 /*
- * v28 (DKR_NATIVE_REMOTE, PICA_ALL, on an Old 3DS): the buckets live on the two-core renderer's backend thread. The
+ * v28 (DKR_NATIVE_REMOTE, on an Old 3DS): the buckets live on the two-core renderer's backend thread. The
  * walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its vertices, matrix and
  * tables) and each flush, in order with its draws, and the backend runs the same bucket code on them, so the frame's
  * draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back faces and the
@@ -1976,7 +1967,7 @@ static void opaque_flush(void) {
     opaque_flush_now();
 }
 
-static s32 sOpaqueSortSwitch = 1; // DKR_OPAQUE_SORT (PICA_ALL; 0 for the bench's old renderer row)
+static s32 sOpaqueSortSwitch = 1; // DKR_OPAQUE_SORT (0 for the bench's old renderer row)
 
 /* Adds a batch to the bucket of its state (by whichever thread has the buckets). */
 static void opaque_append(const GfxDrawState *st, const GfxVertex *verts, s32 numVerts, const u16 *indices,
@@ -2073,7 +2064,6 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
     b->numTris = 0;
     return b;
 }
-#endif
 
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
@@ -2085,7 +2075,6 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             trace_batch();
         }
         part = walk_switch(WALK_DRAWS);
-#ifdef PICA_ALL
         if (opaque_hold()) {
             prof_count(PROF_TRIANGLES, sBatchCount);
             sMix.kinds[sDrawKind].tris += sBatchCount;
@@ -2096,7 +2085,6 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             return;
         }
         OPAQUE_FLUSH();
-#endif
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
@@ -2314,9 +2302,7 @@ static void read_switches(void) {
     // triangle flatness checks while no loaded vertex is flat, and zeroing the second texture's coordinates in draws
     // that have none. The frames are the same either way.
     sWalkLean = plat_switch("DKR_WALK_LEAN", plat_old_3ds()) != 0;
-#ifdef PICA_ALL
     sOpaqueSortSwitch = plat_switch("DKR_OPAQUE_SORT", 1) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
-#endif
     // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
     // that cost the walk a few milliseconds a frame.
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
@@ -2332,14 +2318,12 @@ static void read_switches(void) {
     }
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
-#ifdef PICA_ALL
     sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", 0) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", 0);
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
-#endif
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -2401,7 +2385,7 @@ static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anc
     return flat;
 }
 
-/* GPU vertex lighting (PICA_ALL test build, port_drawtag.h PORT_LIGHT_TAG): while on, the vertices' colours hold
+/* GPU vertex lighting (port_drawtag.h PORT_LIGHT_TAG): while on, the vertices' colours hold
  * normals, lit with sLight (gfx_light_shade, or the GPU's vertex shader for model draws). */
 static u8 sLightOn;
 static float sLight[4];
@@ -3769,7 +3753,6 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
 }
 
 /* At the start of a frame: this frame's switch, and the table emptied for a new level or with the switch off. */
-#ifdef PICA_ALL
 static s32 sOpCountOn = -1;
 static s32 sCensusOn = -1; // DKR_WALK_CENSUS=1: the walk census (census_command)
 static u32 sCensusFrames;
@@ -3784,7 +3767,6 @@ static void census_log(void);
     } while (0)
 static u32 sOpCount[256];
 static u32 sOpKind[PORT_DRAW_KINDS][256]; // DKR_OPCOUNT=1: also by draw kind (N64 commands only, not port tags)
-#endif
 #ifdef PORT_NATIVE_OPS
 void port_nop_static_forget(void);
 static u32 sNopStats[2];
@@ -3807,7 +3789,6 @@ static void track_frame_start(void) {
     }
 #endif
     sTrackLoads = gPortLevelLoads;
-#ifdef PICA_ALL
     if (sFrameCount % 600 == 0 && (sNDrawStats[0] | sNDrawStats[1] | sNDrawStats[2]) != 0) {
         plat_log("native draws: %lu drawn, %lu materials captured, %lu dropped (material gone)", sNDrawStats[0],
                  sNDrawStats[1], sNDrawStats[2]);
@@ -3881,7 +3862,6 @@ static void track_frame_start(void) {
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
         sEngStats[0] = sEngStats[1] = 0; // Read without a lock, as the other profiler counts
     }
-#endif
     if (sNativeTrack && sFrameCount % 600 == 0) {
         plat_log("native track: %u KB in %u meshes; batches %u GPU, %u left out, %u CPU; %u made, %u draws",
                  (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (unsigned) sTrackStats[0],
@@ -4796,8 +4776,7 @@ static NOINLINE HOT s32 native_mesh(const Gfx *dl, s32 remaining) {
     return used;
 }
 
-#ifdef PICA_ALL
-/******************************** Native draws (NR0/NR1/NR2, PICA_ALL) ********************************/
+/******************************** Native draws (NR0/NR1/NR2) ********************************/
 /*
  * The game records a model batch as one PORT_NDRAW_TAG | material and two words of data (port_drawtag.h) instead of
  * its N64 commands. A material is captured once: the first time the game uses it, it emits the material's own
@@ -6030,7 +6009,6 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sTriStateValid = FALSE;
     return 2;
 }
-#endif
 
 /******************************** RDP rectangles ********************************/
 
@@ -6051,12 +6029,10 @@ static void draw_rect(float x0, float y0, float x1, float y1, float s0, float t0
     Tile *tile = &g.tiles[g.rdpHalf1 & 7];
     Tile *tile1 = &g.tiles[(g.rdpHalf1 + 1) & 7];
 
-#ifdef PICA_ALL
     if (sRectOverride) {
         tile = &sRectTiles[0];
         tile1 = &sRectTiles[1];
     }
-#endif
     build_draw_state(&state, TRUE);
     if (!textured) {
         state.textures[0] = NULL;
@@ -6481,7 +6457,6 @@ void port_nop_static_forget(void) {
 }
 #endif
 
-#ifdef PICA_ALL
 /******************************** Texture handles (roadmap R3, DKR_NATIVE_TEXHANDLE) ********************************/
 /*
  * Every texture the game loads has a load list (material_init: its image, the load tile, the block load, the render
@@ -6841,7 +6816,6 @@ static GfxTexture *handle_texture(void) {
     e->lastFrame = sFrameCount;
     return texture_with_filter(e, tex_filter());
 }
-#endif
 
 static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 depth) {
     u32 op = w0 >> 24;
@@ -6851,11 +6825,9 @@ static NOINLINE HOT s32 call_display_list(u32 w0, u32 w1, const Gfx *where, s32 
     }
     if (depth < DL_STACK_SIZE) {
         s32 maxCommands = (op == OP(G_DMADL)) ? (s32) ((w0 >> 16) & 0xFF) : -1;
-#ifdef PICA_ALL
         if (sTexHandleOn && handle_call((const Gfx *) seg_addr(w1), maxCommands, FALSE)) {
             return op == OP(G_DL) && ((w0 >> 16) & G_DL_NOPUSH);
         }
-#endif
 #ifdef PORT_NATIVE_OPS
         nop_static((const Gfx *) seg_addr(w1), maxCommands);
 #endif
@@ -7087,12 +7059,10 @@ static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
             }
             if (depth < DL_STACK_SIZE) {
                 s32 maxCommands = (bits >> 13) & 1 ? (s32) (bits & 0xFF) : -1;
-#ifdef PICA_ALL
                 // R3: a call to a known texture's load list is set by handle, without its ops.
                 if (sTexHandleOn && handle_call((const Gfx *) seg_addr(w1), maxCommands, FALSE)) {
                     return (bits >> 14) & 1;
                 }
-#endif
                 nop_static((const Gfx *) seg_addr(w1), maxCommands);
                 run_command_list((const Gfx *) seg_addr(w1), maxCommands, depth + 1);
             }
@@ -7149,7 +7119,7 @@ static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
 }
 #endif
 
-#if defined(PICA_ALL) && defined(PORT_NATIVE_OPS)
+#ifdef PORT_NATIVE_OPS
 /*
  * The walk census (DKR_WALK_CENSUS=1, gfx_census.h): every command the walk executes, counted by draw kind and class,
  * so the commands that are still N64-shaped (vertex slots, texture loads, fixed matrices, list calls) are listed.
@@ -7317,7 +7287,6 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
         u32 w1 = dl->words.w1;
         u32 op = w0 >> 24;
         u32 info = sOpInfo[op];
-#ifdef PICA_ALL
         if (UNLIKELY(sCensusOn > 0) && !sCensusSkip && !sPrewarming) { // (The texture prewarm runs load lists outside any frame)
             census_command(dl, w0, w1, depth);
         }
@@ -7327,7 +7296,6 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                 sOpKind[sDrawKind][op]++;
             }
         }
-#endif
         dl++;
         remaining--;
         if (UNLIKELY(sTracing)) {
@@ -7372,7 +7340,6 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_track(dl, remaining);
                     dl += used;
                     remaining -= used;
-#ifdef PICA_ALL
                 } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
                     s32 used = native_record(dl, remaining, w1 & 0xFFFF);
                     dl += used;
@@ -7405,7 +7372,6 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     g.curMatrix = index;
                     dl++;
                     remaining--;
-#endif
                 } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
                     s32 k;
                     for (k = 0; k < 4; k++) {
@@ -7764,9 +7730,7 @@ static void drop_entries(const u8 *start, const u8 *end, u32 seq) {
             free_entry_later(&sTexCache[i]);
         }
     }
-#ifdef PICA_ALL
     handle_drop_range(start, end, seq);
-#endif
 }
 
 /*
@@ -7925,9 +7889,7 @@ static void prewarm_textures(void) {
         // was (same size, within DKR_TEX_REHASH frames) is hashed afresh instead of matching the old one's entry.
         sDropsSeen = drops;
         __builtin_memset(sHashCache, 0, sizeof(sHashCache));
-#ifdef PICA_ALL
         handle_forget_all(); // (R3) Nor a handle of a list loaded over since
-#endif
     }
     if (sTexFreeLaterCount > 0) {
         apply_frees_later(!sTexHandleOn);
@@ -7969,7 +7931,6 @@ static void prewarm_textures(void) {
                 g.tmem[i] = noLoad;
             }
             g.tmemValid = 0;
-#ifdef PICA_ALL
             // The list's run also kept as its texture's handle (R3, see TexHandle).
             {
                 GfxTexture *tex = handle_learn(e->list, e->cmd, e->numCommands);
@@ -7981,12 +7942,6 @@ static void prewarm_textures(void) {
                     decoded++;
                 }
             }
-#else
-            run_command_list(e->cmd, e->numCommands, 0);
-            if (lookup_texture(G_TX_RENDERTILE, NULL) != NULL) {
-                decoded++;
-            }
-#endif
         }
     }
     sPrewarming = FALSE;
@@ -8100,7 +8055,6 @@ void port_gfx_run_task(void *taskPtr) {
     REF_CALL(refb_start_frame());
     sTracing = sFrameCount == sTraceFrame;
     read_switches();
-#ifdef PICA_ALL
     {
         // The buckets change threads only with the queue empty (see sRemote).
         static s32 hooked;
@@ -8116,7 +8070,6 @@ void port_gfx_run_task(void *taskPtr) {
         native_remote_take();
     }
     native_tris_take();
-#endif
     dying_reclaim(FALSE);
     prewarm_textures();
     forget_all_loads();

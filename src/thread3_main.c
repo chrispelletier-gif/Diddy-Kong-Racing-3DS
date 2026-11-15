@@ -124,7 +124,7 @@ FadeTransition D_800DD424 = FADE_TRANSITION(FADE_FULLSCREEN, FADE_FLAG_NONE, FAD
 #endif
 Gfx *gDisplayLists[DL_BUFFERS];
 #ifdef TARGET_PORT
-/* PICA_ALL (DKR_RACER_LOD_ADAPT, default on): nonzero while the game is missing its frame rate cap, so the other
+/* DKR_RACER_LOD_ADAPT (default on): nonzero while the game is missing its frame rate cap, so the other
  * karts use their simpler models at the 4-player distances (src/objects.c). On after two slow frames within eight,
  * off again after five seconds without one. The game's own retrace count decides, so lockstep runs never change. */
 s32 gPortRacerLodBoost;
@@ -442,7 +442,6 @@ void main_game_loop(void) {
     tempLogicUpdateRate = fb_update(gScreenStatus);
 #ifdef TARGET_PORT
     prof_game_mark(PROF_MARK_END, tempLogicUpdateRate);
-#if PICA_ALL
     {
         static s32 sSlowHistory, sHold, sQuiet;
         static u32 sLevelSeen;
@@ -491,7 +490,6 @@ void main_game_loop(void) {
             gPortRacerLodBlend = 0; // A new level starts with the usual distances
         }
     }
-#endif
     port_game_section(PORT_SEC_END_NOTE);
     port_game_note_frame();
     port_game_section(PORT_SEC_END_AUTORUN);
