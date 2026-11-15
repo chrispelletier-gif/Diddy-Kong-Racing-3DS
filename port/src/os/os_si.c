@@ -356,9 +356,8 @@ s32 osContStartReadData(OSMesgQueue *mq) {
     return 0;
 }
 
-#ifdef PICA_ALL
 /*
- * Native controller reads (PICA_ALL, DKR_NATIVE_INPUT): the game's joypad code polls the 3DS buttons when it reads
+ * Native controller reads (DKR_NATIVE_INPUT): the game's joypad code polls the 3DS buttons when it reads
  * them, instead of starting an N64 controller read at the end of one frame, waiting for its serial interface message
  * and copying the result the next frame. Input is a frame fresher.
  */
@@ -381,7 +380,6 @@ void port_input_read_now(OSContPad *data) {
 void port_input_frame_done(void) {
     flush_saves(FALSE);
 }
-#endif
 
 void osContGetReadData(OSContPad *data) {
     s32 i;

@@ -592,31 +592,23 @@ void transition_update_shape(s32 updateRate) {
 /* One shape batch of a transition: a native draw record with native draws on (mat from fade_material), else the
  * vertex and triangle commands. */
 static void fade_draw(Gfx **dList, s32 mat, Vertex *v, s32 numVerts, Triangle *t, s32 numTris) {
-#ifdef PICA_ALL
     if (mat >= 0) {
         port_native_record(dList, mat, v, numVerts, t, numTris, 0, 1);
         return;
     }
-#endif
     gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(v), numVerts, 0);
     gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(t), numTris, TRIN_DISABLE_TEXTURE);
 }
 
 /* The transition shape settings just sent, kept as a native material: its id, or -1 with native draws off. */
 static s32 fade_material(Gfx **dList) {
-#ifdef PICA_ALL
     return port_native_material_here(dList, dTransitionShapeSettings, 0);
-#else
-    return -1;
-#endif
 }
 
 static void fade_end(s32 mat) {
-#ifdef PICA_ALL
     if (mat >= 0) {
         port_native_end();
     }
-#endif
 }
 
 /**

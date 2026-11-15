@@ -232,8 +232,7 @@ void port_rom_read(u32 romOffset, void *dst, u32 size) {
     bcopy(sRomData + romOffset, dst, size);
 }
 
-#ifdef PICA_ALL
-/* Native ROM reads (PICA_ALL, DKR_NATIVE_ROM_READS): asset_loading.c copies straight from the ROM image. */
+/* Native ROM reads (DKR_NATIVE_ROM_READS): asset_loading.c copies straight from the ROM image. */
 int port_native_rom_reads_on(void) {
     static s32 sOn = -1;
     if (sOn < 0) {
@@ -241,7 +240,6 @@ int port_native_rom_reads_on(void) {
     }
     return sOn;
 }
-#endif
 
 /******************************** libultra API ********************************/
 

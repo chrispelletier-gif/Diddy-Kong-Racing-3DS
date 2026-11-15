@@ -1,5 +1,5 @@
 /*
- * The sound lock (PICA_ALL test build, DKR_NATIVE_AUDIO_LOCK, on by default there; off in lockstep runs).
+ * The sound lock (DKR_NATIVE_AUDIO_LOCK, on by default; off in lockstep runs).
  *
  * The sound code (libultra's synthesizer, event queues and sound player, and the game's sound effect player) guards
  * the state it shares between the game thread and the sound thread by "disabling interrupts" (osSetIntMask). The port
@@ -15,7 +15,6 @@
 #include "port.h"
 #include "plat/plat.h"
 
-#ifdef PICA_ALL
 
 typedef struct {
     const char *swName, *logLine;
@@ -93,4 +92,3 @@ void port_heap_unlock(u32 flags) {
     }
 }
 
-#endif

@@ -492,10 +492,8 @@ void osCreateMesgQueue(OSMesgQueue *mq, OSMesg *msg, s32 count) {
     mq->msg = msg;
 }
 
-#ifdef PICA_ALL
 extern OSMesgQueue *gPortSchedPumpQ;
 void port_sched_pump(void);
-#endif
 
 s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     int hadInt = (flag == OS_MESG_BLOCK) ? port_int_release() : FALSE;
@@ -519,11 +517,9 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag) {
     if (waited) {
         wait_for_int_enabled();
     }
-#ifdef PICA_ALL
     if (mq == gPortSchedPumpQ) {
         port_sched_pump();
     }
-#endif
     return 0;
 }
 
@@ -656,11 +652,9 @@ void port_raise_event(OSEvent event) {
     if (waited) {
         gPortEventsWaiting--;
     }
-#ifdef PICA_ALL
     if (sEventTable[event].queue == gPortSchedPumpQ && posted) {
         port_sched_pump();
     }
-#endif
 }
 
 /******************************** Time ********************************/

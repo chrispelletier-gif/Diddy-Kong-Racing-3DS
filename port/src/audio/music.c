@@ -1,5 +1,5 @@
 /*
- * The native music player (PICA_ALL test build, DKR_NATIVE_MUSIC, on by default there).
+ * The native music player (DKR_NATIVE_MUSIC, on by default).
  *
  * Replaces libultra's compact sequence player (csplayer.c, cseq.c, event.c's queue and the seqplayer.c voice helpers)
  * for the game's two players (music and jingles), behind the same alCSP and alCSeq calls the game makes:
@@ -23,7 +23,6 @@
 #include "port.h"
 #include "plat/plat.h"
 
-#ifdef PICA_ALL
 
 /* libultra's reader, for a sequence the decoder refused. */
 void alCSeqNextEvent(ALCSeq *seq, ALEvent *evt);
@@ -1183,4 +1182,3 @@ int port_music_post(void *seqp, ALEvent *evt) {
     return TRUE;
 }
 
-#endif

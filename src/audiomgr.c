@@ -101,14 +101,12 @@ static s32 __amDMA(s32 addr, s32 len, void *state);
 static ALDMAproc __amDmaNew(AMDMAState **state);
 static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo);
 static void __amHandleDoneMsg(AudioInfo *info);
-#ifdef PICA_ALL
 int port_frames_native(void);
 void port_frames_audio_wait(void);
 void port_frames_run_audio(void *task);
 int port_native_audio_on(void);
 void port_native_audio_frame(void);
 int port_players_syscore(void);
-#endif
 static void __clearAudioDMA(void);
 
 /**** Debug strings ****/
@@ -252,7 +250,6 @@ static void __amMain(UNUSED void *arg) {
     osScAddClient(gAudioSched, (OSScClient *) &audioStack, &__am.audioFrameMsgQ, OS_MESG_BLOCK);
 
     while (!done) {
-#ifdef PICA_ALL
         if (port_frames_native()) {
             // The native frame queue's beat, every other retrace (port/src/os/frames.c).
             static AudioMsg sRetraceMsg;
@@ -260,11 +257,9 @@ static void __amMain(UNUSED void *arg) {
             port_frames_audio_wait();
             msg = &sRetraceMsg;
         } else
-#endif
         (void) osRecvMesg(&__am.audioFrameMsgQ, (OSMesg *) &msg, OS_MESG_BLOCK);
         switch (msg->gen.type) {
             case OS_SC_RETRACE_MSG:
-#ifdef PICA_ALL
                 if (port_native_audio_on()) {
                     // v31 (DKR_PLAYERS_SYSCORE, Old 3DS): the players' frame on the system core, this thread waiting
                     // for it, so the game's core keeps the time (about 1 ms a frame on an Old 3DS).
@@ -274,7 +269,6 @@ static void __amMain(UNUSED void *arg) {
                     lastInfo = NULL;
                     break;
                 }
-#endif
                 // TODO: Check type of ACMDList?
                 __amHandleFrameMsg((AudioInfo *) __am.ACMDList[(((u32) audFrameCt % 3)) + 2], lastInfo);
                 /* wait for done message */
@@ -311,9 +305,8 @@ static void __amMain(UNUSED void *arg) {
  * know that the next frame of audio is ready for processing.
  *
  *****************************************************************************/
-#ifdef PICA_ALL
 /*
- * The native audio frame (PICA_ALL, DKR_NATIVE_AUDIO): with the DSP voices playing the sound, a frame of the N64's audio
+ * The native audio frame (DKR_NATIVE_AUDIO): with the DSP voices playing the sound, a frame of the N64's audio
  * pipeline is an empty command list sent as an RSP task through the scheduler (which holds back the next graphics task
  * while it runs), an emulated RSP thread that does nothing with it, the SP interrupt back through the scheduler, and
  * the audio interface queue a frame late. Here the frame is sized from what the DSP still has to play, the sequence and
@@ -374,7 +367,6 @@ void port_native_audio_frame(void) {
     gPortSoundPlayersFrames++;
     gPortSoundPlayersCore = plat_core_id();
 }
-#endif
 
 static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo) {
     s16 *audioPtr;
@@ -444,13 +436,11 @@ static u32 __amHandleFrameMsg(AudioInfo *info, AudioInfo *lastInfo) {
     t->list.t.yield_data_size = 0;
     t->unk6C = 1;
 
-#ifdef PICA_ALL
     if (port_frames_native()) {
         port_frames_run_audio(t); // no scheduler: mixed here, and the reply sent (port/src/os/frames.c)
         curAcmdList ^= 1;
         return 0;
     }
-#endif
     ret = osSendMesg(osScGetCmdQ(gAudioSched), (OSMesg) t, OS_MESG_NOBLOCK);
 
     curAcmdList ^= 1; /* swap which acmd list you use each frame */

@@ -1,5 +1,5 @@
 /*
- * The native frame queue (PICA_ALL test build, DKR_NATIVE_FRAMES, on by default there; off in lockstep runs).
+ * The native frame queue (DKR_NATIVE_FRAMES, on by default; off in lockstep runs).
  *
  * Replaces the N64 scheduler's part in getting a frame to the screen. On the N64 (and in the port until now) the game
  * sent its display list task as a message to the scheduler, which queued it in its RSP/RDP state machine, started it
@@ -18,7 +18,6 @@
 #include "plat/plat.h"
 #include "plat/recorder.h"
 
-#ifdef PICA_ALL
 
 extern s32 D_800DE730[];      /* the scheduler's usual done message: swap the buffer */
 extern s32 gRetraceCounter32;
@@ -271,4 +270,3 @@ void port_describe_frames(char *buffer, s32 size) {
                   (unsigned) sOverflows);
 }
 
-#endif
