@@ -156,7 +156,7 @@ static s32 current_tile(s32 page) {
             }
             break;
         case SETUP_PAGE_LOOK:
-            return port_bottom_style();
+            return port_bottom_style() < 4 ? port_bottom_style() : 0; /* the 4 base looks have tiles; the colour variants don't */
     }
     return 0;
 }

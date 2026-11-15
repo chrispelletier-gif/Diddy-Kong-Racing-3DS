@@ -79,7 +79,7 @@ const char *saves_option_label(int i) {
     if (i == ROW_BACK_UP) {
         return "Back up now";
     } else if (i == ROW_PICK) {
-        return "Backup";
+        return "Saved on"; /* the picked backup's date: "Backup" stacked the word under "Back up now" */
     }
     return armed() ? "Tap again to restore" : "Restore backup";
 }

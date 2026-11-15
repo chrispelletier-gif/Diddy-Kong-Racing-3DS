@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "menu_3ds.h"
+#include "plat/bottom_screen.h"
 #include "plat/plat.h"
 #if PLAT_DEBUG_TOOLS
 #include <curl/curl.h>
@@ -100,6 +101,11 @@ static volatile int sTapX, sTapY;
 #define TAP_REFRESH -3 // Not a tap: a race started or ended, so the idle buttons change.
 static LightEvent sTapEvent;
 static Channel sChannels[2] = { { "3ds-master-debug", "master" }, { "3ds-newest", "newest" } };
+
+/* A channel as the screen names it ("the stable build", as its button reads Stable; "master" is the branch). */
+static const char *channel_name(const char *label) {
+    return strcmp(label, "master") == 0 ? "stable" : label;
+}
 static int sChosen;
 
 /* The panel: rows 1-3 are the buttons (screen rows 26-28, y 200-223). */
@@ -269,7 +275,7 @@ static size_t on_data(char *data, size_t size, size_t count, void *user) {
         int percent = (int) ((unsigned long long) download->written * 100 / download->expected);
         if (percent / 5 != download->lastPercent / 5) {
             download->lastPercent = percent;
-            show_busy("Downloading %s: %d%%", sChannels[sChosen].label, percent);
+            show_busy("Downloading the %s build... %d%%", channel_name(sChannels[sChosen].label), percent);
         }
     }
     return length;
@@ -579,7 +585,7 @@ static int download_verified(const char *url, unsigned long size, const char *sh
     mbedtls_sha256_init(&download.sha);
     mbedtls_sha256_starts_ret(&download.sha, 0);
 
-    show_busy("Downloading %s...", label);
+    show_busy("Downloading the %s build...", channel_name(label));
     error[0] = '\0';
     if (net_3ds_begin(error, sizeof(error)) != 0) {
         status = 0;
@@ -731,8 +737,8 @@ int update_3ds_touch(int x, int y) {
     if (plat_3ds_setup_touch(x, y)) {
         return 1; // The first-run setup's tiles and buttons take every tap while they show.
     }
-    if (!sStarted || y >= BUTTON_BOTTOM) {
-        return 0;
+    if (!sStarted || (y >= BUTTON_BOTTOM && !bs_grid_on())) {
+        return 0; // (the grid's bar runs to 232, its buttons take the whole band below the panels)
     }
     if (y < BUTTON_TOP) {
         if (sState != STATE_MENU) {
@@ -741,6 +747,16 @@ int update_3ds_touch(int x, int y) {
         sTapX = x;
         sTapY = y;
         sTappedButton = TAP_MENU;
+        LightEvent_Signal(&sTapEvent);
+        return 1;
+    }
+    if (bs_grid_on()) {
+        // The grid's bar: the buttons where they were drawn, nothing in the 8 px gaps between them.
+        button = sState == STATE_INSTALLED ? 0 : bs_grid_button_hit(x);
+        if (sState == STATE_BUSY || button < 0 || button >= count) {
+            return 1;
+        }
+        sTappedButton = button;
         LightEvent_Signal(&sTapEvent);
         return 1;
     }
