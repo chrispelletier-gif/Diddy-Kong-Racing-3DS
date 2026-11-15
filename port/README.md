@@ -163,8 +163,8 @@ environment variables:
 | `DKR_FRAMES`        | Exit after this many frames. |
 | `DKR_DUMP_EVERY`    | Write every Nth frame to `DKR_DUMP_DIR/frame_NNNNN.png`. |
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
-| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). On the 3DS the name is inside `sdmc:/3ds/dkr/`. |
-| `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). Also works on the 3DS. |
+| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). |
+| `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
 | `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
 | `DKR_BOTTOM_RACE`   | Draw the 3DS bottom screen's race HUD to `race_NNNN.png` in this directory every 60 frames of a race, and leave those HUD pieces off the top screen as the 3DS does (`DKR_RACE_HUD=2` keeps them on both). `DKR_BOTTOM_RACE_LOG=1` also prints the player's map position and heading each frame. |
@@ -236,6 +236,7 @@ controls) work there, as do these renderer switches:
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS, and the sound with it)
+- `DKR_AUDIO_DSP` and `DKR_DUMP_AUDIO` (see the host table above) work here too; the dump file goes inside `sdmc:/3ds/dkr/`
 - `DKR_AUDIO_DEBUG=1` (with the DSP voices, logs how many voices play and how late their changes were applied)
 - `DKR_AUDIO_NOFX=1` (with the DSP voices, no reverb, for comparison)
 - `DKR_AUDIO_SIMD=0` (mixes the sound with the plain C loops instead of the ARM SIMD ones; the sound is the same)
