@@ -3350,12 +3350,10 @@ void render_misc_model(Object *obj, Vertex *verts, u32 numVertices, Triangle *tr
     if (tex != NULL) {
         hasTexture = TRUE;
     }
-#ifdef PICA_ALL
     if (port_native_batch(&gObjectCurrDisplayList, tex, flags, texOffset, verts, numVertices, triangles, numTriangles,
                           hasTexture, 1)) {
         port_native_end();
     } else
-#endif
     {
         material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
         gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
@@ -3866,7 +3864,7 @@ void object_undo_player_tumble(Object *obj) {
     }
 }
 
-#if defined(TARGET_PORT) && PICA_ALL
+#ifdef TARGET_PORT
 /*
  * v41 (DKR_RACER_LOD_HOLD=n, on an Old 3DS 4 by default; 0 the old way): the other karts change model at fixed
  * distances, and one racing right at a threshold flips between two models every few frames (seen on PC: 3 -> 4 -> 3
@@ -3913,7 +3911,7 @@ static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds)
 }
 #endif
 
-#if defined(TARGET_PORT) && PICA_ALL
+#ifdef TARGET_PORT
 /*
  * DKR_RACER_LOD_SMOOTH (Old 3DS 2; 1 eased only; 0 the old instant switch). While the frame rate drops
  * (gPortRacerLodBoost) the other karts' distances move towards the 4-player row (boostRow bytes on in the table),
@@ -3989,7 +3987,7 @@ void set_temp_model_transforms(Object *obj) {
     u8 *var_a1;
     f32 ret2;
     UNUSED s32 pad;
-#if defined(TARGET_PORT) && PICA_ALL
+#ifdef TARGET_PORT
     u8 *racerBaseAsset = NULL; // Non-NULL for another racer's kart (port_racer_lod_hold)
     s32 portRawV = 0;
     s32 lodBoostRow = 0;
@@ -4035,21 +4033,17 @@ void set_temp_model_transforms(Object *obj) {
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
                             s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
-#if PICA_ALL
                             {
                                 extern s32 gPortRacerLodBoost;
                                 racerBaseAsset = bossAsset; // Marks another racer's kart for port_racer_lod_hold
                                 (void) gPortRacerLodBoost; // Eased in by gPortRacerLodBlend instead (port_racer_lod_ease)
                             }
-#endif
                             if (bias > lodLayout && bias <= 3) {
                                 lodLayout = bias;
                             }
-#if PICA_ALL
                             // The frame rate is dropping: towards the 4-player row of the same table (10 bytes a
                             // layout), eased by gPortRacerLodBlend (src/thread3_main.c, port_racer_lod_ease).
                             lodBoostRow = (lodLayout < 3) ? (3 - lodLayout) * 10 : 0;
-#endif
                         }
                         bossAsset += lodLayout * 10;
                     }
@@ -4071,7 +4065,7 @@ void set_temp_model_transforms(Object *obj) {
                     obj->trans.scale *= var_f0;
                     var_v1 *= ((f32 *) get_misc_asset(ASSET_MISC_4))[objRacer->characterId];
                     // ASSET_MISC_4 is just 10 floats of 1.0f. One for each playable character.
-#if defined(TARGET_PORT) && PICA_ALL
+#ifdef TARGET_PORT
                     portRawV = var_v1;
 #endif
                     if (var_v1 < -50) {
@@ -4096,7 +4090,7 @@ void set_temp_model_transforms(Object *obj) {
                             modelIndex = 5;
                         }
                     }
-#if defined(TARGET_PORT) && PICA_ALL
+#ifdef TARGET_PORT
                     if (racerBaseAsset != NULL) { // Another racer's kart (DKR_RACER_LOD_HOLD)
                         modelIndex = port_racer_lod_ease(objRacer->racerIndex, modelIndex, portRawV, bossAsset, lodBoostRow);
                     }
@@ -4257,13 +4251,11 @@ void func_800135B8(Object *boostObj) {
 
         vtx = &gBoostVerts[gBoostVertFlip][(boostObj->properties.boost.indexes >> 14) & 0x3FFF];
         tri = &gBoostTris[gBoostVertFlip][boostObj->properties.boost.indexes & 0x3FFF];
-#ifdef PICA_ALL
         if (port_native_batch(&gObjectCurrDisplayList, asset->tex,
                               (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0, vtx, BOOST_VERT_COUNT,
                               tri, BOOST_TRI_COUNT, hasTexture, 1)) {
             port_native_end();
         } else
-#endif
         {
             material_set(&gObjectCurrDisplayList, asset->tex,
                          (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
@@ -4535,10 +4527,8 @@ void obj_tick_anims(void) {
  * Renders every triangle batch in an objects mesh.
  * If vertOffset is true, then draw in two passes, utilising the head matrix and vertex ID offset in the batch.
  */
-#ifdef PICA_ALL
 extern s16 gForceFlags;
 extern TextureHeader *gCurrentTextureHeader;
-#endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
     s32 i;
     s32 textureIndex;
@@ -4563,13 +4553,11 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     {
         // Native model meshes (port_drawtag.h, DKR_NATIVE_MESH): tag each batch's vertices and triangles.
         s32 nativeTag = obj != NULL && port_native_mesh_for(obj->behaviorId == BHV_RACER);
-#ifdef PICA_ALL
         // GPU vertex lighting (port_drawtag.h): the lit batches of a buffer whose colours hold normals get the light.
         float light[4];
         s32 lit = obj != NULL && port_gpu_light_get(obj->curVertData, objModel, light), lightOn = FALSE;
         // Native draws (port_drawtag.h PORT_NDRAW_TAG): no N64 commands for the batches, only a record each.
         s32 nativeDraw = obj != NULL && port_native_draw() && !gObjectTexAnim, anyNative = FALSE;
-#endif
 #endif
     while (i < objModel->numberOfBatches && !endLoop) {
         if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
@@ -4600,7 +4588,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     !(objModel->batches[i].flags & (flags & ~RENDER_SEMI_TRANSPARENT))) {
                     texToSetFlags |= RENDER_SEMI_TRANSPARENT;
                 }
-#ifdef PICA_ALL
                 if (nativeDraw) {
                     // The material's commands only when the renderer hasn't kept them yet.
                     int capture; s32 id = port_nmat_key(texToSet, texToSetFlags, texOffset, &capture);
@@ -4613,7 +4600,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     textureIndex = id;
                     anyNative = TRUE;
                 } else
-#endif
                 if (gObjectTexAnim == FALSE) {
                     material_set(&dList, texToSet, texToSetFlags, texOffset);
                 } else {
@@ -4622,7 +4608,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                                        texToSet->numberOfCommands);
                 }
 #ifdef TARGET_PORT
-#ifdef PICA_ALL
                 {
                     s32 want = lit && objModel->batches[i].miscData != BATCH_VTX_COL;
                     if (want && !lightOn) {
@@ -4642,8 +4627,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                         lightOn = FALSE;
                     }
                 }
-#endif
-#ifdef PICA_ALL
                 if (nativeDraw) {
                     gDPNoOpTag(dList++, PORT_NDRAW_TAG | textureIndex);
                     dList->words.w0 = OS_K0_TO_PHYSICAL(vtx);
@@ -4655,7 +4638,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     i++;
                     continue;
                 }
-#endif
                 if (nativeTag) {
                     gDPNoOpTag(dList++, PORT_NATIVE_TAG);
                 }
@@ -4682,7 +4664,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
         }
     }
 #ifdef TARGET_PORT
-#ifdef PICA_ALL
     if (lightOn) {
         gDPNoOpTag(dList++, PORT_LIGHT_TAG);
     }
@@ -4692,7 +4673,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
         gForceFlags = TRUE;
         gCurrentTextureHeader = NULL;
     }
-#endif
     }
 #endif
     if (i >= objModel->numberOfBatches) {
@@ -8518,9 +8498,7 @@ void calc_dynamic_lighting_for_object_1(Object *object, ObjectModel *model, s16 
     vertices = object->curVertData;
     normals = model->normals;
     normIdx = 0;
-#ifdef PICA_ALL
     port_gpu_light_clear(vertices); // Shaded on the CPU
-#endif
 
     direction.x = -(object->shading->lightDirX << 3);
     direction.y = -(object->shading->lightDirY << 3);

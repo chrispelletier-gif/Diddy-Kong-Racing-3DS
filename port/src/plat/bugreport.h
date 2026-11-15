@@ -31,15 +31,9 @@ typedef void (*BugReportProgress)(const char *text);
 /*
  * Creates the issue and posts the files. Returns 0 on success, with the issue's web address in result; otherwise
  * nonzero, with what went wrong in result. Files that do not fit in maxAttachmentBytes (compressed) are left out and
- * listed in a final comment.
- */
-int bugreport_send(const BugReportConfig *config, const char *title, const char *body, const BugReportFile *files,
-                   int fileCount, unsigned int maxAttachmentBytes, BugReportProgress progress, char *result,
-                   size_t resultSize);
-
-/*
- * The same, but with issue set (its number, as text) the body is posted as a comment on that issue instead, the title
- * (if not NULL) replaces the issue's, and the files follow as comments. issue NULL or empty: as bugreport_send.
+ * listed in a final comment. With issue set (its number, as text) the body is posted as a comment on that issue
+ * instead, the title (if not NULL) replaces the issue's, and the files follow as comments. issue NULL or empty: a new
+ * issue.
  */
 int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
                       const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
