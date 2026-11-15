@@ -198,6 +198,10 @@ s32 port_gfx_frame_count(void);
 /* Texture pre-decoding (gfx_rdp.c): the game hands over each texture it loads and the memory of each one it frees. */
 void port_gfx_texture_loaded(const void *cmd, s32 numCommands);
 void port_gfx_texture_freed(const void *start, const void *end);
+/* R3: the texture queue's head as the game hands a frame over, and the renderer told it before that frame's walk,
+ * so a texture freed while the frame was built stays until the frame is drawn (gfx_rdp.c sTexFreeLater). */
+unsigned int port_gfx_texture_queue_head(void);
+void port_gfx_frame_textures(unsigned int head);
 s32 port_apply_test_save(void *settings);
 
 /* Unattended test run (port/src/game/port_autorun.c). */

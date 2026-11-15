@@ -38,6 +38,7 @@ static volatile u32 sGfxTasksSubmitted, sGfxTasksFinished;
 /* Each display list's logic step (gPortLogicStep), by the order they were handed over; they are drawn in that order. */
 #define GFX_STEP_RING 8
 static u8 sGfxSteps[GFX_STEP_RING];
+static unsigned int sGfxTexHeads[GFX_STEP_RING]; // R3: the texture queue's head as each frame was handed over
 /* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
 static s32 sRcpTasksBusy;
 /* What the audio worker is doing, for the 3DS watchdog's stall report. */
@@ -127,6 +128,7 @@ static void gfx_thread(void *arg) {
 #endif
         port_raise_event(OS_EVENT_SP);
         plat_set_frame_step(sGfxSteps[sGfxTasksFinished % GFX_STEP_RING]);
+        port_gfx_frame_textures(sGfxTexHeads[sGfxTasksFinished % GFX_STEP_RING]);
         start = plat_time_ns();
         gPortWalkStartNs = start;
         port_gfx_run_task(task);
@@ -226,6 +228,7 @@ void port_rcp_gfx_submitted(void) {
     plat_klock();
     sGfxTasksPending++;
     sGfxSteps[sGfxTasksSubmitted % GFX_STEP_RING] = (u8) gPortLogicStep;
+    sGfxTexHeads[sGfxTasksSubmitted % GFX_STEP_RING] = port_gfx_texture_queue_head();
     sGfxTasksSubmitted++;
     plat_kunlock();
 }
