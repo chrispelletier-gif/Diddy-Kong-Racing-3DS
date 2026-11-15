@@ -764,6 +764,20 @@ static s32 mon_kinds_shown(const ProfDrawMix *m, u8 *shown, s32 rows) {
     return n;
 }
 
+/*
+ * DKR_PROF_TERM (default on, owner 2026-11-15): the bottom screen sets the readout in a small terminal font
+ * (bottom_grid.inc gterm_lines), 57 columns by 16 lines, so the five pages fold into three: the whole summary with the
+ * graph's key, every draw kind with its wasted triangles, and twice as many objects.
+ */
+enum { TERM_SUMMARY, TERM_KINDS, TERM_OBJECTS, TERM_PAGES };
+#define TERM_LINES 16
+static s32 mon_term(void) {
+    return plat_switch("DKR_PROF_TERM", 1) != 0;
+}
+static s32 mon_pages(void) {
+    return mon_term() ? TERM_PAGES : MON_PAGES;
+}
+
 int prof_monitor_tap(int x, int y) {
     (void) x;
     if (!sOverlayShown) {
@@ -772,7 +786,7 @@ int prof_monitor_tap(int x, int y) {
     if (y < BS_GRAPH_BOTTOM) {
         sMonFrozen = !sMonFrozen;
     } else {
-        sMonPage = (sMonPage + 1) % MON_PAGES;
+        sMonPage = (sMonPage + 1) % mon_pages();
     }
     sMonDirty = TRUE;
     return 1;
@@ -793,6 +807,99 @@ static void show_graph(void) {
     plat_overlay_graph(height, kind, n);
 }
 
+/* The pages in the terminal font (DKR_PROF_TERM): the readout's own spacing lines up its columns. */
+static void show_term_page(void) {
+    static char text[1536];
+    const ProfDrawMix *m = &sSecondMix;
+    const ProfSceneCounts *sc = &sSecondScene;
+    double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
+    double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
+    double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
+    static const char *const sNames[TERM_PAGES] = { "PROFILER", "DRAW KINDS", "OBJECTS" };
+    s32 page = sMonPage % TERM_PAGES, at, k;
+
+    at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sNames[page], (int) page + 1, TERM_PAGES,
+                       sMonFrozen ? " FROZEN" : "");
+    switch (page) {
+        case TERM_SUMMARY: {
+            /* the summary without its last line (the status), the graph's key, then the status if there is one */
+            const char *p, *last = sSummaryText;
+            for (p = sSummaryText; *p != '\0'; p++) {
+                if (*p == '\n') {
+                    last = p + 1;
+                }
+            }
+            plat_snprintf(text + at, sizeof(text) - at, "%.*sgraph: green logic cyan build yellow render\n"
+                                                        "orange textures red GPU grey retrace; tap: freeze\n%s",
+                          (int) (last - sSummaryText), sSummaryText, last);
+            break;
+        }
+        case TERM_KINDS: {
+            u8 shown[PORT_DRAW_KINDS];
+            mon_kinds_shown(m, shown, PORT_DRAW_KINDS);
+            at += plat_snprintf(text + at, sizeof(text) - at, "%-11s %5s %3s %5s %5s %4s %4s %4s %5s\n", "a frame:", "tris",
+                                "drw", "rdp", "bld", "off", "back", "tiny", "over");
+            for (k = 0; k < PORT_DRAW_KINDS && at < (s32) sizeof(text); k++) {
+                const ProfKindStats *st = &m->kinds[k];
+                double a = st->audited ? (double) st->audited : 1.0;
+                if (!shown[k]) {
+                    continue;
+                }
+                at += plat_snprintf(text + at, sizeof(text) - at,
+                                    "%-11.11s %5.0f %3.0f %5.2f %5.2f %3.0f%% %3.0f%% %3.0f%% x%.2f\n", sKindNames[k],
+                                    st->tris / frames, st->draws / frames, st->renderNs / 1e6 / timed,
+                                    st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a, st->backface * 100.0 / a,
+                                    st->tiny * 100.0 / a, st->areaPx / audited / (400.0 * 240.0));
+            }
+            if (sc->frames > 0 && at < (s32) sizeof(text)) {
+                at += plat_snprintf(text + at, sizeof(text) - at, "segments %.0f/%.0f (table %.0f)  objects %.0f/%.0f drawn\n",
+                                    (double) sc->segmentsDrawn / sc->frames, (double) sc->segments / sc->frames,
+                                    (double) sc->segmentsAllowed / sc->frames, (double) sc->objectsDrawn / sc->frames,
+                                    (double) sc->objects / sc->frames);
+            }
+            if (at < (s32) sizeof(text)) {
+                plat_snprintf(text + at, sizeof(text) - at, "off: past an edge; back: GPU culls it; tiny: < a pixel\n"
+                                                            "over: the pixels drawn, in whole screens");
+            }
+            break;
+        }
+        default: {
+            const ProfObjMix *o = &sSecondObj;
+            double of = o->frames ? (double) o->frames : 1.0, ot = o->timedFrames ? (double) o->timedFrames : 1.0;
+            double ort = o->renderTimedFrames ? (double) o->renderTimedFrames : 1.0;
+            u8 picked[PROF_OBJ_BUCKETS];
+            s32 n;
+            at += plat_snprintf(text + at, sizeof(text) - at, "%-14s %4s %4s %7s %7s %7s %7s\n", "a frame:", "upd", "vis",
+                                "tris", "logic", "bld", "rdp");
+            for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                picked[k] = o->objs[k].updates == 0 && o->objs[k].drawn == 0 && o->objs[k].tris == 0;
+            }
+            for (n = 0; n < TERM_LINES - 2 && at < (s32) sizeof(text); n++) {
+                s32 best = -1;
+                double bestCost = -1.0;
+                for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                    const ProfObjStats *b = &o->objs[k];
+                    double cost = (b->logicNs + b->buildNs) / ot + b->renderNs / ort + b->tris * 1e-3;
+                    if (!picked[k] && cost > bestCost) {
+                        best = k;
+                        bestCost = cost;
+                    }
+                }
+                if (best < 0) {
+                    break;
+                }
+                picked[best] = TRUE;
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-14.14s %4.0f %4.0f %7.0f %7.2f %7.2f %7.2f\n",
+                                    mon_name(prof_object_name(best), 14), o->objs[best].updates / of,
+                                    o->objs[best].drawn / of, o->objs[best].tris / of, o->objs[best].logicNs / 1e6 / ot,
+                                    o->objs[best].buildNs / 1e6 / ot, o->objs[best].renderNs / 1e6 / ort);
+            }
+            break;
+        }
+    }
+    plat_overlay_show(text);
+}
+
 static void show_monitor_page(void) {
     static char text[1024];
     const ProfDrawMix *m = &sSecondMix;
@@ -800,8 +907,12 @@ static void show_monitor_page(void) {
     double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
     double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
     double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
-    s32 page = sMonPage, at, k;
+    s32 page = sMonPage % MON_PAGES, at, k;
 
+    if (mon_term()) {
+        show_term_page();
+        return;
+    }
     at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sMonPageNames[page], (int) page + 1,
                        MON_PAGES, sMonFrozen ? " FROZEN" : "");
     switch (page) {
