@@ -314,10 +314,10 @@ void weather_reset(s32 weatherType, s32 density, s32 velX, s32 velY, s32 velZ, s
     numOfElements = numOfElements * 4;
     allocSize = sizeof(Vertex);
     allocSize *= numOfElements;
-    gSnowVertexData[0] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
-    gSnowVertexData[1] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
+    gSnowVertexData[0] = mempool_alloc_big(allocSize, COLOUR_TAG_LIGHT_ORANGE);
+    gSnowVertexData[1] = mempool_alloc_big(allocSize, COLOUR_TAG_LIGHT_ORANGE);
 #ifdef TARGET_PORT
-    gSnowVertexData[2] = mempool_alloc_safe(allocSize, COLOUR_TAG_LIGHT_ORANGE);
+    gSnowVertexData[2] = mempool_alloc_big(allocSize, COLOUR_TAG_LIGHT_ORANGE);
 #endif
     for (j = 0; j < FRAME_BUFFERS; j++) {
         gSnowVerts = gSnowVertexData[j];
@@ -544,6 +544,9 @@ void snow_render(void) {
         if (gSnowVertCount >= 4) {
             i = 0;
             mtx = get_projection_matrix_s16();
+#ifdef PICA_ALL
+            if (!cam_load_perspective(&gCurrWeatherDisplayList, G_MTX_DKR_INDEX_0))
+#endif
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
 #ifdef PICA_ALL

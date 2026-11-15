@@ -1,0 +1,5 @@
+# every boss level (both rounds)
+about = every boss level (both rounds)
+warp = 1,41,40,38,37,52,54,53,46,55
+warp_seconds = 10
+frames = auto

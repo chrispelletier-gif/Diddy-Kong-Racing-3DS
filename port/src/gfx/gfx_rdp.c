@@ -14,6 +14,7 @@
 #include "plat/profile.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "gfx_census.h"
 #include "port_drawtag.h"
 
 #define MAX_VERTICES 64
@@ -2384,6 +2385,7 @@ static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switche
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
 static s32 sTriReject;  // DKR_TRI_REJECT (PICA_ALL): a triangle wholly past one edge of the screen is not written
 static s32 sNativeDynamic; // DKR_NATIVE_DYNAMIC (PICA_ALL): batches made anew each frame drawn natively too
+static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
 static s32 sNativeOnceAFrame; // DKR_NATIVE_ONCE (PICA_ALL): a mesh's triangles compared once a frame
 static s32 sNativeBucket; // DKR_NATIVE_BUCKET (PICA_ALL): opaque native draws written straight into their bucket
 static s32 sNativeVfp; // DKR_NATIVE_VFP (PICA_ALL): native draws transform with VFP vectors when DKR_VFP_VECTORS is on
@@ -2497,6 +2499,7 @@ static void read_switches(void) {
     sTriReject = plat_switch("DKR_TRI_REJECT", 1) != 0;
     sNMatFast = plat_switch("DKR_NMAT_FAST", 1) != 0;
     sNativeDynamic = plat_switch("DKR_NATIVE_DYNAMIC", 1) != 0;
+    sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", 0) != 0;
     sNativeOnceAFrame = plat_switch("DKR_NATIVE_ONCE", 1) != 0;
     sNativeBucket = plat_switch("DKR_NATIVE_BUCKET", 1) != 0;
     sNativeVfp = plat_switch("DKR_NATIVE_VFP", 1) != 0;
@@ -2563,8 +2566,7 @@ static COLD void sweep_vertices(const Vertex *src) {
  * A load from vertex 0 brings a new anchor (its first vertex, flat as its matrix is: anchorFlat), which places the
  * ones after it.
  */
-static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anchorFlat) {
-    const RspVertex *anchor = &g.verts[0];
+static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anchorFlat, const RspVertex *anchor) {
     float scaleX = 1.0f, scaleY = 1.0f, scaleZ = 1.0f;
     u8 flat = (dest == 0 ? anchorFlat : anchor->flat) ? GFX_FLAT_PLACED : 0;
     s32 i;
@@ -2588,20 +2590,23 @@ static NOINLINE u8 place_billboard(RspVertex *verts, s32 count, s32 dest, u8 anc
 static u8 sLightOn;
 static float sLight[4];
 
-/* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
-static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
-                                           s32 billboard) {
-    RspVertex *verts = &g.verts[dest];
+/* The transform and the per vertex set-up of a load into verts (the base of an array of RspVertex, dest the first
+ * slot written): load_vertices_now's work, with the vertices' home and the billboard's anchor (for a load not from
+ * slot 0; a load from slot 0 is its own anchor) as arguments, so that records (load_records_now) can make theirs away
+ * from the RSP's slots. Returns the count made; *flatOut: whether any of them may be flat. */
+static inline __attribute__((always_inline)) s32 load_vertices_core(RspVertex *all, const RspVertex *anchorOther, const Vertex *src, s32 count,
+                                            s32 dest, float (*m)[4], s32 fog, s32 billboard, u32 *flatOut) {
+    RspVertex *verts = &all[dest];
     s32 i, n = MIN(count, MAX_VERTICES - dest);
     // An orthographic matrix (the HUD's, menus', fades') gives every vertex the same w.
     u8 flat = m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f;
     u8 restFlat = flat; // Of the vertices after the first, which may be a billboard's anchor (place_billboard)
     float fogMul = g.fogMul, fogOffset = g.fogOffset;
     u32 fogFlat;
-    u64 loaded;
 
+    *flatOut = 0;
     if (n <= 0) {
-        return;
+        return 0;
     }
 #ifdef HAVE_VFP_VECTORS
     if (sVfpVectors) {
@@ -2612,14 +2617,11 @@ static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 des
         transform_vertices(src, n, verts, m);
     }
     if (UNLIKELY(billboard)) {
-        restFlat = place_billboard(verts, n, dest, flat);
+        restFlat = place_billboard(verts, n, dest, flat, dest == 0 ? &all[0] : anchorOther);
     }
     // The fog factor costs a divide, so it is only worked out for vertices loaded with fog on (all fogged geometry,
     // in practice); draw_dkr_triangles catches any others if fog is turned on before they are drawn.
     fogFlat = (fog ? 0x100u : 0u) | ((u32) restFlat << 16);
-    if (!fog) {
-        g.vertsWithoutFog = TRUE;
-    }
     for (i = 0; i < n; i++) {
         RspVertex *v = &verts[i];
         u32 word = fogFlat;
@@ -2637,10 +2639,26 @@ static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 des
     if (dest == 0) {
         verts[0].flat = flat;
     }
+    *flatOut = (flat | restFlat) ? 1u : 0u;
+    return n;
+}
+
+/* Transforms the vertices into g.verts, with the matrix m and the fog and billboard settings they were loaded with. */
+static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
+                                           s32 billboard) {
+    u32 anyFlat;
+    s32 n = load_vertices_core(g.verts, &g.verts[0], src, count, dest, m, fog, billboard, &anyFlat);
+    u64 loaded;
+    if (n <= 0) {
+        return;
+    }
+    if (!fog) {
+        g.vertsWithoutFog = TRUE;
+    }
     // Which of the RSP's vertices may be flat, for DKR_WALK_LEAN (kept up either way, so that it is right when the
     // switch is turned on).
     loaded = ((n >= 64) ? ~0ULL : ((1ULL << n) - 1)) << dest;
-    if (flat | restFlat) {
+    if (anyFlat) {
         g.flatVerts |= loaded;
     } else {
         g.flatVerts &= ~loaded;
@@ -2873,9 +2891,10 @@ static COLD float audit_area(const float *x, const float *y, const float *w, s32
  * the same determinant as DKR_CPU_CULL), smaller than a pixel, or drawn, with its area on the screen. The corners'
  * x and y with the viewport folded in are in the GPU's clip space, where the screen spans -w..w.
  */
-static COLD NOINLINE void audit_triangle(const u8 *idx, s32 oneSided, float keepSign, const Viewport *vp) {
+static COLD NOINLINE void audit_triangle(const RspVertex *V, const u8 *idx, s32 oneSided, float keepSign,
+                                         const Viewport *vp) {
     ProfKindStats *s = &sMix.kinds[sDrawKind];
-    const RspVertex *v[3] = { &g.verts[idx[0]], &g.verts[idx[1]], &g.verts[idx[2]] };
+    const RspVertex *v[3] = { &V[idx[0]], &V[idx[1]], &V[idx[2]] };
     float x[3], y[3], w[3], area;
     s32 k, right = 0, left = 0, top = 0, bottom = 0, behind = 0;
     s->audited++;
@@ -2956,10 +2975,10 @@ static NOINLINE HOT void shared_vertices_clear(void) {
 }
 
 /* Whether a flat triangle reaches both sides of the N64 screen (a full screen picture), as gfx_flat_x sees them. */
-static NOINLINE s32 flat_triangle_spans_screen(const u8 idx[3], const Viewport *vp) {
+static NOINLINE s32 flat_triangle_spans_screen(const RspVertex *V, const u8 idx[3], const Viewport *vp) {
     s32 k, left = FALSE, right = FALSE;
     for (k = 0; k < 3; k++) {
-        const RspVertex *v = &g.verts[idx[k]];
+        const RspVertex *v = &V[idx[k]];
         float x = v->x * vp->scaleX + v->w * vp->transX, edge = 0.99f * (v->w < 0.0f ? -v->w : v->w);
         left |= x <= -edge;
         right |= x >= edge;
@@ -3945,6 +3964,17 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
 /* At the start of a frame: this frame's switch, and the table emptied for a new level or with the switch off. */
 #ifdef PICA_ALL
 static s32 sOpCountOn = -1;
+static s32 sCensusOn = -1; // DKR_WALK_CENSUS=1: the walk census (census_command)
+static u32 sCensusFrames;
+static s32 sCensusSkip = TRUE; // This frame is not counted (native ops off)
+static void census_note(const Gfx *tag, s32 cls, s32 op);
+static void census_log(void);
+#define CENSUS_NOTE(tag, cls, op)                                                                                      \
+    do {                                                                                                               \
+        if (UNLIKELY(sCensusOn > 0) && !sCensusSkip) {                                                                 \
+            census_note(tag, cls, op);                                                                                 \
+        }                                                                                                              \
+    } while (0)
 static u32 sOpCount[256];
 static u32 sOpKind[PORT_DRAW_KINDS][256]; // DKR_OPCOUNT=1: also by draw kind (N64 commands only, not port tags)
 #endif
@@ -3990,6 +4020,13 @@ static void track_frame_start(void) {
     if (sOpCountOn < 0) {
         const char *e = plat_getenv("DKR_OPCOUNT");
         sOpCountOn = (e != NULL && e[0] == '1');
+    }
+    if (sCensusOn < 0) {
+        const char *e = plat_getenv("DKR_WALK_CENSUS");
+        sCensusOn = (e != NULL && e[0] == '1');
+    }
+    if (sCensusOn > 0 && sCensusFrames > 0 && sFrameCount % 600 == 0) {
+        census_log();
     }
     if (sOpCountOn && sFrameCount % 600 == 0 && sFrameCount > 0) {
         char line[1024];
@@ -4054,7 +4091,7 @@ static void track_frame_start(void) {
  * so it is dropped here, before the draw state, texture coordinates and shared vertices are set up for it. The test
  * is audit_triangle's. Only for the 3D world's vertices: flat ones (the HUD, sprites) are placed on the screen.
  */
-static NOINLINE HOT s32 command_off_screen(const Triangle *tris, s32 count) {
+static NOINLINE HOT s32 command_off_screen(const RspVertex *V, const Triangle *tris, s32 count) {
     Viewport vp;
     u32 all = 0x1F;
     s32 i, k;
@@ -4068,7 +4105,7 @@ static NOINLINE HOT s32 command_off_screen(const Triangle *tris, s32 count) {
             if (idx[k] >= MAX_VERTICES) {
                 return FALSE;
             }
-            v = &g.verts[idx[k]];
+            v = &V[idx[k]];
             w = v->w;
             x = v->x * vp.scaleX + w * vp.transX;
             y = v->y * vp.scaleY + w * vp.transY;
@@ -4103,7 +4140,12 @@ void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris) {
 /* v29: set by native_record_append around its draw_dkr_triangles call (DKR_NMAT_FAST, the material's axes ready). */
 static const TexAxis *sPresetAxes;
 
-static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
+/* The triangles of one command (draw_dkr_triangles), from the RSP's vertex slots (V is g.verts: pending loads
+ * resolved first, late fog) or, with slots false, from an array of the caller's own (V, record_vertices: the draws of
+ * native records, which make their vertices themselves and leave the slots as the game's commands left them).
+ * flatBits: for the caller's own, whether any of V may be flat. */
+static inline __attribute__((always_inline)) void draw_triangles_impl(const RspVertex *V, s32 slots, s32 flatBits,
+                                                                      const Triangle *tris, s32 count, s32 textured) {
     GfxDrawState state;
     s32 i, k, fog = (g.geometryMode & G_FOG) != 0;
     Tile *tile0 = &g.tiles[0], *tile1 = &g.tiles[1];
@@ -4119,7 +4161,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         return;
     }
     sObjTris[sDrawObj] += count;
-    if (sAnyPending) {
+    if (slots && sAnyPending) {
         if (model_triangles(tris, count, textured)) {
             return;
         }
@@ -4136,7 +4178,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
         }
     }
-    if (sWalkReject && g.flatVerts == 0 && command_off_screen(tris, count)) {
+    if (sWalkReject && (slots ? g.flatVerts == 0 : !flatBits) && command_off_screen(V, tris, count)) {
         return;
     }
     if (!sTriStateValid) {
@@ -4144,7 +4186,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         sTriStateValid = TRUE;
     }
     state = sTriState;
-    if (UNLIKELY(fog && g.vertsWithoutFog)) {
+    if (UNLIKELY(slots && fog && g.vertsWithoutFog)) {
         fog_late_vertices();
     }
     if (!textured) {
@@ -4197,7 +4239,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         }
     }
     // While no loaded vertex is flat (the 3D world) no triangle is, so DKR_WALK_LEAN skips the checks per triangle.
-    anyFlat = !sWalkLean || g.flatVerts != 0;
+    anyFlat = !sWalkLean || (slots ? g.flatVerts != 0 : flatBits != 0);
     // The second texture's coordinates are only read by draws that bind one (gfx_c3d.c's write_vertices, the
     // software renderers), so with DKR_WALK_LEAN the others leave the batch's old, finite values in them.
     zeroTex1 = !tex1 && !sWalkLean;
@@ -4221,9 +4263,9 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         // Backface culling: flag 0x40 means double sided. The game mirrors the viewport for mirror mode.
         state.cullMode = (t->flags & BACKFACE_DRAW) ? 0 : frontCull;
         if (anyFlat) {
-            u8 flat0 = g.verts[idx[0]].flat, flat1 = g.verts[idx[1]].flat, flat2 = g.verts[idx[2]].flat;
+            u8 flat0 = V[idx[0]].flat, flat1 = V[idx[1]].flat, flat2 = V[idx[2]].flat;
             flat = (flat0 && flat1 && flat2) ? (flat0 | flat1 | flat2) : 0; // 1, or GFX_FLAT_PLACED (3) if a sprite
-            if (flat == 1 && tex0 && !flat_triangle_spans_screen(idx, &vp)) {
+            if (flat == 1 && tex0 && !flat_triangle_spans_screen(V, idx, &vp)) {
                 // Textured and narrower than the screen (a menu's wooden box): on a wide screen it keeps its shape
                 // as it slides past the N64 edge, rather than a corner near the edge snapping out to the wide one's.
                 flat = GFX_FLAT_PLACED;
@@ -4231,17 +4273,17 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
         }
         state.flat = flat;
         if (UNLIKELY(sAuditFrame) && !flat) {
-            audit_triangle(idx, state.cullMode != 0, keepSign, &vp);
+            audit_triangle(V, idx, state.cullMode != 0, keepSign, &vp);
         }
         if (sTriReject && !flat &&
-            (vertex_outcode(&g.verts[idx[0]], &vp) & vertex_outcode(&g.verts[idx[1]], &vp) &
-             vertex_outcode(&g.verts[idx[2]], &vp)) != 0) {
+            (vertex_outcode(&V[idx[0]], &vp) & vertex_outcode(&V[idx[1]], &vp) &
+             vertex_outcode(&V[idx[2]], &vp)) != 0) {
             sWalkRejectedTris++;
             continue;
         }
         if (sCpuCull && state.cullMode != 0 && !flat) {
             // Flat draws keep the GPU's culling: on a wide screen gfx_flat_x moves their corners unevenly.
-            s32 face = face_test(&g.verts[idx[0]], &g.verts[idx[1]], &g.verts[idx[2]], keepSign);
+            s32 face = face_test(&V[idx[0]], &V[idx[1]], &V[idx[2]], keepSign);
             if (face == FACE_AWAY) {
                 continue; // A back face, or edge on (no area: nothing would be drawn)
             }
@@ -4292,7 +4334,7 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
             // The finished vertex: the N64 viewport folded in, and with G_FOG set the RSP replaces the shade alpha
             // with the fog factor.
-            in = &g.verts[idx[k]];
+            in = &V[idx[k]];
             v->x = in->x * vp.scaleX + in->w * vp.transX;
             v->y = in->y * vp.scaleY + in->w * vp.transY;
             v->z = in->z;
@@ -4316,6 +4358,16 @@ static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32
             }
         }
     }
+}
+
+static NOINLINE HOT void draw_dkr_triangles(const Triangle *tris, s32 count, s32 textured) {
+    draw_triangles_impl(g.verts, TRUE, 0, tris, count, textured);
+}
+
+/* The same from vertices the caller made (record_vertices), not the RSP's slots. */
+static NOINLINE void draw_record_triangles(const RspVertex *verts, s32 flatBits, const Triangle *tris, s32 count,
+                                           s32 textured) {
+    draw_triangles_impl(verts, FALSE, flatBits, tris, count, textured);
 }
 
 #define OP(x) ((u8) (x))
@@ -5074,10 +5126,19 @@ static inline void native_preset_axes(NMat *mat, s32 textured) {
 /* A recorded batch drawn the way its commands would have been (vertex slots, draw_dkr_triangles), with the
  * material's tiles, fog bit and state in place meanwhile: for geometry made anew each frame (shadows, water, particles,
  * billboards), whose triangles the native mesh tables would have to be remade for every frame. */
+static void native_record_free(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start, const Triangle *tris, s32 count,
+                               s32 textured);
+static s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris, s32 count,
+                              s32 textured);
+
 static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start,
                                          const Triangle *tris, s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
     u32 geometry = g.geometryMode;
+    if (sNativeRecords) {
+        native_record_free(mat, vtx, numVerts, start, tris, count, textured);
+        return;
+    }
     g.tiles[0] = mat->tiles[0];
     g.tiles[1] = mat->tiles[1];
     g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
@@ -5108,6 +5169,9 @@ static NOINLINE void native_record_append(NMat *mat, const Vertex *vtx, s32 numV
                                           s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
     u32 geometry = g.geometryMode;
+    if (sNativeRecords && native_sprite_free(mat, vtx, numVerts, tris, count, textured)) {
+        return;
+    }
     g.tiles[0] = mat->tiles[0];
     g.tiles[1] = mat->tiles[1];
     g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
@@ -5134,6 +5198,102 @@ static NOINLINE void native_record_append(NMat *mat, const Vertex *vtx, s32 numV
     g.tiles[1] = t1;
     g.geometryMode = geometry;
     sTriStateValid = FALSE;
+}
+
+/*
+ * R2 (DKR_NATIVE_RECORDS, default off): the records that are still drawn through the RSP's vertex slots (billboards,
+ * geometry made anew each frame under a flat matrix: menus, fades, the sky flash; and sprite frames) make their
+ * vertices in arrays of their own instead (load_vertices_core, the slots' own transform and billboard placement) and
+ * are drawn from them (draw_record_triangles): the slots, the pending loads and the flat bits are not touched, so the
+ * frame no longer depends on what the game's commands left in them (bar a billboard's anchor, the game's own load,
+ * still read from slot 0 until its caller (G3) makes it part of the record). The pictures are the same.
+ */
+static RspVertex sRecVerts[MAX_VERTICES]; // A billboard or dynamic record's vertices
+static RspVertex sSprVerts[MAX_VERTICES]; // A sprite frame's: kept for the tiles after the one that loaded them
+static u32 sSprFlat, sSprFrame;
+static s32 sSprValid;
+
+static NOINLINE void native_record_free(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start, const Triangle *tris,
+                                        s32 count, s32 textured) {
+    Tile t0 = g.tiles[0], t1 = g.tiles[1];
+    u32 geometry = g.geometryMode, flatBits = 0, f;
+    g.tiles[0] = mat->tiles[0];
+    g.tiles[1] = mat->tiles[1];
+    g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    if (start == numVerts) {
+        load_vertices_core(sRecVerts, &g.verts[0], vtx, numVerts, 0, g.matrices[g.curMatrix], mat->fog, g.billboard,
+                           &f);
+        flatBits |= f;
+    } else {
+        if (start > 0) {
+            load_vertices_core(sRecVerts, &g.verts[0], vtx, start, 0, g.matrices[g.curMatrix], mat->fog, g.billboard,
+                               &f);
+            flatBits |= f;
+        }
+        load_vertices_core(sRecVerts, &g.verts[0], vtx + start, numVerts - start, start, g.matrices[2], mat->fog,
+                           FALSE, &f);
+        flatBits |= f;
+        g.curMatrix = 1;
+    }
+    nmat_state(mat, &sTriState, textured);
+    sTriStateValid = TRUE;
+    native_preset_axes(mat, textured);
+    draw_record_triangles(sRecVerts, (s32) flatBits, tris, count, textured);
+    sPresetAxes = NULL;
+    g.vertexIndex = 0;
+    g.tiles[0] = t0;
+    g.tiles[1] = t1;
+    g.geometryMode = geometry;
+    sTriStateValid = FALSE;
+}
+
+/* A sprite tile: the vertices it loads go where the frame's appending load would have put them, and the tiles after
+ * it that load none (four of five) use them again. Returns FALSE (nothing done) for a tile that loads none with no
+ * load of this frame's kept. */
+static NOINLINE s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris, s32 count,
+                                       s32 textured) {
+    Tile t0 = g.tiles[0], t1 = g.tiles[1];
+    u32 geometry = g.geometryMode;
+    if (numVerts > 0) {
+        s32 dest = g.billboard ? 1 : g.vertexIndex, i;
+        u32 f, flatBits = 0;
+        if (dest + numVerts > MAX_VERTICES) {
+            numVerts = MAX_VERTICES - dest;
+        }
+        if (sAnyPending) {
+            resolve_slots(0, dest); // The billboard's anchor, and what the triangles may use before the load
+            forget_slots(dest, dest + numVerts);
+        }
+        for (i = 0; i < dest; i++) {
+            sSprVerts[i] = g.verts[i];
+            flatBits |= sSprVerts[i].flat;
+        }
+        g.tiles[0] = mat->tiles[0];
+        g.tiles[1] = mat->tiles[1];
+        g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+        load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
+                           &f);
+        sSprFlat = flatBits | f;
+        sSprFrame = (u32) sFrameCount;
+        sSprValid = TRUE;
+    } else if (sSprValid && sSprFrame == (u32) sFrameCount) {
+        g.tiles[0] = mat->tiles[0];
+        g.tiles[1] = mat->tiles[1];
+        g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    } else {
+        return FALSE;
+    }
+    nmat_state(mat, &sTriState, textured);
+    sTriStateValid = TRUE;
+    native_preset_axes(mat, textured);
+    draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    sPresetAxes = NULL;
+    g.vertexIndex = 0;
+    g.tiles[0] = t0;
+    g.tiles[1] = t1;
+    g.geometryMode = geometry;
+    sTriStateValid = FALSE;
+    return TRUE;
 }
 
 static NOINLINE void texture_rectangle(u32 w0, u32 w1, s32 flip);
@@ -5846,6 +6006,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: not captured", (unsigned long) id);
         }
@@ -5858,6 +6019,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 mat->valid = FALSE;
                 gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
                 sNDrawStats[2]++;
+                CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
                 if (UNLIKELY(sTracing)) {
                     plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
                 }
@@ -5867,6 +6029,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         }
     }
     if (dl[1].words.w0 & 0x40000) {
+        if (!sNativeRecords) {
+            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
+        }
         native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5880,6 +6045,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         // (DKR_NATIVE_DYNAMIC): its vertices are transformed fresh here anyway, and a list whose triangles changed
         // gets its tables remade in place (native_find).
     } else if (dynamic || g.billboard) {
+        if (!sNativeRecords) {
+            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
+        }
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5914,6 +6082,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     }
     if (mesh == NULL || mesh->maxVertex >= total) {
         sNativeDeclined++;
+        if (!sNativeRecords) {
+            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
+        }
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured); // No tables: through the slots
         sNDrawStats[0]++;
         return 2;
@@ -7337,6 +7508,139 @@ static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
 }
 #endif
 
+#if defined(PICA_ALL) && defined(PORT_NATIVE_OPS)
+/*
+ * The walk census (DKR_WALK_CENSUS=1, gfx_census.h): every command the walk executes, counted by draw kind and class,
+ * so the commands that are still N64-shaped (vertex slots, texture loads, fixed matrices, list calls) are listed.
+ * Counts are logged every 600 frames ("census"); host builds also name the source line behind each command and
+ * write census.csv (port/host/census_sites.c, port/tools/census_report.py). Off: one test per command.
+ */
+static u32 sCensusCount[PORT_DRAW_KINDS][CENSUS_CLASSES];
+static s32 sCensusDepth; /* The depth of the list being walked, for the records' notes */
+extern s32 level_id(void);
+
+static inline void census_add(const Gfx *at, s32 depth, s32 cls, s32 op, const void *list) {
+    u32 kind = (u32) sDrawKind < PORT_DRAW_KINDS ? sDrawKind : 0;
+    sCensusCount[kind][cls]++;
+    CENSUS_HOST_HIT(at, depth, (s32) kind, cls, op, list);
+}
+
+/* A record the renderer takes through the vertex slots after all, or drops (native_record), counted inside the records. */
+static NOINLINE COLD void census_note(const Gfx *tag, s32 cls, s32 op) {
+    census_add(tag, sCensusDepth, cls, op, NULL);
+}
+
+static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 depth) {
+    u32 op = w0 >> 24;
+    sCensusDepth = depth;
+    if (op == OP(G_NOOP)) {
+        if (w0 & NOP_MARK) {
+            u32 id = (w0 >> 19) & 15;
+            if (id == NOP_EXT) {
+                switch ((w0 >> 15) & 15) {
+                    case NOPX_LOADTLUT: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADTLUT, NULL); break;
+                    case NOPX_CALL:
+                        census_add(at, depth, CENSUS_LIST_CALL, CENSUS_OP_CALL,
+                                   bad_list_address(w1) ? NULL : (const void *) seg_addr(w1));
+                        break;
+                    case NOPX_VTX: census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_VTX, NULL); break;
+                    case NOPX_TRI: census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_TRI, NULL); break;
+                    case NOPX_MTX: census_add(at, depth, CENSUS_MATRIX, CENSUS_OP_MTX, NULL); break;
+                    case NOPX_TEXRECT: census_add(at, depth, CENSUS_RECT, CENSUS_OP_TEXRECT, NULL); break;
+                    case NOPX_VIEWPORT: census_add(at, depth, CENSUS_STATE, CENSUS_OP_VIEWPORT, NULL); break;
+                    case NOPX_END:
+                    case NOPX_DATA: break;
+                    default: census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL); break;
+                }
+            } else {
+                switch (id) {
+                    case NOP_TILE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_TILE, NULL); break;
+                    case NOP_TILESIZE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_TILESIZE, NULL); break;
+                    case NOP_LOADBLOCK: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADBLOCK, NULL); break;
+                    case NOP_LOADTILE: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADTILE, NULL); break;
+                    case NOP_IMAGE:
+                        if (((w0 >> 17) & 3) >= 2) {
+                            census_add(at, depth, CENSUS_TMEM, CENSUS_OP_IMAGE_TEX, NULL);
+                        } else {
+                            census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL);
+                        }
+                        break;
+                    case NOP_FILLRECT: census_add(at, depth, CENSUS_RECT, CENSUS_OP_FILLRECT, NULL); break;
+                    default: census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL); break;
+                }
+            }
+            return;
+        }
+        if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_KIND_TAG, NULL);
+        } else if (w1 == PORT_NATIVE_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_MESH, NULL);
+        } else if (w1 == PORT_TRACK_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_TRACK, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+            u32 flags = at[2].words.w0; /* The record's second data word (written with the tag) */
+            census_add(at, depth, CENSUS_RECORD,
+                       (flags & 0x40000) ? CENSUS_OP_SPRITE : ((flags & 0x20000) ? CENSUS_OP_NDRAW_DYNAMIC : CENSUS_OP_NDRAW),
+                       NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_NMAT, NULL);
+            CENSUS_MATERIAL();
+        } else if ((w1 & 0xFFFF0000) == PORT_NRECT_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NRECT, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_MTXF, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_LIGHT_TAG) {
+            census_add(at, depth, CENSUS_STATE, CENSUS_OP_LIGHT_TAG, NULL);
+        }
+        return;
+    }
+    switch (op) {
+        case OP(G_ENDDL):
+        case OP(G_RDPHALF_1):
+        case OP(G_RDPHALF_2): break;
+        case OP(G_VTX): census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_VTX, NULL); break;
+        case OP(G_TRIN): census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_TRI, NULL); break;
+        default: census_add(at, depth, CENSUS_RAW_N64, CENSUS_OP_RAW + (s32) op, NULL); break;
+    }
+}
+
+/* The census's counts a frame, in the log (every 600 frames, with DKR_WALK_CENSUS=1). */
+static COLD void census_log(void) {
+    static const char *const sNames[CENSUS_CLASSES] = {"records", "state ops", "vertex slots", "texture ops", "fixed matrices",
+                                                         "list calls", "raw N64", "rects", "slot records", "dropped records"};
+    static const char *const sKindNames[PORT_DRAW_KINDS] = {"other", "track", "racers", "objects", "sky",
+                                                              "see-through", "effects", "shadows", "hud"};
+    char line[512];
+    u32 total[CENSUS_CLASSES], frames = sCensusFrames, c, k;
+    s32 n = 0;
+    for (c = 0; c < CENSUS_CLASSES; c++) {
+        total[c] = 0;
+        for (k = 0; k < PORT_DRAW_KINDS; k++) {
+            total[c] += sCensusCount[k][c];
+        }
+        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %u.%u", c > 0 ? ", " : "", sNames[c],
+                           (unsigned) (total[c] / frames), (unsigned) ((total[c] * 10 / frames) % 10));
+    }
+    plat_log("census over %u frames, a frame: %s", (unsigned) frames, line);
+    for (k = 0; k < PORT_DRAW_KINDS; k++) {
+        n = 0;
+        for (c = 0; c < CENSUS_CLASSES; c++) {
+            /* The leftovers only: vertex slots, texture ops, fixed matrices, list calls, raw N64, rects, slot records, drops */
+            if (c >= CENSUS_VERTEX_SLOT && c != CENSUS_RECORD && sCensusCount[k][c] >= frames / 10 + 1) {
+                n += plat_snprintf(line + n, sizeof(line) - n, " %s %u.%u", sNames[c],
+                                   (unsigned) (sCensusCount[k][c] / frames),
+                                   (unsigned) ((sCensusCount[k][c] * 10 / frames) % 10));
+            }
+        }
+        if (n > 0) {
+            plat_log("  census %s:%s", sKindNames[k], line);
+        }
+    }
+    __builtin_memset(sCensusCount, 0, sizeof(sCensusCount));
+    sCensusFrames = 0;
+}
+#endif
+
 #ifdef PICA_ALL
 /* Stall finder (PICA_ALL test build): logs any command, or frame start/end step, that takes 40 ms or more. */
 static unsigned long long sStallT, sStallLimit;
@@ -7378,6 +7682,9 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
             // Each command timed (DKR_STALL_EACH): a clock read, a system call on the 3DS, for every command, so
             // only when looking for a stall; the frame's steps are always timed.
             STALL_MARK("command", w0, w1);
+        }
+        if (UNLIKELY(sCensusOn > 0) && !sCensusSkip && !sPrewarming) { // (The texture prewarm runs load lists outside any frame)
+            census_command(dl, w0, w1, depth);
         }
         if (UNLIKELY(sOpCountOn > 0)) {
             sOpCount[op]++;
@@ -7445,6 +7752,18 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     s32 used = native_rect(dl, w1 & 0xFFFF);
                     dl += used;
                     remaining -= used;
+                } else if (w1 == PORT_ANCHOR_TAG && remaining >= 1) {
+                    // G3 (DKR_NATIVE_CAMERA): the game's one vertex load into slot 0, as a record. Made at once (a load
+                    // that is only noted would have to be resolved before the billboard's vertices use it anyway).
+                    if (sAnyPending) {
+                        forget_slots(0, 1);
+                    }
+                    g.vertexIndex = 0;
+                    load_vertices_now((const Vertex *) seg_addr(dl->words.w0), 1, 0, g.matrices[g.curMatrix],
+                                      (g.geometryMode & G_FOG) != 0, g.billboard);
+                    g.vertexIndex = 1;
+                    dl++;
+                    remaining--;
                 } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
                     u32 index = w1 & 3;
                     __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
@@ -8198,6 +8517,12 @@ void port_gfx_run_task(void *taskPtr) {
     gPlatGfxStage = "running a display list";
     STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
     walk_begin();
+    sCensusSkip = TRUE;
+    if (UNLIKELY(sCensusOn > 0) && gPortNativeOps) { // (Frames before the first level load still write N64 commands)
+        sCensusSkip = FALSE;
+        sCensusFrames++;
+        CENSUS_FRAME_BEGIN(level_id(), gPortLevelLoads);
+    }
     run_dl((const Gfx *) task->t.data_ptr, -1);
     STALL_MARK("track flush", 0, 0);
     track_flush();
@@ -8205,6 +8530,9 @@ void port_gfx_run_task(void *taskPtr) {
     flush_batch();
     sky_draw_if_held();
     sDepthDrawn = FALSE;
+    if (UNLIKELY(sCensusOn > 0) && !sCensusSkip) {
+        CENSUS_FRAME_END();
+    }
     kind_frame_end(); // The frame end's waits are no kind's.
     gPlatGfxStage = "ending the frame";
     walk_switch(WALK_FRAMEEND);

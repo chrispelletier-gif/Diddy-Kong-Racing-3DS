@@ -1,0 +1,5 @@
+# race tracks 2/2 (the AI drives each for 8 s)
+about = race tracks 2/2 (the AI drives each for 8 s)
+warp = 17,18,19,20,25,26,27,28,29,30,31,32,33
+warp_seconds = 8
+frames = auto
