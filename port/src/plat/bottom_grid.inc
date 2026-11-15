@@ -3880,11 +3880,13 @@ static void gdebug_text(const State *s, int x0, int y0, int x1, int y1) {
 
 /*
  * DKR_PROF_TERM (default on; the owner 2026-11-15: the profiler had too many pages in the look's text settings): the
- * readout in a small fixed-width terminal font (term_font.h, 5x8 cells) instead of the look's fonts, with no case
- * changes or column snapping: the readout's own spaces line its columns up, as on a terminal. 57 columns and 16 lines
- * fit the panel under the graph, so the readout needs 3 pages instead of 5 (port_profile.c).
+ * readout in a small fixed-width terminal font (term_font.h: 5x7 glyphs in 6x9 cells) instead of the look's fonts,
+ * with no case changes or column snapping: the readout's own spaces line its columns up, as on a terminal. 47 columns
+ * and 14 lines fit the panel under the graph, so the readout needs 3 pages instead of 5 (port_profile.c).
  */
-#define TERM_COLS 57
+#define TERM_COLS 47
+#define TERM_LINES 14
+#define TERM_PAD 9 /* frame to ink, left and right; the 14 lines leave 7 above their first capitals and 7 under the last */
 static int gterm_on(void) {
     return plat_switch("DKR_PROF_TERM", 1) != 0;
 }
@@ -3892,15 +3894,15 @@ static int gterm_on(void) {
 /* Text in the terminal font from (x, y), the top of its cells, a colour per character (or one for all); stops at x1. */
 static void gterm_text(int x, int y, int x1, const char *t, const Colour *each, Colour ink) {
     int k, i, j;
-    for (k = 0; t[k] != '\0' && x + TERM_FONT_W - 1 <= x1; k++, x += TERM_FONT_W) {
+    for (k = 0; t[k] != '\0' && x + TERM_GLYPH_W - 1 <= x1; k++, x += TERM_FONT_W) {
         unsigned char c = (unsigned char) t[k];
         Colour col = each != NULL ? each[k] : ink;
         if (c < 32 || c > 126) {
             c = '?';
         }
-        for (j = 0; j < TERM_FONT_H; j++) {
+        for (j = 0; j < TERM_GLYPH_H; j++) {
             unsigned char bits = sTermFont[c - 32][j];
-            for (i = 0; i < TERM_FONT_W; i++) {
+            for (i = 0; i < TERM_GLYPH_W; i++) {
                 if (bits & (0x10 >> i)) {
                     plot(x + i, y + j, col.r, col.g, col.b, col.a);
                 }
@@ -3909,23 +3911,31 @@ static void gterm_text(int x, int y, int x1, const char *t, const Colour *each, 
     }
 }
 
+/* The ink width of text in the terminal font: whole cells but the last one's gap. */
+static int gterm_width(const char *t) {
+    int n = (int) strlen(t);
+    return n > 0 ? n * TERM_FONT_W - 1 : 0;
+}
+
 /* The readout's lines in the terminal font: the title in the accent colour (its hint on the right edge), the graph's
-   key in the graph's colours, lines of words alone (column heads) in the label colour, the rest in white. */
+   key in the graph's colours, a column head line (the line under the title, words alone) in the label colour, the rest
+   in white. */
 static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
-    static const char *const sKey[BS_GRAPH_KINDS] = { "green", "cyan", "yellow", "orange", "red", "grey" };
-    int n = s->overlayLines, i, lx0, lx1, rows, key = 0;
+    /* the graph's key, its words in the order of sGraphColours */
+    static const char *const sKey[BS_GRAPH_KINDS] = { "logic", "build", "render", "textures", "GPU", "retrace" };
+    int n = s->overlayLines, i, lx0, lx1, top;
     while (n > 0 && s->overlay[n - 1][0] == '\0') {
         n--;
     }
     gbox(x0, y0, x1, y1, SK_PANEL);
     log_rec('P', x0, y0, x1, y1, 0, "terminal");
-    /* 57 cells centred on their ink (a cell's last column is its gap): 9 px from the frame on each side (a 304 px panel) */
-    lx0 = x0 + 1 + (x1 - x0 - 2 - (TERM_COLS * TERM_FONT_W - 1)) / 2;
-    lx1 = lx0 + TERM_COLS * TERM_FONT_W - 1;
-    rows = (y1 - y0 - 12) / TERM_FONT_H;
-    for (i = 0; i < n && i < rows; i++) {
+    lx0 = x0 + 1 + TERM_PAD; /* the frame is 1 px */
+    lx1 = x1 - 2 - TERM_PAD; /* the last pixel ink may use */
+    /* 14 lines centred on their capitals (7 rows each) and descenders: as many rows above the first as under the last */
+    top = y0 + 1 + (y1 - y0 - 2 - ((TERM_LINES - 1) * TERM_FONT_H + 7)) / 2;
+    for (i = 0; i < n && i < TERM_LINES; i++) {
         const char *line = s->overlay[i];
-        int y = y0 + 6 + i * TERM_FONT_H, k, digits = 0;
+        int y = top + i * TERM_FONT_H, k, digits = 0;
         Colour each[64];
         if (i == 0) {
             const char *gap = strstr(line, "  ");
@@ -3936,18 +3946,17 @@ static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
                 while (*gap == ' ') {
                     gap++;
                 }
-                gterm_text(lx1 + 1 - (int) strlen(gap) * TERM_FONT_W, y, lx1, gap, NULL, gink_accent());
+                gterm_text(lx1 + 1 - gterm_width(gap), y, lx1, gap, NULL, gink_accent());
             }
             continue;
         }
-        key = strncmp(line, "graph:", 6) == 0 ? 2 : key > 0 ? key - 1 : 0;
         for (k = 0; line[k] != '\0' && k < 64; k++) {
             digits |= line[k] >= '0' && line[k] <= '9';
             each[k] = WHITE;
         }
-        if (key > 0) {
-            /* each colour's name and the word after it in that colour ("green logic", "red GPU") */
-            int w = 0, tint = -1, left = 0;
+        if (strncmp(line, "graph:", 6) == 0) {
+            /* the key: each cause in its bar colour */
+            int w = 0;
             while (line[w] != '\0' && w < 64) {
                 int e = w, c;
                 while (line[e] != '\0' && line[e] != ' ' && e < 64) {
@@ -3955,14 +3964,12 @@ static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
                 }
                 for (c = 0; c < BS_GRAPH_KINDS; c++) {
                     if ((int) strlen(sKey[c]) == e - w && strncmp(line + w, sKey[c], (size_t) (e - w)) == 0) {
-                        tint = c;
-                        left = 2;
+                        int q;
+                        for (q = w; q < e; q++) {
+                            each[q] = sGraphColours[c];
+                        }
                     }
                 }
-                for (c = w; c < e; c++) {
-                    each[c] = left > 0 && line[c] >= 'a' && line[c] <= 'z' ? sGraphColours[tint] : WHITE; /* not its ';' */
-                }
-                left--;
                 w = e;
                 while (line[w] == ' ' && w < 64) {
                     w++;
@@ -3971,7 +3978,7 @@ static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
             gterm_text(lx0, y, lx1, line, each, WHITE);
             continue;
         }
-        gterm_text(lx0, y, lx1, line, NULL, digits ? WHITE : gink_label());
+        gterm_text(lx0, y, lx1, line, NULL, i == 1 && !digits ? gink_label() : WHITE); /* a table's column heads */
     }
 }
 
@@ -3983,8 +3990,8 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     int y60, y30;
     float full = 54.0f;
     gbox(x0, y0, x1, y1, SK_PANEL);
-    labelW = gterm_on() ? 6 * TERM_FONT_W - 1 : gtext_width(GF_BODY, sStyle == 2 ? "60 FPS" : "60 fps", 0); /* the lines are frame rates: labelled so, as 60 sits under 30 (a unit: capitals in Broadcast/Carbon) */
-    lx = gterm_on() ? x0 + 10 : x0 + gpad_x(SK_PANEL); /* terminal: on the readout's left edge (gterm_lines) */
+    labelW = gterm_on() ? gterm_width("60 fps") : gtext_width(GF_BODY, sStyle == 2 ? "60 FPS" : "60 fps", 0); /* the lines are frame rates: labelled so, as 60 sits under 30 (a unit: capitals in Broadcast/Carbon) */
+    lx = gterm_on() ? x0 + 1 + TERM_PAD : x0 + gpad_x(SK_PANEL); /* terminal: on the readout's left edge (gterm_lines) */
     gx0 = lx + labelW + 8;
     frames = (gx1 - gx0) / 2;
     frames = frames > s->graphCount ? s->graphCount : frames;
@@ -4011,14 +4018,14 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     }
     log_rec('P', gx0, gy0_, gx1, gy1_, 0, "graph");
     if (gterm_on()) {
-        /* the terminal font's labels, their capitals (cell rows 1-6) centred on their lines, 4 px or more apart */
-        int c60 = y60, c30 = y30, need = 6 + 4 - (y60 - y30);
+        /* the terminal font's labels, their digits (cell rows 0-6) centred on their lines, 4 px or more apart */
+        int c60 = y60, c30 = y30, need = 7 + 4 - (y60 - y30);
         if (need > 0) {
             c60 += (need + 1) / 2;
             c30 -= need / 2;
         }
-        gterm_text(lx, c60 - 4, lx + labelW, "60 fps", NULL, gink_dim());
-        gterm_text(lx, c30 - 4, lx + labelW, "30 fps", NULL, gink_dim());
+        gterm_text(lx, c60 - 3, lx + labelW, "60 fps", NULL, gink_dim());
+        gterm_text(lx, c30 - 3, lx + labelW, "30 fps", NULL, gink_dim());
         return;
     }
     gband(GF_BODY, 0, &top, &h);

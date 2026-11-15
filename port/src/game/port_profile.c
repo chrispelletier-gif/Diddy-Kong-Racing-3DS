@@ -722,6 +722,7 @@ enum { MON_SUMMARY, MON_TIME, MON_KINDS, MON_OBJECTS, MON_WASTE, MON_PAGES };
 #define MON_LINES 9
 static volatile s32 sMonPage, sMonFrozen, sMonDirty;
 static char sSummaryText[512];
+static char sTermSummary[512]; /* the same, set for the terminal font's 47 columns (DKR_PROF_TERM) */
 static const char *const sMonPageNames[MON_PAGES] = { "PROFILER", "FRAME TIME", "DRAW KINDS", "OBJECTS",
                                                                    "WASTE" };
 
@@ -766,11 +767,11 @@ static s32 mon_kinds_shown(const ProfDrawMix *m, u8 *shown, s32 rows) {
 
 /*
  * DKR_PROF_TERM (default on, owner 2026-11-15): the bottom screen sets the readout in a small terminal font
- * (bottom_grid.inc gterm_lines), 57 columns by 16 lines, so the five pages fold into three: the whole summary with the
- * graph's key, every draw kind with its wasted triangles, and twice as many objects.
+ * (bottom_grid.inc gterm_lines), 47 columns by 14 lines, so the five pages fold into three: the whole summary with the
+ * graph's key, every draw kind with its wasted triangles, and 12 objects.
  */
 enum { TERM_SUMMARY, TERM_KINDS, TERM_OBJECTS, TERM_PAGES };
-#define TERM_LINES 16
+#define TERM_LINES 14
 static s32 mon_term(void) {
     return plat_switch("DKR_PROF_TERM", 1) != 0;
 }
@@ -821,45 +822,39 @@ static void show_term_page(void) {
     at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sNames[page], (int) page + 1, TERM_PAGES,
                        sMonFrozen ? " FROZEN" : "");
     switch (page) {
-        case TERM_SUMMARY: {
-            /* the summary without its last line (the status), the graph's key, then the status if there is one */
-            const char *p, *last = sSummaryText;
-            for (p = sSummaryText; *p != '\0'; p++) {
-                if (*p == '\n') {
-                    last = p + 1;
-                }
-            }
-            plat_snprintf(text + at, sizeof(text) - at, "%.*sgraph: green logic cyan build yellow render\n"
-                                                        "orange textures red GPU grey retrace; tap: freeze\n%s",
-                          (int) (last - sSummaryText), sSummaryText, last);
+        case TERM_SUMMARY:
+            /* the summary, the graph's key (each cause in its bar's colour), then the status if there is one */
+            plat_snprintf(text + at, sizeof(text) - at, "%sgraph: logic build render textures GPU retrace\n%s",
+                          sTermSummary, sStatus);
             break;
-        }
         case TERM_KINDS: {
+            /* a kind's name in 9 columns, its waste as per cent of its triangles without the sign (the key says so) */
+            static const char *const sShort[PORT_DRAW_KINDS] = { "menus", "track", "racers", "objects", "sky",
+                                                                  "see-thru", "effects", "shadows", "HUD" };
             u8 shown[PORT_DRAW_KINDS];
             mon_kinds_shown(m, shown, PORT_DRAW_KINDS);
-            at += plat_snprintf(text + at, sizeof(text) - at, "%-11s %5s %3s %5s %5s %4s %4s %4s %5s\n", "a frame:", "tris",
-                                "drw", "rdp", "bld", "off", "back", "tiny", "over");
+            at += plat_snprintf(text + at, sizeof(text) - at, "%-9s %4s %3s %5s %4s %3s %3s %3s %4s\n", "a frame:", "tris",
+                                "drw", "rdp", "bld", "off", "bck", "tny", "over");
             for (k = 0; k < PORT_DRAW_KINDS && at < (s32) sizeof(text); k++) {
                 const ProfKindStats *st = &m->kinds[k];
                 double a = st->audited ? (double) st->audited : 1.0;
                 if (!shown[k]) {
                     continue;
                 }
-                at += plat_snprintf(text + at, sizeof(text) - at,
-                                    "%-11.11s %5.0f %3.0f %5.2f %5.2f %3.0f%% %3.0f%% %3.0f%% x%.2f\n", sKindNames[k],
-                                    st->tris / frames, st->draws / frames, st->renderNs / 1e6 / timed,
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-9s %4.0f %3.0f %5.2f %4.1f %3.0f %3.0f %3.0f %4.2f\n",
+                                    sShort[k], st->tris / frames, st->draws / frames, st->renderNs / 1e6 / timed,
                                     st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a, st->backface * 100.0 / a,
                                     st->tiny * 100.0 / a, st->areaPx / audited / (400.0 * 240.0));
             }
             if (sc->frames > 0 && at < (s32) sizeof(text)) {
-                at += plat_snprintf(text + at, sizeof(text) - at, "segments %.0f/%.0f (table %.0f)  objects %.0f/%.0f drawn\n",
+                at += plat_snprintf(text + at, sizeof(text) - at, "segments %.0f/%.0f (table %.0f) objects %.0f/%.0f\n",
                                     (double) sc->segmentsDrawn / sc->frames, (double) sc->segments / sc->frames,
                                     (double) sc->segmentsAllowed / sc->frames, (double) sc->objectsDrawn / sc->frames,
                                     (double) sc->objects / sc->frames);
             }
             if (at < (s32) sizeof(text)) {
-                plat_snprintf(text + at, sizeof(text) - at, "off: past an edge; back: GPU culls it; tiny: < a pixel\n"
-                                                            "over: the pixels drawn, in whole screens");
+                plat_snprintf(text + at, sizeof(text) - at, "off/bck/tny: %% of tris off screen, culled by\n"
+                                                            "the GPU, under a pixel; over: screens covered");
             }
             break;
         }
@@ -869,7 +864,7 @@ static void show_term_page(void) {
             double ort = o->renderTimedFrames ? (double) o->renderTimedFrames : 1.0;
             u8 picked[PROF_OBJ_BUCKETS];
             s32 n;
-            at += plat_snprintf(text + at, sizeof(text) - at, "%-14s %4s %4s %7s %7s %7s %7s\n", "a frame:", "upd", "vis",
+            at += plat_snprintf(text + at, sizeof(text) - at, "%-12s %3s %3s %5s %6s %6s %6s\n", "a frame:", "upd", "vis",
                                 "tris", "logic", "bld", "rdp");
             for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
                 picked[k] = o->objs[k].updates == 0 && o->objs[k].drawn == 0 && o->objs[k].tris == 0;
@@ -889,8 +884,8 @@ static void show_term_page(void) {
                     break;
                 }
                 picked[best] = TRUE;
-                at += plat_snprintf(text + at, sizeof(text) - at, "%-14.14s %4.0f %4.0f %7.0f %7.2f %7.2f %7.2f\n",
-                                    mon_name(prof_object_name(best), 14), o->objs[best].updates / of,
+                at += plat_snprintf(text + at, sizeof(text) - at, "%-12.12s %3.0f %3.0f %5.0f %6.2f %6.2f %6.2f\n",
+                                    mon_name(prof_object_name(best), 12), o->objs[best].updates / of,
                                     o->objs[best].drawn / of, o->objs[best].tris / of, o->objs[best].logicNs / 1e6 / ot,
                                     o->objs[best].buildNs / 1e6 / ot, o->objs[best].renderNs / 1e6 / ort);
             }
@@ -1230,6 +1225,28 @@ static void show_overlay(void) {
                       s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                       s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
                       sStatus);
+        /* the terminal font's page: the same numbers in 47 columns and a line fewer (worst and steady together) */
+        plat_snprintf(sTermSummary, sizeof(sTermSummary),
+                      "%.1f/%d fps held back by %s\n"
+                      "on time %d%%, 1 vsync late %d%%, 2+ late %d%%\n"
+                      "worst %u ms (budget %.0f) steady %.1f hitches %u\n"
+                      "time a frame, budget %.1f ms:\n"
+                      "game  %5.1f %3d%% logic %.1f scene %.1f sound %.1f\n"
+                      "render%5.1f %3d%% textures %.1f\n"
+                      "GPU   %5.1f %3d%%\n"
+                      "waiting: game %.1f render %.1f\n"
+                      "idle: game core %d%% render core %d%%\n"
+                      "tris %u draws %u texture loads %u\n",
+                      fps, (int) (60 / target), prof_limit(&s), percent(onTime, s.gameFrames), percent(late, s.gameFrames),
+                      percent(later, s.gameFrames), s.worstFrameUs / 1000, budget, s.jitterUs / 1000.0, s.hitches,
+                      budget, logic + scene + sound, (int) ((logic + scene + sound) * 100.0 / budget + 0.5), logic, scene, sound,
+                      rdp + tex, (int) ((rdp + tex) * 100.0 / budget + 0.5), tex, gpu, (int) (gpu * 100.0 / budget + 0.5),
+                      per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames),
+                      per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
+                      percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
+                      percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)),
+                      s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
+                      s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS]);
     }
     if (sEnabled || sUserOn) {
         sOverlayShown = TRUE;
