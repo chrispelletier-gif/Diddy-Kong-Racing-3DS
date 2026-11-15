@@ -461,9 +461,7 @@ void controls_option_change(int index, int step) {
     int count, layout;
 
     controls_init();
-    while (__atomic_exchange_n(&sBusy, 1, __ATOMIC_ACQUIRE)) {
-        plat_sleep_ns(1000 * 1000);
-    }
+    plat_sleep_lock(&sBusy, 1000000ULL);
     step = step < 0 ? -1 : 1;
     index = option_at(index);
     if (index >= OPT_KEY_FIRST && index < OPT_KEY_FIRST + CTRL_KEY_COUNT) {
@@ -506,10 +504,10 @@ void controls_option_change(int index, int step) {
                 set_defaults();
                 break;
             default:
-                __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
+                plat_sleep_unlock(&sBusy);
                 return;
         }
     }
     save();
-    __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
+    plat_sleep_unlock(&sBusy);
 }

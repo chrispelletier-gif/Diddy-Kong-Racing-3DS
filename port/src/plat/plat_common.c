@@ -158,13 +158,14 @@ static void *load_file(const char *path, unsigned int *size) {
         fclose(f);
         return NULL;
     }
-    data = malloc((size_t) len);
+    data = malloc((size_t) len + 1);
     if (data == NULL || fread(data, 1, (size_t) len, f) != (size_t) len) {
         free(data);
         fclose(f);
         return NULL;
     }
     fclose(f);
+    ((char *) data)[len] = '\0'; // So a text file can be used as a string (not counted in *size).
     *size = (unsigned int) len;
     return data;
 }
@@ -346,10 +347,6 @@ static int switch_read(const char *name, int fallback) {
         // DKR_TEX_VRAM is not here: its default is the backend's own (tex_vram_default in port/3ds/gfx_c3d.c: on for
         // the Old 3DS since v28, benches #432/#436, after the race-start stalls of issues #406/#407; off elsewhere).
         static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_NATIVE_DRAW" };
-        if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
-            // Two cores on both consoles: the New 3DS bench row was perfect, user 2026-11-05 21:17 ("default on both").
-            return 1;
-        }
         for (i = 0; i < (int) (sizeof(sOn) / sizeof(sOn[0])); i++) {
             if (strcmp(sOn[i], name) == 0) {
                 return 1;

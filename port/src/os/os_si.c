@@ -50,17 +50,7 @@ static void do_save_request(void);
  * thread from copying a save the game is part way through changing. It sleeps rather than spins, so that the main
  * thread lets the game's finish.
  */
-static volatile s32 sSaveLock;
-
-static void save_lock(void) {
-    while (__atomic_exchange_n(&sSaveLock, 1, __ATOMIC_ACQUIRE)) {
-        plat_sleep_ns(1000000ULL);
-    }
-}
-
-static void save_unlock(void) {
-    __atomic_store_n(&sSaveLock, 0, __ATOMIC_RELEASE);
-}
+static volatile int sSaveLock;
 
 /*
  * Set while the game's own timed saves are written: those go to the SD card on the background writer, since one write
@@ -158,7 +148,7 @@ static void flush_saves(s32 force) {
     if (!sEepromDirty && !sMempakDirty) {
         return;
     }
-    save_lock();
+    plat_sleep_lock(&sSaveLock, 1000000ULL);
     if (port_autorun_enabled() || sSavesFrozen) {
         // The unattended test run never touches the player's saves (its races would set track records), and after a
         // restore the game's memory has the old progress.
@@ -173,7 +163,7 @@ static void flush_saves(s32 force) {
         write_dirty_saves();
         sWriteLater = FALSE;
     }
-    save_unlock();
+    plat_sleep_unlock(&sSaveLock);
 }
 
 /******************************** Backups ********************************/
@@ -190,7 +180,7 @@ typedef struct SaveRequest {
 
 /* The request another thread hands to the game's. Only one at a time: sAskLock is held from asking to the answer. */
 static volatile s32 sRequestState;
-static volatile s32 sAskLock;
+static volatile int sAskLock;
 static SaveRequest sRequest;
 static s32 sRequestResult;
 
@@ -199,7 +189,7 @@ static s32 run_request(const SaveRequest *request) {
     char dir[96];
     s32 ok = TRUE;
 
-    save_lock();
+    plat_sleep_lock(&sSaveLock, 1000000ULL);
     plat_saves_drain();
     if (request->dir != NULL) {
         plat_snprintf(dir, sizeof(dir), "%s/", request->dir);
@@ -231,7 +221,7 @@ static s32 run_request(const SaveRequest *request) {
     } else {
         plat_log("saves: backup to %s %s", request->dir, ok ? "written" : "failed");
     }
-    save_unlock();
+    plat_sleep_unlock(&sSaveLock);
     return ok;
 }
 
@@ -255,9 +245,7 @@ static s32 run_save_request(const SaveRequest *request, s32 onGameThread) {
     if (onGameThread) {
         return run_request(request);
     }
-    while (__atomic_exchange_n(&sAskLock, 1, __ATOMIC_ACQUIRE)) {
-        plat_sleep_ns(20000000ULL);
-    }
+    plat_sleep_lock(&sAskLock, 20000000ULL);
     sRequest = *request;
     __atomic_store_n(&sRequestState, REQUEST_ASKED, __ATOMIC_RELEASE);
     for (;;) {
@@ -276,7 +264,7 @@ static s32 run_save_request(const SaveRequest *request, s32 onGameThread) {
             break;
         }
     }
-    __atomic_store_n(&sAskLock, 0, __ATOMIC_RELEASE);
+    plat_sleep_unlock(&sAskLock);
     return result;
 }
 
@@ -449,9 +437,9 @@ static s32 eeprom_write_block(u8 address, u8 *buffer) {
 s32 osEepromWrite(OSMesgQueue *mq, u8 address, u8 *buffer) {
     s32 ret;
     (void) mq;
-    save_lock();
+    plat_sleep_lock(&sSaveLock, 1000000ULL);
     ret = eeprom_write_block(address, buffer);
-    save_unlock();
+    plat_sleep_unlock(&sSaveLock);
     return ret;
 }
 
@@ -469,13 +457,13 @@ s32 osEepromLongRead(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes) {
 s32 osEepromLongWrite(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes) {
     s32 ret = 0;
     (void) mq;
-    save_lock();
+    plat_sleep_lock(&sSaveLock, 1000000ULL);
     while (nbytes > 0 && ret == 0) {
         ret = eeprom_write_block(address++, buffer);
         buffer += EEPROM_BLOCK_SIZE;
         nbytes -= EEPROM_BLOCK_SIZE;
     }
-    save_unlock();
+    plat_sleep_unlock(&sSaveLock);
     return ret;
 }
 
@@ -508,11 +496,11 @@ s32 __osContRamWrite(OSMesgQueue *mq, int channel, u16 address, u8 *buffer, int 
         return PFS_ERR_NOPACK;
     }
     if (address < MEMPAK_BLOCKS) {
-        save_lock();
+        plat_sleep_lock(&sSaveLock, 1000000ULL);
         bcopy(buffer, &sMempak[address * BLOCKSIZE], BLOCKSIZE);
         sMempakDirty = TRUE;
         sLastSaveWrite = plat_time_ns();
-        save_unlock();
+        plat_sleep_unlock(&sSaveLock);
     }
     return 0;
 }

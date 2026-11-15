@@ -19,16 +19,6 @@ static int sCount = -1;
 // The game's menus (game thread) and the 3DS bottom screen's (its own thread) both change settings.
 static volatile int sBusy;
 
-static void lock(void) {
-    while (__atomic_exchange_n(&sBusy, 1, __ATOMIC_ACQUIRE)) {
-        plat_sleep_ns(1000 * 1000);
-    }
-}
-
-static void unlock(void) {
-    __atomic_store_n(&sBusy, 0, __ATOMIC_RELEASE);
-}
-
 static void file_path(char *path, size_t size) {
     snprintf(path, size, "%s/settings.txt", plat_data_dir());
 }
@@ -43,8 +33,6 @@ static void load(void) {
     if (text == NULL) {
         return;
     }
-    text = realloc(text, size + 1);
-    text[size] = '\0';
     for (line = text; line != NULL && *line != '\0' && sCount < MAX_SETTINGS; line = next) {
         char *value;
         next = strpbrk(line, "\r\n");
@@ -98,10 +86,10 @@ int settings_get(const char *key, int fallback) {
     if (!PLAT_DEBUG_TOOLS && is_debug_switch(key)) {
         return fallback;
     }
-    lock();
+    plat_sleep_lock(&sBusy, 1000000ULL);
     setting = find(key);
     value = setting != NULL ? setting->value : fallback;
-    unlock();
+    plat_sleep_unlock(&sBusy);
     return value;
 }
 
@@ -127,30 +115,30 @@ static void write_file(void) {
 /* While on, settings_set only changes the table; turning it off writes the file once if anything changed. Every write
  * is a temporary file, a remove and a rename on the SD card, a noticeable hitch on the game's thread. */
 void settings_defer(int on) {
-    lock();
+    plat_sleep_lock(&sBusy, 1000000ULL);
     sDeferred = on;
     if (!on && sDeferredDirty) {
         sDeferredDirty = 0;
         write_file();
     }
-    unlock();
+    plat_sleep_unlock(&sBusy);
 }
 
 void settings_set(const char *key, int value) {
     Setting *setting;
 
-    lock();
+    plat_sleep_lock(&sBusy, 1000000ULL);
     setting = find(key);
     if (setting == NULL) {
         if (sCount >= MAX_SETTINGS || strlen(key) >= sizeof(sSettings[0].key)) {
-            unlock();
+            plat_sleep_unlock(&sBusy);
             return;
         }
         setting = &sSettings[sCount++];
         snprintf(setting->key, sizeof(setting->key), "%s", key);
         rec_event("setting %s = %d (new)", key, value);
     } else if (setting->value == value) {
-        unlock(); // Nothing to write.
+        plat_sleep_unlock(&sBusy); // Nothing to write.
         return;
     } else {
         rec_event("setting %s = %d (was %d)", key, value, setting->value);
@@ -161,7 +149,7 @@ void settings_set(const char *key, int value) {
     } else {
         write_file();
     }
-    unlock();
+    plat_sleep_unlock(&sBusy);
 }
 
 void settings_describe(char *out, int size) {
@@ -170,15 +158,15 @@ void settings_describe(char *out, int size) {
         return;
     }
     out[0] = '\0';
-    lock();
+    plat_sleep_lock(&sBusy, 1000000ULL);
     if (sCount < 0) {
-        unlock();
+        plat_sleep_unlock(&sBusy);
         settings_get("", 0); // Loads the file.
-        lock();
+        plat_sleep_lock(&sBusy, 1000000ULL);
     }
     for (i = 0; i < sCount && length < size - 1; i++) {
         length += snprintf(out + length, size - length, "%s%s=%d", i > 0 ? ", " : "", sSettings[i].key,
                            sSettings[i].value);
     }
-    unlock();
+    plat_sleep_unlock(&sBusy);
 }

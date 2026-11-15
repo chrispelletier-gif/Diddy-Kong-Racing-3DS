@@ -93,6 +93,16 @@ unsigned long long plat_time_ns(void);
 unsigned long long plat_ticks(void);
 unsigned long long plat_ticks_per_second(void);
 void plat_sleep_ns(unsigned long long ns);
+/* A lock between threads that sleeps while it waits rather than spinning (the holder may be a lower priority thread on
+ * this core). */
+static inline void plat_sleep_lock(volatile int *lock, unsigned long long ns) {
+    while (__atomic_exchange_n(lock, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(ns);
+    }
+}
+static inline void plat_sleep_unlock(volatile int *lock) {
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+}
 
 /* The global "kernel" lock and condition variable that protect every emulated message queue. */
 void plat_klock(void);
@@ -126,7 +136,8 @@ void plat_wait_vblank(void);
 /* Returns nonzero while the application should keep running. Called from the main thread. */
 int plat_main_loop_iteration(void);
 
-/* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
+/* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. The buffer has a
+ * NUL after the last byte (not counted in *size), so a text file can be used as a string. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
 /* Saves on a background writer (in order with the other queued writes) and frees data there. */

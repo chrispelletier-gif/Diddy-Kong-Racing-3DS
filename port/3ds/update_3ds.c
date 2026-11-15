@@ -26,6 +26,7 @@
 #include <curl/curl.h>
 #include <mbedtls/sha256.h>
 #include "net_3ds.h"
+#include "plat/curl_common.h"
 #else
 #define net_3ds_background(background) ((void) 0) /* No network in a player build. */
 #endif
@@ -202,8 +203,6 @@ static void load_config(Config *config) {
     if (text == NULL) {
         return;
     }
-    text = realloc(text, size + 1);
-    text[size] = '\0';
     for (line = text; line != NULL && *line; line = next) {
         char *value, *end;
         next = strpbrk(line, "\r\n");
@@ -318,28 +317,13 @@ static long http_get(const Config *config, const char *url, int binary, Download
                                                     : "Accept: application/vnd.github+json");
     }
     curlError[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "dkr-3ds/" PORT_BUILD_VERSION);
+    curl_common_setup(curl, url, headers, "dkr-3ds/" PORT_BUILD_VERSION, on_data, download, curlError, caFile,
+                      net_3ds_ca_pem());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_data);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, download);
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curlError);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     // Give up on a download that stalls (under 1 KB/s for 30 seconds), not on a slow one.
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (caFile != NULL) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, caFile);
-    } else {
-        struct curl_blob blob;
-        blob.data = (void *) net_3ds_ca_pem();
-        blob.len = strlen(net_3ds_ca_pem());
-        blob.flags = CURL_BLOB_COPY;
-        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
-    }
     code = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     if (code != CURLE_OK && (status < 300 || status == 0)) {

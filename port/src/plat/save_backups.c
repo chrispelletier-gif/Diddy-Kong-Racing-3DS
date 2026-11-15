@@ -19,16 +19,6 @@
 /* The scan's name buffers are shared, and the Settings menu and SAVE OPTIONS can scan at the same time. */
 static volatile int sScanLock;
 
-static void scan_lock(void) {
-    while (__atomic_exchange_n(&sScanLock, 1, __ATOMIC_ACQUIRE)) {
-        plat_sleep_ns(1000000ULL); // A sleep, not a spin: the holder may be a lower priority thread on this core.
-    }
-}
-
-static void scan_unlock(void) {
-    __atomic_store_n(&sScanLock, 0, __ATOMIC_RELEASE);
-}
-
 static int has_extension(const char *name, const char *ext) {
     size_t length = strlen(name), extLength = strlen(ext);
     return length > extLength && strcasecmp(name + length - extLength, ext) == 0;
@@ -44,7 +34,7 @@ int save_backups_scan(SaveBackupList *list) {
     char path[192];
     int folders, files, i, j;
 
-    scan_lock();
+    plat_sleep_lock(&sScanLock, 1000000ULL);
     list->count = 0;
     snprintf(path, sizeof(path), "%s/" BACKUP_DIR, plat_data_dir());
     // The whole arrays, not sFolders[0]: the fortified strcpy would take that for a single 48 byte name.
@@ -70,7 +60,7 @@ int save_backups_scan(SaveBackupList *list) {
             list->count++;
         }
     }
-    scan_unlock();
+    plat_sleep_unlock(&sScanLock);
     return list->count;
 }
 
