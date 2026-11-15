@@ -18,7 +18,8 @@
 extern char __data_start[], _end[];
 extern int gPortHalfStep, gPortSkipTick;
 int port_list_objects(unsigned int *out, int max);
-extern unsigned char gPortMainPool[];
+extern unsigned char gPortMainPoolArea[];
+#define gPortMainPool gPortMainPoolArea
 
 static unsigned int sObjStart[1024], sObjEnd[1024];
 static int sNumSorted;
