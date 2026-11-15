@@ -348,6 +348,13 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
     // Raced the old way.
     { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
+    // R3 (2026-11-14, "Give textures native handles"): materials name their texture by handle instead of loading it
+    // through TMEM (no texture load ops or hashing when a material is caught), and a texture freed while a frame is
+    // built stays until that frame is drawn (the objects that went missing for a frame at level loads). PC frames
+    // identical but for those objects. One lap to check textures (Crescent Island water, door numbers, HUD), then a
+    // race for the walk's time.
+    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     // Old 3DS stereo 3D (2026-11-09, "Get Old 3DS to 30 fps in stereo 3D" thread, its own local branch): what 3D costs
     // and what wins it back, against the usual races in 2D. DKR_STEREO3D=2 draws in 3D whatever the slider says (as if
     // all the way up; anti-aliasing is off in 3D, so the GPU fills as many pixels as the usual races' 2x). Today's 3D
@@ -367,6 +374,9 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
     // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
     // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
+    // R3 (2026-11-14): textures by handle (see the Old 3DS list): a one-lap check, then a race.
+    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     // GPU time (gfx_c3d.c gpu_cuts.inc). Bench #451 (2026-11-07): the colour clear as a memory fill saved 1.5-3.2 ms
     // of GPU (stays on, row gone); the top screen's buffers in VRAM took the copy to the screen from 1.2 to 0.55 ms
     // on every track (now on, raced the old way once more: one Haunted Woods race was worse); the texture cache kept
@@ -403,6 +413,11 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // against #502, and the rectangle fill now saves 1.8-2.1 ms on all three tracks, so its row went. The edge row
     // measured nothing there (its switch wasn't read again between races; fixed), so it races once more.
     { "fill edges drawn as the whole clear (old)", { "DKR_FILL_EDGE_STRIP", NULL, NULL }, 1, 0, 1, 0 },
+    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
+    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
+    // then a full race for the speed.
+    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
@@ -440,6 +455,26 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
     // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
+    // G2 (2026-11-14): the HUD's, minimap's and menus' sprite frames and the pulsing-light track batches as native
+    // records (PC frames identical). One-lap check row first (look at the HUD, minimap and Spaceport Alpha's blinking
+    // lights), then the performance row.
+    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1 },
+    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
+    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
+    // then a full race for the speed.
+    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2). The first row races them
+    // together for the walk and renderer time on the four Old 3DS tracks; the check row is one lap on a tree, particle
+    // and snow track for bugs (sprites in place, flicker, weather).
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
+    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
+    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
@@ -463,6 +498,19 @@ static const BenchSwitch sSwitchesNew3ds[] = {
     // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
     // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
+    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2), at the bench's settings and
+    // (the usual 400 pixel races) CPU savings; the check row is one lap.
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
+    // G2 (2026-11-14): HUD/menu sprite frames and blinking-light batches as native records; check row (one lap), then
+    // the performance row.
+    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
+    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 0 },
+    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
+    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #endif
