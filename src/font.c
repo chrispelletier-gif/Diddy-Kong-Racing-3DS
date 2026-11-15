@@ -473,9 +473,7 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     if (lastTextureIndex != textureIndex) {
                         lastTextureIndex = textureIndex;
                         texture = fontData->texturePointers[textureIndex];
-#ifdef PICA_ALL
                         if (!port_native_draw()) // Native draws: each letter's rectangle names its texture
-#endif
                             gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(texture->cmd),
                                                texture->numberOfCommands);
                     }
@@ -506,9 +504,7 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     textureT += -textureUly * 8;
                     textureUly = 0;
                 }
-#ifdef PICA_ALL
                 port_native_rect(dList, texture); // Nothing with native draws off
-#endif
                 gSPTextureRectangle((*dList)++, textureUlx, textureUly, textureLrx, newTempY, 0, textureS, textureT,
                                     1 << 10, 1 << 10);
                 if (lastTextureIndex) {} // Fakematch

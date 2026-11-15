@@ -61,7 +61,7 @@ enum GfxBlendMode {
     GFX_BLEND_ALPHA_CVG /* opaque, alpha tested (cutout) */
 };
 
-/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn (the sky drawn last, DKR_SKY_LAST). */
+/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn. Nothing sets it now; it goes with the next simplify batch. */
 #define GFX_DEPTH_FAR 2
 
 enum GfxTextureFilter { GFX_FILTER_POINT, GFX_FILTER_BILINEAR };
@@ -236,11 +236,11 @@ typedef struct GfxModelParams {
     float texOffset[4];
     short fogMul, fogOffset; // With fog, the alpha is the fog factor clamp(z / w * fogMul + fogOffset, 0, 255)
     unsigned char fog;
-    unsigned char pad[3];   // pad[0]: lit (PICA_ALL GPU vertex lighting): the colours are normals, lit with light
+    unsigned char pad[3];   // pad[0]: lit (GPU vertex lighting): the colours are normals, lit with light
     float light[4];         // Light direction (x, y, z, over 127-unit normals) and ambient, as gfx_light_shade takes them
 } GfxModelParams;
 
-/* GPU vertex lighting (PICA_ALL): the grey of a vertex whose colour holds its normal (signed bytes). */
+/* GPU vertex lighting: the grey of a vertex whose colour holds its normal (signed bytes). */
 static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
     float d = (signed char) r * l[0] + (signed char) g * l[1] + (signed char) b * l[2];
     float v = l[3] + (d > 0.0f ? d : 0.0f);

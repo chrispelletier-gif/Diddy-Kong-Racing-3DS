@@ -48,8 +48,6 @@ struct PlatSem {
 };
 
 static LightLock sKernelLock;
-static CondVar sKernelCond;
-static CondVar sKeyedConds[PLAT_KEYED_CONDS];
 static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
@@ -90,10 +88,6 @@ void plat_init(void) {
     bool isNew3DS = false;
 
     LightLock_Init(&sKernelLock);
-    CondVar_Init(&sKernelCond);
-    for (int i = 0; i < PLAT_KEYED_CONDS; i++) {
-        CondVar_Init(&sKeyedConds[i]);
-    }
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
@@ -596,7 +590,6 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
-#if PICA_ALL
     // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
     // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
     // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
@@ -623,7 +616,6 @@ unsigned long long plat_time_ns(void) {
         // 1e9 / SYSCLOCK_ARM11 in 32.32 fixed point (3.7298 ns a tick).
         return sSeconds * 1000000000ULL + ((rest * 16019311343ULL) >> 32);
     }
-#endif
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 
@@ -648,7 +640,7 @@ void plat_kunlock(void) {
 }
 
 /*
- * v37 (DKR_KCOND, roadmap P50): the kernel lock's waits without libctru's condition variable, which can lose a
+ * The kernel lock's waits without libctru's condition variable, which can lose a
  * broadcast. Its waiter counts itself in the variable and unlocks the lock before it reaches the kernel's wait; a
  * broadcast in that gap zeroes the count and wakes no one, and when another waiter has counted itself in by the time
  * the first one reaches the kernel, the count is below zero again, so the first sleeps on, until its bound (4 ms).
@@ -656,23 +648,18 @@ void plat_kunlock(void) {
  * should have woken the game (the walk idle meanwhile): the 38-39 ms worst frame of every track.
  * Here a waiter counts itself under the lock, reads the variable's broadcast count and sleeps only while the count is
  * unchanged, which the kernel checks as it puts it to sleep (ARBITRATION_WAIT_IF_LESS_THAN count + 1), so a broadcast
- * at any moment after the read wakes it. Every broadcast does both kinds, so the switch can change while threads wait
- * (re-read with the GSP thread's priority, every 64 retraces). 0 = libctru's (old).
+ * at any moment after the read wakes it. (Kept on after the switch bench: libctru's waits had 10-34 late wakes a race.)
  */
 typedef struct KCond {
     volatile s32 count;   // Broadcasts so far (wraps; a waiter at the wrap just wakes early)
     volatile s32 waiters; // Under the kernel lock
 } KCond;
 static KCond sKernelK, sKeyedK[PLAT_KEYED_CONDS];
-static volatile int sKcondNew = 1;
 
 /* Returns whether it timed out (with no broadcast since it started). */
-static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
+static int kcond_wait(KCond *k, s64 ns) {
     s32 count;
     Result rc;
-    if (!sKcondNew) {
-        return CondVar_WaitTimeout(old, &sKernelLock, ns) != 0;
-    }
     k->waiters++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     count = __atomic_load_n(&k->count, __ATOMIC_SEQ_CST);
@@ -684,8 +671,7 @@ static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
     return R_DESCRIPTION(rc) == RD_TIMEOUT && __atomic_load_n(&k->count, __ATOMIC_SEQ_CST) == count;
 }
 
-static void kcond_broadcast(KCond *k, CondVar *old) {
-    CondVar_Broadcast(old); // (No system call when no one waits on it)
+static void kcond_broadcast(KCond *k) {
     __atomic_add_fetch(&k->count, 1, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&k->waiters, __ATOMIC_SEQ_CST) > 0) {
         syncArbitrateAddress((s32 *) &k->count, ARBITRATION_SIGNAL, -1);
@@ -697,23 +683,23 @@ static void kcond_broadcast(KCond *k, CondVar *old) {
  * milliseconds instead of a frozen game (see QUEUE_WAIT_NS in os_core.c).
  */
 void plat_kwait(void) {
-    kcond_wait(&sKernelK, &sKernelCond, 4000000LL);
+    kcond_wait(&sKernelK, 4000000LL);
 }
 
 int plat_kwait_timeout(unsigned long long ns) {
-    return kcond_wait(&sKernelK, &sKernelCond, (s64) ns);
+    return kcond_wait(&sKernelK, (s64) ns);
 }
 
 void plat_kbroadcast(void) {
-    kcond_broadcast(&sKernelK, &sKernelCond);
+    kcond_broadcast(&sKernelK);
 }
 
 int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
-    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)], (s64) ns);
+    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], (s64) ns);
 }
 
 void plat_kbroadcast_on(const void *key) {
-    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)]);
+    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {
@@ -811,11 +797,6 @@ void plat_wait_vblank(void) {
         sVblankRefTick = now;
     }
     if ((calls++ & 63) == 0) {
-        int kcond = plat_switch("DKR_KCOND", 1) != 0;
-        if (kcond != sKcondNew) {
-            sKcondNew = kcond;
-            plat_log("kernel lock waits: %s", kcond ? "can't lose a wake-up" : "libctru's condition variable");
-        }
         gsp_priority_update();
     }
 }

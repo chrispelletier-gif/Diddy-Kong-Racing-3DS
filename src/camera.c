@@ -962,7 +962,6 @@ void set_ortho_matrix_height(f32 value) {
 }
 
 
-#ifdef PICA_ALL
 /* With native draws on, the model matrices go to the renderer as floats (PORT_MTXF_TAG): the Mtx a matrix would have
  * been converted into holds its MtxF instead. */
 static void cam_mtx_store(MtxF *mf, Mtx *m) {
@@ -1018,10 +1017,6 @@ s32 cam_load_perspective(Gfx **dList, u32 index) {
 }
 #define CAM_MTX_STORE(mf, m) cam_mtx_store(mf, m)
 #define CAM_MTX_LOAD(dl, m, index) cam_mtx_load(dl, m, index)
-#else
-#define CAM_MTX_STORE(mf, m) mtxf_to_mtx(mf, m)
-#define CAM_MTX_LOAD(dl, m, index) gSPMatrixDKR((*(dl))++, OS_K0_TO_PHYSICAL(m), index)
-#endif
 
 /**
  * Sets the current matrix to represent an orthogonal view.
@@ -1240,9 +1235,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Push an empty vertex because sprite vertices are hardcoded to start from index 1,
         // and billboard mode is not enabled for vehicle parts.
-#ifdef PICA_ALL
         if (!cam_anchor(dList, &gVehiclePartVertex))
-#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(&gVehiclePartVertex), 1, 0);
     } else {
         // For non-vehicle parts, set up a standard billboard.
@@ -1256,9 +1249,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
-#ifdef PICA_ALL
         if (!cam_anchor(dList, *vtx))
-#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 
@@ -1292,14 +1283,12 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
-#ifdef PICA_ALL
     if (port_native_draw()) {
         port_native_sprite(dList, sprite->frames[frameID],
                            sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                          RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
                            !(flags & RENDER_Z_UPDATE));
     } else
-#endif
     {
         // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
         material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
@@ -1385,12 +1374,10 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     if (index >= sprite->numberOfFrames) {
         index = sprite->numberOfFrames - 1;
     }
-#ifdef PICA_ALL
     if (port_native_leftovers()) {
         // DKR_NATIVE_LEFTOVERS: one draw record per tile instead of the frame's list (its loads and vertex slots).
         port_native_sprite(dList, sprite->frames[index], sprite->drawFlags | flags, FALSE);
     } else
-#endif
     {
         material_load_simple(dList, sprite->drawFlags | flags);
         gSPDisplayList((*dList)++, sprite->frames[index]);

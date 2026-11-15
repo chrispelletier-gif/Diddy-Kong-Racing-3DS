@@ -72,7 +72,7 @@ typedef struct SplitTexture {
     unsigned int ticket; // v33 OP_TEX_FREE from gfx_split_texture_free_later: done when sFreeDone reaches it
 } SplitTexture;
 
-/* v33 (DKR_TEX_FREE_QUEUE): the last free ticket given out (walk) and the last one the backend has done. */
+/* v33: the last free ticket given out (walk) and the last one the backend has done. */
 static unsigned int sFreeTicket;
 static volatile unsigned int sFreeDone;
 
@@ -518,7 +518,7 @@ static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) 
 }
 
 /*
- * DKR_TEX_FREE_QUEUE: a free that goes through the queue after the draws that still use the texture, as a mesh's
+ * A free that goes through the queue after the draws that still use the texture, as a mesh's
  * does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not reuse
  * tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now. On an
  * Old 3DS a mid-race free otherwise made the walk wait for the whole queue.
@@ -622,7 +622,7 @@ void gfx_split_mesh_free(void *mesh) {
 }
 
 /*
- * v28 (DKR_NATIVE_REMOTE, PICA_ALL): work of the walk's own run on the backend thread, in order with the draws: room
+ * v28 (DKR_NATIVE_REMOTE): work of the walk's own run on the backend thread, in order with the draws: room
  * for bytes of the caller's (8-aligned), or NULL when the calls aren't queued this frame or the record is too big for
  * the ring (the caller then drains the queue and makes the call itself).
  */
