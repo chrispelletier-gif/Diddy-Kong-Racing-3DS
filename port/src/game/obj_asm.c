@@ -19,6 +19,30 @@ extern s32 D_8011D644; // Scratch buffer of interpolated animation offsets, 3 s1
 
 #define ANIM_S16(p) ((s16) port_read_be16(p))
 
+/* DKR_NATIVE_ANIM (N1, roadmap NC10): animations whose keyframe headers and first positions were converted to native
+ * little endian halfwords when they were loaded (port_native_object_animation, asset_swap.c) are read with plain
+ * halfword loads and written straight into the vertex buffer (no scratch pass); object shading stores each colour
+ * as two halfwords. Same results bit for bit; switch 0 keeps the line by line translation of the assembly. */
+static inline s32 anim_s16(const u8 *p, s32 native) {
+    if (native) {
+        s16 v;
+        __builtin_memcpy(&v, p, 2);
+        return v;
+    }
+    return ANIM_S16(p);
+}
+
+static unsigned int sNativeAnimLevel = 0xFFFFFFFFu;
+static int sNativeAnim;
+
+static inline int native_anim_on(void) {
+    if (sNativeAnimLevel != gPortLevelLoads) {
+        sNativeAnimLevel = gPortLevelLoads;
+        sNativeAnim = plat_switch("DKR_NATIVE_ANIM", 0) != 0;
+    }
+    return sNativeAnim;
+}
+
 /* Writes a vertex colour the way the assembly does: two big endian halfword stores. */
 static inline void store_shade(Vertex *v, s32 value) {
     u16 first = (u16) (value | (value << 8));
@@ -477,6 +501,8 @@ s32 obj_animate(Object *obj) {
     s16 *dstEnd;
     s32 x, y, z, tilt;
     s32 idx;
+    s32 native;
+    u8 *deltaSrc;
 
     modelIndex = obj->modelIndex;
     if (modelIndex < 0) {
@@ -522,6 +548,7 @@ s32 obj_animate(Object *obj) {
     inst->animationFrame = keyframe;
     frac = frame & 0xF;
     anim = model->animations[animID].animData;
+    native = model->animations[animID].native;
     numAnimVerts = model->numberOfAnimatedVertices;
     vertIndices = (s16 *) model->animatedVertexIndices;
     vertIndicesEnd = vertIndices + model->numberOfVertices;
@@ -536,9 +563,9 @@ s32 obj_animate(Object *obj) {
             if (idx != -1) {
                 dst = work + idx * 3;
                 src = positions + idx * 6;
-                dst[0] = baseVerts->x + ANIM_S16(src + 0);
-                dst[1] = baseVerts->y + ANIM_S16(src + 2);
-                dst[2] = baseVerts->z + ANIM_S16(src + 4);
+                dst[0] = baseVerts->x + anim_s16(src + 0, native);
+                dst[1] = baseVerts->y + anim_s16(src + 2, native);
+                dst[2] = baseVerts->z + anim_s16(src + 4, native);
             }
             indexPtr++;
             baseVerts++;
@@ -586,38 +613,57 @@ s32 obj_animate(Object *obj) {
 
     // Interpolate towards the next keyframe.
     src = anim + stride * (prevKeyframe + 2);
+    deltaSrc = src;
     deltas = (s16 *) D_8011D644;
-    dst = deltas;
-    dstEnd = deltas + numAnimVerts * 3;
-    do {
-        dst[0] = (s16) ((u32) ((s8) src[0] * frac) >> 4);
-        dst[1] = (s16) ((u32) ((s8) src[1] * frac) >> 4);
-        dst[2] = (s16) ((u32) ((s8) src[2] * frac) >> 4);
-        dst += 3;
-        src += 3;
-    } while (dst < dstEnd);
+    if (!native) {
+        dst = deltas;
+        dstEnd = deltas + numAnimVerts * 3;
+        do {
+            dst[0] = (s16) ((u32) ((s8) src[0] * frac) >> 4);
+            dst[1] = (s16) ((u32) ((s8) src[1] * frac) >> 4);
+            dst[2] = (s16) ((u32) ((s8) src[2] * frac) >> 4);
+            dst += 3;
+            src += 3;
+        } while (dst < dstEnd);
+    }
 
     // Interpolate the model offset and head tilt stored in each keyframe's header.
     src = anim;
     if (keyframe != 0) {
         src = anim + stride * (keyframe + 1) - 12;
     }
-    x = ANIM_S16(src + 0);
-    y = ANIM_S16(src + 2);
-    z = ANIM_S16(src + 4);
-    tilt = ANIM_S16(src + 0xA);
+    x = anim_s16(src + 0, native);
+    y = anim_s16(src + 2, native);
+    z = anim_s16(src + 4, native);
+    tilt = anim_s16(src + 0xA, native);
     src += stride;
     if (keyframe == 0) {
         src += stride - 12;
     }
-    inst->offsetX = x + (s32) ((u32) ((ANIM_S16(src + 0) - x) * frac) >> 4);
-    inst->offsetY = y + (s32) ((u32) ((ANIM_S16(src + 2) - y) * frac) >> 4);
-    inst->offsetZ = z + (s32) ((u32) ((ANIM_S16(src + 4) - z) * frac) >> 4);
-    inst->headTilt = tilt + (s32) ((u32) ((ANIM_S16(src + 0xA) - tilt) * frac) >> 4);
+    inst->offsetX = x + (s32) ((u32) ((anim_s16(src + 0, native) - x) * frac) >> 4);
+    inst->offsetY = y + (s32) ((u32) ((anim_s16(src + 2, native) - y) * frac) >> 4);
+    inst->offsetZ = z + (s32) ((u32) ((anim_s16(src + 4, native) - z) * frac) >> 4);
+    inst->headTilt = tilt + (s32) ((u32) ((anim_s16(src + 0xA, native) - tilt) * frac) >> 4);
 
     // Write the final vertex positions into the other vertex buffer.
     inst->animationTaskNum ^= 1;
     outVerts = inst->vertices[(u8) inst->animationTaskNum];
+    if (native) {
+        // The interpolated offsets are worked out here, per vertex, instead of in a scratch buffer first.
+        const s8 *d = (const s8 *) deltaSrc;
+        while (vertIndices < vertIndicesEnd) {
+            idx = *vertIndices++;
+            if (idx != -1) {
+                const s16 *a = work + idx * 3;
+                const s8 *b = d + idx * 3;
+                outVerts->x = a[0] + (s16) ((u32) (b[0] * frac) >> 4);
+                outVerts->y = a[1] + (s16) ((u32) (b[1] * frac) >> 4);
+                outVerts->z = a[2] + (s16) ((u32) (b[2] * frac) >> 4);
+            }
+            outVerts++;
+        }
+        return 1;
+    }
     while (vertIndices < vertIndicesEnd) {
         idx = *vertIndices++;
         if (idx != -1) {
@@ -630,6 +676,51 @@ s32 obj_animate(Object *obj) {
         outVerts++;
     }
     return 1;
+}
+
+/* A vertex colour (r, g, b, a bytes after the position) stored as two halfwords; grey values 0..255 only, anything
+ * else goes through store_shade as before. */
+static inline void store_shade_native(Vertex *v, s32 value) {
+    if ((u32) value <= 0xFF) {
+        u16 lo = (u16) (value * 0x0101);
+        u16 hi = (u16) (value | 0xFF00);
+        __builtin_memcpy(&v->r, &lo, 2);
+        __builtin_memcpy(&v->b, &hi, 2);
+    } else {
+        store_shade(v, value);
+    }
+}
+
+static void shade_fast_native(ObjectModel *model, Object *obj, s32 base, s32 dirX, s32 dirY, s32 dirZ) {
+    TriangleBatchInfo *batch = model->batches, *batchEnd = batch + model->numberOfBatches;
+    Vec3s *normals = model->normals;
+    Vertex *verts = obj->curVertData;
+    s32 count, dot, value;
+    do {
+        count = batch[1].verticesOffset - batch->verticesOffset;
+        if (batch->miscData == BATCH_VTX_COL) {
+            verts += count;
+            if (batch->flags & 0x8000) {
+                normals += count;
+            }
+        } else {
+            while (count-- > 0) {
+                dot = (normals->x * dirX + normals->y * dirY + normals->z * dirZ) >> 11;
+                normals++;
+                if (dot <= 0) {
+                    value = base;
+                } else {
+                    value = ((u32) (dot * base) >> 16) + base;
+                    if (value >= 0x100) {
+                        value = 0xFF;
+                    }
+                }
+                store_shade_native(verts, value);
+                verts++;
+            }
+        }
+        batch++;
+    } while (batch < batchEnd);
 }
 
 /**
@@ -663,6 +754,10 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
     verts = obj->curVertData;
     batch = model->batches;
     batchEnd = batch + model->numberOfBatches;
+    if (native_anim_on()) {
+        shade_fast_native(model, obj, base, dirX, dirY, dirZ);
+        return;
+    }
     do {
         count = batch[1].verticesOffset - batch->verticesOffset;
         if (batch->miscData == BATCH_VTX_COL) {

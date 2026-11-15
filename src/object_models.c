@@ -1065,7 +1065,7 @@ s32 model_anim_init(ObjectModel *model, s32 modelID) {
         }
     }
     model->numberOfAnimations = end - start;
-    allocAnimData = (ObjectModel_44 *) mempool_alloc(model->numberOfAnimations * 8, COLOUR_TAG_RED);
+    allocAnimData = (ObjectModel_44 *) mempool_alloc(model->numberOfAnimations * sizeof(ObjectModel_44), COLOUR_TAG_RED);
     model->animations = allocAnimData;
     if (allocAnimData == NULL) {
         return 1;
@@ -1095,6 +1095,10 @@ s32 model_anim_init(ObjectModel *model, s32 modelID) {
         temp = model->animations[i].anim;
         model->animations[i].animLength = *temp;
         model->animations[i].anim++;
+#ifdef TARGET_PORT
+        model->animations[i].native = port_native_object_animation(model->animations[i].anim, model->numberOfAnimatedVertices,
+                                                                   model->animations[i].animLength, size - 0x80 - 4);
+#endif
         i++;
         start++;
         i2++;
