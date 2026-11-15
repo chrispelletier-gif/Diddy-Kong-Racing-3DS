@@ -22,8 +22,9 @@ typedef enum MempoolFlags {
 #ifdef TARGET_PORT
 // On native ports the "RAM" the game manages is a static buffer, see port/src/port_main.c.
 #define PORT_MAIN_POOL_SIZE (8 * 1024 * 1024)
-extern u8 gPortMainPool[];
-#define RAM_END ((s32) (gPortMainPool + PORT_MAIN_POOL_SIZE))
+extern u8 *gPortMainPool;
+extern u32 gPortMainPoolSize; // PORT_MAIN_POOL_SIZE, or less with DKR_NATIVE_HEAP (native_heap.c)
+#define RAM_END ((s32) (gPortMainPool + gPortMainPoolSize))
 #define EXPANSION_RAM_END RAM_END
 #else
 #define RAM_END 0x80400000
@@ -106,6 +107,12 @@ extern MemoryPoolSlot gMainMemoryPool;
 void mempool_init_main(void);
 MemoryPoolSlot *mempool_new_sub(s32 poolDataSize, s32 numSlots);
 void *mempool_alloc_safe(s32 size, u32 colourTag);
+#ifdef TARGET_PORT
+/* mempool_alloc_safe for a big buffer: a native allocation with DKR_NATIVE_HEAP, otherwise the same. Freed with mempool_free. */
+void *mempool_alloc_big(s32 size, u32 colourTag);
+#else
+#define mempool_alloc_big mempool_alloc_safe
+#endif
 MemoryPoolSlot *mempool_alloc(s32 size, u32 colourTag);
 void *mempool_alloc_pool(MemoryPoolSlot *slots, s32 size);
 void mempool_free_timer(s32 state);

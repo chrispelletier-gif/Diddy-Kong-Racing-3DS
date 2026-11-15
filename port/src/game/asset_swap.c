@@ -17,6 +17,7 @@
 #include "font.h"
 #include "port.h"
 #include "port_swap.h"
+#include "plat/plat.h"
 #include "port_object_entries.h"
 
 /******************************** Generic helpers ********************************/
@@ -617,6 +618,33 @@ void port_swap_object_model(ObjectModel *model) {
 /* Object animations stay big endian apart from the leading keyframe count (see obj_animate). */
 void port_swap_object_animation(void *anim) {
     port_swap32(anim);
+}
+
+/*
+ * DKR_NATIVE_ANIM: converts the halfwords obj_animate reads (the 12 byte header of every keyframe and the first
+ * keyframe's absolute positions, 3 per animated vertex) to native byte order, once, when the animation is loaded.
+ * anim is the data after the keyframe count. The layout (as obj_animate walks it): header 0 at 0, the positions at
+ * 0xC, header k (k >= 1) at stride * (k + 1) - 12 with stride = 3 * numAnimVerts + 12, the signed byte deltas in
+ * between. Returns 1 when converted (the animation's flag is then set), 0 when the switch is off or the data
+ * doesn't fit the layout.
+ */
+int port_native_object_animation(void *anim, int numAnimVerts, int animLength, int dataSize) {
+    u8 *base = (u8 *) anim;
+    s32 stride = numAnimVerts * 3 + 12;
+    s32 k;
+    if (!plat_switch("DKR_NATIVE_ANIM", 0) || animLength < 2 || numAnimVerts <= 0 || numAnimVerts > 0x200) {
+        return 0;
+    }
+    if (12 + numAnimVerts * 6 > dataSize || stride * animLength > dataSize) {
+        plat_log("native animation not converted: %d keyframes, %d vertices, %d bytes", animLength, numAnimVerts, dataSize);
+        return 0;
+    }
+    port_swap16_array(base, 6);
+    port_swap16_array(base + 12, numAnimVerts * 3);
+    for (k = 1; k < animLength; k++) {
+        port_swap16_array(base + stride * (k + 1) - 12, 6);
+    }
+    return 1;
 }
 
 /******************************** Textures and sprites ********************************/
