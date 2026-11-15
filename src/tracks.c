@@ -2204,6 +2204,30 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         if (batchFlags & RENDER_PULSING_LIGHTS) {
             color = gCurrentLevelHeader2->pulseLightData->outColorValue;
             gDPSetPrimColor(gTrackDL++, 0, 0, color, color, color, color);
+#ifdef PICA_ALL
+            if (nativeDraw && port_native_leftovers()) {
+                // DKR_NATIVE_LEFTOVERS: the blinking-light batch as a record too (its own material key, bit 31).
+                int capture;
+                s32 id = port_nmat_key(texture, (int) ((u32) batchFlags | 0x80000000u), texOffset, &capture);
+                if (capture) {
+                    gForceFlags = TRUE;
+                    gCurrentTextureHeader = NULL;
+                    material_set_blinking_lights(&gTrackDL, texture, batchFlags, texOffset);
+                    gDPNoOpTag(gTrackDL++, PORT_NMAT_TAG | id);
+                }
+                gDPNoOpTag(gTrackDL++, PORT_NDRAW_TAG | id);
+                gTrackDL->words.w0 = OS_K0_TO_PHYSICAL(vertices);
+                gTrackDL->words.w1 = OS_K0_TO_PHYSICAL(triangles);
+                gTrackDL++;
+                gTrackDL->words.w0 = (u32) numberVertices | ((u32) numberVertices << 8) |
+                                     ((u32) (texture != NULL) << 16);
+                gTrackDL->words.w1 = (u32) numberTriangles;
+                gTrackDL++;
+                gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
+                anyNative = TRUE;
+                continue;
+            }
+#endif
             material_set_blinking_lights(&gTrackDL, texture, batchFlags, texOffset);
 #ifdef TARGET_PORT
             if (nativeTrack) {
