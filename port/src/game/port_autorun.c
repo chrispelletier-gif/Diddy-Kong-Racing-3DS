@@ -251,269 +251,38 @@ typedef struct BenchSwitch {
  * models by distance, sooner with more players on screen (objects.c); DKR_RACER_LOD=n uses the distances of n + 1
  * players for the other karts (PC, Whale Bay start: their draws 106 to 56 a frame with 4-player distances).
  * The list ends with an empty entry, so it may be otherwise empty. */
-#ifdef PICA_ALL
-/* The off-GitHub "every N64 layer native" test build (plat_common.c defaults): native draws on, GPU vertex maths and
- * textures in VRAM off, two-core renderer on on both consoles. */
-/* The bench after the OS-layer stages (user 2026-11-05 22:51): GPU vertex maths and textures in VRAM are settled
- * (both stay off: no gain on either console, runs 9/10 and the New 3DS runs 5/6), so their rows are gone and the
- * usual races (the new renderer at its best settings) race the old renderer at its best: the game builds its N64
- * display lists again and the walk draws them in their order (DKR_OLD_RENDERER 1: native draws and opaque sorting off), as before the
- * PICA stages. The OS-layer stages (frame queue, sound, music, input, ROM reads, locks) are set at launch, so both
- * kinds of race have them. Textures in VRAM with each (Old 3DS runs 9 and 10 disagreed; user 23:00: VRAM with new and with old renderer). */
-/* Textures in VRAM never beat the usual races with the new renderer (Old 3DS #417 and #419, New 3DS #418), so it stays
- * off and its two rows are gone (user 2026-11-06: remove redundant tests). */
-/* Benches #432/#436 (Old 3DS) and #435 (New 3DS), v26-v27: the off-screen triangle drop, the kart detail drop, the
- * native code's vertex vectors and game code are kept (no row beat them); checking pieces once a frame made no
- * difference and the stall finder only costs, so their rows are gone (user rule: drop settled rows). Textures in
- * VRAM: steadier on Whale Bay in both Old 3DS runs (frame to frame 2.0-2.2 ms against 2.3-3.8), even elsewhere, so
- * v28 makes it the Old 3DS default and its row races the old way; on the New 3DS it was even, and races again. */
-/* Old 3DS: two-core off was settled at 12 fps (issue #406), so it has no row. v19: the game logic thread's native
- * code (collision cells, interaction lists, block memcpy) turned off; only here, as the New 3DS game core is idle. */
-static const BenchSwitch sSwitchesOld3ds[] = {
-    // Bench #437 (v28): native draws' vertex maths on the system core (DKR_NATIVE_REMOTE=3) saved 1.4-3.0 ms of
-    // renderer time on the game core (frames at 30: Whale Bay 91 -> 97%, Windmill Plains 93 -> 98%), more than
-    // opaque draws alone; it stays the default and its rows went, as did textures in RAM (even again).
-    // v29 walk cuts (PC walk -20% instructions, -20% cache misses on a simulated Old 3DS cache, frames identical):
-    // draws behind a waiting batch go to the system core too (DKR_REMOTE_FLUSH), the system core reads unchanged
-    // mesh tables in place (DKR_REMOTE_SHARE), track and model triangles are compared only after the game changes
-    // them (DKR_TRIS_SKIP). Raced all off, and the first alone off (it moves more work to the system core).
-    // Bench #443 kept all three (renderer -0.8 to -1.0 ms on Windmill Plains and EverFrost Peak, even on Whale Bay;
-    // the flush alone off: Whale Bay +0.8 ms, the others -0.3), so their rows went.
-    // v30: the bottom screen is drawn on the system core (DKR_BS_SYSCORE) and its copy to the screen no longer
-    // holds the lock the game's HUD updates wait for (DKR_BS_COPY_LOCK). Benches #449/#450 kept both (the copy under
-    // the lock had more frames slower than 30: 95-98% at 30 against 98-99%), so their rows went.
-    // v31: the N64 sound players' frame on the system core (DKR_PLAYERS_SYSCORE); the game's loops over every object
-    // load the objects ahead of use (DKR_OBJ_PREFETCH); the walk loads the next draw record's data and the backend
-    // the next piece ahead of use (DKR_WALK_PREFETCH, DKR_BACKEND_PREFETCH); exact game code cuts (shadow pass skips
-    // objects without shadows, each clip corner worked out once, lighter object loops; the music fade scan is skipped
-    // on levels without fades, no row); the watchdog counts free memory every 5 s and the bottom screen is flushed
-    // by a system call. Each raced the old way. Bench #456: every row even with the usual races (within 0.3 fps),
-    // so the cuts stay on and their rows went; the sound players' row tested nothing (their thread gave up at
-    // start-up, before the system core lent any time), fixed in v32, so it races again.
-    // v32: the profiler's own costs, found by v31's slowest-frame line: its readout and log lines run after the frame
-    // is built (DKR_PROF_IDLE_LOG; they took ~8 ms after the frame's end every 4th second), and the GPU timeline's
-    // frame cut by kind is off (DKR_GPU_KINDS; 24 of #456's 53 renderer hitches were on it). Raced the v31 way.
-    // Bench #457 (v32): all three kept (worst GPU frame 35-50 -> 24-27 ms without the kind cuts; the sound players
-    // on core 1 take 0.6 ms a frame off the game core, fps even), so their rows went.
-    // v33: a texture freed at a frame's start (objects' textures mid-race, stale ones at loads) goes through the
-    // backend's queue instead of the walk waiting for the backend to catch up (DKR_TEX_FREE_QUEUE): half of #457's
-    // Whale Bay hitches after the start had such a free in the frame (renderer 49-54 ms). Raced the old way.
-    // Benches #459/#460 (v33, lean): the queue was even with the old way (all three tracks at 29.9 fps, none at
-    // 20 fps with the profiler's readout off), so it stays on and its row went.
-    // v35: the GSP event thread (retraces, the GPU's next command list, the swap) above the walk (DKR_GSP_PRIO,
-    // plat_3ds.c): at the walk's priority it waited for the walk, and lean quick test #462's 39 ms worst frames were
-    // retraces that came late that way. Raced the old way.
-    // Lean quick tests #465/#467 (v35/v36): the GSP thread raised cut Whale Bay's GPU time 11.4 -> 9.8 ms; the 39 ms
-    // frames stayed, and v36's probe found them: the game thread slept out its 4 ms bound after a lost broadcast
-    // (libctru's condition variable). v37 waits on the kernel lock without it (DKR_KCOND, plat_3ds.c).
-    // Switch bench #472 (combined build fc6df8e8): both kept. The old GSP priority cost 1.2-5.1 ms of GPU a frame;
-    // the old waits had 10-34 late wakes a race against none, a 1% low of 25.8 against 29.2 on Whale Bay and Windmill
-    // Plains and EverFrost Peak's worst frame 39 against 34 ms. Their rows went.
-    // The New 3DS's GPU cuts that are off here, the frame's colour clear and the whole-screen solid rectangle as memory
-    // fills (DKR_COLOUR_FILL + DKR_RECT_FILL), raced together in bench #476: no GPU time saved on any of the three
-    // tracks (9.8-10.3 ms either way), so they stay off and the row went.
-    // v39: Whale Bay's last 50 ms frames (quick tests #474/#475) come in the first 15 s of a race, with the pack
-    // together: the PC race has twice the usual triangles then (2000 against 970 a frame, the racers 900 of them).
-    // A racer's model comes in 23-35 pieces that repeat most of their vertices (~300 sent for ~130 different), so
-    // the backend's shared corners (DKR_WELD, gfx_rdp.c weld_vertices) work out a vertex seen again in the same
-    // matrix, light and fog once: PC Whale Bay, 31-37% of the racers' vertices (36-38% of every piece's) taken from
-    // the table, frames and game state identical. Bench run 34 (#481, Whale Bay): racers alone 29.8 fps / 99% at 30
-    // as usual with GPU and renderer 0.6 ms worse, every piece 2 ms more renderer and 97%, so DKR_WELD stays 0 and
-    // its rows went: a vertex's maths is not what a piece costs the Old 3DS.
-    // v40: what a piece does cost is its draw: a PC Whale Bay race start has ~210 draws a frame, ~60 of them the
-    // racers' (one per texture of each piece). The texture atlas now takes the backend's draws too, but most racer
-    // textures tile (coordinates past their edges), which a page can't hold, so only 61 -> 55. A measurement, not a
-    // setting: every racer piece through the atlas, tiled ones drawn clamped (wrong), racer draws 61 -> 17 at the
-    // start and 40 -> 6 over the race. If it saves the Old 3DS real time, pages that tile those textures come next.
-    { "racer pieces batched (measurement, racer textures look wrong)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 3, 1, 0 },
-    // v41 (user, 2026-11-09: the other karts' simpler models are barely noticeable, can it be avoided?): the Old 3DS
-    // has used 3-player distances for the other karts since run 16 (DKR_RACER_LOD=2), when it was far slower. Since
-    // KCOND (v37) Whale Bay holds 99% of frames at 30 (#481), so the 2-player (1) and the game's own distances (0) are
-    // raced again. And a kart no longer flickers between two models at a threshold (DKR_RACER_LOD_HOLD=4, on by
-    // default: PC Whale Bay 5 -> 2 flips back within a second); raced against the old way.
-    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 1, 0 },
-    { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 1, 0 },
-    // v42: the two distance rows race alone (both set DKR_RACER_LOD), so the every-switch race is the hold row's.
-    { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
-    // While the frame rate drops, the other karts' distances move to the 4-player ones (DKR_RACER_LOD_ADAPT), which
-    // only changes anything at the 1- and 2-player distances above. That switch is now eased over ~1 s in and 2 s out,
-    // a kart only getting simpler while it moves away (DKR_RACER_LOD_SMOOTH=2, objects.c port_racer_lod_ease); this
-    // row races the game's own distances with the old all-at-once switch (both variables 0), against the row above.
-    { "other karts' detail at the game's own distances, dropped all at once when slow (old)",
-      { "DKR_RACER_LOD", "DKR_RACER_LOD_SMOOTH", NULL }, 2, 0, 1, 0 },
-    // Taj's pond in the Central Area (bug report #482, v39): the view with the pond's ten frogs and Taj drew 150-200
-    // draws a frame on PC against ~55 elsewhere in the hub, and the backend was busy 30 ms a frame there (17 ms
-    // elsewhere). Every solid object's shadow sat between two objects' models, so no two shadows shared a draw: the
-    // shadows now go first, together (DKR_SHADOWS_FIRST, tracks.c), and the frogs' batch. PC hub tour: shadow draws
-    // 28 -> 7 and all draws 161 -> 152 a frame at the pond, 230 of 231 frames identical (one 3 pixels apart).
-    // Raced the old way.
-    { "shadows drawn with their objects (old)", { "DKR_SHADOWS_FIRST", NULL, NULL }, 1, 0, 0, 0 },
-    // R3 (2026-11-14, "Give textures native handles"): materials name their texture by handle instead of loading it
-    // through TMEM (no texture load ops or hashing when a material is caught), and a texture freed while a frame is
-    // built stays until that frame is drawn (the objects that went missing for a frame at level loads). PC frames
-    // identical but for those objects. One lap to check textures (Crescent Island water, door numbers, HUD), then a
-    // race for the walk's time.
-    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
-    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
-    // Old 3DS stereo 3D (2026-11-09, "Get Old 3DS to 30 fps in stereo 3D" thread, its own local branch): what 3D costs
-    // and what wins it back, against the usual races in 2D. DKR_STEREO3D=2 draws in 3D whatever the slider says (as if
-    // all the way up; anti-aliasing is off in 3D, so the GPU fills as many pixels as the usual races' 2x). Today's 3D
-    // sends every draw once for each eye, with a change of target between; made once (P33, DKR_STEREO_ONCE) the GPU
-    // runs the frame's commands twice; and the walk's back face culling (P40), off in 3D until now, tests both eyes
-    // (DKR_STEREO_CULL, gfx_rdp.c face_test). Each a measurement, raced alone.
-    { "3D, every draw sent for each eye (today's 3D)", { "DKR_STEREO3D", NULL, NULL }, 0, 2, 1, 0 },
-    { "3D made once, the GPU running it for each eye (P33)", { "DKR_STEREO3D", "DKR_STEREO_ONCE", NULL }, 0, 2, 1, 0 },
-    { "3D made once, back faces culled for both eyes",
-      { "DKR_STEREO3D", "DKR_STEREO_ONCE", "DKR_STEREO_CULL" }, 0, 2, 1, 0 },
-    { NULL, { NULL, NULL, NULL }, 0, 0 },
-};
-/* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
-static const BenchSwitch sSwitchesNew3ds[] = {
-    // Bench #438 (v28): native draws' vertex maths on the second renderer thread cost the New 3DS 1.5-2.7 ms of
-    // renderer time on two tracks (its second thread shares the game's core), and textures in VRAM were mixed again
-    // (Haunted Woods -2.1 ms, the others +0.1-0.4): both stay off there and their rows went.
-    // Bench #444 (v29): comparing triangles every frame again cost Haunted Woods 2.7 ms of renderer time and was
-    // within 0.7 ms elsewhere, so DKR_TRIS_SKIP stays on and its row went.
-    // R3 (2026-11-14): textures by handle (see the Old 3DS list): a one-lap check, then a race.
-    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
-    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
-    // GPU time (gfx_c3d.c gpu_cuts.inc). Bench #451 (2026-11-07): the colour clear as a memory fill saved 1.5-3.2 ms
-    // of GPU (stays on, row gone); the top screen's buffers in VRAM took the copy to the screen from 1.2 to 0.55 ms
-    // on every track (now on, raced the old way once more: one Haunted Woods race was worse); the texture cache kept
-    // between draws gained nothing (shelved, row gone). Round 2: draws that can't change a pixel left out (the
-    // screen fader's alpha 0 quad over the whole screen in every race frame; PC frames identical), raced the old
-    // way, and cost rows for what the bench's GPU timeline can't split: the sky, the see-through/effects/shadows
-    // draws left out (DKR_SKIP_DRAW_KINDS, the backend's), and every draw's settings written once instead of twice
-    // (DKR_REWRITE=1; the head and cliff dropouts may show in that race).
-    // Bench #463 (gpu3): leaving out those draws saved Haunted Woods 3.6 ms and Jungle Falls 1.9 ms of GPU (stays
-    // on), main memory buffers cost 0.6-2.6 ms (VRAM stays on), and settings written once saved nothing (the second
-    // write costs the GPU nothing), so those rows went. The cost rows said the sky takes 1.0-3.1 ms and the
-    // see-through/effects/shadows draws up to 2.8 ms (Crescent Island); round 3 times every draw on the GPU in the
-    // profile instead (DKR_GPU_DRAWS, "GPU draws" in the log), so they went too.
-    // Round 3: the GPU events thread above the renderer's priority on a New 3DS too (DKR_GSP_PRIO=1, v35's Old 3DS
-    // default): at equal priority the next list part and the swap waited for the walk, idle GPU time that the
-    // timeline can't see.
-    // Bench #466 (gpu4): it cost Haunted Woods 1.7 ms of GPU and gained nothing elsewhere, so the New 3DS keeps
-    // libctru's priority and the row went. Round 4: v37's kernel lock waits that can't lose a broadcast (DKR_KCOND,
-    // on for both consoles) raced the old way, for the New 3DS's pacing and render waits (late_wakes column).
-    // Bench #469 (v37 in the combined build): the old waits cost Haunted Woods 2.2 ms of GPU and a 33 ms worst frame,
-    // so DKR_KCOND stays on and its row went. Round 5: #469's per-draw list began race frames with a whole-screen
-    // rectangle in one colour (~1.9 ms of GPU, after the game's clear was already a fill); drawn first, it is now the
-    // frame's memory fill instead (DKR_RECT_FILL, gpu_cuts.inc section 7), raced the old way.
-    // Boss fights (2026-11-08, user: "performance during the boss fights seems poor at times"): Wizpig 1's rain is two
-    // whole-screen blended layers every frame. Blended draws that write no depth now drop their alpha 0 pixels with
-    // the GPU's alpha test before the blend (DKR_XLU_ALPHA_TEST, gfx_c3d.c; same picture). Benches #488 and #502:
-    // the old way cost Haunted Woods 2.9-3.0 ms of GPU and saved nothing elsewhere, so it stays on and its row went.
-    // Benches #488/#502 also had the rectangle fill above costing Crescent Island and Jungle Falls 1.0-1.2 ms, and the
-    // 200-race runs #494/#505 (800 pixels) 1 ms more GPU on every track than #483: its fill needs an edge drawn each
-    // side, and each edge was drawn as the whole rectangle cut by the scissor, which the GPU pays for in full
-    // (#505's per-draw log: two 1.5 ms "COLOUR CLEAR drawn" a frame). The edges are now drawn as strips just over
-    // their lines (DKR_FILL_EDGE_STRIP, gpu_cuts.inc draw_fill_edge; same pixels), raced the old way.
-    // Bench #511 (combined build ec64ffb): usual GPU on Crescent Island 14.0 -> 11.2 ms and Jungle Falls 10.6 -> 7.8 ms
-    // against #502, and the rectangle fill now saves 1.8-2.1 ms on all three tracks, so its row went. The edge row
-    // measured nothing there (its switch wasn't read again between races; fixed), so it races once more.
-    { "fill edges drawn as the whole clear (old)", { "DKR_FILL_EDGE_STRIP", NULL, NULL }, 1, 0, 1, 0 },
-    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
-    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
-    // then a full race for the speed.
+/* The switch bench's rows (2026-11-15, owner: "only the newer native renderer switches"): each native renderer switch
+ * of the 0.4 build, raced against the usual settings, then all of them together. A bug-check row (check = 1) races
+ * one lap; a performance row races the track's own laps. The earlier experiments' rows (the other karts' detail,
+ * shadows first, flicker, batched pieces, 3D, back face culling, ...) are out of the list, their switches untouched;
+ * their last results are in port/docs/bench-history.md. DKR_NATIVE_HEAP has no row: it is read once at boot, because
+ * the game's pool is sized by it, so a race can't flip it (test it by starting the game with the switch on).
+ * One list serves both consoles. */
+static const BenchSwitch sSwitchesNative[] = {
+    // R2 (PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots. One lap to check the
+    // sprites (hub trees, balloons), then a full race for the speed.
     { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
     { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
-    { NULL, { NULL, NULL, NULL }, 0, 0 },
-};
-#else
-static const BenchSwitch sSwitchesOld3ds[] = {
-    // Run 16 (v37): 3-player distances won on Jungle Falls, Crescent Island and Haunted Woods (98/96/96% of frames
-    // at 30 against 96/92/94%), so DKR_RACER_LOD=2 is the Old 3DS default (src/objects.c) and its rows are gone.
-    // Quick test #304 (v40, the monitor): the walk costs some 50-70 us a command, and 30-85% of the sky's, track's
-    // and effects' triangles are off the screen. DKR_WALK_REJECT drops a command wholly past one edge before its
-    // set-up (PC Whale Bay: 55-67 of ~180 commands a frame, walk instructions -4.7%, frames identical).
-    // Run 17 (v41): renderer -1.4 to -1.7 ms on Crescent Island and Haunted Woods (93/91% -> 96/95% of frames at
-    // 30), so it is the Old 3DS default and out of the list.
-    // Runs 18-21 (v42-v45): the Jungle Falls tunnel dropout (#306: walls and ceiling missing for a frame or two)
-    // came and went whatever was switched; the frame history now counts big flashes (flashes column). Run 22 (v46),
-    // two races a row: usual 5 flashes, system core 4 ms busier 10, no overlap 11, depth clear drawn 0. So the depth
-    // clear is drawn by default on an Old 3DS now (DKR_DEPTH_FILL=0, gfx_c3d.c); v47 raced the memory fill back on against it.
-    // The user was sure after run 22, so its confirmation row is gone. 2026-11-01 (PGO run #331 no gain): how much a
-    // native track or racer renderer (drawing from our own 3DS data instead of the game's display lists) could save at
-    // most, with the game not building them at all (DKR_SKIP_GAME_KINDS: track 1 << 1, racers 1 << 2), on the worst
-    // tracks of the whole game baseline #326.
-    // v49/v50 ran three cost rows here (DKR_SKIP_GAME_KINDS 2/4/6: track, racers, both not built or drawn).
-    // Bench #355 (v49, Whale Bay): racers not built 81% -> 97% of frames at 30, and their walk alone is 2.7 ms a frame
-    // (draw mix). The GPU route lost on an Old 3DS (run 15: P30 for every draw), but at 30 fps its GPU has room (11 of
-    // 33 ms): only the racers' (kind bit 2) or the track's (bit 1) vertex maths on the GPU, the way a native renderer
-    // would do them, before writing one (both variables take the test value: any non-zero turns P30 on).
-    // Bench #367 (v51): both lost (racers: GPU +1.0 to 2.3 ms and no renderer saving; track: worse, and 1-6 s
-    // freezes on Windmill Plains), so the native renderer keeps the vertex maths on the CPU and the rows are gone.
-    // v52: the native mesh path (NR1, gfx_rdp.c native_mesh; PC frames identical on 12 levels) for the racers' models
-    // (DKR_NATIVE_MESH=1) and for every object's 3D model (3: also the windmill sails, the "hit tester" objects of
-    // #364). And, without draw distance changes (no pop-in): the other karts' simpler models at the 4-player
-    // distances (DKR_RACER_LOD=3; the default 2 is 3-player).
-    { "native meshes for the racers", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 1, 1 },
-    { "native meshes for the racers and objects", { "DKR_NATIVE_MESH", NULL, NULL }, 0, 3, 1 },
-    { "other karts' simpler models sooner (4-player distances)", { "DKR_RACER_LOD", NULL, NULL }, 2, 3, 1 },
-    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths,
-    // the opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames
-    // the same but for rounding). Unlike run 15 / #367's GPU route, one draw per material rather than per command.
-    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1 },
-    // G2 (2026-11-14): the HUD's, minimap's and menus' sprite frames and the pulsing-light track batches as native
-    // records (PC frames identical). One-lap check row first (look at the HUD, minimap and Spaceport Alpha's blinking
-    // lights), then the performance row.
+    // G2 (PR #528): HUD, minimap and menu sprite frames and the blinking-light batches as native records. One lap to
+    // look at the HUD, the minimap and Spaceport Alpha's lights, then the performance row.
     { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
-    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1 },
-    // R2 (2026-11-14, PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (PC frames
-    // identical on the intro, 12 levels and the Adventure hub). One lap to check the sprites (hub trees, balloons),
-    // then a full race for the speed.
-    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
-    { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
-    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
-    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2). The first row races them
-    // together for the walk and renderer time on the four Old 3DS tracks; the check row is one lap on a tree, particle
-    // and snow track for bugs (sprites in place, flicker, weather).
-    { "native camera records (billboard anchors, weather matrix; with R2 records)",
-      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
+    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 0, 0 },
+    // G3 (PR #530): billboard anchors and the weather's projection matrix as records, with R2's records (it needs
+    // them). One lap on trees, particles and snow to check for bugs, then the race for the walk and renderer time.
     { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
-    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
-    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
-    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1 },
+    { "native camera records (billboard anchors, weather matrix; with R2 records)",
+      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 0, 0 },
+    // N1 (PR #524): object animation and shading as native code (bit-exact on the PC): cuts the game thread's time in
+    // races with many animated objects.
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
+    // R3 (PR #531): materials name their texture by handle, and a texture freed while a frame is built stays until
+    // that frame is drawn. One lap to check textures (Crescent Island water, door numbers, HUD), then a race.
+    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-/* New 3DS: switch bench #286 (2026-10-31) made the two-core renderer (P21) the default (renderer 7.4-8.4 ms to
- * 3.7-4.3 ms, Haunted Woods' 1% low 30 to 58 fps); the P38 cuts, the P40 cull and texture hashes kept 8 frames were
- * within noise. At the player's 800 pixels and 4x anti-aliasing the GPU is the limit instead (#289, #291: 15-16 ms of
- * a 16.7 ms frame, Crescent Island down to 45 fps), so the New 3DS races at those settings (sBenchRenderNew3ds) and
- * measures the GPU there. Bench #309 made adaptive anti-aliasing (P37) the player's default, but the usual race keeps
- * it off so the GPU's full cost stays measurable; its row shows what a player gets. Textures in VRAM (P17, 0.1-0.2 ms
- * in #309) left the list. The fixed cost (about 9-10 ms with nothing drawn) is split by the colour boost and
- * 400-pixel rows. Bench #320: the sky drawn last (P41) and a depth buffer without stencil (P42) saved nothing (left
- * off, rows dropped); the untextured track row looks for what makes a track pixel cost. */
-static const BenchSwitch sSwitchesNew3ds[] = {
-    // Head and cliff dropouts (2026-11-01): every draw's settings written twice (DKR_REWRITE=2) is the New 3DS
-    // default. Bench runs #375/#380: no flicker with 2 or 3 (texture changes too), flicker with the old 1; 3 was not
-    // measurably cheaper, so 2 stays and both check rows went.
-    // The two-core renderer's second thread now runs below the game on its core (#383: above it, it held the
-    // Central Area's game logic up to 12.7 ms a frame, 47-52 fps); this row races the old order.
-    { "renderer's second thread above the game (old)", { "DKR_SPLIT_BELOW_GAME", NULL }, 1, 0, 1, 0 },
-    { "renderer's second thread on the system core", { "DKR_SPLIT_SYSCORE", NULL }, 0, 1, 1, 0 },
-    // NR4 (2026-11-05): the track drawn from copies in GPU memory made once per level, by the GPU's vertex maths, the
-    // opaque part sorted by material (gfx_rdp.c native_track; PC Whale Bay: track draws 73 -> 25 a frame, frames the
-    // same but for rounding). Jungle Falls is raced too for its tunnel (#306: walls and ceiling missing).
-    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
-    // G3 (2026-11-14): billboard anchors and the weather's projection matrix as records (DKR_NATIVE_CAMERA), with the
-    // sprites and billboards drawn from arrays of their own (DKR_NATIVE_RECORDS, R2), at the bench's settings and
-    // (the usual 400 pixel races) CPU savings; the check row is one lap.
-    { "native camera records (billboard anchors, weather matrix; with R2 records)",
-      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 0 },
-    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
-    // G2 (2026-11-14): HUD/menu sprite frames and blinking-light batches as native records; check row (one lap), then
-    // the performance row.
-    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
-    { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 0 },
-    // N1 (NC10, 2026-11-14): object animation and shading as native code (little endian keyframes converted at model load;
-    // read at level load; bit-exact on the PC). Cuts game thread time in races with many animated objects.
-    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 1, 0 },
-    { NULL, { NULL, NULL, NULL }, 0, 0 },
-};
-#endif
+#define sSwitchesOld3ds sSwitchesNative
+#define sSwitchesNew3ds sSwitchesNative
 /*
  * New 3DS: the shelved switches bench ("Shelved switches" in the Test run menu, 2026-11-01; the user asked whether
  * anything shelved earlier is worth another look now that the profiler times every part, the renderer runs on two
