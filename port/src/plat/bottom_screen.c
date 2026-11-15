@@ -80,6 +80,7 @@ typedef struct UiFont {
 #define UI_NG 106 /* glyphs per pen phase: 0x21-0x8A */
 #include "ui_font_data.h"
 #include "logo_vector_data.h"
+#include "term_font.h"
 
 static Font sFonts[3];
 static Picture sLogo, sSmallLogo; /* The title logo, and at half size for the menus' companions. */
