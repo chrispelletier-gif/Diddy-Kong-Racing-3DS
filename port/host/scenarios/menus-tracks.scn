@@ -1,0 +1,5 @@
+# Tracks mode, from the title: player select (three A presses), game select (stick down to TRACKS), track select
+# (stick right twice), vehicle select, the T.T. page, "Ok?", the race start, then the pause menu and Restart Race
+about = player select, game select, track select, vehicle and T.T. pages, a race start, the pause menu, a restart
+frames = 4400
+input = 700:START 706: 800:A 806: 860:A 866: 920:A 926: 1040:STICK=0,-90 1055: 1110:A 1116: 1300:STICK=90,0 1315: 1400:STICK=90,0 1415: 1500:A 1506: 1620:STICK=90,0 1635: 1700:A 1706: 1900:A 1906: 2100:A 2106: 2600:START 2606: 2800:STICK=0,-90 2815: 2900:A 2906:

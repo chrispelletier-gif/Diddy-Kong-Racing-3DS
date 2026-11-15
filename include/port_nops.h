@@ -22,6 +22,18 @@
 extern int gPortNativeOps;
 unsigned int port_nop_intern(int table, unsigned int a, unsigned int b);
 
+/* The walk census (DKR_WALK_CENSUS, host builds only: PORT_CENSUS_SITES): the commands the renderer still walks are
+ * named by the source line that wrote them, see port/host/census_sites.c. Nothing on the 3DS. */
+#ifdef PORT_CENSUS_SITES
+extern int gPortCensusSites;
+void port_census_site(const void *cmd, const char *file, int line);
+#define PORT_CENSUS_SITE(cmd)                                                                                          \
+    if (gPortCensusSites)                                                                                              \
+    port_census_site((cmd), __FILE__, __LINE__)
+#else
+#define PORT_CENSUS_SITE(cmd) ((void) 0)
+#endif
+
 #define NOP_MARK 0x00800000u
 #define NOP_TAG 0xC0000000u
 enum {
@@ -65,6 +77,7 @@ enum {
 #define NOP_PUT(pkt, id, bits, word)                                                                                   \
     {                                                                                                                  \
         Gfx *_n = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_n);                                                                                          \
         _n->words.w0 = NOP_W0(id, bits);                                                                               \
         _n->words.w1 = (unsigned int) (word);                                                                          \
     }
@@ -219,6 +232,7 @@ enum {
 #define gDPFillRectangle(pkt, ulx, uly, lrx, lry)                                                                      \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps) {                                                                                          \
             _g->words.w0 = NOP_W0(NOP_FILLRECT, _SHIFTL((lry), 0, 10));                                                \
             _g->words.w1 = _SHIFTL((ulx), 20, 10) | _SHIFTL((uly), 10, 10) | _SHIFTL((lrx), 0, 10);                    \
@@ -232,6 +246,7 @@ enum {
 #define gSetImage(pkt, cmd, fmt, siz, width, i)                                                                        \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         _g->words.w0 = gPortNativeOps ? NOP_W0(NOP_IMAGE, (((cmd) == G_SETCIMG) ? 0 : ((cmd) == G_SETZIMG) ? 1 : 2) << 17 | \
                                                               _SHIFTL(fmt, 14, 3) | _SHIFTL(siz, 12, 2) |              \
                                                               _SHIFTL((width) - 1, 0, 12))                             \
@@ -244,6 +259,7 @@ enum {
 #define gDPSetTile(pkt, fmt, siz, line, tmem, tile, palette, cmt, maskt, shiftt, cms, masks, shifts)                     \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps) {                                                                                          \
             _g->words.w0 = NOP_W0(NOP_TILE, _SHIFTL(cmt, 17, 2) | _SHIFTL(tile, 14, 3) | _SHIFTL(line, 5, 9) |         \
                                                 _SHIFTL(siz, 3, 2) | _SHIFTL(fmt, 0, 3));                              \
@@ -267,6 +283,7 @@ enum {
 #define gDPLoadTileGeneric(pkt, c, tile, uls, ult, lrs, lrt)                                                           \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps) {                                                                                          \
             _g->words.w0 = NOP_RECT4(((c) == G_SETTILESIZE) ? NOP_TILESIZE : NOP_LOADTILE, tile, uls, ult, lrs, lrt);  \
             _g->words.w1 = NOP_RECT4_W1(ult, lrs, lrt);                                                                \
@@ -280,6 +297,7 @@ enum {
 #define gDPLoadBlock(pkt, tile, uls, ult, lrs, dxt)                                                                    \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps) {                                                                                          \
             _g->words.w0 = NOP_RECT4(NOP_LOADBLOCK, tile, uls, ult, MIN(lrs, G_TX_LDBLK_MAX_TXL), dxt);                \
             _g->words.w1 = NOP_RECT4_W1(ult, MIN(lrs, G_TX_LDBLK_MAX_TXL), dxt);                                       \
@@ -294,6 +312,7 @@ enum {
 #define gDPLoadTLUTCmd(pkt, tile, count)                                                                               \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) pkt;                                                                                         \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps) {                                                                                          \
             _g->words.w0 = NOPX_W0(NOPX_LOADTLUT, (tile) & 7);                                                           \
             _g->words.w1 = (unsigned int) (count);                                                                     \
@@ -310,6 +329,7 @@ enum {
 #define gDma1p(pkt, c, s, l, p)                                                                                        \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         if (gPortNativeOps && (c) == G_DL) {                                                                           \
             _g->words.w0 = NOPX_W0(NOPX_CALL, ((p) == G_DL_NOPUSH) << 14);                                             \
         } else if (gPortNativeOps && (c) == G_VTX) {                                                                   \
@@ -360,6 +380,7 @@ enum {
 #define gSPPolygon(dl, ptr, numTris, texEnabled)                                                                       \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (dl);                                                                                        \
+        PORT_CENSUS_SITE(_g); \
         _g->words.w0 = gPortNativeOps ? NOPX_W0(NOPX_TRI, ((texEnabled) & 1) << 12 | ((numTris) & 0xFFF))              \
                                       : (_SHIFTL((((numTris) - 1) << 4) | (texEnabled), 16, 8) | _SHIFTL(G_TRIN, 24, 8) | \
                                          _SHIFTL(((numTris) * 16), 0, 16));                                            \
@@ -370,6 +391,7 @@ enum {
 #define gDkrDmaDisplayList(pkt, address, numberOfCommands)                                                             \
     {                                                                                                                  \
         Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g); \
         _g->words.w0 = gPortNativeOps ? NOPX_W0(NOPX_CALL, 1 << 13 | ((numberOfCommands) & 0xFF))                      \
                                       : (_SHIFTL(G_DMADL, 24, 8) | _SHIFTL((numberOfCommands), 16, 8) |                \
                                          _SHIFTL((numberOfCommands * 8), 0, 16));                                      \
@@ -403,6 +425,16 @@ enum {
         _g = (Gfx *) (pkt);                                                                                            \
         _g->words.w0 = _SHIFTL(G_RDPHALF_2, 24, 8);                                                                    \
         _g->words.w1 = (_SHIFTL(dsdx, 16, 16) | _SHIFTL(dtdy, 0, 16));                                                 \
+    }
+
+/* The port's tags (draw kinds, native draw records, matrices as floats...): a site for the walk census too. */
+#undef gDPNoOpTag
+#define gDPNoOpTag(pkt, tag)                                                                                           \
+    {                                                                                                                  \
+        Gfx *_g = (Gfx *) (pkt);                                                                                       \
+        PORT_CENSUS_SITE(_g);                                                                                          \
+        _g->words.w0 = _SHIFTL(G_NOOP, 24, 8);                                                                         \
+        _g->words.w1 = (tag);                                                                                          \
     }
 
 /* Reads a geometry or list command in either form (N64 or native op), for the code that looks ahead in a list. */

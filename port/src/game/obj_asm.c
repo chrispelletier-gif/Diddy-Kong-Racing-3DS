@@ -14,6 +14,11 @@
 #include "port.h"
 #include "plat/plat.h"
 #include "port_drawtag.h"
+#undef port_native_batch /* The walk census's wrappers (port_drawtag.h) */
+#undef port_native_batch_xlu
+#undef port_native_sprite
+#undef port_native_rect
+#undef port_native_record
 
 extern s32 D_8011D644; // Scratch buffer of interpolated animation offsets, 3 s16 per animated vertex.
 
