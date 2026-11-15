@@ -378,7 +378,7 @@ volatile u32 gPortMissedWakeups;
  * higher priority thread. Here the other threads still get their messages (the scheduler may already be running), so
  * a woken thread first waits for any interrupt disabled section to end. Without this the sound thread could run in the
  * middle of the game's (sound_play's sndp_allocate's) and edit the same lists, which tied them into a loop the sound
- * thread then spun in forever (60 fps freezes, issues #91, #93, #97 and #102). Not needed in lockstep, where only one
+ * thread then spun in forever (60 fps freezes). Not needed in lockstep, where only one
  * thread runs and the CPU only changes hands when a thread blocks.
  */
 static void wait_for_int_enabled(void) {
@@ -426,20 +426,20 @@ void port_describe_threads(char *buffer, s32 size) {
 }
 
 /*
- * Queue waits are bounded: a thread that sleeps past a message (a wake-up the 3DS condition variable lost, as in
- * #107 and #114, where the scheduler slept on a full interrupt queue and the game stopped) looks again on its own.
+ * Queue waits are bounded: a thread that sleeps past a message (a wake-up the 3DS condition variable lost, so the
+ * scheduler slept on a full interrupt queue and the game stopped) looks again on its own.
  * Those found with the queue ready on waking are counted, and the watchdog's thread line reports them.
  */
 #define QUEUE_WAIT_NS 4000000ULL
 
 /*
- * Roadmap P32 (DKR_QUEUE_WAKE=1, off: no gain in switch bench #246): every message used to wake every blocked N64 thread through
- * the kernel's one condition variable, each looking at its own queue again. With the switch on (outside lockstep), a
- * thread waiting on a queue sleeps on that queue's variable (plat_kwait_on_timeout) and a message wakes only those.
- * Nothing else waits on queues, so nothing else needs the queue's wake-ups; the bounded wait stays as it was.
+ * DKR_QUEUE_WAKE: every message used to wake every blocked N64 thread through the kernel's one condition variable,
+ * each looking at its own queue again. With the switch on (outside lockstep), a thread waiting on a queue sleeps on
+ * that queue's variable (plat_kwait_on_timeout) and a message wakes only those. Nothing else waits on queues, so
+ * nothing else needs the queue's wake-ups; the bounded wait stays as it was.
+ * On by default on a New 3DS (with every thread woken by every message, an AI Diddy's head flickered); off on the
+ * Old 3DS (never flickered there) and on PC (no gain).
  */
-/* New 3DS default on (2026-11-01): with every thread woken by every message, an AI Diddy's head flickered in every
- * switch bench race; the per-queue race had none. Off on the Old 3DS (never flickered there, not benched) and on PC. */
 static int queue_wake_default(void) {
 #ifdef __3DS__
     return !plat_old_3ds();
@@ -630,7 +630,7 @@ void port_raise_event(OSEvent event) {
         posted = post_mesg(sEventTable[event].queue, sEventTable[event].msg);
         plat_intlock_unlock();
         // A lost task-done message leaves the scheduler waiting for it forever: the game and the sound both stop
-        // (issues #91 and #93, at 60 fps, where the scheduler's 8-message queue holds less time). The RCP workers are
+        // (at 60 fps, where the scheduler's 8-message queue holds less time). The RCP workers are
         // threads, not interrupts, so the done message waits for room instead.
         if (posted) {
             break;

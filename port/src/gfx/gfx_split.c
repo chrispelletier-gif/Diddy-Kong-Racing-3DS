@@ -1,12 +1,10 @@
 /*
- * The two-core renderer (roadmap P21, DKR_SPLIT_RENDER). The renderer has two halves of about the same size: the
- * display list walk (gfx_rdp.c: the RSP's vertex maths, texture decodes, batching) and the backend that turns its
- * draws into GPU commands (gfx_c3d.c on the 3DS). With the switch on, the walk queues its backend calls here instead
- * of making them, and a second renderer thread on the other core (plat.h PLAT_THREAD_RCP2) makes them in the same
- * order: the walk of frame N+1 runs while the backend builds frame N. An Old 3DS, whose one core held the whole
- * renderer and the game (bench #258: renderer 31 ms a frame), has the system core for the other half. On by default
- * there since switch bench #263 (Jungle Falls 21.0 to 29.0 fps, Crescent Island 20.0 to 29.1), and on a New 3DS since
- * switch bench #286 (renderer 7.4-8.4 to 3.7-4.3 ms; Haunted Woods' 1% low 30 to 58 fps).
+ * The two-core renderer (DKR_SPLIT_RENDER). The renderer has two halves of about the same size: the display list
+ * walk (gfx_rdp.c: the RSP's vertex maths, texture decodes, batching) and the backend that turns its draws into GPU
+ * commands (gfx_c3d.c on the 3DS). With the switch on, the walk queues its backend calls here instead of making them,
+ * and a second renderer thread on the other core (plat.h PLAT_THREAD_RCP2) makes them in the same order: the walk of
+ * frame N+1 runs while the backend builds frame N. An Old 3DS, whose one core held the whole renderer and the game,
+ * has the system core for the other half. On by default on both consoles (bench numbers: docs/bench-history.md).
  *
  * The queue is a byte ring of records, each a backend call with its arguments copied (the walk reuses its batch
  * buffers as soon as a call returns). One thread writes it (the walk's, sHead) and one reads it (sTail). The walk is
@@ -333,8 +331,8 @@ static int start_backend(void) {
 
 /*
  * A New 3DS can also run the backend on the system core (DKR_SPLIT_SYSCORE=1), with its share raised, instead of on
- * the game's core, which the game and the backend together fill in a busy race (#390: game core 2-14% idle, a 33 ms
- * frame every 8-16). Each core has a thread of its own; the queue is handed over empty, at a frame's start.
+ * the game's core, which the game and the backend together fill in a busy race. Each core has a thread of its own;
+ * the queue is handed over empty, at a frame's start.
  */
 static void choose_backend(void) {
     int want = plat_split_syscore_possible() && plat_switch("DKR_SPLIT_SYSCORE", 0) ? 1 : 0;
@@ -520,10 +518,10 @@ static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) 
 }
 
 /*
- * v33 (DKR_TEX_FREE_QUEUE): a free that goes through the queue after the draws that still use the texture, as a
- * mesh's does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not
- * reuse tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now.
- * On an Old 3DS a mid-race free made the walk wait for the whole queue: frames of 49-54 ms (bench #457).
+ * DKR_TEX_FREE_QUEUE: a free that goes through the queue after the draws that still use the texture, as a mesh's
+ * does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not reuse
+ * tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now. On an
+ * Old 3DS a mid-race free otherwise made the walk wait for the whole queue.
  */
 unsigned int gfx_split_texture_free_later(GfxTexture *tex) {
     SplitTexture *t;

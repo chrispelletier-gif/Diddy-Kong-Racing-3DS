@@ -163,11 +163,11 @@ environment variables:
 | `DKR_FRAMES`        | Exit after this many frames. |
 | `DKR_DUMP_EVERY`    | Write every Nth frame to `DKR_DUMP_DIR/frame_NNNNN.png`. |
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
-| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). |
-| `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
+| `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). On the 3DS the name is inside `sdmc:/3ds/dkr/`. |
+| `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). Also works on the 3DS. |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
 | `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
-| `DKR_BOTTOM_RACE`   | Draw the 3DS bottom screen's race HUD (roadmap G9) to `race_NNNN.png` in this directory every 60 frames of a race, and leave those HUD pieces off the top screen as the 3DS does (`DKR_RACE_HUD=2` keeps them on both). `DKR_BOTTOM_RACE_LOG=1` also prints the player's map position and heading each frame. |
+| `DKR_BOTTOM_RACE`   | Draw the 3DS bottom screen's race HUD to `race_NNNN.png` in this directory every 60 frames of a race, and leave those HUD pieces off the top screen as the 3DS does (`DKR_RACE_HUD=2` keeps them on both). `DKR_BOTTOM_RACE_LOG=1` also prints the player's map position and heading each frame. |
 
 `make -C port TARGET=host DEBUG=asan BUILD_DIR=build/asan` builds with AddressSanitizer, which is how the original
 memory bugs above were found.
@@ -236,11 +236,8 @@ controls) work there, as do these renderer switches:
 - `DKR_MIPMAP=0` (never builds mipmaps, so they take no memory; the Settings switch then does nothing)
 - `DKR_MIP_FILTER=0` (reads the nearest mipmap instead of blending the two nearest)
 - `DKR_SINGLE_CORE=1` (on a New 3DS, keeps the renderer on the main core as on an Old 3DS, and the sound with it)
-- `DKR_AUDIO_DSP=0` (the CPU mixer instead of the DSP voices, whatever the Sound page says; also on the host build)
 - `DKR_AUDIO_DEBUG=1` (with the DSP voices, logs how many voices play and how late their changes were applied)
 - `DKR_AUDIO_NOFX=1` (with the DSP voices, no reverb, for comparison)
-- `DKR_DUMP_AUDIO=name` (with the DSP voices, writes the DSP's finished stereo output, 16 bit at its 32728 Hz, to
-  `sdmc:/3ds/dkr/name`)
 - `DKR_AUDIO_SIMD=0` (mixes the sound with the plain C loops instead of the ARM SIMD ones; the sound is the same)
 - `DKR_AUDIO_RATE=n` (runs the mixer at n Hz, whatever the Sound page says; also works on the host build)
 - `DKR_SYSCORE_LIMIT=n` (the share of the system core, in percent, asked for when the sound is mixed there; 80)
@@ -380,9 +377,9 @@ With the two-core renderer (the default on both consoles) the renderer's time pe
 the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's
 times per kind are taken while the profiler is on (an Old 3DS, whose clock reads
 are system calls, times one frame in 8); the waste on one frame in 8. The log gets the same as `draw mix a frame` and
-`objects a frame` lines every few seconds. The GPU can't time its draws one by one, so the switch bench has four
-cost rows that leave a kind undrawn (`DKR_SKIP_KINDS`, a bit per kind): the GPU ms they save is what that kind costs
-it. On a New 3DS more cost rows split the rest: anti-aliasing off, colour boost off and 400 pixels instead of 800.
+`objects a frame` lines every few seconds. The GPU can't time its draws one by one, so on one frame in a few the
+command list is cut where the kind of draw changes and each kind's GPU time is read from the GSP's events
+(`DKR_GPU_KINDS`, with the GPU timeline).
 
 ## Unattended test run (debug build only)
 
@@ -527,14 +524,14 @@ For sound in Azahar, put any file at `sdmc/3ds/dspfirm.cdc`; Azahar's emulated D
 
 ## Status
 
-- **Real hardware:** played on a New 3DS since 2026-10-17. Races hold 30 fps with 4x anti-aliasing, and about 60 fps
-  with anti-aliasing off or 2x on most tracks (WizPig 1 and Walrus Cove 2 are GPU-bound at 60 fps with 2x).
+- **Real hardware:** played on a New 3DS and an Old 3DS. Per track frame rates are in the release notes
+  (`port/release-notes/`).
 - **Tested by machine:** every track with every character (the full test run), the ten boss fights, and the host
   build's frame regression on every push.
 - **Not yet checked end to end:** a complete Adventure playthrough.
 - **Known gaps:**
   - Only the US 1.0 ROM is supported; other versions are planned.
-  - The Old 3DS hasn't been tried; the renderer counts on the New 3DS's extra core.
+  - The Old 3DS runs at about 30 fps and needs its system core for the renderer's second half.
   - One player only (see above); rumble isn't possible on a 3DS.
 
 Player defaults (the release build): anti-aliasing 4x, 30 fps, Balanced widescreen, 800 pixels and stereo 3D on,

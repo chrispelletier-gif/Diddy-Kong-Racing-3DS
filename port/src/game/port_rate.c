@@ -44,7 +44,7 @@ s32 port_car_settle(void) {
 }
 
 /*
- * The bosses at 60 fps (Bubbler, 2026-11-11: about 20% faster at 60 than at 30, in both fights). A boss races on the
+ * The bosses at 60 fps (Bubbler ran about 20% faster at 60 than at 30, in both fights). A boss races on the
  * game's full four-sphere kart collision, which re-measures the boss's fall from how far it really moved each frame.
  * With half steps a boss tipped onto one side settles back at about half the speed, and while a front wheel is off
  * the water it gets no drag but full throttle, so Bubbler gained speed on every wave. Rather than chase each such step

@@ -1,20 +1,19 @@
 /*
- * New 3DS GPU time ("Cut New 3DS GPU time" thread, 2026-11-07). At 800 pixels with 2x anti-aliasing the GPU is what
- * holds a New 3DS back (switch bench #444: 14-16 ms a frame, the limit in every race), and the bench's cost rows put
- * about 5 ms of it outside the track, racers, objects and sky. Included once by gfx_c3d.c, after split_command_list.
+ * New 3DS GPU time. At 800 pixels with 2x anti-aliasing the GPU is what holds a New 3DS back. Included once by
+ * gfx_c3d.c, after split_command_list. History and bench numbers: port/docs/bench-history.md.
  *
  *  1. The GPU timeline (DKR_GPU_TIMELINE, on): when each GPU job of a frame finished (the memory fills, each part of
  *     the command list, the copy to the screen), from the GSP's events, so a test run shows where the GPU's time
  *     goes instead of one number. One frame in GPU_KIND_EVERY also has its command list cut where the kind of draw
  *     changes (gfx_rdp.c sends the kinds), which times each kind on the GPU (DKR_GPU_KINDS, on).
  *  2. The colour clear as a memory fill (DKR_COLOUR_FILL, on by default on a New 3DS). Every frame the game clears the
- *     screen to a colour before it draws anything (rcp_dkr.c bgdraw_render: black in a race), which was drawn as two
- *     triangles over the whole target: 384,000 pixels at 800x480, as many as the sky. The GPU's memory fill unit
- *     does it instead, beside the depth clear's fill (P18), before the command list starts.
- *  3. The top screen's buffers in VRAM (DKR_FB_VRAM, on by default on a New 3DS after #451): the copy to the screen
- *     writes VRAM instead of the main memory the CPU is using (1.2 -> 0.55 ms a frame).
- *  4. The texture cache kept between draws (DKR_TEX_CACHE_KEEP, off: #451 saw no gain, shelved): citro3d's cache
- *     clear on every texture set taken out unless texture memory changed.
+ *     screen to a colour before it draws anything (rcp_dkr.c bgdraw_render), which was drawn as two triangles over
+ *     the whole target. The GPU's memory fill unit does it instead, beside the depth clear's fill, before the
+ *     command list starts.
+ *  3. The top screen's buffers in VRAM (DKR_FB_VRAM, on by default on a New 3DS): the copy to the screen writes VRAM
+ *     instead of the main memory the CPU is using.
+ *  4. The texture cache kept between draws (DKR_TEX_CACHE_KEEP, off: no gain): citro3d's cache clear on every
+ *     texture set taken out unless texture memory changed.
  *  5. Draws that can't change a pixel left out (DKR_SKIP_INVISIBLE, on): the screen fader's alpha 0 quad over the
  *     whole screen in every race frame. Also DKR_SKIP_DRAW_KINDS, for the bench's cost rows.
  */
@@ -333,12 +332,11 @@ static inline void gpu_kind_end_frame(void) {
  * The fill writes whole lines of the target (lines of the target run along the screen's height), so it can only do a
  * clear that covers the target's full height, and across it only a band of whole tile rows (8 lines): the band of the
  * clear's lines whose pixel centres lie inside its triangles (with a hundredth of a pixel to spare) and its scissor,
- * made symmetric about the
- * middle (the framebuffer's lines may be stored top to bottom or bottom to top: a symmetric band is the same lines
- * either way). The lines of the clear outside the band (only at the 4:3 edges of a narrow picture, where the band's
+ * made symmetric about the middle (the framebuffer's lines may be stored top to bottom or bottom to top: a symmetric
+ * band is the same lines either way). The lines of the clear outside the band (only at the 4:3 edges of a narrow picture, where the band's
  * tile rows don't meet them) are still drawn, with the scissor narrowed to them.
- * The game's clear stops a line short of the screen's bottom row (its scissor ends at 239: rcp_dkr.c), so the fill
- * also clears that row, which every 3D frame draws over anyway.
+ * The game's clear stops a line short of the screen's bottom row (rcp_dkr.c), so the fill also clears that row, which
+ * every 3D frame draws over anyway.
  *
  * The colour the fill writes must be what the draw would have left, colour boost (G2) and all, which is the
  * combiner's sum in the GPU's own rounding. So it is read back from the GPU: the first clear of each colour (and boost
