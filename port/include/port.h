@@ -128,7 +128,7 @@ void port_load_game_frame(s32 gameMode, s32 levelId);
 void port_gfx_run_task(void *task);
 void port_audio_run_task(void *task);
 /*
- * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one, roadmap O5).
+ * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one).
  * Pitches and reverb lengths are scaled by gPortAudioRateScale (requested / chosen) to sound the same.
  */
 u32 port_audio_output_rate(u32 requested);
@@ -280,7 +280,7 @@ void port_setup_reset(void);
 void port_setup_restart(void);
 
 /*
- * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
+ * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c): port_race_hud_frame copies the
  * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;
  * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.
  */
