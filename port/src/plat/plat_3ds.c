@@ -1392,6 +1392,22 @@ static void screen_thread_start(int core) {
 }
 
 /* First thing in main, before plat_init. */
+/* A look (settings "bottomstyle" 0-7) as the screen's style and colour variant: 4-7 are Carbon, Jungle, Sunset and
+   Daylight. The grid layouts (O1h redo) are on unless DKR_BOTTOM_GRID=0 in env.txt. */
+static void apply_bottom_look(int look) {
+    static const unsigned char sStyleOf[8] = { 0, 1, 2, 3, 2, 3, 1, 1 }, sVariantOf[8] = { 0, 0, 0, 0, 1, 2, 3, 4 };
+    if (look < 0 || look > 7) {
+        look = 0;
+    }
+    bs_set_variant(sVariantOf[look]);
+    bs_set_style(sStyleOf[look]);
+}
+
+static void apply_bottom_grid(void) {
+    const char *env = plat_getenv("DKR_BOTTOM_GRID");
+    bs_set_grid(env == NULL || atoi(env) != 0);
+}
+
 void plat_3ds_console_init(void) {
     LightLock_Init(&sConsoleLock);
     LightLock_Init(&sCopyLock);
@@ -1401,6 +1417,9 @@ void plat_3ds_console_init(void) {
     gspWaitForVBlank();
     LightLock_Lock(&sConsoleLock);
     bs_init(consoleGetDefault()->font.gfx);
+    apply_bottom_grid();
+    /* the player's look from the first frame (settings.txt is on the SD card, readable before the ROM is) */
+    apply_bottom_look(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1412,7 +1431,7 @@ void plat_3ds_console_init(void) {
 void plat_rom_loaded(void) {
     LightLock_Lock(&sConsoleLock);
     bs_load_assets();
-    bs_set_style(settings_get("bottomstyle", 0));
+    apply_bottom_look(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
@@ -1488,7 +1507,7 @@ void plat_3ds_bottom_picture(unsigned short *out) {
 /* The bottom screen's look (Race HUD page, port_race_hud.c). */
 void plat_set_bottom_style(int style) {
     LightLock_Lock(&sConsoleLock);
-    bs_set_style(style);
+    apply_bottom_look(style);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1807,7 +1826,7 @@ static void watchdog(void *arg) {
                     rec_event("watchdog: counting free memory took %.2f ms", spent / 1e6);
                 }
             }
-            snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
+            snprintf(line[1], sizeof(line[1]), "gap %u drop %u textures %u GPU %lu.%luM heap %lu.%luM",
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
                      now[PLAT_COUNTER_TEXTURE_FAILED], sGpuFree / 10, sGpuFree % 10, sHeapFree / 10, sHeapFree % 10);
         }

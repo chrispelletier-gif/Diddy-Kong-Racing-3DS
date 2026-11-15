@@ -502,7 +502,9 @@ const char *plat_build_version(void) {
 #ifdef PORT_BUILD_VERSION
     return PORT_BUILD_VERSION;
 #else
-    return "host";
+    /* the host preview names a build as a device shows it (git describe), not "host" */
+    const char *e = getenv("DKR_BUILD_VERSION");
+    return e != NULL && e[0] != '\0' ? e : "host";
 #endif
 }
 

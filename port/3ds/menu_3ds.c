@@ -52,7 +52,7 @@ typedef struct MenuPage {
 } MenuPage;
 
 /* The rows of a page shown at once (the screen's geometry is in bottom_screen.h). */
-#define ROWS_PER_PAGE BS_MENU_ROWS
+#define ROWS_PER_PAGE bs_menu_rows()
 
 #define MAX_PAGES 8
 static MenuPage sPages[MAX_PAGES];
@@ -207,8 +207,8 @@ static const char *row_hint(int i) {
     } else if (i == MAIN_PICTURE) {
         return "Closes the menu; open a page and wait";
     } else if (i == MAIN_AA) {
-        return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges; the GPU draws 2x"
-                                                           : "Smoother edges; the GPU draws 4x";
+        return plat_3ds_antialias_setting() == PLAT_AA_2X ? "Smoother edges: each pixel drawn 2 times"
+                                                           : "Smoother edges: each pixel drawn 4 times";
     } else if (i == MAIN_FPS) {
         return plat_frame_rate_setting() == 20 ? "Steady 20 (Old 3DS)" : "60 when a frame fits (try AA off)";
     } else if (i == MAIN_MIPMAPS) {
