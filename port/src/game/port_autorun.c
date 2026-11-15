@@ -377,6 +377,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       0, 1, 1, 0 },
     { "all native switches, walked (old)",
       { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
+    // R5 (2026-11-15, "Hand frames straight to the renderer (R5)"): the frame's record buffer goes straight from the
+    // frame queue to the renderer (DKR_FRAME_DIRECT), with no RSP task, osSpTaskStartGo or SP/DP events. 1: the
+    // renderer's thread as today (core 0, above the game). 2: the whole frame (dispatcher and GPU commands) on one
+    // thread on the system core, so core 0 runs only the game. Both set the same switch, so they race alone. One lap
+    // each to check (try HOME and sleep in them), then a race: watch scene, renderer, 1% low and late wakes.
+    { "frames straight to the renderer (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 1 },
+    { "frames straight to the renderer", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 0 },
+    { "whole frame on the system core (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 1 },
+    { "whole frame on the system core, core 0 only the game", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 /* New 3DS: two-core renderer on by default too (its row ran perfectly, user 2026-11-05), so no row. */
@@ -442,6 +451,12 @@ static const BenchSwitch sSwitchesNew3ds[] = {
       0, 1, 1, 0 },
     { "all native switches, walked (old)",
       { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
+    // R5 (2026-11-15): frames straight to the renderer (see the Old 3DS list). 2 on a New 3DS: the whole frame on the
+    // renderer's core 2, the two-core renderer's second thread on core 0 unused.
+    { "frames straight to the renderer (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 1 },
+    { "frames straight to the renderer", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 0 },
+    { "whole frame on core 2, core 0 only the game (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 1 },
+    { "whole frame on core 2, core 0 only the game", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
 #else
