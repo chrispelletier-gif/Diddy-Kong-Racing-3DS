@@ -183,10 +183,10 @@ static const BenchConfig sBenchConfigs[] = {
 
 /*
  * The switch bench's experimental switches (plat_switch names, read by the renderer at the start of a frame). Each
- * is raced at its usual setting and, by itself, at its test setting; a switch can set up to three variables together,
+ * is raced at its usual setting and, by itself, at its test setting; a switch can set up to five variables together,
  * and several switches can share a variable (one that the others need).
  */
-#define BENCH_SWITCH_VARS 3
+#define BENCH_SWITCH_VARS 5
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
     const char *env[BENCH_SWITCH_VARS];
@@ -279,7 +279,19 @@ static const BenchSwitch sSwitchesNative[] = {
     // that frame is drawn. One lap to check textures (Crescent Island water, door numbers, HUD), then a race.
     { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
     { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
-    { NULL, { NULL, NULL, NULL }, 0, 0 },
+    // R4 (PR #538): with every native switch on, the frame is run as records by its own dispatcher (gfx/nframe.c,
+    // DKR_NATIVE_FRAME) instead of the display list walk; PC frames identical to the walk's with the same switches. One
+    // lap with all five on to check for anything missing or misplaced, then the five against the four walked: the
+    // profiler's "display list walk" line is the one to watch. Measurements, left out of the all-together race.
+    { "native frame stream, all native switches (bug check, 1 lap)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 1 },
+    { "native frame stream (all native switches)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      0, 1, 1, 0 },
+    { "all native switches, walked (old)",
+      { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
+    { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesOld3ds sSwitchesNative
 #define sSwitchesNew3ds sSwitchesNative
