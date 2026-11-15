@@ -20,6 +20,12 @@ void port_heap_unlock(u32 flags);
 
 /************ .bss ************/
 
+#ifdef TARGET_PORT
+void port_main_pool_init(void);
+void *port_native_heap_alloc(s32 size);
+s32 port_native_heap_free(const void *address);
+#endif
+
 MemoryPool gMemoryPools[POOL_COUNT]; // Only two are used.
 s32 gNumberOfMemoryPools;
 UNUSED s32 D_801235C4;
@@ -37,6 +43,9 @@ s32 gFreeQueueTimer;
 void mempool_init_main(void) {
     s32 ramEnd;
 
+#ifdef TARGET_PORT
+    port_main_pool_init();
+#endif
     gNumberOfMemoryPools = -1;
     if (EXPANSION_PAK_SUPPORT) {
         ramEnd = EXPANSION_RAM_END;
@@ -102,6 +111,32 @@ MemoryPoolSlot *mempool_init(MemoryPoolSlot *slots, s32 poolSize, s32 numSlots) 
     return gMemoryPools[poolCount].slots;
 }
 
+#ifdef TARGET_PORT
+u32 gPortPoolPeakUsed; // The most the pool has had in use at a level load
+
+/* Bytes in use, the largest free block and the slots used in the main pool (the load log line, port_loadtime.c). */
+void port_mempool_stats(u32 *used, u32 *largestFree, u32 *slotsUsed) {
+    MemoryPoolSlot *slots = gMemoryPools[POOL_MAIN].slots;
+    s32 i = 0;
+    u32 u = 0, big = 0, n = 0;
+    while (i != MEMSLOT_NONE) {
+        if (slots[i].flags != SLOT_FREE) {
+            u += slots[i].size;
+            n++;
+        } else if ((u32) slots[i].size > big) {
+            big = slots[i].size;
+        }
+        i = slots[i].nextIndex;
+    }
+    if (u > gPortPoolPeakUsed) {
+        gPortPoolPeakUsed = u;
+    }
+    *used = u;
+    *largestFree = big;
+    *slotsUsed = n;
+}
+#endif
+
 /**
  * Reserves and returns memory from the main memory pool. Has 2 assert checks.
  * Will cause an exception if the size is 0 or if memory cannot be reserved,
@@ -118,6 +153,13 @@ void *mempool_alloc_safe(s32 size, u32 colourTag) {
     }
     return addr;
 }
+
+#ifdef TARGET_PORT
+void *mempool_alloc_big(s32 size, u32 colourTag) {
+    void *addr = port_native_heap_alloc(size);
+    return (addr != NULL) ? addr : mempool_alloc_safe(size, colourTag);
+}
+#endif
 
 /**
  * Reserves and returns memory from the main memory pool. Has no assert checks.
@@ -331,6 +373,9 @@ void mempool_free_addr(u8 *address) {
         port_rcp_wait_idle();
     }
     sFreeingQueued = FALSE;
+    if (port_native_heap_free(address)) { // A native big buffer (DKR_NATIVE_HEAP), not a slot of the pool.
+        return;
+    }
 #endif
 
     poolIndex = mempool_get_pool(address);

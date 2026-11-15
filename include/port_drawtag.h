@@ -143,6 +143,9 @@ int port_native_camera(void);
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */
 int port_native_rect(Gfx **dl, const void *tex);
 int port_native_draw(void);
+/* DKR_NATIVE_LEFTOVERS (needs native draws): the menus' and HUD's sprite frames and the pulsing-light track batches are
+ * draw records instead of display lists. */
+int port_native_leftovers(void);
 
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);
@@ -155,6 +158,18 @@ int port_native_material_here(Gfx **dl, const void *key, int keyFlags);
 int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
                           const void *tris, int numTris);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
+
+/* Host builds with the walk census (PORT_CENSUS_SITES): the records obj_asm.c writes are named by the line that
+ * called its functions (port/host/census_sites.c). obj_asm.c undefines these before defining the functions. */
+#ifdef PORT_CENSUS_SITES
+void port_census_caller(const char *file, int line);
+#define PORT_CENSUS_CALL(call) (port_census_caller(__FILE__, __LINE__), call)
+#define port_native_batch(...) PORT_CENSUS_CALL(port_native_batch(__VA_ARGS__))
+#define port_native_batch_xlu(...) PORT_CENSUS_CALL(port_native_batch_xlu(__VA_ARGS__))
+#define port_native_sprite(...) PORT_CENSUS_CALL(port_native_sprite(__VA_ARGS__))
+#define port_native_rect(...) PORT_CENSUS_CALL(port_native_rect(__VA_ARGS__))
+#define port_native_record(...) PORT_CENSUS_CALL(port_native_record(__VA_ARGS__))
+#endif
 /* v29 (DKR_TRIS_SKIP): the level and model triangle lists that game code changed in place (texture scrollers,
  * animators, model UV maps) go in this ring after their changes, and the renderer compares those batches' triangles
  * with its copies only then (see native_tris_take). Written by the game thread alone. */
