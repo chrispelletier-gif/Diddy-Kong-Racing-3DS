@@ -16,11 +16,12 @@
 #include "gfx_split.h"
 #include "gfx_census.h"
 #include "port_drawtag.h"
+#include "gfx_internal.h"
 
 #define MAX_VERTICES 64
 #define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
 #define MAX_BATCH_VERTICES GFX_MAX_BATCH_VERTICES
-#define DL_STACK_SIZE 18
+#define DL_STACK_SIZE GFX_LIST_DEPTH
 
 /******************************** State ********************************/
 
@@ -1526,6 +1527,7 @@ static GfxTexture *sRectTex[2];
 /* R3 (DKR_NATIVE_TEXHANDLE): while a material is captured right after its texture was set by handle, that texture
  * (nmat_capture), so the capture doesn't hash and look up what the handle already names. */
 static GfxTexture *sCapTex;
+static s32 sNativeFrame; // DKR_NATIVE_FRAME (read_switches): the record dispatcher, nframe.c (roadmap R4)
 static s32 sTexHandleOn; // DKR_NATIVE_TEXHANDLE (read_switches): 1 on, 2 also checks each capture against a lookup
 /* Textures set by handle; learned during frames; texture lists run all the same (not a plain texture load);
  * captures that took the handle's texture; with DKR_NATIVE_TEXHANDLE=2, captures where it differed from a lookup. */
@@ -2322,6 +2324,8 @@ static void read_switches(void) {
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", 0);
+    // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
+    sNativeFrame = plat_switch("DKR_NATIVE_FRAME", 0) != 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
 }
 
@@ -7127,6 +7131,7 @@ static NOINLINE s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
  */
 static u32 sCensusCount[PORT_DRAW_KINDS][CENSUS_CLASSES];
 static s32 sCensusDepth; /* The depth of the list being walked, for the records' notes */
+static s32 sCensusRecords; /* Counting for the record dispatcher (R4): list calls and fills are records there */
 extern s32 level_id(void);
 
 static inline void census_add(const Gfx *at, s32 depth, s32 cls, s32 op, const void *list) {
@@ -7150,7 +7155,9 @@ static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 dept
                 switch ((w0 >> 15) & 15) {
                     case NOPX_LOADTLUT: census_add(at, depth, CENSUS_TMEM, CENSUS_OP_LOADTLUT, NULL); break;
                     case NOPX_CALL:
-                        census_add(at, depth, CENSUS_LIST_CALL, CENSUS_OP_CALL,
+                        // In the record dispatcher (R4) a call is a LIST record: its list's records, converted once.
+                        census_add(at, depth, sCensusRecords ? CENSUS_RECORD : CENSUS_LIST_CALL,
+                                   sCensusRecords ? CENSUS_OP_LIST : CENSUS_OP_CALL,
                                    bad_list_address(w1) ? NULL : (const void *) seg_addr(w1));
                         break;
                     case NOPX_VTX: census_add(at, depth, CENSUS_VERTEX_SLOT, CENSUS_OP_VTX, NULL); break;
@@ -7175,7 +7182,10 @@ static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 dept
                             census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL);
                         }
                         break;
-                    case NOP_FILLRECT: census_add(at, depth, CENSUS_RECT, CENSUS_OP_FILLRECT, NULL); break;
+                    case NOP_FILLRECT: // A FILL record in the record dispatcher (R4)
+                        census_add(at, depth, sCensusRecords ? CENSUS_RECORD : CENSUS_RECT,
+                                   sCensusRecords ? CENSUS_OP_FILL : CENSUS_OP_FILLRECT, NULL);
+                        break;
                     default: census_add(at, depth, CENSUS_STATE, CENSUS_OP_STATE, NULL); break;
                 }
             }
@@ -7276,6 +7286,62 @@ static void stall_mark(const char *what, u32 w0, u32 w1) {
 #define STALL_MARK(what, w0, w1)
 #endif
 
+/*
+ * The port's tags in a frame (a no-op whose second word is a tag): draw kinds, the native records and the words they
+ * own. dl is the word after the tag, remaining the words left in the list from there. Returns the words the tag used
+ * after itself. Shared by the walk (run_command_list) and the record dispatcher (nframe.c, through gfx_frame_tag).
+ */
+static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth) {
+    const Gfx *start = dl;
+    if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
+        kind_switch(w1);
+    } else if (w1 == PORT_NATIVE_TAG) {
+        s32 used = native_mesh(dl, remaining);
+        dl += used;
+    } else if (w1 == PORT_TRACK_TAG) {
+        s32 used = native_track(dl, remaining);
+        dl += used;
+    } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+        s32 used = native_record(dl, remaining, w1 & 0xFFFF);
+        dl += used;
+    } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
+        nmat_capture(w1 & 0xFFFF);
+    } else if ((w1 & 0xFFFF0000) == PORT_NTEX_TAG && remaining >= 1) {
+        native_texture(dl->words.w1, (s32) (w1 & 0xFF), dl - 1, depth);
+        dl++;
+    } else if ((w1 & 0xFFFF0000) == PORT_NRECT_TAG && remaining >= 3) {
+        s32 used = native_rect(dl, w1 & 0xFFFF);
+        dl += used;
+    } else if (w1 == PORT_ANCHOR_TAG && remaining >= 1) {
+        // G3 (DKR_NATIVE_CAMERA): the game's one vertex load into slot 0, as a record. Made at once (a load
+        // that is only noted would have to be resolved before the billboard's vertices use it anyway).
+        if (sAnyPending) {
+            forget_slots(0, 1);
+        }
+        g.vertexIndex = 0;
+        load_vertices_now((const Vertex *) seg_addr(dl->words.w0), 1, 0, g.matrices[g.curMatrix],
+                          (g.geometryMode & G_FOG) != 0, g.billboard);
+        g.vertexIndex = 1;
+        dl++;
+    } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
+        u32 index = w1 & 3;
+        __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
+        g.curMatrix = index;
+        dl++;
+    } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
+        s32 k;
+        for (k = 0; k < 4; k++) {
+            u32 bits = dl[k].words.w1;
+            __builtin_memcpy(&sLight[k], &bits, 4);
+        }
+        sLightOn = TRUE;
+        dl += 4;
+    } else if (w1 == PORT_LIGHT_TAG) {
+        sLightOn = FALSE;
+    }
+    return (s32) (dl - start);
+}
+
 static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
     // Commands left to run: a G_DMADL's count, or (no list is that long) as good as no limit, so that the loop tests
     // one count rather than the limit and the count.
@@ -7329,59 +7395,10 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
                     break;
                 }
 #endif
-                if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
-                    kind_switch(w1);
-                } else if (w1 == PORT_NATIVE_TAG) {
-                    s32 used = native_mesh(dl, remaining);
+                {
+                    s32 used = run_tag(dl, w1, remaining, depth);
                     dl += used;
                     remaining -= used;
-                } else if (w1 == PORT_TRACK_TAG) {
-                    s32 used = native_track(dl, remaining);
-                    dl += used;
-                    remaining -= used;
-                } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
-                    s32 used = native_record(dl, remaining, w1 & 0xFFFF);
-                    dl += used;
-                    remaining -= used;
-                } else if ((w1 & 0xFFFF0000) == PORT_NMAT_TAG) {
-                    nmat_capture(w1 & 0xFFFF);
-                } else if ((w1 & 0xFFFF0000) == PORT_NTEX_TAG && remaining >= 1) {
-                    native_texture(dl->words.w1, (s32) (w1 & 0xFF), dl - 1, depth);
-                    dl++;
-                    remaining--;
-                } else if ((w1 & 0xFFFF0000) == PORT_NRECT_TAG && remaining >= 3) {
-                    s32 used = native_rect(dl, w1 & 0xFFFF);
-                    dl += used;
-                    remaining -= used;
-                } else if (w1 == PORT_ANCHOR_TAG && remaining >= 1) {
-                    // G3 (DKR_NATIVE_CAMERA): the game's one vertex load into slot 0, as a record. Made at once (a load
-                    // that is only noted would have to be resolved before the billboard's vertices use it anyway).
-                    if (sAnyPending) {
-                        forget_slots(0, 1);
-                    }
-                    g.vertexIndex = 0;
-                    load_vertices_now((const Vertex *) seg_addr(dl->words.w0), 1, 0, g.matrices[g.curMatrix],
-                                      (g.geometryMode & G_FOG) != 0, g.billboard);
-                    g.vertexIndex = 1;
-                    dl++;
-                    remaining--;
-                } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
-                    u32 index = w1 & 3;
-                    __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
-                    g.curMatrix = index;
-                    dl++;
-                    remaining--;
-                } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
-                    s32 k;
-                    for (k = 0; k < 4; k++) {
-                        u32 bits = dl[k].words.w1;
-                        __builtin_memcpy(&sLight[k], &bits, 4);
-                    }
-                    sLightOn = TRUE;
-                    dl += 4;
-                    remaining -= 4;
-                } else if (w1 == PORT_LIGHT_TAG) {
-                    sLightOn = FALSE;
                 }
                 break;
             case OP(G_SPNOOP):
@@ -7607,6 +7624,72 @@ static HOT void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth) {
 static void run_dl(const Gfx *dl, s32 maxCommands) {
     run_command_list(dl, maxCommands, 0);
 }
+
+#ifdef PORT_NATIVE_OPS
+/*
+ * The record dispatcher (roadmap R4, DKR_NATIVE_FRAME, nframe.c) shares the walk's own handlers instead of copies of
+ * them: these are its way in (gfx_internal.h). Each does exactly what run_command_list does for the same words.
+ */
+s32 gfx_frame_tag(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
+    return run_tag(data, w1, remaining, depth);
+}
+
+void gfx_frame_op(u32 w0, u32 w1) {
+    native_op(w0, w1);
+}
+
+s32 gfx_frame_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
+    return native_ext(w0, w1, where, depth);
+}
+
+/* A texture rectangle's three words (the op at rect). */
+void gfx_frame_texrect(const Gfx *rect) {
+    u32 r0, r1;
+    s32 flip;
+    read_rect(rect, &r0, &r1, &g.rdpHalf1, &g.rdpHalf2, &flip);
+    sTriStateValid = FALSE;
+    texture_rectangle(r0, r1, flip);
+}
+
+/* Commands the dispatcher leaves to the walk (N64 commands, as the game or a list wrote them). */
+void gfx_frame_walk(const Gfx *dl, s32 maxCommands, s32 depth) {
+    run_command_list(dl, maxCommands, depth);
+}
+
+/*
+ * A list call (NOPX_CALL, or an N64 G_DL / G_DMADL) at depth: what native_ext and call_display_list do before they run
+ * the called list. Returns the list to run (its commands converted to native ops, nop_static), or NULL when there is
+ * nothing to run: a bad address (*stop set: the calling list ends, as in the walk), the depth limit, or a texture's
+ * load list set by handle (R3).
+ */
+const Gfx *gfx_frame_list(u32 addr, s32 maxCommands, const Gfx *where, s32 depth, s32 *stop) {
+    const Gfx *list;
+    if (UNLIKELY(bad_list_address(addr))) {
+        log_bad_list_address(addr, where);
+        *stop = TRUE;
+        return NULL;
+    }
+    if (depth >= DL_STACK_SIZE) {
+        return NULL;
+    }
+    list = (const Gfx *) seg_addr(addr);
+    if (sTexHandleOn && handle_call(list, maxCommands, FALSE)) {
+        return NULL;
+    }
+    nop_static(list, maxCommands);
+    return list;
+}
+
+/* The walk census for a word the dispatcher runs itself (DKR_WALK_CENSUS, while gfx_frame_census_on). */
+void gfx_frame_census(const Gfx *at, s32 depth) {
+    sCensusRecords = TRUE;
+    census_command(at, at->words.w0, at->words.w1, depth);
+    sCensusRecords = FALSE;
+}
+s32 gfx_frame_census_on(void) {
+    return sCensusOn > 0 && !sCensusSkip && !sPrewarming;
+}
+#endif
 
 /******************************** Decoding textures at load time ********************************/
 
@@ -8109,7 +8192,14 @@ void port_gfx_run_task(void *taskPtr) {
         sCensusFrames++;
         CENSUS_FRAME_BEGIN(level_id(), gPortLevelLoads);
     }
-    run_dl((const Gfx *) task->t.data_ptr, -1);
+    // R4: with every native switch on, the frame is records, run by the record dispatcher. Frames that are traced,
+    // snapshot, drawn by the reference renderer or op counted keep the walk, which those tools read.
+    if (sNativeFrame && gPortNativeOps && sNativeRecords && sTexHandleOn && port_native_leftovers() &&
+        port_native_camera() && !sTracing && !snapshot && !REF_ACTIVE() && sOpCountOn <= 0) {
+        run_native_frame((const Gfx *) task->t.data_ptr);
+    } else {
+        run_dl((const Gfx *) task->t.data_ptr, -1);
+    }
     STALL_MARK("track flush", 0, 0);
     track_flush();
     STALL_MARK("batch flush", 0, 0);
