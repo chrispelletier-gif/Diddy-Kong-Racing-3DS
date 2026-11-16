@@ -4802,8 +4802,9 @@ static int lap_row(const RaceHud *hud, int x, int y) {
     return x;
 }
 
+/* The place and its suffix 3 clear columns apart ("3RD": at 2 the figure's right side read as touching the R) */
 static int place_row(int place, int x, int y) {
-    x = piece(&sPlaces[place - 1], x, y, 1);
+    x = piece(&sPlaces[place - 1], x, y, 2);
     return piece(&sSuffixes[place <= 3 ? place - 1 : 3], x, y + 2, 0);
 }
 
@@ -5987,7 +5988,7 @@ static void place_centred(const RaceHud *hud, int x0, int y0, int x1, int y1, in
 static int place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
     if (hud->position >= 1 && hud->position <= 8) {
         int suffix = hud->position <= 3 ? hud->position - 1 : 3;
-        x = piece(&sPlaces[hud->position - 1], x, y, 1);
+        x = piece(&sPlaces[hud->position - 1], x, y, 2); /* (as place_row) */
         piece(&sSuffixes[suffix], x, y + suffixDy, 0);
     }
     return x; /* Where the suffix starts: "of 8" goes under it. */

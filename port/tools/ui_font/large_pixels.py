@@ -84,6 +84,11 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None, slant=False):
     for k, rows in FACES.get(face, {}).items():
         assert len(rows) == H and all(len(r) == W for r in rows), k
         out[k] = rows
+    # a look's figures traced from its font (traced_pixels.py): each its own width, as the font drew it
+    import traced_pixels as _tp
+    for k, rows in _tp.SETS.get(face, {}).items():
+        assert len(rows) == H and len(set(map(len, rows))) == 1, (face, k)
+        out[k] = rows
     return out
 
 # Barlow (Broadcast, Carbon) drawn in its own shapes rather than built from bars: condensed round bowls (two-pixel
