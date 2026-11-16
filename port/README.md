@@ -375,10 +375,10 @@ freeze it and the page, to read them.
 | OBJECTS | The 13 costliest kinds of object (by behaviour; particles together): updated, drawn, triangles, and game logic, display list building and renderer ms. |
 | WASTE | Per kind, of its triangles: off the screen, facing away (the GPU culls them), under a pixel; and its overdraw (the screen area its triangles cover, x1.00 being the screen once). |
 
-The pages are set in a small fixed-width terminal font (5x8 cells, 57 columns by 16 lines), which fits them on three
-pages: PROFILER (the whole readout and the graph's key), DRAW KINDS (every kind drawn, its waste columns included:
-`off`, `back`, `tiny` and `over`) and OBJECTS (the 14 costliest). `DKR_PROF_TERM=0` in `env.txt` goes back to the
-look's own fonts and the five pages above.
+The pages are set in a small fixed-width terminal font (5x7 glyphs in 6x9 cells, 47 columns by 14 lines), which fits
+them on three pages: PROFILER (the whole readout and the graph's key in the bars' colours), DRAW KINDS (every kind
+drawn, its waste columns included: `off`, `bck`, `tny` as per cent of its triangles and `over` in screens) and OBJECTS
+(the 12 costliest). `DKR_PROF_TERM=0` in `env.txt` goes back to the look's own fonts and the five pages above.
 
 With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
 the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's
