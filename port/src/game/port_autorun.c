@@ -306,6 +306,11 @@ static const BenchSwitch sSwitchesNative[] = {
     { "frames straight to the renderer", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 0 },
     { "whole frame on the system core, core 0 only the game (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 1 },
     { "whole frame on the system core, core 0 only the game", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 0 },
+    // Bug report #548 (PR #549): the other karts with every distance times n (DKR_RACER_LOD_FAR, objects.c), no adaptive
+    // boost. 4: model 1 to 1280 units (the N64's 320), the 14-triangle model 5 only past 5760; 255: always model 1.
+    // Old 3DS rows (the New 3DS already races the game's own distances); each alone, they share a variable.
+    { "other karts' full detail out to 4x the N64's distances", { "DKR_RACER_LOD_FAR", NULL, NULL, NULL, NULL }, 0, 4, 1, 0 },
+    { "other karts always at full detail", { "DKR_RACER_LOD_FAR", NULL, NULL, NULL, NULL }, 0, 255, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesOld3ds sSwitchesNative
