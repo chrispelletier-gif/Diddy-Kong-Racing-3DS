@@ -9,6 +9,7 @@
 
 #include "plat/bottom_screen.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 
 int stbi_write_png(char const *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
 
@@ -187,21 +188,16 @@ void host_bottom_preview(const char *dir) {
      */
     if (plat_switch("DKR_PROF_TERM", 1)) {
         /* the terminal font's three pages (port_profile.c show_term_page): the same second, every kind, 12 objects */
-        bs_set_overlay("PROFILER 1/3  tap: page\n"
-                       "29.3/30 fps held back by renderer CPU\n"
-                       "on time 95%, 1 vsync late 5%, 2+ late 0%\n"
-                       "worst 50 ms (budget 33) steady 1.8 hitches 1\n"
-                       "time a frame, budget 33.3 ms:\n"
-                       "game   27.0  81% logic 15.2 scene 9.8 sound 2.0\n"
-                       "render 29.0  87% textures 0.4\n"
-                       "GPU    12.1  36%\n"
-                       "waiting: game 5.0 render 2.2\n"
-                       "idle: game core 4% render core 6%\n"
-                       "tris 1058 draws 137 texture loads 3\n"
-                       "graph: logic build render textures GPU retrace\n"
-                       "SWITCH BENCH 29  race 12/42  ok 11 bad 0\n"
-                       "Haunted Woods, native frame stream (always)\n");
-        save(dir, "2a_monitor_summary");
+        /* the summary as port_profile.c lays it out, during the switch bench's longest row, on both consoles */
+        {
+            static char page[1024];
+            prof_term_preview(0, page, (int) sizeof(page));
+            bs_set_overlay(page);
+            save(dir, "2a_monitor_summary");
+            prof_term_preview(1, page, (int) sizeof(page));
+            bs_set_overlay(page);
+            save(dir, "2a_monitor_summary_old3ds");
+        }
         bs_set_overlay("DRAW KINDS 2/3  tap: page\n"
                        "a frame:  tris drw   rdp  bld off bck tny over\n"
                        "track      458  56 15.20  3.6  21  52  10 1.38\n"

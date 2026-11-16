@@ -136,6 +136,11 @@ const char *prof_limit(const ProfStats *stats);
 /* Extra text shown under the profiler on the bottom screen (the unattended run's progress). NULL clears it. */
 void prof_set_status(const char *text);
 
+/* The PC's check that every page of the terminal-font readout fits its 47 columns and 14 lines: 0 when it does. */
+int prof_term_check(char *report, int size);
+/* The PC preview's PROFILER page in the terminal font, for a New 3DS or an Old 3DS (renderer on the game's core). */
+void prof_term_preview(int oldLayout, char *out, int size);
+
 /*
  * A player's build has no profiler (port_profile.c is left out of RELEASE=1): it is never on, and the calls compile
  * to nothing.
