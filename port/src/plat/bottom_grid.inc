@@ -763,12 +763,13 @@ enum { GA_LEFT, GA_CENTRE, GA_RIGHT };
 /*
  * A whole-pixel label (Classic and the drawn sets) whose room leaves an odd column: where that column goes, every letter
  * drawn as it is everywhere else (not one of them a column wider: see ui_widen_on). Tried in turn: a word space a
- * pixel wider, a button's icon gap (iconW) a pixel wider, every gap between the letters a pixel wider. (Not Classic's
+ * pixel wider, a button's icon gap (iconW) a pixel wider, every gap between the letters a pixel wider (spread; not
+ * Classic's buttons: a row of them would be spaced unalike, so those sit a pixel left). (Not Classic's
  * drop shadow: it joins the outline, so the dark ink would sit a pixel off the middle.)
  * 1: found (*ink the ink to centre; *track, *space and *iconGap to draw with), 0: none.
  */
 static int ui_whole_fit(int kind, const char *s, Colour c, int room, int iconW, int iconGap0, int track0, Ink *ink, int *track,
-                        int *space, int *iconGap) {
+                        int *space, int *iconGap, int spread) {
     Ink kq;
 #define FITS_(k) (!((room - ((k).x1 - (k).x0) - (iconW ? iconW + *iconGap : 0)) & 1))
     *track = track0, *space = 0, *iconGap = iconGap0;
@@ -792,6 +793,9 @@ static int ui_whole_fit(int kind, const char *s, Colour c, int room, int iconW, 
             return 1;
         }
         *iconGap = iconGap0;
+    }
+    if (!spread) {
+        return 0;
     }
     sUiTrack = track0 + 64;
     MEASURE(gdraw_raw(kind, 0, 0, s, c), kq);
@@ -950,7 +954,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
         if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1) && !ui_widen_on()) {
             /* whole pixels: the odd column taken up where it isn't seen (ui_whole_fit), else the label a pixel left */
             int sp = 0, ig = 0;
-            if (ui_whole_fit(kind, s, c, x1 - x0, 0, 0, base, &fk, &ft, &sp, &ig)) {
+            if (ui_whole_fit(kind, s, c, x1 - x0, 0, 0, base, &fk, &ft, &sp, &ig, 1)) {
                 chipSpace = sp;
                 done = 2;
             } else {
@@ -1716,7 +1720,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
                 if (((x1 - x0 - gw) & 1) && !ui_widen_on()) {
                     /* the odd column taken up where it isn't seen (ui_whole_fit), else the label a pixel left */
                     int tr = trk, sp = 0;
-                    if (ui_whole_fit(kind, shown, ink, x1 - x0, iconW, GICON_GAP, trk, &kq, &tr, &sp, &iconGap)) {
+                    if (ui_whole_fit(kind, shown, ink, x1 - x0, iconW, GICON_GAP, trk, &kq, &tr, &sp, &iconGap, !gfont(kind)->outlined)) {
                         kt = kq, fq = 0, ft = tr;
                         btnSpace = sp;
                     } else {
