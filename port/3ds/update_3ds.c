@@ -65,7 +65,7 @@ enum UpdateState {
     STATE_CONFIRM,  /* Stop the test run / - / cancel. */
     STATE_BUSY,     /* Checking or downloading; taps are ignored. */
     STATE_CHOOSE,   /* master / newest / cancel. */
-    STATE_INSTALLED /* "Quit to finish the update". */
+    STATE_INSTALLED /* "Update installed: quit to finish it" and Quit. */
 };
 
 typedef struct Channel {
@@ -900,7 +900,9 @@ static void update_thread(void *arg) {
                     net_3ds_background(0);
                     if (installed) {
                         sState = STATE_INSTALLED;
-                        draw_text_button("Quit to finish the update");
+                        /* the sentence in the panel, the button one word: the button is a third of the bar */
+                        show_busy("Update installed: quit to finish it");
+                        draw_text_button("Quit");
                     } else {
                         sState = STATE_CHOOSE;
                         draw_choices();

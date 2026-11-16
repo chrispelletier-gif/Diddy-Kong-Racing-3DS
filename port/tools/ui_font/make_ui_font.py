@@ -91,6 +91,216 @@ def zones(big):
     return [(-gs - 20, -D - 20), (-gs, -D), (-ps, -D), (-ov0, 0), (0, 0), (xs, X), (max(xs, xo), X), (Hs, H),
             (max(Hs, hi), H), (max(Hs, hi) + 20, H + 20)]
 
+# Glyphs redrawn hinted (STYLE "fix=SIZE/CHARS"): the few letters the zone resampling below breaks at these sizes
+# (Barlow's Q read as an O, its g closed up, f and t blurred; Inter's Q lost its tail) are FreeType's own light-hinted
+# outlines at SIZE px instead: heights and bars snapped to whole rows, each letter's true shape across. Their rows are
+# made to stand exactly on the font's zones (see zones()) by repeating or dropping one whole row where the letters
+# change least from the row beside it, and their coverage takes the same three levels as every other glyph.
+HFACE = None
+HCAP = 0  # the capitals' height after the row map: no letter but a descender's reaches past it or under the baseline
+HROWS = None  # source row (above the baseline) -> destination rows
+
+TNUM = {}  # character -> its tabular form's glyph name (the font's tnum feature, read from GSUB)
+
+def hload(path, size):
+    import freetype
+    global TNUM
+    f = freetype.Face(path)
+    f.set_char_size(int(round(size * 64)), 0, 72, 72)
+    TNUM = {}
+    try:
+        from fontTools.ttLib import TTFont
+        t = TTFont(path)
+        cmap = t.getBestCmap()
+        g = t["GSUB"].table
+        m = {}
+        for fr in g.FeatureList.FeatureRecord:
+            if fr.FeatureTag == "tnum":
+                for li in fr.Feature.LookupListIndex:
+                    for st in g.LookupList.Lookup[li].SubTable:
+                        st = getattr(st, "ExtSubTable", st)
+                        if hasattr(st, "mapping"):
+                            m.update(st.mapping)
+        for d in "0123456789":
+            if ord(d) in cmap and cmap[ord(d)] in m:
+                TNUM[d] = m[cmap[ord(d)]]
+    except (ImportError, KeyError):
+        pass
+    return f
+
+HFLAGS = None
+
+def hglyph(ch, stretch=1.0, tnum=False, shift=0):
+    """The hinted bitmap: (rows of coverage, width, bitmap_left, bitmap_top, advance px). The advance is the hinter's
+    (whole pixels); hdelta() gives the pair corrections FreeType's own layout makes with it."""
+    import freetype
+    f = HFACE
+    if stretch != 1.0 or shift:
+        # (a pen phase: light hinting leaves the letter's place across alone, so it is drawn that far right)
+        f.set_transform(freetype.Matrix(int(stretch * 0x10000), 0, 0, 0x10000), freetype.Vector(int(shift), 0))
+    fl = freetype.FT_LOAD_FORCE_AUTOHINT | (freetype.FT_LOAD_TARGET_LIGHT if HLIGHT else freetype.FT_LOAD_TARGET_NORMAL) | freetype.FT_LOAD_RENDER
+    if tnum and ch in TNUM:
+        f.load_glyph(f.get_name_index(TNUM[ch].encode()), fl)
+    else:
+        f.load_char(ch, fl)
+    if stretch != 1.0 or shift:
+        f.set_transform(freetype.Matrix(0x10000, 0, 0, 0x10000), freetype.Vector(0, 0))
+    g = f.glyph
+    bm = g.bitmap
+    rows = [[bm.buffer[j * bm.pitch + i] for i in range(bm.width)] for j in range(bm.rows)]
+    raw = g._FT_GlyphSlot.contents
+    HDELTA[(ch, tnum)] = (raw.lsb_delta, raw.rsb_delta)
+    HLIN[(ch, tnum)] = g.linearHoriAdvance / 65536.0
+    return rows, bm.width, g.bitmap_left, g.bitmap_top, int(round(g.advance.x / 64.0))
+
+HDELTA = {}
+# light hinting (FreeType's "light" target): heights, bars and baselines snapped to whole rows; across, each letter
+# keeps its true shape and width (the full hinter squeezed Barlow's f and t into 1 and l)
+HLIGHT = True
+HLIN = {}  # the unhinted advances
+
+def hdelta(a, b):
+    """FreeType's hinted spacing fix for a pair: the hinter moved a's right edge and b's left edge, and when they moved
+    apart (or together) by more than half a pixel between them the pair is set a pixel closer (or wider)."""
+    hglyph(a)
+    hglyph(b)
+    d = HDELTA[(a, False)][1] - HDELTA[(b, False)][0]
+    return -64 if d > 32 else 64 if d < -31 else 0
+
+def hadv(ch, tnum=False):
+    return hglyph(ch, 1.0, tnum)[4]
+
+def hzone_rows(chars, th=96):
+    """Ink rows above the baseline (top, bottom) of these letters, as hinted (no row map)."""
+    top, bot = -99, 99
+    for c in chars:
+        rows, w, x0, t, _ = hglyph(c)
+        ink = [j for j in range(len(rows)) if any(v >= th for v in rows[j])]
+        if ink:
+            top = max(top, t - ink[0])
+            bot = min(bot, t - ink[-1] - 1)
+    return top, bot
+
+def hplan(old, digits_only=False):
+    """The row map: each zone (capitals above the lowercase, lowercase, descenders) made even, toward the font's
+    previous height (old: (H, X, D)) when it is odd, by one row repeated or dropped where it changes least."""
+    global HROWS
+    cap = hzone_rows("0123456789" if digits_only else "HEIZ")[0]
+    x = hzone_rows("xzvw")[0]
+    desc = -hzone_rows("gpqy")[1]
+    lo = "abcdefghijklmnopqrstuvwxyz"
+    up = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    glyphs = {c: hglyph(c) for c in lo + up}
+    def change(r, chars):
+        # how much the letters' row r differs from the row below it (lower is better to repeat or drop)
+        tot = 0
+        for c in chars:
+            rows, w, x0, t, _ = glyphs[c]
+            def row(rr):
+                j = t - 1 - rr
+                return rows[j] if 0 <= j < len(rows) else [0] * w
+            a, b = row(r), row(r - 1)
+            tot += sum(abs(u - v) for u, v in zip(a, b))
+        return tot
+    count = {}
+    plan = []
+    def gap(r):
+        # a row some letter leaves clear between ink above and below it (the dot of an i or j over its stem): dropping
+        # it would join them
+        n = 0
+        for c in lo + up:
+            rows, w, x0, t, _ = glyphs[c]
+            def has(rr):
+                j = t - 1 - rr
+                return 0 <= j < len(rows) and any(v >= 64 for v in rows[j])
+            if not has(r) and has(r + 1) and has(r - 1):
+                n += 1
+        return n
+    def fix(v, want, band, chars, name):
+        if v % 2 == 0:
+            return v
+        d = 1 if want > v else -1
+        r = min(band, key=lambda rr: (gap(rr) if d < 0 else 0, change(rr, chars),
+                                      abs(rr - (band[0] + band[-1]) / 2.0)))
+        count[r] = 2 if d > 0 else 0
+        plan.append("%s %d->%d at row %d" % (name, v, v + d, r))
+        return v + d
+    H, X, D = old
+    global HCAP
+    dx = 0
+    if not digits_only:
+        dx = fix(x, X, list(range(1, x - 1)), lo, "x") - x
+    # (a row added or dropped in the lowercase moves the capitals' top with it)
+    HCAP = fix(cap + dx, H, list(range(x, cap - 1)) or [x], up + "bdfhijklt", "cap")
+    if not digits_only:
+        fix(desc, D, list(range(-desc + 1, -1)) or [-1], "gjpqy", "desc")
+    HROWS = {}
+    d = 0
+    for r in range(0, 120):
+        c = count.get(r, 1)
+        HROWS[r] = list(range(d, d + c))
+        d += c
+    d = -1
+    for r in range(-1, -60, -1):
+        c = count.get(r, 1)
+        HROWS[r] = list(range(d, d - c, -1))
+        d -= c
+    return cap, x, desc, plan
+
+HFIX = ""  # the letters drawn hinted
+
+def hraster(ch, stretch=1.0, tnum=False, shift=0):
+    rows, w, x0, t, _ = hglyph(ch, stretch, tnum, shift)
+    out = {}
+    for j, row in enumerate(rows):
+        for dr in HROWS[t - 1 - j]:
+            out[dr] = row
+    if not out or w == 0:
+        return [], 0, 0, 0, 0
+    # nothing taller than the capitals or under the baseline but descenders and brackets (Outfit's ascenders and
+    # Inter's slash stood a row out, so a label with them was an odd number of rows and sat half a pixel off): a short
+    # mark (` ^ ') moved in, a taller glyph losing the row of its body most like the one under it
+    def trim(lo, hi):
+        rows = sorted(out, reverse=True)
+        n = (rows[0] - hi + 1 if rows[0] >= hi else 0) + (lo - rows[-1] if rows[-1] < lo else 0)
+        if n <= 0:
+            return
+        if len(rows) <= 4:
+            dy = -(rows[0] - hi + 1) if rows[0] >= hi else lo - rows[-1]
+            moved = {r + dy: v for r, v in out.items()}
+            out.clear()
+            out.update(moved)
+            return
+        for _ in range(n):
+            rows = sorted(out, reverse=True)
+            above = rows[0] >= hi
+            pick = [r for r in rows[1:-1] if (r >= HCAP // 2 if above else True)] or rows[1:-1]
+            r = min(pick, key=lambda rr: (sum(abs(a - b) for a, b in zip(out[rr], out.get(rr - 1, [0] * w))), -rr if above else rr))
+            new = {}
+            for rr, v in out.items():
+                if rr == r:
+                    continue
+                new[rr - 1 if (above and rr > r) else rr + 1 if (not above and rr < r) else rr] = v
+            out.clear()
+            out.update(new)
+    if HCAP and ch not in "gjpqy,;()[]{}|_Q@$":
+        trim(0, HCAP)
+    elif HCAP and ch in "gjpqy;,Q":
+        trim(-99, HCAP)
+    # coverage under 24 dropped: a fringe the eye can't see but a check would count as ink
+    top = max(out)
+    bot = min(out)
+    full = [[(v if v >= 24 else 0) for v in out.get(r, [0] * w)] for r in range(top, bot - 1, -1)]
+    cols = [i for i in range(w) if any(rw[i] for rw in full)]
+    rws = [j for j in range(len(full)) if any(full[j])]
+    if not cols:
+        return [], 0, 0, 0, 0
+    c0, c1, r0, r1 = cols[0], cols[-1] + 1, rws[0], rws[-1] + 1
+    px = [full[j][i] for j in range(r0, r1) for i in range(c0, c1)]
+    # the three levels every other glyph is drawn in (see raster())
+    px = [0 if v < 56 else 112 if v < 184 else 255 for v in px]
+    return px, c1 - c0, r1 - r0, x0 + c0, -(top + 1) + r0
+
 # The key caps' and value chips' lone letters, drawn by hand for each body font: solid pixels only (no half-covered
 # edge, so every cap letter in a look is drawn alike), 2 px stems and 1 row bars, mirror exact where the letter is
 # symmetric (A, X: left to right; X top to bottom too), each in two widths a column apart so whichever cap's room is
@@ -152,6 +362,8 @@ def raster(font, big, ch, feats, phase, stretch=1.0):
     (big None) keep FreeType's hinted bitmap. The others are drawn unhinted at OVER times the size and box-filtered
     down, as a word processor positions text: hinting would snap every glyph back to whole pixels (and its own
     widths), and the quarter-pixel pen would gain nothing."""
+    if HFACE is not None and big is not None and ch in HFIX:
+        return hraster(ch, stretch, False, int(round(phase * 16)))
     if big is None:
         m, (x0, y0) = font.getmask2(ch, mode="L", anchor="ls", features=feats)
         w, h = m.size
@@ -351,13 +563,26 @@ def main():
         base = int(base)
         font = load(path, size, variation)
         big = None
-        global ZONES
+        global ZONES, HFACE, HFIX, HCAP
         ZONES = None
-        if style != "outline":
+        HFACE, HFIX, HCAP = None, "", 0
+        if not style.startswith(("outline", "draw=")):
             big = ImageFont.truetype(path, font.size * OVER)
             if variation:
                 big.set_variation_by_name(variation.encode())
             ZONES = zones(big)
+        if style.startswith("fix="):
+            hsize, HFIX = style[4:].split("/")
+            HFACE = hload(path, float(hsize))
+            old = (ZONES[7][1], ZONES[5][1], -ZONES[1][1])
+            got = hplan(old)
+            # the redrawn letters must stand on exactly the zones the others do
+            def hrows(c):
+                pix, w, h, x0, y0 = hraster(c)
+                return -y0, h + y0
+            H_, X_, D_ = hrows("H")[0], hrows("x")[0], hrows("p")[1]
+            sys.stderr.write("%s: %s redrawn hinted at %s px: cap %d x %d desc %d (zones %d %d %d)%s\n" % (
+                name, HFIX, hsize, H_, X_, D_, old[0], old[1], old[2], "" if (H_, X_, D_) == old else "  MISMATCH"))
         bigx, xshift = big, 0
         bigp, pshift = big, 0
         if big is not None:
@@ -423,7 +648,29 @@ def main():
             return pix, n, n
         has_tnum = len({round(font.getlength(d, features=feats), 3) for d in "0123456789"}) == 1
         digit_adv = max(font.getlength(d, features=feats) for d in "0123456789")
-        crisp = style == "outline"
+        # crisp: whole pixels, set by ink (Classic, outlined; the drawn sets of the other looks, not outlined)
+        outlined = style.startswith("outline")
+        crisp = outlined or style.startswith("draw=")
+        # Classic's own lettering drawn by hand (STYLE "outline+pix8" or "outline+pix9": see classic_pixels.py); the
+        # font file is then only for the few marks not drawn
+        design = {}
+        if style.startswith("draw="):
+            # the other looks' lettering drawn by hand (STYLE "draw=FACE/ASC/X/DESC": the rows its size gains above the
+            # x-height, in it and below it; see drawn_pixels.py)
+            import drawn_pixels as _dp
+            face, g_asc, g_x, g_d = style[5:].split("/")
+            g_asc, g_x, g_d = int(g_asc), int(g_x), int(g_d)
+            prows = 8 + g_asc + g_x
+            for k, gl in _dp.FACES[face].items():
+                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d)
+        if "+pix" in style:
+            import classic_pixels as _cp
+            prows = int(style.split("+pix")[1])
+            for k, gl in _cp.GLYPHS.items():
+                design[k] = gl if prows == _cp.CAP else _cp.head(gl)
+        def designed(ch):
+            # (the proportional figures and the minus are the same drawings)
+            return design.get(ch)
         data, glyphs = [], []
         adv64 = {}
         for code in CODES:
@@ -437,9 +684,15 @@ def main():
             if ch == "+" and bigp is not big:
                 adv = bigp.getlength(ch, features=cf) / OVER  # the larger plus keeps its own side bearings
             pix, w, h, x0, y0 = raster(font, bigx if ch == "×" else bigp if ch == "+" else big, ch, cf, 0)
+            dg = designed(ch)
+            if dg is not None:
+                top, rws = dg
+                w, h = len(rws[0]), len(rws)
+                pix = [255 if c == "#" else 0 for r in rws for c in r]
+                x0, y0 = 0, top - prows
             if ch == "×":
                 x0 += xshift
-                if style != "outline" and 0 < _zh <= 11:
+                if not crisp and 0 < _zh <= 11:
                     pix, w, h = times_pix()
                     x0, adv = 1, w + 2  # 1 px clear of the digit each side, as a word space is not
                 y0 = times_y(h, y0)
@@ -454,7 +707,7 @@ def main():
             if crisp and w > 0:
                 from PIL import Image as _I
                 mask = _I.frombytes("L", (w, h), bytes(pix))
-                if ch == "1" and code not in PROP:
+                if ch == "1" and code not in PROP and dg is None:
                     # a timer-face 1 drawn to fill the 0's cell: a stem as heavy as the 0's sides, centred, a flag to the
                     # left at the top and a foot the 0's full width, so the tabular 1 neither leaves a hole ("00:3 1:00")
                     # nor reads thin beside its neighbours ("7 1%")
@@ -484,7 +737,7 @@ def main():
                     mask, w, h = canvas, zw, zh
                     x0, y0 = zx + zb[0], zy + zb[1]
                     pix = list(canvas.tobytes())
-            if crisp and ch in "ij" and w > 0:
+            if crisp and ch in "ij" and w > 0 and dg is None:
                 # the dot no higher than the capitals (the hinter sets it a row above them): its top row dropped, so a
                 # word's ink is the capitals' height ("Medium" an even number of rows, as "MEDIUM")
                 hb = font.getmask2("H", mode="L", anchor="ls")
@@ -495,7 +748,22 @@ def main():
                     pix = pix[cut * w:]
                     h -= cut
                     y0 += cut
-            if crisp and ch == "-" and w > 0:
+            if outlined and ch == "/" and w > 0 and dg is None:
+                # Classic's big slash (Lilita's): exactly the figures' height and on their rows, so "2/3" laps have it
+                # centred on the digits (Lilita's stands a row over them and two under); a stroke as heavy as theirs
+                zrows = [j for j in range(_zh) if any(_zp[j * _zw + i] >= 80 for i in range(_zw))]
+                n = len(zrows)
+                sw = 3 if n >= 12 else 2
+                sw2 = n // 2 + sw - 1  # its width: half its height, plus the stroke
+                pix = []
+                for j in range(n):
+                    left = (n - 1 - j) * (sw2 - sw) // max(1, n - 1)
+                    pix.extend(255 if left <= i < left + sw else 0 for i in range(sw2))
+                w, h = sw2, n
+                x0, y0 = 0, _zy + zrows[0]
+                from PIL import Image as _I
+                mask = _I.frombytes("L", (w, h), bytes(pix))
+            if crisp and ch == "-" and w > 0 and dg is None:
                 # Classic's hyphen: Lilita's bar is an en dash wide at this size ("Anti- aliasing"); a hyphen is a short
                 # bar, 4 px of solid ink, its rows as the font draws them
                 sb = mask.point(lambda v: 255 if v >= 80 else 0).getbbox()
@@ -524,7 +792,10 @@ def main():
                 if bb:
                     ink_w = bb[2] - bb[0]
                     if tabular(code):
-                        boxes = [solid_box(as_img(font.getmask2(d, mode="L", anchor="ls", features=feats)[0])) for d in "0123456789"]
+                        if designed("0") is not None:
+                            boxes = [(0, 0, len(designed(d)[1][0]), 1) for d in "0123456789"]
+                        else:
+                            boxes = [solid_box(as_img(font.getmask2(d, mode="L", anchor="ls", features=feats)[0])) for d in "0123456789"]
                         ink_w_max = max(b[2] - b[0] for b in boxes if b)
                         x0 = -bb[0] + (ink_w_max - ink_w) // 2
                         adv = ink_w_max + 1
@@ -548,7 +819,7 @@ def main():
                 pix, w, h, x0, y0 = raster(font, bigx if ch == "×" else bigp if ch == "+" else big, ch, cf, p)
                 if ch == "×":
                     x0 += xshift
-                    if style != "outline" and 0 < _zh <= 11:
+                    if not crisp and 0 < _zh <= 11:
                         pix, w, h = times_pix()
                         x0 = 1
                     y0 = times_y(h, y0)
@@ -585,10 +856,10 @@ def main():
                 if not ("A" <= ch <= "Z") or not gw:
                     glyphs.append((0, 0, 0, 0, 0, 0))
                     continue
-                if crisp and extra == 0:
+                if outlined and extra == 0:
                     glyphs.append((0, 0, 0, 0, 0, 0))
                     continue
-                if crisp:
+                if outlined:
                     # the outlined font is FreeType's hinted bitmap, which can't be drawn wider: the key caps' letters are
                     # drawn by hand at its 8 px capitals, in its own chunky shapes (solid, as a boxed Classic label draws)
                     hand = CLASSIC_WIDE.get(ch)
@@ -740,6 +1011,10 @@ def main():
         if crisp:
             hh = font.getbbox("H", anchor="ls")
             space64 = ((hh[3] - hh[1]) // 2 - 1) * 64  # a word space about 2 px wider than a letter gap
+            if design:
+                # the drawn letters: a word gap 2 px wider than a letter gap (3 px), 3 px wider in Classic's 10 row heading
+                # and the 12 row one (4 px)
+                space64 = (2 if prows < 10 or (prows == 10 and not outlined) else 3) * 64
         lines.append("static const unsigned char k%sPixels[%d] = {" % (name, max(1, len(data))))
         for i in range(0, max(1, len(data)), 24):
             lines.append("    " + ",".join(str(v) for v in (data or [0])[i:i + 24]) + ",")
@@ -753,7 +1028,7 @@ def main():
             lines.append("    { %d, %d, %d }," % (a, b, k))
         lines.append("};")
         lines.append("")
-        names.append((name, space64, base, len(kerns), 1 if crisp else 0, phases))
+        names.append((name, space64, base, len(kerns), 1 if outlined else 0, phases))
     for name, space64, base, nk, st, ph in names:
         lines.append("static const UiFont k%s = { %d, %d, k%sGlyphs, k%sPixels, k%sKerns, %d, %d, %d };" % (name, space64, base, name, name, name, nk, st, ph))
     open(out, "w").write("\n".join(lines) + "\n")

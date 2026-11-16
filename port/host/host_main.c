@@ -7,6 +7,7 @@
  *   DKR_FRAMES      exit after rendering this many frames (default: run forever)
  *   DKR_DUMP_EVERY  write every Nth frame to DKR_DUMP_DIR/frame_XXXXX.ppm (default: 0 = never)
  *   DKR_INPUT       scripted input, see host_input.c
+ *   DKR_PROF_TERM_CHECK  check that every profiler page fits the terminal font's 47 columns and 14 lines, then exit
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,9 +88,18 @@ int plat_main_loop_iteration(void) {
     return 1;
 }
 
+int prof_term_check(char *report, int size);
+
 int main(int argc, char **argv) {
     (void) argc;
     (void) argv;
+    if (getenv("DKR_PROF_TERM_CHECK") != NULL) {
+        /* CI: every profiler page in the terminal font fits the bottom screen (port_profile.c) */
+        static char report[32768];
+        int failed = prof_term_check(report, (int) sizeof(report));
+        fputs(report, stdout);
+        return failed;
+    }
     add_game_menu_options();
     port_boot();
     while (plat_main_loop_iteration()) {

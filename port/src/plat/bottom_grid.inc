@@ -904,6 +904,18 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
         /* a lone capital drawn by hand for the key caps (both forms there): only those, so every cap letter of a look
            is drawn alike */
         int handDrawn = alone && gfont(kind)->glyphs[(gfont(kind)->phases + 1) * UI_NG + s[0] - 0x21].width > 0;
+        if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
+            /* Classic: one letter a column wider (see sUiWiden), not its letters spread */
+            Ink kq;
+            sUiWiden = 1;
+            MEASURE(gdraw_raw(kind, 0, 0, s, c), kq);
+            if (!((x1 - x0 - (kq.x1 - kq.x0)) & 1)) {
+                fk = kq, fq = 0, ft = base, fw = 0;
+                done = 2;
+            } else {
+                sUiWiden = 0;
+            }
+        }
         for (wd = handDrawn ? 1 : 0; wd <= (alone ? 2 : 0) && done < 2; wd++) {
             for (t = 0; t <= (alone ? 0 : 64) && done < 2; t += 2) {
                 for (sg = 1; sg >= -1 && done < 2; sg -= 2) {
@@ -958,6 +970,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
     }
     sPen0 = 0;
     sUiWide = 0;
+    sUiWiden = 0;
     sUiCrispAll = crisp;
     log_rec('C', x + inkX0, y + top, x + inkX1, y + top + h, kind, s); /* the ink, as the eye sees the text's place */
     if (sFaceY1 > sFaceY0) {
@@ -1372,11 +1385,13 @@ static int gicons_fit(void) {
     if (getenv("DKR_ICON_DEBUG")) {
         fprintf(stderr, "style %d var %d: worst side pad %d\n", sStyle, sVariant, worst);
     }
-    return worst >= 8;
+    /* (Classic keeps its plain labels, as with its earlier lettering: its hand-drawn capitals are narrower and would
+       otherwise just make room) */
+    return sStyle != 0 && worst >= 8;
 }
 
 /* Classic's letter tracking on buttons: GBTN_TRACK where every label and its icon still keep 8 px clear of a
-   three-column button, else the most that does (in quarter pixels), decided once per look so a label never changes
+   three-column button, else the most that does (in whole pixels), decided once per look so a label never changes
    its spacing between screens or states */
 static int gbtn_track(void) {
     static const char *const sAll[] = { "Pause", "Settings", "Controls", "Updates", "Close", "Prev", "Next" };
@@ -1385,7 +1400,7 @@ static int gbtn_track(void) {
     if (sStyle != 0) {
         return 0;
     }
-    for (trk = GBTN_TRACK; trk > 0; trk -= 16) {
+    for (trk = GBTN_TRACK; trk > 0; trk -= 64) { /* whole pixels: every gap between letters the same */
         int worst = 999;
         for (i = 0; i < sizeof(sAll) / sizeof(sAll[0]); i++) {
             char up[40];
@@ -1441,7 +1456,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
         const char *t = label + (grey || on || pressed || focus);
         char shown[40];
         Colour ink = grey ? (Colour){ 150, 155, 178, 255 } : WHITE, top, bottom, edge, hole;
-        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, iconSolidL = 0;
+        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, btnWiden = 0, iconSolidL = 0;
         Ink ik;
         /* disabled differs by more than colour: it loses its icon and its fill goes flat */
         if (gicon_known(t)) { /* disabled keeps its icon, greyed with its label */
@@ -1603,6 +1618,17 @@ static void gbuttons(const char (*buttons)[40], int count) {
         if (noIcons) {
             iconW = 0;
         }
+        /* a label wider than its button less 8 px each side: without its icon, then a size smaller (never clipped or
+           over the next box; logged so the checks catch any label still too wide) */
+        if (gtext_width(kind, shown, 0) + (iconW ? iconW + GICON_GAP : 0) > x1 - x0 - 16) {
+            iconW = 0;
+            while (kind != GF_SM && gtext_width(kind, shown, 0) > x1 - x0 - 16) {
+                kind = kind == GF_HEAD ? GF_BODY : GF_SM;
+            }
+            if (gtext_width(kind, shown, 0) > x1 - x0 - 16) {
+                log_rec('E', x0, y0, x1, y1, 0, "label-too-wide");
+            }
+        }
         if (iconW) {
             /* the icon as it is drawn here (a dark icon on a lit key has no outline): the gap is from its own ink */
             Ink ki;
@@ -1622,8 +1648,28 @@ static void gbuttons(const char (*buttons)[40], int count) {
             int q, tt, sg, done = 0, fq = 0, ft = trk, crisp = sUiCrispAll;
             sFlatMode = grey && sStyle == 0 ? 2 : 0;
             sUiFlat = grey && sStyle == 0;
-            if (gfont(kind) != NULL && gfont(kind)->outlined) {
+            if (gfont(kind) != NULL && gfont(kind)->phases == 1) { /* (whole-pixel fonts: Classic and the drawn sets) */
                 sUiCrispAll = 1; /* measured as gtext_ex draws a boxed Classic label: every letter solid */
+                Ink kq;
+                int gw;
+                sUiTrack = trk;
+                sPen0 = 0;
+                MEASURE(gdraw_raw(kind, 0, 0, shown, ink), kq);
+                gw = kq.x1 - kq.x0 + (iconW ? iconW + GICON_GAP : 0);
+                if ((x1 - x0 - gw) & 1) {
+                    /* one letter a column wider (see sUiWiden), not the letters spread */
+                    sUiWiden = 1;
+                    sUiTrack = trk;
+                    sPen0 = 0;
+                    MEASURE(gdraw_raw(kind, 0, 0, shown, ink), kq);
+                    gw = kq.x1 - kq.x0 + (iconW ? iconW + GICON_GAP : 0);
+                    sUiWiden = 0;
+                    if (!((x1 - x0 - gw) & 1)) {
+                        kt = kq, fq = 0, ft = trk;
+                        done = 2;
+                        btnWiden = 1;
+                    }
+                }
             }
             for (q = 0; q < 64 && done < 2; q += 16) {
                 for (tt = 0; tt <= 64 && done < 2; tt += 2) {
@@ -1686,6 +1732,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
         sUiFlat = grey && sStyle == 0;
         sUiTrack = btnTrack; /* (the tracking and pen the label was centred with, above) */
         sPen0 = btnPen;
+        sUiWiden = btnWiden;
         gtext_ex(kind, gx - textX0, y0 + pressed, gx - textX0 + 1000, y1 + pressed, shown, ink, GA_LEFT, 0, NULL, NULL);
         sUiTrack = 0;
         sFlatMode = 0;
@@ -3878,6 +3925,110 @@ static void gdebug_text(const State *s, int x0, int y0, int x1, int y1) {
     }
 }
 
+/*
+ * DKR_PROF_TERM (default on; the owner 2026-11-15: the profiler had too many pages in the look's text settings): the
+ * readout in a small fixed-width terminal font (term_font.h: 5x7 glyphs in 6x9 cells) instead of the look's fonts,
+ * with no case changes or column snapping: the readout's own spaces line its columns up, as on a terminal. 47 columns
+ * and 14 lines fit the panel under the graph, so the readout needs 3 pages instead of 5 (port_profile.c).
+ */
+#define TERM_COLS 47
+#define TERM_LINES 14
+#define TERM_PAD 9 /* frame to ink, left and right; the 14 lines leave 7 above their first capitals and 7 under the last */
+static int gterm_on(void) {
+    return plat_switch("DKR_PROF_TERM", 1) != 0;
+}
+
+/* Text in the terminal font from (x, y), the top of its cells, a colour per character (or one for all); stops at x1. */
+static void gterm_text(int x, int y, int x1, const char *t, const Colour *each, Colour ink) {
+    int k, i, j;
+    for (k = 0; t[k] != '\0' && x + TERM_GLYPH_W - 1 <= x1; k++, x += TERM_FONT_W) {
+        unsigned char c = (unsigned char) t[k];
+        Colour col = each != NULL ? each[k] : ink;
+        if (c < 32 || c > 126) {
+            c = '?';
+        }
+        for (j = 0; j < TERM_GLYPH_H; j++) {
+            unsigned char bits = sTermFont[c - 32][j];
+            for (i = 0; i < TERM_GLYPH_W; i++) {
+                if (bits & (0x10 >> i)) {
+                    plot(x + i, y + j, col.r, col.g, col.b, col.a);
+                }
+            }
+        }
+    }
+}
+
+/* The ink width of text in the terminal font: whole cells but the last one's gap. */
+static int gterm_width(const char *t) {
+    int n = (int) strlen(t);
+    return n > 0 ? n * TERM_FONT_W - 1 : 0;
+}
+
+/* The readout's lines in the terminal font: the title in the accent colour (its hint on the right edge), the graph's
+   key in the graph's colours, a column head line (the line under the title, words alone) in the label colour, the rest
+   in white. */
+static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
+    /* the graph's key, its words in the order of sGraphColours */
+    static const char *const sKey[BS_GRAPH_KINDS] = { "logic", "build", "render", "textures", "GPU", "retrace" };
+    int n = s->overlayLines, i, lx0, lx1, top;
+    while (n > 0 && s->overlay[n - 1][0] == '\0') {
+        n--;
+    }
+    gbox(x0, y0, x1, y1, SK_PANEL);
+    log_rec('P', x0, y0, x1, y1, 0, "terminal");
+    lx0 = x0 + 1 + TERM_PAD; /* the frame is 1 px */
+    lx1 = x1 - 2 - TERM_PAD; /* the last pixel ink may use */
+    /* 14 lines centred on their capitals (7 rows each) and descenders: as many rows above the first as under the last */
+    top = y0 + 1 + (y1 - y0 - 2 - ((TERM_LINES - 1) * TERM_FONT_H + 7)) / 2;
+    for (i = 0; i < n && i < TERM_LINES; i++) {
+        const char *line = s->overlay[i];
+        int y = top + i * TERM_FONT_H, k, digits = 0;
+        Colour each[64];
+        if (i == 0) {
+            const char *gap = strstr(line, "  ");
+            char left[64];
+            snprintf(left, sizeof(left), "%.*s", gap != NULL ? (int) (gap - line) : (int) strlen(line), line);
+            gterm_text(lx0, y, lx1, left, NULL, gink_accent());
+            if (gap != NULL) {
+                while (*gap == ' ') {
+                    gap++;
+                }
+                gterm_text(lx1 + 1 - gterm_width(gap), y, lx1, gap, NULL, gink_accent());
+            }
+            continue;
+        }
+        for (k = 0; line[k] != '\0' && k < 64; k++) {
+            digits |= line[k] >= '0' && line[k] <= '9';
+            each[k] = WHITE;
+        }
+        if (strncmp(line, "graph:", 6) == 0) {
+            /* the key: each cause in its bar colour */
+            int w = 0;
+            while (line[w] != '\0' && w < 64) {
+                int e = w, c;
+                while (line[e] != '\0' && line[e] != ' ' && e < 64) {
+                    e++;
+                }
+                for (c = 0; c < BS_GRAPH_KINDS; c++) {
+                    if ((int) strlen(sKey[c]) == e - w && strncmp(line + w, sKey[c], (size_t) (e - w)) == 0) {
+                        int q;
+                        for (q = w; q < e; q++) {
+                            each[q] = sGraphColours[c];
+                        }
+                    }
+                }
+                w = e;
+                while (line[w] == ' ' && w < 64) {
+                    w++;
+                }
+            }
+            gterm_text(lx0, y, lx1, line, each, WHITE);
+            continue;
+        }
+        gterm_text(lx0, y, lx1, line, NULL, i == 1 && !digits ? gink_label() : WHITE); /* a table's column heads */
+    }
+}
+
 /* The frame graph in a panel: the newest frame on the right, a bar of 2 px per frame, 50 ms full height, 60 and 30 fps lines. */
 static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     /* 54 ms full height, so a late frame (50 ms) shows above the 30 fps line and a hitch's white cap stays inside
@@ -3886,8 +4037,8 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     int y60, y30;
     float full = 54.0f;
     gbox(x0, y0, x1, y1, SK_PANEL);
-    labelW = gtext_width(GF_BODY, sStyle == 2 ? "60 FPS" : "60 fps", 0); /* the lines are frame rates: labelled so, as 60 sits under 30 (a unit: capitals in Broadcast/Carbon) */
-    lx = x0 + gpad_x(SK_PANEL);
+    labelW = gterm_on() ? gterm_width("60 fps") : gtext_width(GF_BODY, sStyle == 2 ? "60 FPS" : "60 fps", 0); /* the lines are frame rates: labelled so, as 60 sits under 30 (a unit: capitals in Broadcast/Carbon) */
+    lx = gterm_on() ? x0 + 1 + TERM_PAD : x0 + gpad_x(SK_PANEL); /* terminal: on the readout's left edge (gterm_lines) */
     gx0 = lx + labelW + 8;
     frames = (gx1 - gx0) / 2;
     frames = frames > s->graphCount ? s->graphCount : frames;
@@ -3913,6 +4064,17 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
         sQuiet = q;
     }
     log_rec('P', gx0, gy0_, gx1, gy1_, 0, "graph");
+    if (gterm_on()) {
+        /* the terminal font's labels, their digits (cell rows 0-6) centred on their lines, 4 px or more apart */
+        int c60 = y60, c30 = y30, need = 7 + 4 - (y60 - y30);
+        if (need > 0) {
+            c60 += (need + 1) / 2;
+            c30 -= need / 2;
+        }
+        gterm_text(lx, c60 - 3, lx + labelW, "60 fps", NULL, gink_dim());
+        gterm_text(lx, c30 - 3, lx + labelW, "30 fps", NULL, gink_dim());
+        return;
+    }
     gband(GF_BODY, 0, &top, &h);
     {
         /* each label centred on its line, unless that leaves less than 3 px between them: then both move apart
@@ -3949,7 +4111,15 @@ static void gdebug(const State *s) {
 static void gdebug_inner(const State *s) {
     if (s->graphCount > 0) {
         gdebug_graph(s, GX0, gy0(0), GX1, gy1(1));
+        if (gterm_on()) {
+            gterm_lines(s, GX0, gy0(2), GX1, gy1(7));
+            return;
+        }
         gdebug_text(s, GX0, gy0(2), GX1, gy1(7));
+        return;
+    }
+    if (gterm_on()) {
+        gterm_lines(s, GX0, gy0(0), GX1, gy1(7)); /* no graph: the readout has the whole screen above the buttons */
         return;
     }
     if (sLogo.rgba != NULL) {
@@ -4243,7 +4413,9 @@ static void gpanel_text_inner(const char *t, int right) {
         pct = m > 1 && v <= 100 ? v : -1;
     }
     if (pct < 0) {
-        gtext(GF_BODY, GX0 + GPAD, GBTN_Y0, right - GPAD, y1, t, YELLOW, GA_CENTRE);
+        /* (a line wider than the panel a size smaller, never over its edge) */
+        int kind = gtext_width(GF_BODY, t, 0) > right - GX0 - 2 * GPAD ? GF_SM : GF_BODY;
+        gtext(kind, GX0 + GPAD, GBTN_Y0, right - GPAD, y1, t, YELLOW, GA_CENTRE);
         return;
     }
     /* a download: what is downloading on the first line; under it its percentage and the progress bar, so the panel
@@ -4308,6 +4480,22 @@ static void gglyph_sheet(void) {
     static const int sKinds[4] = { GF_BODY, GF_HEAD, GF_SM, GF_LG };
     int r, d, q = sQuiet;
     sQuiet = 1;
+    if (getenv("DKR_GLYPH_ALPHA") != NULL) {
+        /* host check: every letter and digit in each type size, on a panel as the screens show them */
+        static const char *const sLines[] = { "ABCDEFGHIJKLM", "NOPQRSTUVWXYZ", "abcdefghijklm", "nopqrstuvwxyz",
+                                              "0123456789 +-.:/% !?'\"(),;" };
+        int kinds[3] = { GF_BODY, GF_HEAD, GF_SM }, y = 4, i, k;
+        gbox(0, 0, BS_WIDTH, BS_HEIGHT, SK_PANEL);
+        for (k = 0; k < 3; k++) {
+            for (i = 0; i < 5; i++) {
+                gtext(kinds[k], 6, y, 314, y + 14, sLines[i], WHITE, GA_LEFT);
+                y += 15;
+            }
+            y += 4;
+        }
+        sQuiet = q;
+        return;
+    }
     fill(0, 0, BS_WIDTH, 198, (Colour){ 0, 0, 0, 255 });
     for (r = 0; r < 4; r++) {
         int kind = sKinds[r], y = 10 + r * 30;

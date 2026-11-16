@@ -9,6 +9,7 @@
 
 #include "plat/bottom_screen.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 
 int stbi_write_png(char const *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
 
@@ -185,43 +186,86 @@ void host_bottom_preview(const char *dir) {
      * late (50 ms): 1 / (0.95 x 33.3 + 0.05 x 50) ms = 29.3 fps. The kinds (2b) add up to the page totals (2d) and the
      * objects (2c) to the kinds' racers and objects rows.
      */
-    bs_set_overlay("PROFILER 1/5  tap: page\n"
-                   "29.3/30 fps held back by renderer CPU\n"
-                   "on time 95%, 1 vsync late 5%, 2+ late 0%\n"
-                   "worst 50 ms (budget 33) hitches 1\n"
-                   "steady: frame to frame 1.8 ms\n"
-                   "graph: green logic cyan build yellow render\n"
-                   "orange textures red GPU grey retrace; tap: freeze");
-    save(dir, "2a_monitor_summary");
-    bs_set_overlay("FRAME TIME 2/5  tap: page\n"
-                   "time a frame, budget 33.3 ms:\n"
-                   " game    27.0  81% logic 15.2 scene 9.8 sound 2.0\n"
-                   " render  29.0  87% textures 0.4\n"
-                   " GPU     12.1  36%\n"
-                   "waiting: game 5.0 render 2.2\n"
-                   "idle: game core 4% render core 6%\n"
-                   "tris 1058 draws 137 texture loads 3\n");
-    save(dir, "2d_monitor_time");
-    bs_set_overlay("DRAW KINDS 3/5  tap: page\n"
-                   "a frame:     tris drw  rdp   bld  waste\n"
-                   "track         458  56 15.20  3.60   83%\n"
-                   "racers        280  36  5.40  2.40   43%\n"
-                   "objects       238  28  4.10  1.30   94%\n"
-                   "sky            38  10  2.10  0.50   71%\n"
-                   "shadows        44   7  1.80  2.00   65%\n"
-                   "segments 11/24 (table 17)\n"
-                   "objects 13/62 drawn\n");
-    save(dir, "2b_monitor_kinds");
-    bs_set_overlay("OBJECTS 4/5 FROZEN  tap: page\n"
-                   "a frame:    upd vis  tris logic  bld  rdp\n"
-                   "racer        8   4   280  9.80 2.40 5.40\n"
-                   "scenery     22   5    30  1.20 0.60 2.30\n"
-                   "dino whale   1   1   166  0.90 0.30 0.90\n"
-                   "banana      14   0     0  1.10 0.00 0.00\n"
-                   "exit         2   1    24  0.40 0.10 0.50\n"
-                   "weapon       3   2    18  0.60 0.30 0.40\n"
-                   "checkpoint  12   0     0  1.20 0.00 0.00\n");
-    save(dir, "2c_monitor_objects");
+    if (plat_switch("DKR_PROF_TERM", 1)) {
+        /* the terminal font's three pages (port_profile.c show_term_page): the same second, every kind, 12 objects */
+        /* the summary as port_profile.c lays it out, during the switch bench's longest row, on both consoles */
+        {
+            static char page[1024];
+            prof_term_preview(0, page, (int) sizeof(page));
+            bs_set_overlay(page);
+            save(dir, "2a_monitor_summary");
+            prof_term_preview(1, page, (int) sizeof(page));
+            bs_set_overlay(page);
+            save(dir, "2a_monitor_summary_old3ds");
+        }
+        bs_set_overlay("DRAW KINDS 2/3  tap: page\n"
+                       "a frame:  tris drw   rdp  bld off bck tny over\n"
+                       "track      458  56 15.20  3.6  21  52  10 1.38\n"
+                       "racers     280  36  5.40  2.4  12  28   3 0.21\n"
+                       "objects    238  28  4.10  1.3  58  30   6 0.12\n"
+                       "sky         38  10  2.10  0.5  40  31   0 1.00\n"
+                       "see-thru    22   6  0.60  0.2  18  30   2 0.09\n"
+                       "effects     16   5  0.40  0.1  25   0   9 0.05\n"
+                       "shadows     44   7  1.80  2.0  30  33   2 0.04\n"
+                       "HUD         54  18  0.20  0.1   0   0   4 0.03\n"
+                       "segments 11/24 (table 17) objects 13/62\n"
+                       "off/bck/tny: % of tris off screen, culled by\n"
+                       "the GPU, under a pixel; over: screens covered\n");
+        save(dir, "2b_monitor_kinds");
+        bs_set_overlay("OBJECTS 3/3 FROZEN  tap: page\n"
+                       "a frame:     upd vis  tris  logic    bld    rdp\n"
+                       "racer          8   4   280   9.80   2.40   5.40\n"
+                       "scenery       22   5    30   1.20   0.60   2.30\n"
+                       "dino whale     1   1   166   0.90   0.30   0.90\n"
+                       "banana        14   0     0   1.10   0.00   0.00\n"
+                       "checkpoint    12   0     0   1.20   0.00   0.00\n"
+                       "weapon         3   2    18   0.60   0.30   0.40\n"
+                       "exit           2   1    24   0.40   0.10   0.50\n"
+                       "animator       6   3    40   0.30   0.20   0.35\n"
+                       "audio          9   0     0   0.20   0.00   0.00\n"
+                       "fish           5   5    20   0.10   0.10   0.15\n"
+                       "door           2   2    16   0.05   0.05   0.10\n"
+                       "fog changer    3   0     0   0.05   0.00   0.00\n");
+        save(dir, "2c_monitor_objects");
+    } else {
+        bs_set_overlay("PROFILER 1/5  tap: page\n"
+                       "29.3/30 fps held back by renderer CPU\n"
+                       "on time 95%, 1 vsync late 5%, 2+ late 0%\n"
+                       "worst 50 ms (budget 33) hitches 1\n"
+                       "steady: frame to frame 1.8 ms\n"
+                       "graph: green logic cyan build yellow render\n"
+                       "orange textures red GPU grey retrace; tap: freeze");
+        save(dir, "2a_monitor_summary");
+        bs_set_overlay("FRAME TIME 2/5  tap: page\n"
+                       "time a frame, budget 33.3 ms:\n"
+                       " game    27.0  81% logic 15.2 scene 9.8 sound 2.0\n"
+                       " render  29.0  87% textures 0.4\n"
+                       " GPU     12.1  36%\n"
+                       "waiting: game 5.0 render 2.2\n"
+                       "idle: game core 4% render core 6%\n"
+                       "tris 1058 draws 137 texture loads 3\n");
+        save(dir, "2d_monitor_time");
+        bs_set_overlay("DRAW KINDS 3/5  tap: page\n"
+                       "a frame:     tris drw  rdp   bld  waste\n"
+                       "track         458  56 15.20  3.60   83%\n"
+                       "racers        280  36  5.40  2.40   43%\n"
+                       "objects       238  28  4.10  1.30   94%\n"
+                       "sky            38  10  2.10  0.50   71%\n"
+                       "shadows        44   7  1.80  2.00   65%\n"
+                       "segments 11/24 (table 17)\n"
+                       "objects 13/62 drawn\n");
+        save(dir, "2b_monitor_kinds");
+        bs_set_overlay("OBJECTS 4/5 FROZEN  tap: page\n"
+                       "a frame:    upd vis  tris logic  bld  rdp\n"
+                       "racer        8   4   280  9.80 2.40 5.40\n"
+                       "scenery     22   5    30  1.20 0.60 2.30\n"
+                       "dino whale   1   1   166  0.90 0.30 0.90\n"
+                       "banana      14   0     0  1.10 0.00 0.00\n"
+                       "exit         2   1    24  0.40 0.10 0.50\n"
+                       "weapon       3   2    18  0.60 0.30 0.40\n"
+                       "checkpoint  12   0     0  1.20 0.00 0.00\n");
+        save(dir, "2c_monitor_objects");
+    }
     bs_set_frame_graph(NULL, NULL, 0);
     bs_set_overlay("");
 
@@ -316,6 +360,13 @@ void host_bottom_preview(const char *dir) {
         bs_set_buttons(sBusy, 1);
     }
     save(dir, "6_busy");
+    {
+        /* the update installed: the panel says so, the one button closes the game to finish it */
+        static const char *const sDone[1] = { "Quit" };
+        bs_set_panel_text(port_text("Update installed: quit to finish it"));
+        bs_set_buttons(sDone, 1);
+    }
+    save(dir, "6b_installed");
     {
         static const char *const sConfirm[3] = { "Stop test", "-", "cancel" };
         bs_set_buttons(sConfirm, 3);

@@ -14,6 +14,7 @@
  * go on every target, and wrap after 71 minutes, far longer than any window.
  */
 #include <ultra64.h>
+#include <string.h>
 #include "types.h"
 #include "port.h"
 #include "plat/plat.h"
@@ -53,6 +54,45 @@ static u32 sBuildUs;                // Logic + scene time of the current frame.
 static unsigned long long sLastFrameEndNs;
 static u32 sGameFrames;
 
+/*
+ * DKR_PROF_SHARED_CORE (default 1; 0 = the old numbers): on an Old 3DS the renderer's display list walk runs on the
+ * game's core above every game thread, so whatever of it lands while the game builds a frame was counted as the game's
+ * scene (and logic) time, and again as the renderer's (rdp). With the switch on, that time is taken out of logic and
+ * scene and kept as PROF_SHARED_CORE ("renderer on the game core"), so scene is the game's own work; the game core's
+ * load (logic + scene + shared) and the profiler's "held back by" answer stay as they were. Read at each frame's start.
+ */
+static s32 sSharedOn;
+static unsigned long long sOtherAtLoopNs;  // shared_core_now() at the frame's start
+static unsigned long long sOtherAtLogicNs; // and at the start of the logic window running now
+static unsigned long long sLogicOtherNs;   // Other threads' time inside this frame's logic windows
+static unsigned long long sFrameSharedNs;  // This frame's shared time (at PROF_MARK_BUILT), for the flight recorder
+
+extern volatile int gPortSoundPlayersCore;
+extern volatile unsigned long long gPortSoundPlayersNs, gPortSoundPlayersStartNs, gPortWalkTotalNs, gPortWalkStartNs;
+
+/* What other threads on the game's core have run so far: the walk on an Old 3DS (a New 3DS's walk has a core of its
+ * own), and the N64 sound players when they run on the game's core (0) of a 3DS. Unlike the sections' sec_other_now()
+ * the players are left out when their core is unknown (-1: a PC, where they run on another host core), so PC and New
+ * 3DS numbers stay as they were. */
+static unsigned long long shared_core_now(unsigned long long now) {
+    unsigned long long total = 0;
+    if (plat_old_3ds()) {
+        unsigned long long walkStart = gPortWalkStartNs;
+        total = gPortWalkTotalNs;
+        if (walkStart != 0 && now > walkStart) {
+            total += now - walkStart;
+        }
+    }
+    if (gPortSoundPlayersCore == 0) {
+        unsigned long long playersStart = gPortSoundPlayersStartNs;
+        total += gPortSoundPlayersNs;
+        if (playersStart != 0 && now > playersStart) {
+            total += now - playersStart;
+        }
+    }
+    return total;
+}
+
 /* The frame time histogram behind the 1% low, and where a frame stops counting as one, two, three or more retraces (half a
  * retrace past each, so a late vblank doesn't move a frame up a group). */
 #define PERIOD_BIN_US 500
@@ -83,7 +123,7 @@ typedef struct Window {
 } Window;
 
 static Window sWindows[PROF_WINDOW_COUNT];
-static char sStatus[96];
+static char sStatus[320]; /* a test run's lines (port_autorun.c show_status): room for the longest bench row's name */
 static s32 sOverlayShown; // The readout is on the bottom screen.
 static s32 sLogCounter;
 
@@ -217,10 +257,19 @@ void prof_render_task(unsigned long long totalNs) {
 
 void prof_logic_begin(void) {
     sLogicStartNs = plat_time_ns();
+    if (sSharedOn) {
+        sOtherAtLogicNs = shared_core_now(sLogicStartNs);
+    }
 }
 
 void prof_logic_end(void) {
-    sLogicNs += plat_time_ns() - sLogicStartNs;
+    unsigned long long now = plat_time_ns(), spent = now - sLogicStartNs;
+    sLogicNs += spent;
+    if (sSharedOn) {
+        unsigned long long other = shared_core_now(now);
+        other = other > sOtherAtLogicNs ? other - sOtherAtLogicNs : 0;
+        sLogicOtherNs += other < spent ? other : spent; // (64-bit reads of another core's counters may tear)
+    }
 }
 
 void prof_window_start(int window) {
@@ -312,7 +361,8 @@ static double per_frame_ms(const ProfStats *s, s32 stage, u32 frames) {
 }
 
 const char *prof_limit(const ProfStats *s) {
-    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames);
+    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames) +
+                  per_frame_ms(s, PROF_SHARED_CORE, s->gameFrames); // (the game core's whole load, as before the split)
     double render = per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
     double gpu = per_frame_ms(s, PROF_GPU_DRAW, s->renderedFrames);
     if (gpu > game && gpu > render) {
@@ -764,6 +814,327 @@ static s32 mon_kinds_shown(const ProfDrawMix *m, u8 *shown, s32 rows) {
     return n;
 }
 
+/*
+ * DKR_PROF_TERM (default on, owner 2026-11-15): the bottom screen sets the readout in a small terminal font
+ * (bottom_grid.inc gterm_lines), 47 columns by 14 lines, so the five pages fold into three: the whole summary with the
+ * graph's key, every draw kind with its wasted triangles, and 12 objects.
+ */
+enum { TERM_SUMMARY, TERM_KINDS, TERM_OBJECTS, TERM_PAGES };
+#define TERM_LINES 14
+#define TERM_COLS 47
+/* The tables' rows (shared with prof_term_check, which formats their widest numbers) */
+#define TERM_KIND_HEAD "%-9s %4s %3s %5s %4s %3s %3s %3s %4s\n"
+#define TERM_KIND_ROW "%-9s %4.0f %3.0f %5.2f %4.1f %3.0f %3.0f %3.0f %4.2f\n"
+#define TERM_SCENE_ROW "segments %.0f/%.0f (table %.0f) objects %.0f/%.0f\n"
+#define TERM_OBJ_HEAD "%-12s %3s %3s %5s %6s %6s %6s\n"
+#define TERM_OBJ_ROW "%-12.12s %3.0f %3.0f %5.0f %6.2f %6.2f %6.2f\n"
+/* A line that may give way when a page has too many (the graph's key: the bars' colours are in the README) */
+#define TERM_DROPPABLE '\x01'
+
+/* The PROFILER page's numbers, kept each second, so that the page and prof_term_check format them the same way. */
+typedef struct {
+    double fps, budget, steady, game, logic, scene, sound, shared, render, tex, gpu, waitGame, waitRender;
+    int cap, onTime, late, later, idleGame, idleRender;
+    unsigned worst, hitches, tris, draws, loads;
+    const char *limit;
+} TermNumbers;
+static TermNumbers sTermNumbers;
+
+/*
+ * The PROFILER page in 47 columns (owner 2026-11-16: lines were cut off, and on an Old 3DS the renderer-on-this-core
+ * line pushed the bench's track off the page): render shares the GPU's line, waiting and idle share one, so 11 lines
+ * (10 on a New 3DS) leave three for a test run's status even with the graph's key.
+ */
+/* A part of a frame's time: one decimal, or whole ms from 10 ms when its line would not fit 47 columns. */
+static const char *term_ms(char *out, double ms, s32 whole) {
+    plat_snprintf(out, 8, whole && ms >= 9.95 ? "%.0f" : "%.1f", ms);
+    return out;
+}
+
+static int term_summary_text(char *out, int size, const TermNumbers *n) {
+    char logic[8], scene[8], sound[8], tex[8], game[64], render[64];
+    s32 whole;
+    int at;
+    /* the game's and the renderer's lines: with decimals if they fit, else the parts of 10 ms or more whole */
+    for (whole = 0; whole < 2; whole++) {
+        plat_snprintf(game, sizeof(game), "game  %5.1f%4d%% logic %s scene %s sound %s", n->game,
+                      (int) (n->game * 100.0 / n->budget + 0.5), term_ms(logic, n->logic, whole),
+                      term_ms(scene, n->scene, whole), term_ms(sound, n->sound, whole));
+        if (strlen(game) <= TERM_COLS) {
+            break;
+        }
+    }
+    for (whole = 0; whole < 2; whole++) {
+        plat_snprintf(render, sizeof(render), "render%5.1f%4d%% textures %s, %u loads", n->render,
+                      (int) (n->render * 100.0 / n->budget + 0.5), term_ms(tex, n->tex, whole), n->loads);
+        if (strlen(render) <= TERM_COLS) {
+            break;
+        }
+    }
+    at = plat_snprintf(out, size,
+                       "%.1f/%d fps held back by %s\n"
+                       "on time %d%%, 1 vsync late %d%%, 2+ late %d%%\n"
+                       "worst %u ms, steady %.1f ms, hitches %u\n"
+                       "time a frame, budget %.1f ms:\n"
+                       "%s\n",
+                       n->fps, n->cap, n->limit, n->onTime, n->late, n->later, n->worst, n->steady, n->hitches,
+                       n->budget, game);
+    if (n->shared > 0.05) {
+        at += plat_snprintf(out + at, size - at, "      + renderer on this core %.1f\n", n->shared);
+    }
+    at += plat_snprintf(out + at, size - at,
+                        "%s\n"
+                        "GPU   %5.1f%4d%% for %u tris in %u draws\n"
+                        "waiting: game %.1f render %.1f, idle %d%% %d%%\n",
+                        render, n->gpu, (int) (n->gpu * 100.0 / n->budget + 0.5), n->tris, n->draws, n->waitGame,
+                        n->waitRender, n->idleGame, n->idleRender);
+    return at;
+}
+
+/*
+ * A page's text fitted to the terminal: each line wrapped at a space to 47 columns (its next rows indented by 2), a
+ * test run's progress bar (its colour codes) left out but its per cent put after the line before, then if the rows
+ * still outnumber the panel's 14, the droppable lines left out from the last, and only then the last row cut short
+ * with "..". Returns how many lines were dropped, plus 100 if a row had to be cut.
+ */
+static int term_fit(const char *in, char *out, int size) {
+    char rows[40][TERM_COLS + 1];
+    s8 owner[40], droppable[24];
+    s32 nrows = 0, line = 0, at = 0, dropped = 0, cut = 0, i;
+    const char *p = in;
+    while (*p != '\0' && line < 24) {
+        char buf[400];
+        s32 len = 0, d = 0;
+        const char *e = p;
+        while (*e != '\0' && *e != '\n') {
+            e++;
+        }
+        if (*p == TERM_DROPPABLE) {
+            d = 1;
+            p++;
+        }
+        len = (s32) (e - p) < (s32) sizeof(buf) - 1 ? (s32) (e - p) : (s32) sizeof(buf) - 1;
+        memcpy(buf, p, (size_t) len);
+        buf[len] = '\0';
+        p = *e == '\n' ? e + 1 : e;
+        if (strchr(buf, '\x1b') != NULL) {
+            /* the progress bar: its per cent (after the last colour code) joins the row before if it fits */
+            const char *pct = buf, *q;
+            for (q = buf; *q != '\0'; q++) {
+                if (*q == 'm') {
+                    pct = q + 1;
+                }
+            }
+            while (*pct == ' ') {
+                pct++;
+            }
+            if (nrows > 0 && *pct != '\0' && strlen(rows[nrows - 1]) + 2 + strlen(pct) <= TERM_COLS) {
+                s32 r = (s32) strlen(rows[nrows - 1]);
+                plat_snprintf(rows[nrows - 1] + r, sizeof(rows[0]) - (size_t) r, "  %s", pct);
+            }
+            continue;
+        }
+        droppable[line] = (s8) d;
+        {
+            /* wrap: as many words as fit, then the rest on rows indented by 2 */
+            const char *w = buf;
+            s32 indent = 0;
+            do {
+                s32 room = TERM_COLS - indent, n = (s32) strlen(w), take = n;
+                if (nrows >= 40) {
+                    break;
+                }
+                if (n > room) {
+                    for (take = room; take > 0 && w[take] != ' '; take--) {
+                    }
+                    if (take <= 0) {
+                        take = room; /* one word longer than the row: cut it */
+                    }
+                }
+                plat_snprintf(rows[nrows], sizeof(rows[nrows]), "%*s%.*s", (int) indent, "", (int) take, w);
+                owner[nrows++] = (s8) line;
+                w += take;
+                while (*w == ' ') {
+                    w++;
+                }
+                indent = 2;
+            } while (*w != '\0');
+        }
+        line++;
+    }
+    for (i = line - 1; i >= 0 && nrows > TERM_LINES; i--) {
+        if (droppable[i]) {
+            s32 r, k = 0;
+            for (r = 0; r < nrows; r++) {
+                if (owner[r] != i) {
+                    if (k != r) {
+                        memcpy(rows[k], rows[r], sizeof(rows[k]));
+                        owner[k] = owner[r];
+                    }
+                    k++;
+                }
+            }
+            nrows = k;
+            dropped++;
+        }
+    }
+    if (nrows > TERM_LINES) {
+        s32 n = (s32) strlen(rows[TERM_LINES - 1]);
+        if (n > TERM_COLS - 2) {
+            n = TERM_COLS - 2;
+        }
+        rows[TERM_LINES - 1][n] = '.';
+        rows[TERM_LINES - 1][n + 1] = '.';
+        rows[TERM_LINES - 1][n + 2] = '\0';
+        nrows = TERM_LINES;
+        cut = 1;
+    }
+    out[0] = '\0';
+    for (i = 0; i < nrows; i++) {
+        at += plat_snprintf(out + at, size - at, "%s%s", rows[i], i + 1 < nrows ? "\n" : "");
+    }
+    return dropped + 100 * cut;
+}
+
+/*
+ * The PC's check (host_main.c, DKR_PROF_TERM_CHECK=1, run by CI): each terminal page with its widest numbers and the
+ * longest test run status (port_autorun_longest_status), with and without the Old 3DS's renderer-on-this-core line,
+ * must fit 47 columns by 14 lines with nothing cut and no line lost but the graph's key. Returns 0 when all fit.
+ */
+int prof_term_check(char *report, int size) {
+    static char text[2048], fitted[TERM_LINES * (TERM_COLS + 1) + 1];
+    s32 out = 0;
+    char status[320];
+    TermNumbers n;
+    s32 failures = 0, layout, page, at, k;
+    s32 which;
+    for (which = 0; port_autorun_longest_status(which, 0, status, (int) sizeof(status)); which++) {
+    for (layout = 0; layout < 2; layout++) {
+        for (page = 0; page < TERM_PAGES; page++) {
+            s32 result, rows = 1, width = 0, row = 0;
+            const char *c;
+            at = plat_snprintf(text, sizeof(text), "%s %d/%d FROZEN  tap: page\n",
+                               page == TERM_SUMMARY ? "PROFILER" : page == TERM_KINDS ? "DRAW KINDS" : "OBJECTS",
+                               (int) page + 1, TERM_PAGES);
+            if (page == TERM_SUMMARY) {
+                {
+                    static const TermNumbers sZero;
+                    n = sZero;
+                }
+                n.fps = 59.9;
+                n.cap = 60;
+                n.limit = "renderer CPU";
+                n.onTime = n.late = n.later = n.idleGame = n.idleRender = 100;
+                n.worst = 9999;
+                n.steady = n.logic = n.scene = n.sound = n.tex = n.waitGame = n.waitRender = 99.9;
+                n.budget = 33.3;
+                n.game = n.render = n.gpu = 99.9;
+                n.shared = layout == 0 ? 0.0 : 99.9;
+                n.hitches = 9999;
+                n.tris = 99999;
+                n.draws = 9999;
+                n.loads = 9999;
+                at += term_summary_text(text + at, (int) sizeof(text) - at, &n);
+                plat_snprintf(text + at, sizeof(text) - at, "%cgraph: logic build render textures GPU retrace\n%s",
+                              TERM_DROPPABLE, status);
+            } else if (page == TERM_KINDS) {
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_KIND_HEAD, "a frame:", "tris", "drw", "rdp",
+                                    "bld", "off", "bck", "tny", "over");
+                for (k = 0; k < PORT_DRAW_KINDS; k++) {
+                    at += plat_snprintf(text + at, sizeof(text) - at, TERM_KIND_ROW, "see-thru", 9999.0, 999.0, 99.99,
+                                        99.9, 100.0, 100.0, 100.0, 9.99);
+                }
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_SCENE_ROW, 999.0, 999.0, 999.0, 999.0, 999.0);
+                plat_snprintf(text + at, sizeof(text) - at, "off/bck/tny: %% of tris off screen, culled by\n"
+                                                            "the GPU, under a pixel; over: screens covered");
+            } else {
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_OBJ_HEAD, "a frame:", "upd", "vis", "tris",
+                                    "logic", "bld", "rdp");
+                for (k = 0; k < TERM_LINES - 2; k++) {
+                    at += plat_snprintf(text + at, sizeof(text) - at, TERM_OBJ_ROW, "a long object name", 999.0,
+                                        999.0, 99999.0, 99.99, 99.99, 99.99);
+                }
+            }
+            result = term_fit(text, fitted, (int) sizeof(fitted));
+            for (c = fitted; *c != '\0'; c++) {
+                if (*c == '\n') {
+                    rows++;
+                    width = 0;
+                } else if (++width > TERM_COLS) {
+                    row = rows;
+                }
+            }
+            out += plat_snprintf(report + out, size - out, "prof_term_check: status %d, page %d, %s: %d rows%s%s\n%s\n\n",
+                   (int) which, (int) page + 1, layout ? "Old 3DS (renderer on this core)" : "New 3DS", (int) rows,
+                   result % 100 ? ", the graph's key left out" : "", result >= 100 ? ", CUT SHORT" : "", fitted);
+            /* only the summary's key may give way, and only when the status needs its row */
+            if (row != 0 || rows > TERM_LINES || result >= 100 || (page != TERM_SUMMARY && result != 0) ||
+                result % 100 > 1) {
+                out += plat_snprintf(report + out, size - out, "prof_term_check: FAILED (row %d too wide, or too many rows, or a line lost)\n", (int) row);
+                failures++;
+            }
+            /* a summary line itself (not the status) must not wrap: its numbers are read by column */
+            if (page == TERM_SUMMARY) {
+                const char *line = text;
+                s32 i;
+                for (i = 0; *line != '\0'; i++) {
+                    const char *e = strchr(line, '\n');
+                    s32 len = e != NULL ? (s32) (e - line) : (s32) strlen(line);
+                    s32 same = 0;
+                    while (same < len && line[same] == status[same]) {
+                        same++;
+                    }
+                    if (same == len) {
+                        break;
+                    }
+                    if (len - (*line == TERM_DROPPABLE) > TERM_COLS) {
+                        out += plat_snprintf(report + out, size - out, "prof_term_check: FAILED, summary line %d is %d columns: %.*s\n", (int) i, (int) len,
+                               (int) len, line);
+                        failures++;
+                    }
+                    if (e == NULL) {
+                        break;
+                    }
+                    line = e + 1;
+                }
+            }
+        }
+    }
+    }
+    plat_snprintf(report + out, size - out, "prof_term_check: %s\n", failures ? "FAILED" : "every page fits");
+    return failures != 0;
+}
+
+/*
+ * The PC's preview (bottom_preview.c): the PROFILER page for its made-up second (budget 33.3 ms at 30 fps) during the
+ * switch bench's longest row, laid out for a New 3DS or, with oldLayout, an Old 3DS whose renderer shares the game's
+ * core (the game's 27.0 ms then holds 3.8 of the renderer's, and its scene is that much less).
+ */
+void prof_term_preview(int oldLayout, char *out, int size) {
+    static char text[1536];
+    char status[320];
+    TermNumbers n = { 29.3, 33.3, 1.8, 27.0, 15.2, 9.8, 2.0, 0.0, 29.0, 0.4, 12.1, 5.0, 2.2,
+                      30, 95, 5, 0, 4, 6, 50, 1, 1058, 137, 3, "renderer CPU" };
+    s32 at;
+    if (oldLayout) {
+        n.scene = 6.0;
+        n.shared = 3.8;
+    }
+    port_autorun_longest_status(0, 1, status, (int) sizeof(status));
+    at = plat_snprintf(text, sizeof(text), "PROFILER 1/%d  tap: page\n", TERM_PAGES);
+    at += term_summary_text(text + at, (int) sizeof(text) - at, &n);
+    plat_snprintf(text + at, sizeof(text) - at, "%cgraph: logic build render textures GPU retrace\n%s", TERM_DROPPABLE,
+                  status);
+    term_fit(text, out, size);
+}
+
+static s32 mon_term(void) {
+    return plat_switch("DKR_PROF_TERM", 1) != 0;
+}
+static s32 mon_pages(void) {
+    return mon_term() ? TERM_PAGES : MON_PAGES;
+}
+
 int prof_monitor_tap(int x, int y) {
     (void) x;
     if (!sOverlayShown) {
@@ -772,7 +1143,7 @@ int prof_monitor_tap(int x, int y) {
     if (y < BS_GRAPH_BOTTOM) {
         sMonFrozen = !sMonFrozen;
     } else {
-        sMonPage = (sMonPage + 1) % MON_PAGES;
+        sMonPage = (sMonPage + 1) % mon_pages();
     }
     sMonDirty = TRUE;
     return 1;
@@ -793,6 +1164,98 @@ static void show_graph(void) {
     plat_overlay_graph(height, kind, n);
 }
 
+/* The pages in the terminal font (DKR_PROF_TERM): the readout's own spacing lines up its columns. */
+static void show_term_page(void) {
+    static char text[1536];
+    const ProfDrawMix *m = &sSecondMix;
+    const ProfSceneCounts *sc = &sSecondScene;
+    double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
+    double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
+    double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
+    static const char *const sNames[TERM_PAGES] = { "PROFILER", "DRAW KINDS", "OBJECTS" };
+    s32 page = sMonPage % TERM_PAGES, at, k;
+
+    at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sNames[page], (int) page + 1, TERM_PAGES,
+                       sMonFrozen ? " FROZEN" : "");
+    switch (page) {
+        case TERM_SUMMARY:
+            /* the summary, the graph's key (each cause in its bar's colour), then the status if there is one */
+            at += term_summary_text(text + at, (int) sizeof(text) - at, &sTermNumbers);
+            plat_snprintf(text + at, sizeof(text) - at, "%cgraph: logic build render textures GPU retrace\n%s",
+                          TERM_DROPPABLE, sStatus);
+            break;
+        case TERM_KINDS: {
+            /* a kind's name in 9 columns, its waste as per cent of its triangles without the sign (the key says so) */
+            static const char *const sShort[PORT_DRAW_KINDS] = { "menus", "track", "racers", "objects", "sky",
+                                                                  "see-thru", "effects", "shadows", "HUD" };
+            u8 shown[PORT_DRAW_KINDS];
+            mon_kinds_shown(m, shown, PORT_DRAW_KINDS);
+            at += plat_snprintf(text + at, sizeof(text) - at, TERM_KIND_HEAD, "a frame:", "tris",
+                                "drw", "rdp", "bld", "off", "bck", "tny", "over");
+            for (k = 0; k < PORT_DRAW_KINDS && at < (s32) sizeof(text); k++) {
+                const ProfKindStats *st = &m->kinds[k];
+                double a = st->audited ? (double) st->audited : 1.0;
+                if (!shown[k]) {
+                    continue;
+                }
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_KIND_ROW,
+                                    sShort[k], st->tris / frames, st->draws / frames, st->renderNs / 1e6 / timed,
+                                    st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a, st->backface * 100.0 / a,
+                                    st->tiny * 100.0 / a, st->areaPx / audited / (400.0 * 240.0));
+            }
+            if (sc->frames > 0 && at < (s32) sizeof(text)) {
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_SCENE_ROW,
+                                    (double) sc->segmentsDrawn / sc->frames, (double) sc->segments / sc->frames,
+                                    (double) sc->segmentsAllowed / sc->frames, (double) sc->objectsDrawn / sc->frames,
+                                    (double) sc->objects / sc->frames);
+            }
+            if (at < (s32) sizeof(text)) {
+                plat_snprintf(text + at, sizeof(text) - at, "off/bck/tny: %% of tris off screen, culled by\n"
+                                                            "the GPU, under a pixel; over: screens covered");
+            }
+            break;
+        }
+        default: {
+            const ProfObjMix *o = &sSecondObj;
+            double of = o->frames ? (double) o->frames : 1.0, ot = o->timedFrames ? (double) o->timedFrames : 1.0;
+            double ort = o->renderTimedFrames ? (double) o->renderTimedFrames : 1.0;
+            u8 picked[PROF_OBJ_BUCKETS];
+            s32 n;
+            at += plat_snprintf(text + at, sizeof(text) - at, TERM_OBJ_HEAD, "a frame:", "upd", "vis",
+                                "tris", "logic", "bld", "rdp");
+            for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                picked[k] = o->objs[k].updates == 0 && o->objs[k].drawn == 0 && o->objs[k].tris == 0;
+            }
+            for (n = 0; n < TERM_LINES - 2 && at < (s32) sizeof(text); n++) {
+                s32 best = -1;
+                double bestCost = -1.0;
+                for (k = 0; k < PROF_OBJ_BUCKETS; k++) {
+                    const ProfObjStats *b = &o->objs[k];
+                    double cost = (b->logicNs + b->buildNs) / ot + b->renderNs / ort + b->tris * 1e-3;
+                    if (!picked[k] && cost > bestCost) {
+                        best = k;
+                        bestCost = cost;
+                    }
+                }
+                if (best < 0) {
+                    break;
+                }
+                picked[best] = TRUE;
+                at += plat_snprintf(text + at, sizeof(text) - at, TERM_OBJ_ROW,
+                                    mon_name(prof_object_name(best), 12), o->objs[best].updates / of,
+                                    o->objs[best].drawn / of, o->objs[best].tris / of, o->objs[best].logicNs / 1e6 / ot,
+                                    o->objs[best].buildNs / 1e6 / ot, o->objs[best].renderNs / 1e6 / ort);
+            }
+            break;
+        }
+    }
+    {
+        static char fitted[TERM_LINES * (TERM_COLS + 1) + 1];
+        term_fit(text, fitted, (int) sizeof(fitted));
+        plat_overlay_show(fitted);
+    }
+}
+
 static void show_monitor_page(void) {
     static char text[1024];
     const ProfDrawMix *m = &sSecondMix;
@@ -800,8 +1263,12 @@ static void show_monitor_page(void) {
     double frames = m->frames ? (double) m->frames : 1.0, timed = m->timedFrames ? (double) m->timedFrames : 1.0;
     double gameTimed = m->gameTimedFrames ? (double) m->gameTimedFrames : 1.0;
     double audited = m->auditedFrames ? (double) m->auditedFrames : 1.0;
-    s32 page = sMonPage, at, k;
+    s32 page = sMonPage % MON_PAGES, at, k;
 
+    if (mon_term()) {
+        show_term_page();
+        return;
+    }
     at = plat_snprintf(text, sizeof(text), "%s %d/%d%s  tap: page\n", sMonPageNames[page], (int) page + 1,
                        MON_PAGES, sMonFrozen ? " FROZEN" : "");
     switch (page) {
@@ -1083,8 +1550,15 @@ static void show_overlay(void) {
         double logic = per_frame_ms(&s, PROF_LOGIC, s.gameFrames), scene = per_frame_ms(&s, PROF_SCENE, s.gameFrames);
         double rdp = per_frame_ms(&s, PROF_RDP, s.renderedFrames), tex = per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames);
         double gpu = per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames);
-        /* the game core's time a frame: logic, the scene build and the sound mixer, the three listed after it */
+        /* the game core's time a frame: logic, the scene build and the sound mixer, the three listed after it, and
+         * (DKR_PROF_SHARED_CORE, an Old 3DS) the renderer's time on that core while the game built the frame */
         double sound = per_frame_ms(&s, PROF_AUDIO, s.gameFrames);
+        double shared = per_frame_ms(&s, PROF_SHARED_CORE, s.gameFrames), game = logic + scene + shared + sound;
+        char sharedLine[48];
+        sharedLine[0] = '\0';
+        if (shared > 0.05) {
+            plat_snprintf(sharedLine, sizeof(sharedLine), "  + renderer on this core %.1f\n", shared);
+        }
         for (i = 0; i < PROF_RATE_BUCKETS; i++) {
             if ((s32) i <= target) {
                 onTime += s.rateFrames[i];
@@ -1102,6 +1576,7 @@ static void show_overlay(void) {
                       "steady: frame to frame %.1f ms\n"
                       "time a frame, budget %.1f ms:\n"
                       " game   %5.1f %3d%% logic %.1f scene %.1f sound %.1f\n"
+                      "%s"
                       " render %5.1f %3d%% textures %.1f\n"
                       " GPU    %5.1f %3d%%\n"
                       "waiting: game %.1f render %.1f\n"
@@ -1110,7 +1585,7 @@ static void show_overlay(void) {
                       "%s",
                       fps, (int) (60 / target), prof_limit(&s), percent(onTime, s.gameFrames), percent(late, s.gameFrames),
                       percent(later, s.gameFrames), s.worstFrameUs / 1000, budget, s.hitches, s.jitterUs / 1000.0,
-                      budget, logic + scene + sound, (int) ((logic + scene + sound) * 100.0 / budget + 0.5), logic, scene, sound,
+                      budget, game, (int) (game * 100.0 / budget + 0.5), logic, scene, sound, sharedLine,
                       rdp + tex, (int) ((rdp + tex) * 100.0 / budget + 0.5), tex, gpu, (int) (gpu * 100.0 / budget + 0.5),
                       per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames),
                       per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
@@ -1119,6 +1594,35 @@ static void show_overlay(void) {
                       s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                       s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
                       sStatus);
+        /* the terminal font's page (term_summary_text) formats the same numbers */
+        {
+            TermNumbers *n = &sTermNumbers;
+            n->fps = fps;
+            n->cap = (int) (60 / target);
+            n->limit = prof_limit(&s);
+            n->onTime = percent(onTime, s.gameFrames);
+            n->late = percent(late, s.gameFrames);
+            n->later = percent(later, s.gameFrames);
+            n->worst = s.worstFrameUs / 1000;
+            n->steady = s.jitterUs / 1000.0;
+            n->hitches = s.hitches;
+            n->budget = budget;
+            n->game = game;
+            n->logic = logic;
+            n->scene = scene;
+            n->sound = sound;
+            n->shared = shared;
+            n->render = rdp + tex;
+            n->tex = tex;
+            n->gpu = gpu;
+            n->waitGame = per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames);
+            n->waitRender = per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames);
+            n->idleGame = percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000));
+            n->idleRender = percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000));
+            n->tris = s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0;
+            n->draws = s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0;
+            n->loads = s.counters[PROF_TEXTURE_UPLOADS];
+        }
     }
     if (sEnabled || sUserOn) {
         sOverlayShown = TRUE;
@@ -1148,10 +1652,11 @@ static void show_overlay(void) {
         sScreenLoggedNs = screenNs;
         sScreenLoggedDraws = screenDraws;
         sScreenLoggedFrames = sRenderedFrames;
-        port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
-                 "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
+        port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f shared %.2f rdp %.2f tex %.2f "
+                 "gpu %.2f audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
                  fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
                  per_frame_ms(&s, PROF_LOGIC, s.gameFrames), per_frame_ms(&s, PROF_SCENE, s.gameFrames),
+                 per_frame_ms(&s, PROF_SHARED_CORE, s.gameFrames),
                  per_frame_ms(&s, PROF_RDP, s.renderedFrames), per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames),
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                  prof_limit(&s), percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
@@ -1243,7 +1748,7 @@ int port_rec_frame_detail(char *out, int size) {
 static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
     static u32 sLastTotalUs[PROF_STAGE_COUNT], sLastCounters[PROF_COUNTER_COUNT];
     u32 totals[PROF_STAGE_COUNT], counters[PROF_COUNTER_COUNT];
-    u32 logicUs = (u32) (sLogicNs / 1000);
+    u32 logicUs = (u32) ((sLogicNs - sLogicOtherNs) / 1000), sharedUs = (u32) (sFrameSharedNs / 1000);
     RecFrame row;
     s32 i;
 
@@ -1256,7 +1761,8 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
     bzero(&row, sizeof(row));
     row.periodUs = periodUs;
     row.logicUs = logicUs;
-    row.sceneUs = buildUs > logicUs ? buildUs - logicUs : 0;
+    row.sceneUs = buildUs > logicUs + sharedUs ? buildUs - logicUs - sharedUs : 0;
+    row.sharedUs = sharedUs;
     row.renderWaitUs = (u32) ((sMarkNs[PROF_MARK_WAITED] - sMarkNs[PROF_MARK_BUILT]) / 1000);
     row.vsyncUs = (u32) ((now - sMarkNs[PROF_MARK_WAITED]) / 1000);
     row.rdpUs = totals[PROF_RDP] - sLastTotalUs[PROF_RDP];
@@ -1312,6 +1818,9 @@ void prof_game_mark(int mark, int updateRate) {
     switch (mark) {
         case PROF_MARK_LOOP_START:
             sLogicNs = 0;
+            sSharedOn = plat_switch("DKR_PROF_SHARED_CORE", 1) != 0;
+            sLogicOtherNs = 0;
+            sOtherAtLoopNs = sSharedOn ? shared_core_now(now) : 0;
             sKindNow = PORT_DRAW_OTHER;
             sObjNow = PROF_OBJ_NONE;
             sGameFrameCount++;
@@ -1341,8 +1850,27 @@ void prof_game_mark(int mark, int updateRate) {
                 sKindBuildNs[PORT_DRAW_OTHER] -= other > sLogicNs ? sLogicNs : other;
                 sKindStartNs = 0;
             }
-            prof_add(PROF_LOGIC, sLogicNs);
-            prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
+            if (sSharedOn) {
+                // Other threads' time on the game's core during the build, taken out of logic (what landed inside
+                // its windows) and scene (the rest), and shown apart.
+                unsigned long long other = shared_core_now(now), logicOther = sLogicOtherNs, logic, scene;
+                other = other > sOtherAtLoopNs ? other - sOtherAtLoopNs : 0;
+                other = other < build ? other : build;
+                logicOther = logicOther < sLogicNs ? logicOther : sLogicNs;
+                logicOther = logicOther < other ? logicOther : other;
+                logic = sLogicNs - logicOther;
+                scene = build > sLogicNs + (other - logicOther) ? build - sLogicNs - (other - logicOther) : 0;
+                prof_add(PROF_LOGIC, logic);
+                prof_add(PROF_SCENE, scene);
+                prof_add(PROF_SHARED_CORE, other);
+                sFrameSharedNs = other;
+                sLogicOtherNs = logicOther; // (record_frame's logic: the game's own)
+            } else {
+                prof_add(PROF_LOGIC, sLogicNs);
+                prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
+                sFrameSharedNs = 0;
+                sLogicOtherNs = 0;
+            }
             for (w = 0; w < PROF_WINDOW_COUNT; w++) {
                 if (build / 1000 > sWindows[w].worstBuildUs) {
                     sWindows[w].worstBuildUs = (u32) (build / 1000);

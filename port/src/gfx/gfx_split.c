@@ -380,8 +380,20 @@ void gfx_split_drain(void) {
     }
 }
 
-int gfx_split_frame_start(int direct) {
+static int sCoresHeld; // A solo frame (holdCores) keeps the system core's share raised
+
+int gfx_split_frame_start(int direct, int holdCores) {
     int want = !direct && plat_switch("DKR_SPLIT_RENDER", 1) != 0;
+    if (holdCores) {
+        // R5 placement 2: this frame runs whole on the system core. The queue empties first (a frame queued before
+        // may still be drawing on the second thread), then the share stays (refreshed, as DKR_SPLIT_SHARE may change).
+        gfx_split_drain();
+        sActive = FALSE;
+        sCoresHeld = TRUE;
+        plat_split_render_cores(TRUE);
+        gfxb_start_frame();
+        return FALSE;
+    }
     if (want && !sActive) {
         // The other core's share comes first: without it the second thread can't be made there.
         plat_split_render_cores(TRUE);
@@ -392,10 +404,11 @@ int gfx_split_frame_start(int direct) {
     }
     if (!want) {
         gfx_split_drain();
-        if (sActive) {
+        if (sActive || sCoresHeld) {
             plat_split_render_cores(FALSE);
         }
         sActive = FALSE;
+        sCoresHeld = FALSE;
         gfxb_start_frame();
         return FALSE;
     }
@@ -405,6 +418,7 @@ int gfx_split_frame_start(int direct) {
         plat_split_render_cores(TRUE); // Follows a change of the system core's share (the switch bench's)
     }
     sActive = TRUE;
+    sCoresHeld = FALSE;
     choose_backend();
     plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;

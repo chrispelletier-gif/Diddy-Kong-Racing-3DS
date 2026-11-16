@@ -8110,7 +8110,15 @@ static COLD void end_reference_frame(void) {
 #endif
 
 void port_gfx_run_task(void *taskPtr) {
-    OSTask *task = (OSTask *) taskPtr;
+    port_gfx_run_frame((const void *) ((OSTask *) taskPtr)->t.data_ptr, FALSE);
+}
+
+/*
+ * One frame, from its record buffer (R5: the native frame queue hands it over without an OSTask). solo (DKR_FRAME_DIRECT
+ * 2): the whole frame on the calling thread, off the game's core, with the two-core renderer's calls made directly and
+ * the system core's share it lends kept.
+ */
+void port_gfx_run_frame(const void *frameDl, int solo) {
     int snapshot;
     port_gfx_init();
     sFrameCount++;
@@ -8122,8 +8130,9 @@ void port_gfx_run_task(void *taskPtr) {
     // On a New 3DS so are frames with GPU vertex maths, whose walk asks the backend about each model
     // (gfxb_model_check, the guard band of the backend's last frame); the Old 3DS races them on the two-core renderer.
     snapshot = gPlatSnapshotRequested; // Read once: another thread sets it
-    gfx_split_frame_start(REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
-                          (!plat_old_3ds() && plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)));
+    gfx_split_frame_start(solo || REF_ACTIVE() || snapshot || sFrameCount == sTraceFrame ||
+                          (!plat_old_3ds() && plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)),
+                          solo);
     if (UNLIKELY(sGpuKindMarks)) {
         gpu_kind_send(PORT_DRAW_OTHER); // The frame's first kind (kind_frame_start set it without a switch)
     }
@@ -8196,9 +8205,9 @@ void port_gfx_run_task(void *taskPtr) {
     // snapshot, drawn by the reference renderer or op counted keep the walk, which those tools read.
     if (sNativeFrame && gPortNativeOps && sNativeRecords && sTexHandleOn && port_native_leftovers() &&
         port_native_camera() && !sTracing && !snapshot && !REF_ACTIVE() && sOpCountOn <= 0) {
-        run_native_frame((const Gfx *) task->t.data_ptr);
+        run_native_frame((const Gfx *) frameDl);
     } else {
-        run_dl((const Gfx *) task->t.data_ptr, -1);
+        run_dl((const Gfx *) frameDl, -1);
     }
     STALL_MARK("track flush", 0, 0);
     track_flush();
