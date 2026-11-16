@@ -904,7 +904,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
         /* a lone capital drawn by hand for the key caps (both forms there): only those, so every cap letter of a look
            is drawn alike */
         int handDrawn = alone && gfont(kind)->glyphs[(gfont(kind)->phases + 1) * UI_NG + s[0] - 0x21].width > 0;
-        if (gfont(kind)->outlined && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
+        if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
             /* Classic: one letter a column wider (see sUiWiden), not its letters spread */
             Ink kq;
             sUiWiden = 1;
@@ -1618,6 +1618,17 @@ static void gbuttons(const char (*buttons)[40], int count) {
         if (noIcons) {
             iconW = 0;
         }
+        /* a label wider than its button less 8 px each side: without its icon, then a size smaller (never clipped or
+           over the next box; logged so the checks catch any label still too wide) */
+        if (gtext_width(kind, shown, 0) + (iconW ? iconW + GICON_GAP : 0) > x1 - x0 - 16) {
+            iconW = 0;
+            while (kind != GF_SM && gtext_width(kind, shown, 0) > x1 - x0 - 16) {
+                kind = kind == GF_HEAD ? GF_BODY : GF_SM;
+            }
+            if (gtext_width(kind, shown, 0) > x1 - x0 - 16) {
+                log_rec('E', x0, y0, x1, y1, 0, "label-too-wide");
+            }
+        }
         if (iconW) {
             /* the icon as it is drawn here (a dark icon on a lit key has no outline): the gap is from its own ink */
             Ink ki;
@@ -1637,7 +1648,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
             int q, tt, sg, done = 0, fq = 0, ft = trk, crisp = sUiCrispAll;
             sFlatMode = grey && sStyle == 0 ? 2 : 0;
             sUiFlat = grey && sStyle == 0;
-            if (gfont(kind) != NULL && gfont(kind)->outlined) {
+            if (gfont(kind) != NULL && gfont(kind)->phases == 1) { /* (whole-pixel fonts: Classic and the drawn sets) */
                 sUiCrispAll = 1; /* measured as gtext_ex draws a boxed Classic label: every letter solid */
                 Ink kq;
                 int gw;
@@ -4279,7 +4290,9 @@ static void gpanel_text_inner(const char *t, int right) {
         pct = m > 1 && v <= 100 ? v : -1;
     }
     if (pct < 0) {
-        gtext(GF_BODY, GX0 + GPAD, GBTN_Y0, right - GPAD, y1, t, YELLOW, GA_CENTRE);
+        /* (a line wider than the panel a size smaller, never over its edge) */
+        int kind = gtext_width(GF_BODY, t, 0) > right - GX0 - 2 * GPAD ? GF_SM : GF_BODY;
+        gtext(kind, GX0 + GPAD, GBTN_Y0, right - GPAD, y1, t, YELLOW, GA_CENTRE);
         return;
     }
     /* a download: what is downloading on the first line; under it its percentage and the progress bar, so the panel

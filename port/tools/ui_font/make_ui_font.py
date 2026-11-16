@@ -566,7 +566,7 @@ def main():
         global ZONES, HFACE, HFIX, HCAP
         ZONES = None
         HFACE, HFIX, HCAP = None, "", 0
-        if not style.startswith("outline"):
+        if not style.startswith(("outline", "draw=")):
             big = ImageFont.truetype(path, font.size * OVER)
             if variation:
                 big.set_variation_by_name(variation.encode())
@@ -648,10 +648,21 @@ def main():
             return pix, n, n
         has_tnum = len({round(font.getlength(d, features=feats), 3) for d in "0123456789"}) == 1
         digit_adv = max(font.getlength(d, features=feats) for d in "0123456789")
-        crisp = style.startswith("outline")
+        # crisp: whole pixels, set by ink (Classic, outlined; the drawn sets of the other looks, not outlined)
+        outlined = style.startswith("outline")
+        crisp = outlined or style.startswith("draw=")
         # Classic's own lettering drawn by hand (STYLE "outline+pix8" or "outline+pix9": see classic_pixels.py); the
         # font file is then only for the few marks not drawn
         design = {}
+        if style.startswith("draw="):
+            # the other looks' lettering drawn by hand (STYLE "draw=FACE/ASC/X/DESC": the rows its size gains above the
+            # x-height, in it and below it; see drawn_pixels.py)
+            import drawn_pixels as _dp
+            face, g_asc, g_x, g_d = style[5:].split("/")
+            g_asc, g_x, g_d = int(g_asc), int(g_x), int(g_d)
+            prows = 8 + g_asc + g_x
+            for k, gl in _dp.FACES[face].items():
+                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d)
         if "+pix" in style:
             import classic_pixels as _cp
             prows = int(style.split("+pix")[1])
@@ -737,6 +748,21 @@ def main():
                     pix = pix[cut * w:]
                     h -= cut
                     y0 += cut
+            if outlined and ch == "/" and w > 0 and dg is None:
+                # Classic's big slash (Lilita's): exactly the figures' height and on their rows, so "2/3" laps have it
+                # centred on the digits (Lilita's stands a row over them and two under); a stroke as heavy as theirs
+                zrows = [j for j in range(_zh) if any(_zp[j * _zw + i] >= 80 for i in range(_zw))]
+                n = len(zrows)
+                sw = 3 if n >= 12 else 2
+                sw2 = n // 2 + sw - 1  # its width: half its height, plus the stroke
+                pix = []
+                for j in range(n):
+                    left = (n - 1 - j) * (sw2 - sw) // max(1, n - 1)
+                    pix.extend(255 if left <= i < left + sw else 0 for i in range(sw2))
+                w, h = sw2, n
+                x0, y0 = 0, _zy + zrows[0]
+                from PIL import Image as _I
+                mask = _I.frombytes("L", (w, h), bytes(pix))
             if crisp and ch == "-" and w > 0 and dg is None:
                 # Classic's hyphen: Lilita's bar is an en dash wide at this size ("Anti- aliasing"); a hyphen is a short
                 # bar, 4 px of solid ink, its rows as the font draws them
@@ -830,10 +856,10 @@ def main():
                 if not ("A" <= ch <= "Z") or not gw:
                     glyphs.append((0, 0, 0, 0, 0, 0))
                     continue
-                if crisp and extra == 0:
+                if outlined and extra == 0:
                     glyphs.append((0, 0, 0, 0, 0, 0))
                     continue
-                if crisp:
+                if outlined:
                     # the outlined font is FreeType's hinted bitmap, which can't be drawn wider: the key caps' letters are
                     # drawn by hand at its 8 px capitals, in its own chunky shapes (solid, as a boxed Classic label draws)
                     hand = CLASSIC_WIDE.get(ch)
@@ -986,7 +1012,9 @@ def main():
             hh = font.getbbox("H", anchor="ls")
             space64 = ((hh[3] - hh[1]) // 2 - 1) * 64  # a word space about 2 px wider than a letter gap
             if design:
-                space64 = (prows // 2 - 2) * 64  # the drawn letters: a word gap 2 px wider than a letter gap (3 px; 4 in the heading)
+                # the drawn letters: a word gap 2 px wider than a letter gap (3 px), 3 px wider in Classic's 10 row heading
+                # and the 12 row one (4 px)
+                space64 = (2 if prows < 10 or (prows == 10 and not outlined) else 3) * 64
         lines.append("static const unsigned char k%sPixels[%d] = {" % (name, max(1, len(data))))
         for i in range(0, max(1, len(data)), 24):
             lines.append("    " + ",".join(str(v) for v in (data or [0])[i:i + 24]) + ",")
@@ -1000,7 +1028,7 @@ def main():
             lines.append("    { %d, %d, %d }," % (a, b, k))
         lines.append("};")
         lines.append("")
-        names.append((name, space64, base, len(kerns), 1 if crisp else 0, phases))
+        names.append((name, space64, base, len(kerns), 1 if outlined else 0, phases))
     for name, space64, base, nk, st, ph in names:
         lines.append("static const UiFont k%s = { %d, %d, k%sGlyphs, k%sPixels, k%sKerns, %d, %d, %d };" % (name, space64, base, name, name, name, nk, st, ph))
     open(out, "w").write("\n".join(lines) + "\n")
