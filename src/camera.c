@@ -1341,7 +1341,9 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     vertex->b = 255;
     vertex->a = 255;
 
-    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
+    if (!cam_anchor(dList, *vtx)) { // R4: as a record with DKR_NATIVE_CAMERA, like render_sprite_billboard's
+        gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
+    }
     (*vtx)++; // Can't be done in the macro?
     index = segment->animFrame;
 

@@ -126,6 +126,10 @@ void port_load_pick(s32 step);
 void port_load_menu_held(s32 held);
 void port_load_game_frame(s32 gameMode, s32 levelId);
 void port_gfx_run_task(void *task);
+/* R5: one frame from its record buffer; solo: on one thread with the two-core renderer's calls made directly. */
+void port_gfx_run_frame(const void *dl, int solo);
+/* R5 (DKR_FRAME_DIRECT): a frame's record buffer straight to a renderer thread (os_sp.c), direct 1 or 2. */
+void port_rcp_frame_start(const void *dl, s32 direct);
 void port_audio_run_task(void *task);
 /*
  * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one).

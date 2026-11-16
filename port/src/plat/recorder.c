@@ -35,10 +35,13 @@ static void init(void) {
 
 /* What took a frame's time: the game thread's biggest stage, or what the renderer it waited for was doing. */
 int rec_frame_cause(const RecFrame *r) {
-    if (r->logicUs >= r->sceneUs && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
+    /* the renderer's time on the game's core (sharedUs) held the game thread up too: counted with the scene, as
+     * before it was shown apart */
+    unsigned int scene = r->sceneUs + r->sharedUs;
+    if (r->logicUs >= scene && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
         return REC_CAUSE_LOGIC;
     }
-    if (r->sceneUs >= r->renderWaitUs && r->sceneUs >= r->vsyncUs) {
+    if (scene >= r->renderWaitUs && scene >= r->vsyncUs) {
         return REC_CAUSE_SCENE;
     }
     if (r->renderWaitUs >= r->vsyncUs) {
@@ -63,6 +66,11 @@ static void describe_cause(const RecFrame *r, char *out, size_t size) {
             snprintf(out, size, "game logic %u ms", r->logicUs / 1000);
             break;
         case REC_CAUSE_SCENE:
+            if (r->sharedUs > r->sceneUs) {
+                snprintf(out, size, "renderer on the game's core %u ms (the game's own scene %u ms)",
+                         r->sharedUs / 1000, r->sceneUs / 1000);
+                break;
+            }
             snprintf(out, size, "game thread outside the object updates (scene, loads, sound queue) %u ms",
                      r->sceneUs / 1000);
             break;
@@ -445,7 +453,7 @@ char *rec_format_csv(const RecState *s) {
             "e = an event, flags: 1 hitch, 2 shortcut pressed, 4 profiler on\n");
     sb_addf(&b, "kind,frame,render_frame,t_ms,rel_ms,period_ms,logic_ms,scene_ms,render_wait_ms,vsync_ms,rdp_ms,tex_ms,"
             "gpu_ms,gpu_wait_ms,audio_ms,tris,draws,tex_decodes,sound_gaps,rate,mode,level,menu,paused,racing,lap,cp,"
-            "flags,text\n");
+            "flags,shared_ms,text\n");
     while (f < fEnd || e < eEnd) {
         const RecFrame *row = f < fEnd ? &s->frames[f % REC_FRAMES] : NULL;
         const RecEvent *ev = NULL;
@@ -456,7 +464,7 @@ char *rec_format_csv(const RecState *s) {
             ev = NULL;
         }
         if (ev != NULL && (row == NULL || (int) (ev->ms - row->endMs) <= 0)) {
-            sb_addf(&b, "e,%u,,%u,%d,,,,,,,,,,,,,,,,,,,,,,,,", ev->frame, ev->ms, (int) (ev->ms - ref));
+            sb_addf(&b, "e,%u,,%u,%d,,,,,,,,,,,,,,,,,,,,,,,,,", ev->frame, ev->ms, (int) (ev->ms - ref));
             add_csv_text(&b, ev->text);
             sb_addf(&b, "\n");
             e++;
@@ -467,12 +475,12 @@ char *rec_format_csv(const RecState *s) {
         }
         sb_addf(&b,
             "f,%u,%u,%u,%d,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u,%u,%u,%u,"
-            "%d,%s,%d,%d,%u,%u,%u,%u,%u,\n",
+            "%d,%s,%d,%d,%u,%u,%u,%u,%u,%u.%02u,\n",
             row->frame, row->renderFrame, row->endMs, (int) (row->endMs - ref), MS(row->periodUs), MS(row->logicUs),
             MS(row->sceneUs), MS(row->renderWaitUs), MS(row->vsyncUs), MS(row->rdpUs), MS(row->texUs),
             MS(row->gpuUs), MS(row->gpuWaitUs), MS(row->audioUs), row->tris, row->draws, row->texDecodes,
             row->soundGaps, row->rate, mode_name(row->mode), row->level, row->menu, row->paused, row->racing, row->lap,
-            row->checkpoint, row->flags);
+            row->checkpoint, row->flags, MS(row->sharedUs));
         f++;
     }
     return finish(&b);

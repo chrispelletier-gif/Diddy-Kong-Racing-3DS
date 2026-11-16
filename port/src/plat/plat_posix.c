@@ -295,6 +295,11 @@ void plat_split_render_cores(int on) {
     (void) on;
 }
 
+/* The PC build makes the solo thread too, so placement 2's thread change runs there. */
+int plat_frame_solo_thread(void) {
+    return 1;
+}
+
 void plat_thread_set_priority(PlatThread *thread, int n64Priority) {
     (void) thread;
     (void) n64Priority;

@@ -54,6 +54,45 @@ static u32 sBuildUs;                // Logic + scene time of the current frame.
 static unsigned long long sLastFrameEndNs;
 static u32 sGameFrames;
 
+/*
+ * DKR_PROF_SHARED_CORE (default 1; 0 = the old numbers): on an Old 3DS the renderer's display list walk runs on the
+ * game's core above every game thread, so whatever of it lands while the game builds a frame was counted as the game's
+ * scene (and logic) time, and again as the renderer's (rdp). With the switch on, that time is taken out of logic and
+ * scene and kept as PROF_SHARED_CORE ("renderer on the game core"), so scene is the game's own work; the game core's
+ * load (logic + scene + shared) and the profiler's "held back by" answer stay as they were. Read at each frame's start.
+ */
+static s32 sSharedOn;
+static unsigned long long sOtherAtLoopNs;  // shared_core_now() at the frame's start
+static unsigned long long sOtherAtLogicNs; // and at the start of the logic window running now
+static unsigned long long sLogicOtherNs;   // Other threads' time inside this frame's logic windows
+static unsigned long long sFrameSharedNs;  // This frame's shared time (at PROF_MARK_BUILT), for the flight recorder
+
+extern volatile int gPortSoundPlayersCore;
+extern volatile unsigned long long gPortSoundPlayersNs, gPortSoundPlayersStartNs, gPortWalkTotalNs, gPortWalkStartNs;
+
+/* What other threads on the game's core have run so far: the walk on an Old 3DS (a New 3DS's walk has a core of its
+ * own), and the N64 sound players when they run on the game's core (0) of a 3DS. Unlike the sections' sec_other_now()
+ * the players are left out when their core is unknown (-1: a PC, where they run on another host core), so PC and New
+ * 3DS numbers stay as they were. */
+static unsigned long long shared_core_now(unsigned long long now) {
+    unsigned long long total = 0;
+    if (plat_old_3ds()) {
+        unsigned long long walkStart = gPortWalkStartNs;
+        total = gPortWalkTotalNs;
+        if (walkStart != 0 && now > walkStart) {
+            total += now - walkStart;
+        }
+    }
+    if (gPortSoundPlayersCore == 0) {
+        unsigned long long playersStart = gPortSoundPlayersStartNs;
+        total += gPortSoundPlayersNs;
+        if (playersStart != 0 && now > playersStart) {
+            total += now - playersStart;
+        }
+    }
+    return total;
+}
+
 /* The frame time histogram behind the 1% low, and where a frame stops counting as one, two, three or more retraces (half a
  * retrace past each, so a late vblank doesn't move a frame up a group). */
 #define PERIOD_BIN_US 500
@@ -218,10 +257,19 @@ void prof_render_task(unsigned long long totalNs) {
 
 void prof_logic_begin(void) {
     sLogicStartNs = plat_time_ns();
+    if (sSharedOn) {
+        sOtherAtLogicNs = shared_core_now(sLogicStartNs);
+    }
 }
 
 void prof_logic_end(void) {
-    sLogicNs += plat_time_ns() - sLogicStartNs;
+    unsigned long long now = plat_time_ns(), spent = now - sLogicStartNs;
+    sLogicNs += spent;
+    if (sSharedOn) {
+        unsigned long long other = shared_core_now(now);
+        other = other > sOtherAtLogicNs ? other - sOtherAtLogicNs : 0;
+        sLogicOtherNs += other < spent ? other : spent; // (64-bit reads of another core's counters may tear)
+    }
 }
 
 void prof_window_start(int window) {
@@ -313,7 +361,8 @@ static double per_frame_ms(const ProfStats *s, s32 stage, u32 frames) {
 }
 
 const char *prof_limit(const ProfStats *s) {
-    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames);
+    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames) +
+                  per_frame_ms(s, PROF_SHARED_CORE, s->gameFrames); // (the game core's whole load, as before the split)
     double render = per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
     double gpu = per_frame_ms(s, PROF_GPU_DRAW, s->renderedFrames);
     if (gpu > game && gpu > render) {
@@ -1501,9 +1550,15 @@ static void show_overlay(void) {
         double logic = per_frame_ms(&s, PROF_LOGIC, s.gameFrames), scene = per_frame_ms(&s, PROF_SCENE, s.gameFrames);
         double rdp = per_frame_ms(&s, PROF_RDP, s.renderedFrames), tex = per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames);
         double gpu = per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames);
-        /* the game core's time a frame: logic, the scene build and the sound mixer, the three listed after it */
+        /* the game core's time a frame: logic, the scene build and the sound mixer, the three listed after it, and
+         * (DKR_PROF_SHARED_CORE, an Old 3DS) the renderer's time on that core while the game built the frame */
         double sound = per_frame_ms(&s, PROF_AUDIO, s.gameFrames);
-        double game = logic + scene + sound;
+        double shared = per_frame_ms(&s, PROF_SHARED_CORE, s.gameFrames), game = logic + scene + shared + sound;
+        char sharedLine[48];
+        sharedLine[0] = '\0';
+        if (shared > 0.05) {
+            plat_snprintf(sharedLine, sizeof(sharedLine), "  + renderer on this core %.1f\n", shared);
+        }
         for (i = 0; i < PROF_RATE_BUCKETS; i++) {
             if ((s32) i <= target) {
                 onTime += s.rateFrames[i];
@@ -1521,6 +1576,7 @@ static void show_overlay(void) {
                       "steady: frame to frame %.1f ms\n"
                       "time a frame, budget %.1f ms:\n"
                       " game   %5.1f %3d%% logic %.1f scene %.1f sound %.1f\n"
+                      "%s"
                       " render %5.1f %3d%% textures %.1f\n"
                       " GPU    %5.1f %3d%%\n"
                       "waiting: game %.1f render %.1f\n"
@@ -1529,7 +1585,7 @@ static void show_overlay(void) {
                       "%s",
                       fps, (int) (60 / target), prof_limit(&s), percent(onTime, s.gameFrames), percent(late, s.gameFrames),
                       percent(later, s.gameFrames), s.worstFrameUs / 1000, budget, s.hitches, s.jitterUs / 1000.0,
-                      budget, logic + scene + sound, (int) ((logic + scene + sound) * 100.0 / budget + 0.5), logic, scene, sound,
+                      budget, game, (int) (game * 100.0 / budget + 0.5), logic, scene, sound, sharedLine,
                       rdp + tex, (int) ((rdp + tex) * 100.0 / budget + 0.5), tex, gpu, (int) (gpu * 100.0 / budget + 0.5),
                       per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames),
                       per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
@@ -1555,7 +1611,7 @@ static void show_overlay(void) {
             n->logic = logic;
             n->scene = scene;
             n->sound = sound;
-            n->shared = 0.0; /* the renderer on the game core: PR #544 */
+            n->shared = shared;
             n->render = rdp + tex;
             n->tex = tex;
             n->gpu = gpu;
@@ -1596,10 +1652,11 @@ static void show_overlay(void) {
         sScreenLoggedNs = screenNs;
         sScreenLoggedDraws = screenDraws;
         sScreenLoggedFrames = sRenderedFrames;
-        port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f rdp %.2f tex %.2f gpu %.2f "
-                 "audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
+        port_log("profile: %.1f fps (30fps %d%%), worst %u ms, logic %.2f scene %.2f shared %.2f rdp %.2f tex %.2f "
+                 "gpu %.2f audio %.2f ms, limit %s, idle game core %d%% render core %d%%",
                  fps, percent(s.rateFrames[2] + s.rateFrames[1], s.gameFrames), s.worstFrameUs / 1000,
                  per_frame_ms(&s, PROF_LOGIC, s.gameFrames), per_frame_ms(&s, PROF_SCENE, s.gameFrames),
+                 per_frame_ms(&s, PROF_SHARED_CORE, s.gameFrames),
                  per_frame_ms(&s, PROF_RDP, s.renderedFrames), per_frame_ms(&s, PROF_TEXTURE, s.renderedFrames),
                  per_frame_ms(&s, PROF_GPU_DRAW, s.renderedFrames), per_frame_ms(&s, PROF_AUDIO, s.gameFrames),
                  prof_limit(&s), percent((u32) (s.idleNs / 1000), (u32) (s.elapsedNs / 1000)),
@@ -1691,7 +1748,7 @@ int port_rec_frame_detail(char *out, int size) {
 static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
     static u32 sLastTotalUs[PROF_STAGE_COUNT], sLastCounters[PROF_COUNTER_COUNT];
     u32 totals[PROF_STAGE_COUNT], counters[PROF_COUNTER_COUNT];
-    u32 logicUs = (u32) (sLogicNs / 1000);
+    u32 logicUs = (u32) ((sLogicNs - sLogicOtherNs) / 1000), sharedUs = (u32) (sFrameSharedNs / 1000);
     RecFrame row;
     s32 i;
 
@@ -1704,7 +1761,8 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
     bzero(&row, sizeof(row));
     row.periodUs = periodUs;
     row.logicUs = logicUs;
-    row.sceneUs = buildUs > logicUs ? buildUs - logicUs : 0;
+    row.sceneUs = buildUs > logicUs + sharedUs ? buildUs - logicUs - sharedUs : 0;
+    row.sharedUs = sharedUs;
     row.renderWaitUs = (u32) ((sMarkNs[PROF_MARK_WAITED] - sMarkNs[PROF_MARK_BUILT]) / 1000);
     row.vsyncUs = (u32) ((now - sMarkNs[PROF_MARK_WAITED]) / 1000);
     row.rdpUs = totals[PROF_RDP] - sLastTotalUs[PROF_RDP];
@@ -1760,6 +1818,9 @@ void prof_game_mark(int mark, int updateRate) {
     switch (mark) {
         case PROF_MARK_LOOP_START:
             sLogicNs = 0;
+            sSharedOn = plat_switch("DKR_PROF_SHARED_CORE", 1) != 0;
+            sLogicOtherNs = 0;
+            sOtherAtLoopNs = sSharedOn ? shared_core_now(now) : 0;
             sKindNow = PORT_DRAW_OTHER;
             sObjNow = PROF_OBJ_NONE;
             sGameFrameCount++;
@@ -1789,8 +1850,27 @@ void prof_game_mark(int mark, int updateRate) {
                 sKindBuildNs[PORT_DRAW_OTHER] -= other > sLogicNs ? sLogicNs : other;
                 sKindStartNs = 0;
             }
-            prof_add(PROF_LOGIC, sLogicNs);
-            prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
+            if (sSharedOn) {
+                // Other threads' time on the game's core during the build, taken out of logic (what landed inside
+                // its windows) and scene (the rest), and shown apart.
+                unsigned long long other = shared_core_now(now), logicOther = sLogicOtherNs, logic, scene;
+                other = other > sOtherAtLoopNs ? other - sOtherAtLoopNs : 0;
+                other = other < build ? other : build;
+                logicOther = logicOther < sLogicNs ? logicOther : sLogicNs;
+                logicOther = logicOther < other ? logicOther : other;
+                logic = sLogicNs - logicOther;
+                scene = build > sLogicNs + (other - logicOther) ? build - sLogicNs - (other - logicOther) : 0;
+                prof_add(PROF_LOGIC, logic);
+                prof_add(PROF_SCENE, scene);
+                prof_add(PROF_SHARED_CORE, other);
+                sFrameSharedNs = other;
+                sLogicOtherNs = logicOther; // (record_frame's logic: the game's own)
+            } else {
+                prof_add(PROF_LOGIC, sLogicNs);
+                prof_add(PROF_SCENE, build > sLogicNs ? build - sLogicNs : 0);
+                sFrameSharedNs = 0;
+                sLogicOtherNs = 0;
+            }
             for (w = 0; w < PROF_WINDOW_COUNT; w++) {
                 if (build / 1000 > sWindows[w].worstBuildUs) {
                     sWindows[w].worstBuildUs = (u32) (build / 1000);

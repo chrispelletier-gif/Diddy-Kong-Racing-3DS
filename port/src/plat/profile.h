@@ -19,7 +19,9 @@ extern "C" {
 
 enum ProfStage {
     PROF_LOGIC,      /* Game thread: object updates (racers, AI, physics). */
-    PROF_SCENE,      /* Game thread: the rest of the frame, mostly building the display list. */
+    PROF_SCENE,      /* Game thread: the rest of the frame, mostly building the display list. With DKR_PROF_SHARED_CORE
+                      * (default on) only the game thread's own time: what other threads on its core took is
+                      * PROF_SHARED_CORE. */
     PROF_FRAME_WAIT, /* Game thread: waiting for the renderer to finish the previous frame. */
     PROF_VSYNC,      /* Game thread: waiting for the retrace that paces the frame rate. */
     PROF_RDP,        /* Renderer: display list interpretation and GPU command submission. */
@@ -30,6 +32,9 @@ enum ProfStage {
     PROF_GPU_FILL,   /* Within it, from the GPU timeline (3DS, gpu_cuts.inc): memory fills (the frame's clears), */
     PROF_GPU_LISTS,  /* the command lists (the draws) */
     PROF_GPU_COPY,   /* and copies (the picture to the screen). */
+    PROF_SHARED_CORE, /* Game thread: wall time other threads on its core took from it while it built the frame (Old
+                       * 3DS: the renderer's display list walk; DKR_PROF_SHARED_CORE). Taken out of PROF_LOGIC and
+                       * PROF_SCENE, so the game core's load is still logic + scene + this. */
     PROF_STAGE_COUNT
 };
 

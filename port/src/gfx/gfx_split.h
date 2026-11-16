@@ -8,7 +8,9 @@
  * renderer thread while DKR_SPLIT_RENDER is on, else made at once. gfx_split_frame_start starts the frame either
  * way (direct: this frame is made at once whatever the switch says) and says whether its calls are queued.
  */
-int gfx_split_frame_start(int direct);
+/* holdCores (R5's DKR_FRAME_DIRECT 2): a direct frame made on the system core keeps the share of it the two-core
+ * renderer raised, instead of giving it back. */
+int gfx_split_frame_start(int direct, int holdCores);
 void gfx_split_frame_end(void);
 int gfx_split_active(void);
 void gfx_split_drain(void);

@@ -73,7 +73,7 @@ static const char *kOps[] = {"NDRAW",     "NDRAW_DYNAMIC", "SPRITE",     "NRECT"
                              "VTX",       "TRI",           "TILE",       "TILESIZE",      "LOADBLOCK",  "LOADTILE",
                              "LOADTLUT",  "IMAGE_TEX",     "MTX",        "CALL",          "TEXRECT",    "FILLRECT",
                              "SLOTS_DYNAMIC", "SLOTS_BILLBOARD", "SLOTS_SPRITE", "SLOTS_DECLINED", "DROP_MATERIAL",
-                             "DROP_TEXTURE"};
+                             "DROP_TEXTURE", "LIST",       "FILL"};
 
 static unsigned int intern_site(const char *name) {
     unsigned int h = 5381, i;
@@ -260,14 +260,14 @@ void port_census_hit(const void *cmd, int depth, int kind, int cls, int op, cons
         }
         site = intern_site(name);
     }
-    if (cls == CENSUS_LIST_CALL && idx + 1 <= DEPTH_MAX + 1) {
+    if ((cls == CENSUS_LIST_CALL || op == CENSUS_OP_LIST) && idx + 1 <= DEPTH_MAX + 1) {
         /* The called list's commands are named for this call (its own site, or the site that called this list) */
         unsigned int own = site_of(cmd);
         sCaller[idx + 1] = own != 0 ? own : sCaller[idx];
     }
     key = make_key(sLevel, sPhase, kind, cls, op, 0, site);
     add_row(key, 1);
-    if (cls == CENSUS_TMEM || cls == CENSUS_LIST_CALL || cls == CENSUS_STATE) {
+    if (cls == CENSUS_TMEM || cls == CENSUS_LIST_CALL || op == CENSUS_OP_LIST || cls == CENSUS_STATE) {
         if (sNumPending < PENDING_MAX) {
             sPending[sNumPending++] = key;
         }

@@ -10,7 +10,8 @@
 
 /* What a walked command is. The first six are the finish plan's classes; the others keep them honest. */
 typedef enum CensusClass {
-    CENSUS_RECORD,      /* A flat record: NDRAW (mesh, dynamic, sprite), NRECT, MTXF, the native mesh and track tags */
+    CENSUS_RECORD,      /* A flat record: NDRAW (mesh, dynamic, sprite), NRECT, MTXF, the native mesh and track tags;
+                           with DKR_NATIVE_FRAME also LIST (list calls) and FILL (fill rectangles) */
     CENSUS_STATE,       /* A native state op (modes, colours, scissor, viewport, fog, tags...) */
     CENSUS_VERTEX_SLOT, /* NOPX_VTX, NOPX_TRI: vertices into the N64's slots, triangles drawn from them */
     CENSUS_TMEM,        /* Tile and texture load ops: NOP_TILE, TILESIZE, LOADBLOCK, LOADTILE, texture IMAGE, LOADTLUT */
@@ -55,6 +56,8 @@ typedef enum CensusOp {
     CENSUS_OP_SLOTS_DECLINED,
     CENSUS_OP_DROP_MATERIAL,
     CENSUS_OP_DROP_TEXTURE,
+    CENSUS_OP_LIST, /* R4 record dispatcher: a list call, as a LIST record */
+    CENSUS_OP_FILL, /* R4 record dispatcher: a fill rectangle, as a FILL record */
     CENSUS_OP_COUNT,
     CENSUS_OP_RAW = 0x100
 } CensusOp;
