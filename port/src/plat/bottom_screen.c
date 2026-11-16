@@ -1061,13 +1061,16 @@ static int ui_ink_gap(const UiFont *u, unsigned char a, int xa, int pa, unsigned
             }
         }
     }
-    for (r = 0; r < 64; r++) {
-        int d;
-        if (ra[r] < -(1 << 19)) {
-            continue;
+    {
+        /* the gap between the two inks' boxes: the first's rightmost solid column to the second's leftmost, whatever
+           rows they are on (as owner rule 25 measures a slash's gaps, ink to ink on both sides) */
+        int right = -(1 << 20), left = 1 << 20;
+        for (r = 0; r < 64; r++) {
+            right = ra[r] > right ? ra[r] : right;
+            left = lb[r] < left ? lb[r] : left;
         }
-        if (lb[r] < (1 << 19) && lb[r] - ra[r] - 1 < best) {
-            best = lb[r] - ra[r] - 1;
+        if (right > -(1 << 19) && left < (1 << 19)) {
+            best = left - right - 1;
         }
     }
     return best;
@@ -1096,7 +1099,7 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
     n = i;
     /*
      * a fraction ("2/3" laps, "9/10" bananas): the slash exactly as far from the figure before it as from the one
-     * after it (where their inks come nearest), the nearer side opened by whole pixels, never closed
+     * after it (box to box: the clear columns between their inks), the nearer side opened by whole pixels, never closed
      */
     for (i = 1; i + 1 < n; i++) {
         unsigned char a = (unsigned char) s[i - 1], b = (unsigned char) s[i + 1];
@@ -4802,9 +4805,8 @@ static int lap_row(const RaceHud *hud, int x, int y) {
     return x;
 }
 
-/* The place and its suffix 3 clear columns apart ("3RD": at 2 the figure's right side read as touching the R) */
 static int place_row(int place, int x, int y) {
-    x = piece(&sPlaces[place - 1], x, y, 2);
+    x = piece(&sPlaces[place - 1], x, y, 1);
     return piece(&sSuffixes[place <= 3 ? place - 1 : 3], x, y + 2, 0);
 }
 
@@ -5988,7 +5990,7 @@ static void place_centred(const RaceHud *hud, int x0, int y0, int x1, int y1, in
 static int place_pieces(const RaceHud *hud, int x, int y, int suffixDy) {
     if (hud->position >= 1 && hud->position <= 8) {
         int suffix = hud->position <= 3 ? hud->position - 1 : 3;
-        x = piece(&sPlaces[hud->position - 1], x, y, 2); /* (as place_row) */
+        x = piece(&sPlaces[hud->position - 1], x, y, 1);
         piece(&sSuffixes[suffix], x, y + suffixDy, 0);
     }
     return x; /* Where the suffix starts: "of 8" goes under it. */
