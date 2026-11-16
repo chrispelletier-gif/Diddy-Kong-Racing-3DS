@@ -1242,10 +1242,12 @@ static void show_overlay(void) {
          * (DKR_PROF_SHARED_CORE, an Old 3DS) the renderer's time on that core while the game built the frame */
         double sound = per_frame_ms(&s, PROF_AUDIO, s.gameFrames);
         double shared = per_frame_ms(&s, PROF_SHARED_CORE, s.gameFrames), game = logic + scene + shared + sound;
-        char sharedLine[48];
+        char sharedLine[48], termSharedLine[48];
         sharedLine[0] = '\0';
+        termSharedLine[0] = '\0';
         if (shared > 0.05) {
             plat_snprintf(sharedLine, sizeof(sharedLine), "  + renderer on this core %.1f\n", shared);
+            plat_snprintf(termSharedLine, sizeof(termSharedLine), "      + renderer on this core %.1f\n", shared);
         }
         for (i = 0; i < PROF_RATE_BUCKETS; i++) {
             if ((s32) i <= target) {
@@ -1289,6 +1291,7 @@ static void show_overlay(void) {
                       "worst %u ms (budget %.0f) steady %.1f hitches %u\n"
                       "time a frame, budget %.1f ms:\n"
                       "game  %5.1f %3d%% logic %.1f scene %.1f sound %.1f\n"
+                      "%s"
                       "render%5.1f %3d%% textures %.1f\n"
                       "GPU   %5.1f %3d%%\n"
                       "waiting: game %.1f render %.1f\n"
@@ -1296,7 +1299,7 @@ static void show_overlay(void) {
                       "tris %u draws %u texture loads %u\n",
                       fps, (int) (60 / target), prof_limit(&s), percent(onTime, s.gameFrames), percent(late, s.gameFrames),
                       percent(later, s.gameFrames), s.worstFrameUs / 1000, budget, s.jitterUs / 1000.0, s.hitches,
-                      budget, logic + scene + sound, (int) ((logic + scene + sound) * 100.0 / budget + 0.5), logic, scene, sound,
+                      budget, game, (int) (game * 100.0 / budget + 0.5), logic, scene, sound, termSharedLine,
                       rdp + tex, (int) ((rdp + tex) * 100.0 / budget + 0.5), tex, gpu, (int) (gpu * 100.0 / budget + 0.5),
                       per_frame_ms(&s, PROF_FRAME_WAIT, s.gameFrames),
                       per_frame_ms(&s, PROF_GPU_WAIT, s.renderedFrames),
