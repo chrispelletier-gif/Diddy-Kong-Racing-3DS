@@ -1001,6 +1001,20 @@ static int sPen0; /* where a line's pen starts, in 1/64 px: a centred label set 
  */
 static int sUiWiden;
 static int sUiWidenCol = -1; /* ui_glyph_draw: this glyph column drawn twice (-1: none) */
+/*
+ * Letters widened so (the N in SETTINGS read as an M, CONTROLS' R and UPDATES' D a column wider than the same letters
+ * elsewhere) only with DKR_UI_WIDEN=1 in env.txt. Off (the default): every letter of a look is drawn alike, and an odd
+ * column left over is taken up where it can't be seen (ui_whole_fit in bottom_grid.inc).
+ */
+static int ui_widen_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = plat_getenv("DKR_UI_WIDEN");
+        on = e != NULL && atoi(e) != 0;
+    }
+    return on;
+}
+static int sUiSpaceExtra; /* a word space this much wider, 1/64 px (a label's odd column taken up there) */
 static int ui_widen_pick(const char *s) {
     static const char *const sOk = "BCDEFGHJKLMNOPQRSUWZabcdeghmnopqsuwz023456789";
     int n = (int) strlen(s), best = -1, bd = 1 << 20, i;
@@ -1084,6 +1098,9 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
         unsigned char c = (unsigned char) s[i];
         if (prev != 0 && prev != ' ' && c != ' ') {
             pen += sUiTrack; /* between letters, not round a word space */
+        }
+        if (prev != 0 && c == ' ') {
+            pen += sUiSpaceExtra;
         }
         if (prev != 0 && (ui_has(prev) || prev == ' ') && (ui_has(c) || c == ' ')) {
             pen += ui_kern(u, prev, c); /* a space is kerned only against the figures beside it */
