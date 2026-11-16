@@ -993,8 +993,30 @@ static int ui_adv64(const UiFont *u, unsigned char c) {
  */
 static int sUiTrack; /* extra space between letters, 1/64 px (Classic's button labels: no shared outline) */
 static int sPen0; /* where a line's pen starts, in 1/64 px: a centred label set a fraction of a pixel over */
+/*
+ * Classic (whole-pixel letters with an outline): a label whose room is odd is centred by drawing one letter a column
+ * wider (its middle column twice: a bar or a bowl a pixel longer), never by a wider gap, so every gap between letters
+ * stays one outline pixel. The letter: the one nearest the label's middle whose middle column is a bar or a gap, not a
+ * lone stem (E, O, S, N: not I, T or 1). sUiWiden set: the line is drawn so.
+ */
+static int sUiWiden;
+static int sUiWidenCol = -1; /* ui_glyph_draw: this glyph column drawn twice (-1: none) */
+static int ui_widen_pick(const char *s) {
+    static const char *const sOk = "BCDEFGHJKLMNOPQRSUWZabcdeghmnopqsuwz023456789";
+    int n = (int) strlen(s), best = -1, bd = 1 << 20, i;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char) s[i];
+        int ok = strchr(sOk, c) != NULL || (c >= UI_PROP0 + 2 && c < UI_PROP0 + 10) || c == UI_PROP0;
+        int d = 2 * i - (n - 1);
+        d = d < 0 ? -d : d;
+        if (c != 0 && ok && d < bd) {
+            bd = d, best = i;
+        }
+    }
+    return best;
+}
 static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
-    int pen = u->phases > 1 ? sPen0 : 0, i;
+    int pen = u->phases > 1 ? sPen0 : 0, i, widen = sUiWiden ? ui_widen_pick(s) : -1;
     unsigned char prev = 0;
     for (i = 0; s[i] != '\0'; i++) {
         unsigned char c = (unsigned char) s[i];
@@ -1013,7 +1035,7 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
                 ph[i] = q & 3;
             }
         }
-        pen += ui_adv64(u, c);
+        pen += ui_adv64(u, c) + (i == widen ? 64 : 0);
         prev = c;
     }
     return (pen + 32) >> 6;
@@ -1068,8 +1090,10 @@ static int sUiFaceOnly; /* ui_draw: an outlined font's face drawn alone (dark in
 static void ui_glyph_draw(const UiFont *u, const UiGlyph *g, const unsigned char *px, int x0_, int y, Colour colour, int pass) {
     int i, j, hh = u->glyphs['H' - 0x21].height, capTop = u->base - hh;
     for (j = 0; j < g->height; j++) {
-        for (i = 0; i < g->width; i++) {
-            int x = x0_, cover, dx, dy;
+        int rep, reps;
+        for (i = 0; i < g->width; i++) for (rep = 0, reps = i == sUiWidenCol ? 2 : 1; rep < reps; rep++) {
+            /* (a widened letter: columns after its middle one a pixel right, the middle one drawn twice) */
+            int x = x0_ + (sUiWidenCol >= 0 && i > sUiWidenCol ? 1 : 0) + rep, cover, dx, dy;
             cover = px[j * g->width + i];
             if (cover == 0 || (pass < 2 && cover < (u->outlined && (sUiCrisp || sUiFaceOnly) ? 112 : 80))) {
                 /* (a solid-drawn glyph's outline follows the pixels it draws: 112 and up) */
@@ -1119,9 +1143,10 @@ static void ui_glyph_draw(const UiFont *u, const UiGlyph *g, const unsigned char
 }
 
 static int ui_draw(const UiFont *u, int x, int y, const char *text, Colour colour, int shadow, int right) {
-    int xs[UI_LINE_MAX], ph[UI_LINE_MAX], n = 0, i, pass, end;
+    int xs[UI_LINE_MAX], ph[UI_LINE_MAX], n = 0, i, pass, end, widen;
     char line[UI_LINE_MAX];
     snprintf(line, sizeof(line), "%s", text);
+    widen = sUiWiden ? ui_widen_pick(line) : -1;
     sUiShadowSpace = shadow && !u->outlined ? 64 : 0;
     end = ui_layout_ph(u, line, xs, ph);
     sUiShadowSpace = 0;
@@ -1155,7 +1180,9 @@ static int ui_draw(const UiFont *u, int x, int y, const char *text, Colour colou
                 const UiGlyph *g = ui_glyph(u, c, ph[i], &px);
                 sUiCrisp = sUiCrispAll || (c >= '0' && c <= '9') || (c >= UI_PROP0 && c < UI_PROP0 + 10) || c == UI_TIMES || c == UI_MINUS ||
                            c == '/' || c == '-'; /* (Classic: a number's slash and hyphen as solid as its digits) */
+                sUiWidenCol = i == widen ? g->width / 2 : -1;
                 ui_glyph_draw(u, g, px, x + xs[i], y, colour, pass);
+                sUiWidenCol = -1;
                 sUiCrisp = 0;
             }
         }

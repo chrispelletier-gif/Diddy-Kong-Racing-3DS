@@ -904,6 +904,18 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
         /* a lone capital drawn by hand for the key caps (both forms there): only those, so every cap letter of a look
            is drawn alike */
         int handDrawn = alone && gfont(kind)->glyphs[(gfont(kind)->phases + 1) * UI_NG + s[0] - 0x21].width > 0;
+        if (gfont(kind)->outlined && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
+            /* Classic: one letter a column wider (see sUiWiden), not its letters spread */
+            Ink kq;
+            sUiWiden = 1;
+            MEASURE(gdraw_raw(kind, 0, 0, s, c), kq);
+            if (!((x1 - x0 - (kq.x1 - kq.x0)) & 1)) {
+                fk = kq, fq = 0, ft = base, fw = 0;
+                done = 2;
+            } else {
+                sUiWiden = 0;
+            }
+        }
         for (wd = handDrawn ? 1 : 0; wd <= (alone ? 2 : 0) && done < 2; wd++) {
             for (t = 0; t <= (alone ? 0 : 64) && done < 2; t += 2) {
                 for (sg = 1; sg >= -1 && done < 2; sg -= 2) {
@@ -958,6 +970,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
     }
     sPen0 = 0;
     sUiWide = 0;
+    sUiWiden = 0;
     sUiCrispAll = crisp;
     log_rec('C', x + inkX0, y + top, x + inkX1, y + top + h, kind, s); /* the ink, as the eye sees the text's place */
     if (sFaceY1 > sFaceY0) {
@@ -1372,11 +1385,13 @@ static int gicons_fit(void) {
     if (getenv("DKR_ICON_DEBUG")) {
         fprintf(stderr, "style %d var %d: worst side pad %d\n", sStyle, sVariant, worst);
     }
-    return worst >= 8;
+    /* (Classic keeps its plain labels, as with its earlier lettering: its hand-drawn capitals are narrower and would
+       otherwise just make room) */
+    return sStyle != 0 && worst >= 8;
 }
 
 /* Classic's letter tracking on buttons: GBTN_TRACK where every label and its icon still keep 8 px clear of a
-   three-column button, else the most that does (in quarter pixels), decided once per look so a label never changes
+   three-column button, else the most that does (in whole pixels), decided once per look so a label never changes
    its spacing between screens or states */
 static int gbtn_track(void) {
     static const char *const sAll[] = { "Pause", "Settings", "Controls", "Updates", "Close", "Prev", "Next" };
@@ -1385,7 +1400,7 @@ static int gbtn_track(void) {
     if (sStyle != 0) {
         return 0;
     }
-    for (trk = GBTN_TRACK; trk > 0; trk -= 16) {
+    for (trk = GBTN_TRACK; trk > 0; trk -= 64) { /* whole pixels: every gap between letters the same */
         int worst = 999;
         for (i = 0; i < sizeof(sAll) / sizeof(sAll[0]); i++) {
             char up[40];
@@ -1441,7 +1456,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
         const char *t = label + (grey || on || pressed || focus);
         char shown[40];
         Colour ink = grey ? (Colour){ 150, 155, 178, 255 } : WHITE, top, bottom, edge, hole;
-        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, iconSolidL = 0;
+        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, btnWiden = 0, iconSolidL = 0;
         Ink ik;
         /* disabled differs by more than colour: it loses its icon and its fill goes flat */
         if (gicon_known(t)) { /* disabled keeps its icon, greyed with its label */
@@ -1624,6 +1639,26 @@ static void gbuttons(const char (*buttons)[40], int count) {
             sUiFlat = grey && sStyle == 0;
             if (gfont(kind) != NULL && gfont(kind)->outlined) {
                 sUiCrispAll = 1; /* measured as gtext_ex draws a boxed Classic label: every letter solid */
+                Ink kq;
+                int gw;
+                sUiTrack = trk;
+                sPen0 = 0;
+                MEASURE(gdraw_raw(kind, 0, 0, shown, ink), kq);
+                gw = kq.x1 - kq.x0 + (iconW ? iconW + GICON_GAP : 0);
+                if ((x1 - x0 - gw) & 1) {
+                    /* one letter a column wider (see sUiWiden), not the letters spread */
+                    sUiWiden = 1;
+                    sUiTrack = trk;
+                    sPen0 = 0;
+                    MEASURE(gdraw_raw(kind, 0, 0, shown, ink), kq);
+                    gw = kq.x1 - kq.x0 + (iconW ? iconW + GICON_GAP : 0);
+                    sUiWiden = 0;
+                    if (!((x1 - x0 - gw) & 1)) {
+                        kt = kq, fq = 0, ft = trk;
+                        done = 2;
+                        btnWiden = 1;
+                    }
+                }
             }
             for (q = 0; q < 64 && done < 2; q += 16) {
                 for (tt = 0; tt <= 64 && done < 2; tt += 2) {
@@ -1686,6 +1721,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
         sUiFlat = grey && sStyle == 0;
         sUiTrack = btnTrack; /* (the tracking and pen the label was centred with, above) */
         sPen0 = btnPen;
+        sUiWiden = btnWiden;
         gtext_ex(kind, gx - textX0, y0 + pressed, gx - textX0 + 1000, y1 + pressed, shown, ink, GA_LEFT, 0, NULL, NULL);
         sUiTrack = 0;
         sFlatMode = 0;
@@ -4431,6 +4467,22 @@ static void gglyph_sheet(void) {
     static const int sKinds[4] = { GF_BODY, GF_HEAD, GF_SM, GF_LG };
     int r, d, q = sQuiet;
     sQuiet = 1;
+    if (getenv("DKR_GLYPH_ALPHA") != NULL) {
+        /* host check: every letter and digit in each type size, on a panel as the screens show them */
+        static const char *const sLines[] = { "ABCDEFGHIJKLM", "NOPQRSTUVWXYZ", "abcdefghijklm", "nopqrstuvwxyz",
+                                              "0123456789 +-.:/% !?'\"(),;" };
+        int kinds[3] = { GF_BODY, GF_HEAD, GF_SM }, y = 4, i, k;
+        gbox(0, 0, BS_WIDTH, BS_HEIGHT, SK_PANEL);
+        for (k = 0; k < 3; k++) {
+            for (i = 0; i < 5; i++) {
+                gtext(kinds[k], 6, y, 314, y + 14, sLines[i], WHITE, GA_LEFT);
+                y += 15;
+            }
+            y += 4;
+        }
+        sQuiet = q;
+        return;
+    }
     fill(0, 0, BS_WIDTH, 198, (Colour){ 0, 0, 0, 255 });
     for (r = 0; r < 4; r++) {
         int kind = sKinds[r], y = 10 + r * 30;
