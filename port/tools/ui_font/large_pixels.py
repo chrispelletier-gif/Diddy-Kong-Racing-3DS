@@ -1,6 +1,6 @@
 # Hand-built pixel numerals for the large number size, from bars and evenly stepped diagonals.
 # W cell ink width, H rows, s vertical stroke, t horizontal stroke, cr corner cut (1 or 2)
-def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None):
+def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None, slant=False):
     def blank(): return [[0] * W for _ in range(H)]
     def fill(c, y0, y1, x0, x1):
         for y in range(max(0, y0), min(H, y1)):
@@ -29,8 +29,11 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None):
     corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['0'] = c
     # 1: stem right of centre, a 2-px flag stepping down-left, a foot
     c = blank(); sx = (W - s + 1) // 2; fill(c, 0, B, sx, sx + s)
-    fill(c, 1, 2, sx - 2, sx); fill(c, 2, 3, sx - 3, sx - 1)
-    fill(c, B, H, 1 if W % 2 == 0 else 1, W - 1); G['1'] = c
+    fl = max(2, s - 1)  # the flag: two pixels wide, a column a row down to the left
+    for k in range(1, fl + 1): fill(c, k, k + 1, sx - k - 1, sx - k + 1)
+    if not slant: fill(c, B, H, 1, W - 1)  # (Barlow's 1 has no foot)
+    else: fill(c, B, H, sx, sx + s)
+    G['1'] = c
     # 2
     c = blank(); fill(c, 0, t, 0, W); fill(c, t, t + 1, 0, s)
     corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr')])
@@ -39,7 +42,7 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None):
     c = blank(); fill(c, 0, t, 0, W); fill(c, M, M + t, s, W); fill(c, B, H, 0, W); fill(c, 0, H, R, W)
     corners(c, [(0, W - 1, 'tr'), (H - 1, W - 1, 'br')]); G['3'] = c
     # 4: the bar at about two thirds, the stem 3 rows below it at most
-    c = blank(); b = bar4 if bar4 is not None else H - t - 3; sx = W - s - 1
+    c = blank(); b = bar4 if bar4 is not None else H - t - max(3, int(round(H * 0.19))); sx = W - s - 1
     fill(c, 0, H, sx, sx + s); fill(c, b, b + t, 0, W)
     rpc = max(1, (b - 1) // sx); y0 = down(c, sx * rpc, sx, 0, rpc); fill(c, sx * rpc, b, 0, s); G['4'] = c
     # 5
@@ -51,8 +54,9 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None):
     corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (M, W - 1, 'tr'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['6'] = c
     # 7
     c = blank(); fill(c, 0, t, 0, W)
-    v = H - 6  # the diagonal ends in a short upright
+    v = H - 6 if not slant else H - 1  # the diagonal ends in a short upright (Barlow: it slants to the baseline)
     sx = (W - s) // 2
+    if slant: sx = max(1, (W - s) // 2 - 2)
     rpc = max(1, (v - t - 2) // (R - 1 - sx)); y0 = down(c, v, R - 1, sx, rpc); fill(c, t, y0, R, W); fill(c, v, H, sx, sx + s); G['7'] = c
     # 8
     c = blank(); fill(c, 0, t, 0, W); fill(c, M, M + t, 0, W); fill(c, B, H, 0, W); fill(c, 0, H, 0, s); fill(c, 0, H, R, W)
@@ -61,6 +65,14 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None):
     # 9
     c = blank(); fill(c, 0, t, 0, W); fill(c, 0, M + t, 0, s); fill(c, M, M + t, 0, W); fill(c, 0, H, R, W); fill(c, B, H, 0, W)
     corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (M + t - 1, 0, 'bl'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['9'] = c
+    if slant:
+        c = blank(); fill(c, 0, t, 0, W); fill(c, B, H, 0, W); fill(c, 0, M, R, W); fill(c, M + t, H, R, W)
+        fill(c, t, t + max(1, t // 2), 0, s); fill(c, B - max(1, t // 2), B, 0, s)
+        fill(c, M, M + t, (W - s) // 2, W - 1)
+        corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['3'] = c
+        c = G['5']; corners(c, [(M, W - 1, 'tr')])
+        c = G['6']; fill(c, t, t + max(1, t // 2), R, W)
+        c = G['9']; fill(c, B - max(1, t // 2), B, 0, s)
     out = {k: [''.join('#' if v else '.' for v in r) for r in g] for k, g in G.items()}
     # the slash: the digits' height, s wide, one column every 2 rows
     sw = H // 2 + s - 1

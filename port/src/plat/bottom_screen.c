@@ -1022,8 +1022,8 @@ static int ui_is_fig(unsigned char c) {
 }
 
 /*
- * The clear columns between two glyphs drawn at x (whole pixels, their quarter ph), where their inks come nearest:
- * on the same row, or one row apart (corners meeting diagonally).
+ * The clear columns between two glyphs drawn at x (whole pixels, their quarter ph), where their inks come nearest on
+ * the same row (as the eye measures a slash's gap: "2/3" reads with the 2's foot and the 3's shoulder equally far off).
  */
 static int sUiNoShadow; /* outlined text without its drop shadow (small tab names, the racer's own lit row) */
 static int ui_ink_gap(const UiFont *u, unsigned char a, int xa, int pa, unsigned char b, int xb, int pb) {
@@ -1066,10 +1066,8 @@ static int ui_ink_gap(const UiFont *u, unsigned char a, int xa, int pa, unsigned
         if (ra[r] < -(1 << 19)) {
             continue;
         }
-        for (d = -1; d <= 1; d++) {
-            if (r + d >= 0 && r + d < 64 && lb[r + d] < (1 << 19) && lb[r + d] - ra[r] - 1 < best) {
-                best = lb[r + d] - ra[r] - 1;
-            }
+        if (lb[r] < (1 << 19) && lb[r] - ra[r] - 1 < best) {
+            best = lb[r] - ra[r] - 1;
         }
     }
     return best;
