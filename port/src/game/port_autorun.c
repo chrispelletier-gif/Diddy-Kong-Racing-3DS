@@ -331,16 +331,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // KCOND (v37) Whale Bay holds 99% of frames at 30 (#481), so the 2-player (1) and the game's own distances (0) are
     // raced again. And a kart no longer flickers between two models at a threshold (DKR_RACER_LOD_HOLD=4, on by
     // default: PC Whale Bay 5 -> 2 flips back within a second); raced against the old way.
-    { "other karts' detail at 2-player distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 1, 1, 0 },
+    // Bench #493 answered the 2-player row (+1.6 ms renderer on Whale Bay, 98% at 30), so it went.
     { "other karts' detail at the game's own distances", { "DKR_RACER_LOD", NULL, NULL }, 2, 0, 1, 0 },
+    // Bug report #548 (owner 2026-11-16: a racer visibly swaps to a simpler model as the camera closes in on it): the
+    // other karts on the 1-player row with every distance times n (DKR_RACER_LOD_FAR, objects.c), no adaptive boost.
+    // 4: model 1 to 1280 units (the N64 320), the 14-triangle model 5 only past 5760, a few pixels tall; 255: always
+    // model 1. With the row above, three points; the largest n within 1 point of the usual races' share of frames at
+    // 30 becomes the Old 3DS default. Each races alone (they share a variable with the row above).
+    { "other karts' full detail out to 4x the N64's distances", { "DKR_RACER_LOD_FAR", NULL, NULL }, 0, 4, 1, 0 },
+    { "other karts always at full detail", { "DKR_RACER_LOD_FAR", NULL, NULL }, 0, 255, 1, 0 },
     // v42: the two distance rows race alone (both set DKR_RACER_LOD), so the every-switch race is the hold row's.
     { "karts may flicker between two models (old)", { "DKR_RACER_LOD_HOLD", NULL, NULL }, 4, 0, 0, 0 },
-    // While the frame rate drops, the other karts' distances move to the 4-player ones (DKR_RACER_LOD_ADAPT), which
-    // only changes anything at the 1- and 2-player distances above. That switch is now eased over ~1 s in and 2 s out,
-    // a kart only getting simpler while it moves away (DKR_RACER_LOD_SMOOTH=2, objects.c port_racer_lod_ease); this
-    // row races the game's own distances with the old all-at-once switch (both variables 0), against the row above.
-    { "other karts' detail at the game's own distances, dropped all at once when slow (old)",
-      { "DKR_RACER_LOD", "DKR_RACER_LOD_SMOOTH", NULL }, 2, 0, 1, 0 },
+    // The "game's own distances, dropped all at once when slow (old)" row (DKR_RACER_LOD_SMOOTH 0) went with #548:
+    // the far rows above turn the adaptive boost off, so how it eases is no longer the question.
     // Taj's pond in the Central Area (bug report #482, v39): the view with the pond's ten frogs and Taj drew 150-200
     // draws a frame on PC against ~55 elsewhere in the hub, and the backend was busy 30 ms a frame there (17 ms
     // elsewhere). Every solid object's shadow sat between two objects' models, so no two shadows shared a draw: the

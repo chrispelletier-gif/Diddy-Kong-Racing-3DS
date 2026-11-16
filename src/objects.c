@@ -3879,7 +3879,7 @@ static s32 port_racer_lod_view(void) {
     return (view >= 0 && view < 4) ? view : 0;
 }
 
-static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds) {
+static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const s16 *thresholds) {
     static s8 sPrevByView[4][8];
     s8 *sPrev = sPrevByView[port_racer_lod_view()];
     static u32 sLoads = 0xFFFFFFFFu;
@@ -3920,7 +3920,9 @@ static s32 port_racer_lod_hold(s32 racer, s32 want, s32 v, const u8 *thresholds)
  * it comes closer, as the game's own distance swaps look. Matters at the 1- and 2-player distances (the 3-player row
  * equals the 4-player one). Blend 0 = exactly port_racer_lod_hold on the usual distances.
  */
-static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 boostRow) {
+/* row: the kart's layout row in the ROM table (boostRow bytes on is the 4-player row); thrs: the thresholds the
+ * choice used (row as s16, or scaled by DKR_RACER_LOD_FAR, which passes boostRow 0). */
+static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, const s16 *thrs, s32 boostRow) {
     extern s32 gPortRacerLodBlend;
     extern unsigned int gPortLevelLoads;
     static s8 sPrevModelByView[4][8];
@@ -3931,7 +3933,7 @@ static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 b
     s8 *sPrevModel = sPrevModelByView[view];
     s16 *sPrevDist = sPrevDistByView[view];
     u32 sValid;
-    u8 thr[5];
+    s16 thr[5];
     s32 blend = gPortRacerLodBlend;
     s32 target = usual, result, prev, lo, hi, d, k;
 
@@ -3944,14 +3946,14 @@ static s32 port_racer_lod_ease(s32 racer, s32 usual, s32 v, const u8 *row, s32 b
         if (racer >= 0 && racer < 8) {
             sValidByView[view] &= ~(1u << racer);
         }
-        return port_racer_lod_hold(racer, usual, v, row);
+        return port_racer_lod_hold(racer, usual, v, thrs);
     }
     d = v >> 1;
     if (d < 0) {
         d = 0;
     }
     for (k = 0; k < 5; k++) {
-        thr[k] = (u8) (row[k] + ((((s32) row[boostRow + k] - (s32) row[k]) * blend) >> 8));
+        thr[k] = (s16) (u8) (row[k] + ((((s32) row[boostRow + k] - (s32) row[k]) * blend) >> 8));
     }
     for (target = 0; target < 5; target++) {
         if (d < thr[target]) {
@@ -3991,6 +3993,8 @@ void set_temp_model_transforms(Object *obj) {
     u8 *racerBaseAsset = NULL; // Non-NULL for another racer's kart (port_racer_lod_hold)
     s32 portRawV = 0;
     s32 lodBoostRow = 0;
+    s32 lodFar = 0; // DKR_RACER_LOD_FAR scale for another racer's kart (1 player only), 0 = the game's thresholds
+    s16 portThr[5];
 #endif
     Object_Racer *objRacer;
     f32 ret1;
@@ -4033,6 +4037,21 @@ void set_temp_model_transforms(Object *obj) {
                         s32 lodLayout = cam_get_viewport_layout();
                         if (get_current_viewport() != objRacer->playerIndex) {
                             s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
+                            /*
+                             * DKR_RACER_LOD_FAR=n (default 0 = the distances above; bug report #548): on an Old 3DS
+                             * the 3-player row puts other karts on model 3 at best, model 4 past 384 units and the
+                             * 14-triangle model 5 past 544, a visible swap as the camera closes in. n > 0 (1 player
+                             * only) uses the 1-player row with every threshold times n (4: model 1 to 1280 units, 2 to
+                             * 2240, 3 to 4160, 4 to 5760; 255: always model 1, never model 0, as on the N64) and no
+                             * adaptive boost, so a slow patch can't bring the swaps back. Hold and smoothing work on
+                             * the scaled thresholds. Bench rows n = 4 and 255 (Old 3DS list, port_autorun.c).
+                             */
+                            if (lodLayout == 0) {
+                                lodFar = plat_switch("DKR_RACER_LOD_FAR", 0);
+                                if (lodFar > 0) {
+                                    bias = 0; // The 1-player row, scaled below (DKR_RACER_LOD_FAR)
+                                }
+                            }
                             {
                                 extern s32 gPortRacerLodBoost;
                                 racerBaseAsset = bossAsset; // Marks another racer's kart for port_racer_lod_hold
@@ -4043,7 +4062,7 @@ void set_temp_model_transforms(Object *obj) {
                             }
                             // The frame rate is dropping: towards the 4-player row of the same table (10 bytes a
                             // layout), eased by gPortRacerLodBlend (src/thread3_main.c, port_racer_lod_ease).
-                            lodBoostRow = (lodLayout < 3) ? (3 - lodLayout) * 10 : 0;
+                            lodBoostRow = (lodLayout < 3 && lodFar <= 0) ? (3 - lodLayout) * 10 : 0;
                         }
                         bossAsset += lodLayout * 10;
                     }
@@ -4053,6 +4072,23 @@ void set_temp_model_transforms(Object *obj) {
                     if (get_current_viewport() != objRacer->playerIndex) {
                         bossAsset += 5;
                     }
+#ifdef TARGET_PORT
+                    {
+                        s32 k;
+                        for (k = 0; k < 5; k++) {
+                            s32 t = bossAsset[k];
+                            if (lodFar >= 255) {
+                                t = (t > 0) ? 32767 : 0; // Always the best model the table allows (model 1)
+                            } else if (lodFar > 0) {
+                                t *= lodFar;
+                                if (t > 32767) {
+                                    t = 32767;
+                                }
+                            }
+                            portThr[k] = (s16) t;
+                        }
+                    }
+#endif
                     var_f0 = obj->distanceToCamera;
                     var_v1 = (s32) var_f0 >> 3;
                     if (obj->distanceToCamera < 0.0f) {
@@ -4076,23 +4112,30 @@ void set_temp_model_transforms(Object *obj) {
                             var_v1 = 0;
                         }
 
-                        if (var_v1 < bossAsset[0]) {
+#ifdef TARGET_PORT
+#define LOD_THR(k) portThr[k]
+#else
+#define LOD_THR(k) bossAsset[k]
+#endif
+                        if (var_v1 < LOD_THR(0)) {
                             modelIndex = 0;
-                        } else if (var_v1 < bossAsset[1]) {
+                        } else if (var_v1 < LOD_THR(1)) {
                             modelIndex = 1;
-                        } else if (var_v1 < bossAsset[2]) {
+                        } else if (var_v1 < LOD_THR(2)) {
                             modelIndex = 2;
-                        } else if (var_v1 < bossAsset[3]) {
+                        } else if (var_v1 < LOD_THR(3)) {
                             modelIndex = 3;
-                        } else if (var_v1 < bossAsset[4]) {
+                        } else if (var_v1 < LOD_THR(4)) {
                             modelIndex = 4;
                         } else {
                             modelIndex = 5;
                         }
+#undef LOD_THR
                     }
 #ifdef TARGET_PORT
                     if (racerBaseAsset != NULL) { // Another racer's kart (DKR_RACER_LOD_HOLD)
-                        modelIndex = port_racer_lod_ease(objRacer->racerIndex, modelIndex, portRawV, bossAsset, lodBoostRow);
+                        modelIndex = port_racer_lod_ease(objRacer->racerIndex, modelIndex, portRawV, bossAsset, portThr,
+                                                         lodBoostRow);
                     }
 #endif
                 }
