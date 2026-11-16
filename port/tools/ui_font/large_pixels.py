@@ -65,11 +65,13 @@ def numerals(W, H, s=3, t=2, cr=1, face=None, bar4=None, slant=False):
     # 9
     c = blank(); fill(c, 0, t, 0, W); fill(c, 0, M + t, 0, s); fill(c, M, M + t, 0, W); fill(c, 0, H, R, W); fill(c, B, H, 0, W)
     corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (M + t - 1, 0, 'bl'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['9'] = c
+    # the 3 round in every set (a flat-topped one read as a mirrored E): corners clipped as the 2's and 5's, a hook
+    # under the top and over the foot on the left, a middle bar joining the right side with a notch outside it
+    c = blank(); fill(c, 0, t, 0, W); fill(c, B, H, 0, W); fill(c, 0, M, R, W); fill(c, M + t, H, R, W)
+    fill(c, t, t + max(1, t // 2), 0, s); fill(c, B - max(1, t // 2), B, 0, s)
+    fill(c, M, M + t, (W - s) // 2, W - 1)
+    corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['3'] = c
     if slant:
-        c = blank(); fill(c, 0, t, 0, W); fill(c, B, H, 0, W); fill(c, 0, M, R, W); fill(c, M + t, H, R, W)
-        fill(c, t, t + max(1, t // 2), 0, s); fill(c, B - max(1, t // 2), B, 0, s)
-        fill(c, M, M + t, (W - s) // 2, W - 1)
-        corners(c, [(0, 0, 'tl'), (0, W - 1, 'tr'), (H - 1, 0, 'bl'), (H - 1, W - 1, 'br')]); G['3'] = c
         c = G['5']; corners(c, [(M, W - 1, 'tr')])
         c = G['6']; fill(c, t, t + max(1, t // 2), R, W)
         c = G['9']; fill(c, B - max(1, t // 2), B, 0, s)
