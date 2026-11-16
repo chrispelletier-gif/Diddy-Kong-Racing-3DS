@@ -20,6 +20,7 @@ from collections import defaultdict
 STAGES = [
     ("logic_ms", "logic"),
     ("scene_ms", "scene"),
+    ("shared_core_ms", "renderer on game core"),
     ("rdp_ms", "rdp"),
     ("texture_ms", "tex"),
     ("gpu_draw_ms", "gpu"),

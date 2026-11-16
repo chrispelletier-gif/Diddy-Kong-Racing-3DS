@@ -20,7 +20,7 @@ extern "C" {
 #endif
 
 #define REC_MAGIC 0x52524B44 /* "DKRR" */
-#define REC_VERSION 1
+#define REC_VERSION 2 /* 2: RecFrame.sharedUs */
 #define REC_FRAMES 1024
 #define REC_EVENTS 512
 #define REC_EVENT_TEXT 100
@@ -43,6 +43,8 @@ typedef struct RecFrame {
     unsigned short draws, texDecodes, soundGaps, flags;
     signed char rate, mode, level, menu;
     unsigned char paused, racing, lap, checkpoint;
+    unsigned int sharedUs; /* Other threads' time on the game's core while it built the frame (Old 3DS: the renderer's
+                            * walk), out of logicUs and sceneUs (DKR_PROF_SHARED_CORE; 0 when off). */
 } RecFrame;
 
 typedef struct RecEvent {
