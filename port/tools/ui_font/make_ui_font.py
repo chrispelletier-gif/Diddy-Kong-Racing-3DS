@@ -673,9 +673,10 @@ def main():
             # the large numbers (lap counter, counts) drawn by hand at the size the font drew them (STYLE
             # "lgdraw=W/H/STEM/BAR/CORNER": see large_pixels.py), standing on the baseline; the times sign centred on them
             import large_pixels as _lp
-            lw, lh, ls, lt, lc = (int(v) for v in style.split("lgdraw=")[1].split("/"))
+            lp = style.split("lgdraw=")[1].split("/")
+            lw, lh, ls, lt, lc = (int(v) for v in lp[:5])
             prows = lg_rows = lh
-            for k, rows in _lp.numerals(lw, lh, ls, lt, lc).items():
+            for k, rows in _lp.numerals(lw, lh, ls, lt, lc, lp[5] if len(lp) > 5 else None).items():
                 design[k] = (0 if k != "×" else (lh - len(rows)) // 2, rows)
         def designed(ch):
             # (the proportional figures and the minus are the same drawings)
