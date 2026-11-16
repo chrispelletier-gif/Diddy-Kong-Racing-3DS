@@ -1107,10 +1107,14 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
             int k, gl, gr, t, dl, dr;
             gl = ui_ink_gap(u, a, lx[i - 1], lp[i - 1], '/', lx[i], lp[i]);
             gr = ui_ink_gap(u, '/', lx[i], lp[i], b, lx[i + 1], lp[i + 1]);
-            if (gl > 64 || gr > 64 || gl == gr) {
+            if (gl > 64 || gr > 64) {
                 continue;
             }
             t = gl > gr ? gl : gr;
+            t = t < 2 ? 2 : t; /* 2 clear columns at least, so every fraction in a look is spaced alike ("2/3", "3/3", "7/10") */
+            if (gl == t && gr == t) {
+                continue;
+            }
             dl = t - gl, dr = t - gr;
             for (k = i; k < n; k++) {
                 lx[k] += dl + (k > i ? dr : 0);
