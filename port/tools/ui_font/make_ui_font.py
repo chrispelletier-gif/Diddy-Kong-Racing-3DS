@@ -566,7 +566,7 @@ def main():
         global ZONES, HFACE, HFIX, HCAP
         ZONES = None
         HFACE, HFIX, HCAP = None, "", 0
-        if not style.startswith(("outline", "draw=")):
+        if not style.startswith(("outline", "draw=", "lgdraw=")):
             big = ImageFont.truetype(path, font.size * OVER)
             if variation:
                 big.set_variation_by_name(variation.encode())
@@ -650,7 +650,7 @@ def main():
         digit_adv = max(font.getlength(d, features=feats) for d in "0123456789")
         # crisp: whole pixels, set by ink (Classic, outlined; the drawn sets of the other looks, not outlined)
         outlined = style.startswith("outline")
-        crisp = outlined or style.startswith("draw=")
+        crisp = outlined or style.startswith(("draw=", "lgdraw="))
         # Classic's own lettering drawn by hand (STYLE "outline+pix8" or "outline+pix9": see classic_pixels.py); the
         # font file is then only for the few marks not drawn
         design = {}
@@ -662,12 +662,21 @@ def main():
             g_asc, g_x, g_d = int(g_asc), int(g_x), int(g_d)
             prows = 8 + g_asc + g_x
             for k, gl in _dp.FACES[face].items():
-                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d)
+                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d, face)
         if "+pix" in style:
             import classic_pixels as _cp
             prows = int(style.split("+pix")[1])
             for k, gl in _cp.GLYPHS.items():
                 design[k] = gl if prows == _cp.CAP else _cp.head(gl)
+        lg_rows = 0
+        if "lgdraw=" in style:
+            # the large numbers (lap counter, counts) drawn by hand at the size the font drew them (STYLE
+            # "lgdraw=W/H/STEM/BAR/CORNER": see large_pixels.py), standing on the baseline; the times sign centred on them
+            import large_pixels as _lp
+            lw, lh, ls, lt, lc = (int(v) for v in style.split("lgdraw=")[1].split("/"))
+            prows = lg_rows = lh
+            for k, rows in _lp.numerals(lw, lh, ls, lt, lc).items():
+                design[k] = (0 if k != "×" else (lh - len(rows)) // 2, rows)
         def designed(ch):
             # (the proportional figures and the minus are the same drawings)
             return design.get(ch)
@@ -696,6 +705,10 @@ def main():
                     pix, w, h = times_pix()
                     x0, adv = 1, w + 2  # 1 px clear of the digit each side, as a word space is not
                 y0 = times_y(h, y0)
+                if dg is not None and designed("0") is not None:
+                    # a drawn sign: centred on the drawn figures, to the row
+                    zt, zr = designed("0")
+                    y0 = zt - prows + (len(zr) - h) // 2
             elif ch == "+":
                 x0 += pshift
             if tabular(code) and abs(adv - digit_adv) > 0.01:
