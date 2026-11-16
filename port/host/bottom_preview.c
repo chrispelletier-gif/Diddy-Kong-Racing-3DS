@@ -365,6 +365,13 @@ void host_bottom_preview(const char *dir) {
     }
     save(dir, "6_busy");
     {
+        /* the update installed: the panel says so, the one button closes the game to finish it */
+        static const char *const sDone[1] = { "Quit" };
+        bs_set_panel_text(port_text("Update installed: quit to finish it"));
+        bs_set_buttons(sDone, 1);
+    }
+    save(dir, "6b_installed");
+    {
         static const char *const sConfirm[3] = { "Stop test", "-", "cancel" };
         bs_set_buttons(sConfirm, 3);
     }
