@@ -77,7 +77,7 @@ GLASS = {
     "0": _g(0, ".####.", "##..##", "##..##", "##..##", "##..##", "##..##", "##..##", ".####."),
     "1": _g(0, "..##..", ".###..", "####..", "..##..", "..##..", "..##..", "..##..", "######"),
     "2": _g(0, ".####.", "##..##", "....##", "...##.", "..##..", ".##...", "##....", "######"),
-    "3": _g(0, "#####.", "....##", "....##", ".####.", "....##", "....##", "....##", "#####."),
+    "3": _g(0, ".####.", "##..##", "....##", "..###.", "....##", "....##", "##..##", ".####."),  # (round: a flat one read as a mirrored E)
     "4": _g(0, "...##.", "..###.", ".####.", "##.##.", "######", "...##.", "...##.", "...##."),
     "5": _g(0, "######", "##....", "##....", "#####.", "....##", "....##", "##..##", ".####."),
     "6": _g(0, ".####.", "##....", "##....", "#####.", "##..##", "##..##", "##..##", ".####."),
@@ -116,6 +116,14 @@ BARLOW.update({
     "W": _g(0, "##...##", "##...##", "##...##", "##...##", "##.#.##", "##.#.##", "#######", ".##.##."),
     "X": _g(0, "##..##", "##..##", ".####.", "..##..", "..##..", ".####.", "##..##", "##..##"),
     "/": _g(0, "..##", "..##", "..##", ".##.", ".##.", "##..", "##..", "##.."),
+    # figures in Barlow's own shapes (as its large ones): a 1 with no foot, round-topped 3, 6 and 9, a 7 slanting to the baseline
+    "1": _g(0, "...##.", ".####.", "##.##.", "...##.", "...##.", "...##.", "...##.", "...##."),
+    "3": _g(0, ".####.", "##..##", "....##", "..###.", "....##", "....##", "##..##", ".####."),
+    "6": _g(0, ".####.", "##..##", "##....", "#####.", "##..##", "##..##", "##..##", ".####."),
+    "7": _g(0, "######", "....##", "...##.", "...##.", "..##..", "..##..", ".##...", ".##..."),
+    "9": _g(0, ".####.", "##..##", "##..##", "##..##", ".#####", "....##", "##..##", ".####."),
+    # the times sign ("4x", "x3"): two strokes crossing in a square the figures' width, centred on them
+    "×": _g(2, "##..##", ".####.", "..##..", "..##..", ".####.", "##..##"),
     "m": _g(2, "######.", "##.#.##", "##.#.##", "##.#.##", "##.#.##", "##.#.##"),
     "w": _g(2, "##...##", "##...##", "##.#.##", "##.#.##", "#######", ".##.##."),
 })
@@ -147,9 +155,23 @@ CAPS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?/%'\"()")
 OWN_REP = {"%": {0: (), 2: (1, 6), 4: (1, 2, 6, 6)}, "x": {0: (), 2: (3, 6)}, ":": {0: (), 2: (4, 5)}, ";": {0: (), 2: (4, 5)}}
 
 
-def grow(ch, glyph, asc, x, d):
+# rows a face grows its own way: Barlow's 4 about its diagonal, so its bar stays low (three rows of stem below it, not
+# four: the stem read long); its 7 so its slant steps evenly to the baseline; its times sign keeps its size
+FACE_REP = {"barlow": {"1": {0: (), 2: (4, 6), 4: (3, 4, 5, 6)}, "4": {0: (), 2: (1, 3), 4: (1, 2, 3, 6)}, "7": {0: (), 2: (1, 7), 4: (1, 3, 5, 7)},
+                       "×": {0: (), 2: ()}}}
+
+
+def grow(ch, glyph, asc, x, d, face=None):
     """The glyph at a size asc rows taller above the x-height, x rows taller in it and d rows longer below it."""
     top, rows = glyph
+    own = FACE_REP.get(face, {}).get(ch)
+    if own is not None:
+        reps = list(own[asc + x] if ch in CAPS else own[x])
+        out = []
+        for i, r in enumerate(rows):
+            out.append(r)
+            out.extend([r] * reps.count(top + i))
+        return (top, out)
     if ch in CAPS:
         reps = list(OWN_REP.get(ch, CAP_REP)[asc + x])  # (a capital's few rows below the baseline don't grow)
         above = 0  # (a capital starts on row 0: its rows grow, its top stays)

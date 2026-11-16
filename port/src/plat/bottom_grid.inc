@@ -1795,11 +1795,12 @@ static void gformat_time(int frames, char *out, int size) {
     snprintf(out, size, "%02d'%02d\"%02d", minutes % 100, seconds, hundredths); /* the game's own 00'31"00 */
 }
 
-/* The place ("3" with "RD" raised to the digit's top), centred in the box. */
+/* The place ("3" with "RD" raised to the digit's top), centred in the box: 4 clear columns from the figure's ink box to the
+ * suffix's (at 2 and 3 the 3's right side read as touching the R) */
 static void gplace(const RaceHud *hud, int x0, int y0, int x1, int y1) {
     static const char *const sSuffix[4] = { "ST", "ND", "RD", "TH" };
     char digit[4];
-    int top, h, stop, sh, wD, wS, x, y, gap = 2;
+    int top, h, stop, sh, wD, wS, x, y, gap = 4;
     Ink kd, ks;
     if (hud->position < 1 || hud->position > 8) {
         return;
@@ -3244,8 +3245,9 @@ static void gchallenge(const RaceHud *hud) {
             gbox(x0, y0 + 2, x1, y1 - 2, SK_LIT);
         }
         if (gbroadcast()) {
-            /* clear of the lit slab's stripe (the same inset on every row, so they line up) */
-            x0 += 8;
+            /* clear of the lit slab's stripe (the same inset on every row, so they line up; 7, so "7/10" with its
+               slash spaced box to box keeps 2 px inside the lit slab) */
+            x0 += 7;
         }
         by = y0 + (rh - (18 + 6 + 6)) / 2;
         gportrait(r, x0 + 4, by + 1, x0 + 20, by + 17);

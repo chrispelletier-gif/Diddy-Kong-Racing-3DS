@@ -422,7 +422,7 @@ static void preview_race(const char *dir) {
         hud.racers[i].player = i == 2;
         hud.racers[i].gap = i == 2 ? RACE_HUD_NO_GAP : sGaps[i];
     }
-    hud.position = 3;
+    hud.position = getenv("DKR_PREVIEW_POS") != NULL ? atoi(getenv("DKR_PREVIEW_POS")) : 3; /* (host: a sheet of every place) */
     hud.lap = 2;
     hud.laps = 3;
     /* (every time a multiple of 3 frames, so the hundredths add up exactly) lap 2 under way: lap 1 done in 31.00, lap 2 running for 18.75 (the last timed lap is the one being driven) */

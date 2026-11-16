@@ -509,7 +509,7 @@ def tabular(code):
     typeset with the minus sit where the digits will)."""
     return chr(code).isdigit() or code == 0x80 or code == 0x7F
 
-def centre_marks(glyphs, data, crisp, phases):
+def centre_marks(glyphs, data, crisp, phases, drawn_x=False):
     """The multiplication and minus signs centred on the digits' height (fonts put them on the maths axis, a pixel or
     two above the middle of a figure: "4x" read as a raised mark). Outlined fonts (Classic) get a drawn x: two crisp
     diagonals, as the font's own is a soft blob at these sizes."""
@@ -525,6 +525,8 @@ def centre_marks(glyphs, data, crisp, phases):
             a64, x0, y, w, h, off = glyphs[idx]
             if not a64 or not w:
                 continue
+            if drawn_x and code == 0x7F:
+                continue  # (a face's own drawn x, already centred on its drawn figures)
             if crisp and code == 0x7F:
                 n = max(5, int(round(len(rows) * 0.55)))
                 # the same parity as the digits' ink rows, so the x sits exactly on their middle (not half a pixel high)
@@ -566,7 +568,7 @@ def main():
         global ZONES, HFACE, HFIX, HCAP
         ZONES = None
         HFACE, HFIX, HCAP = None, "", 0
-        if not style.startswith(("outline", "draw=")):
+        if not style.startswith(("outline", "draw=", "lgdraw=")):
             big = ImageFont.truetype(path, font.size * OVER)
             if variation:
                 big.set_variation_by_name(variation.encode())
@@ -650,7 +652,7 @@ def main():
         digit_adv = max(font.getlength(d, features=feats) for d in "0123456789")
         # crisp: whole pixels, set by ink (Classic, outlined; the drawn sets of the other looks, not outlined)
         outlined = style.startswith("outline")
-        crisp = outlined or style.startswith("draw=")
+        crisp = outlined or style.startswith(("draw=", "lgdraw="))
         # Classic's own lettering drawn by hand (STYLE "outline+pix8" or "outline+pix9": see classic_pixels.py); the
         # font file is then only for the few marks not drawn
         design = {}
@@ -662,12 +664,23 @@ def main():
             g_asc, g_x, g_d = int(g_asc), int(g_x), int(g_d)
             prows = 8 + g_asc + g_x
             for k, gl in _dp.FACES[face].items():
-                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d)
+                design[k] = _dp.grow(k, gl, g_asc, g_x, g_d, face)
         if "+pix" in style:
             import classic_pixels as _cp
             prows = int(style.split("+pix")[1])
             for k, gl in _cp.GLYPHS.items():
                 design[k] = gl if prows == _cp.CAP else _cp.head(gl)
+        lg_rows = 0
+        if "lgdraw=" in style:
+            # the large numbers (lap counter, counts) drawn by hand at the size the font drew them (STYLE
+            # "lgdraw=W/H/STEM/BAR/CORNER[/FACE[/slant]]": see large_pixels.py), standing on the baseline; the times sign centred on them
+            import large_pixels as _lp
+            lp = style.split("lgdraw=")[1].split("/")
+            lw, lh, ls, lt, lc = (int(v) for v in lp[:5])
+            prows = lg_rows = lh
+            for k, rows in _lp.numerals(lw, lh, ls, lt, lc, (lp[5] if len(lp) > 5 else None) or None,
+                                         slant=len(lp) > 6 and lp[6] == "slant").items():
+                design[k] = (0 if k != "×" else (lh - len(rows)) // 2, rows)
         def designed(ch):
             # (the proportional figures and the minus are the same drawings)
             return design.get(ch)
@@ -696,6 +709,10 @@ def main():
                     pix, w, h = times_pix()
                     x0, adv = 1, w + 2  # 1 px clear of the digit each side, as a word space is not
                 y0 = times_y(h, y0)
+                if dg is not None and designed("0") is not None:
+                    # a drawn sign: centred on the drawn figures, to the row
+                    zt, zr = designed("0")
+                    y0 = zt - prows + (len(zr) - h) // 2
             elif ch == "+":
                 x0 += pshift
             if tabular(code) and abs(adv - digit_adv) > 0.01:
@@ -842,7 +859,7 @@ def main():
                 k64 = int(round(k * 64))
                 if abs(k64) >= 8:
                     kerns.append((a, b, k64))
-        centre_marks(glyphs, data, crisp, phases)
+        centre_marks(glyphs, data, crisp, phases, designed("×") is not None)
         # a capital alone in a key cap or chip (A, B, X) is centred to the pixel: its ink is an even or odd number of
         # columns as its cap's room is, and a column of caps holds letters of both kinds. Two more sets follow the pen
         # phases' glyphs, at the whole pixel (zeros: none). The first: the key cap letters (KEYCAP) in their wide form,
@@ -952,12 +969,25 @@ def main():
         gt, g0 = glyphs[0x7F - 0x21], glyphs[ord("0") - 0x21]
         if gt[0] and gt[3] and g0[3]:
             if crisp:
-                r = right_edge(gt, 0.3)
+                # 2 clear columns between the x's last inked column and the figure's first, for every figure (any
+                # rows: a figure's bar never reaches over the x, "x3" would read as one mark), as the slash of a fraction
+                def row_ink(g, right):
+                    a64, x0, y, w, h, off = g
+                    out = {}
+                    for j in range(h):
+                        cols = [i for i in range(w) if data[off + j * w + i] >= 112]
+                        if cols:
+                            out[y + j] = x0 + (max(cols) if right else min(cols))
+                    return out
+                tr = row_ink(gt, True)
                 for d in "0123456789":
                     gd = glyphs[ord(d) - 0x21]
                     if gd[3]:
-                        k = (r + 4 - gt[0] / 64.0 - left_edge(gd, 0.3)) * 64
-                        k64 = int(round((gt[0] + k) / 64.0)) * 64 - gt[0]
+                        dl = row_ink(gd, False)
+                        if not dl:
+                            continue
+                        want = 2 - (min(dl.values()) - max(tr.values()) - 1)  # (both at the same pen)
+                        k64 = want * 64 - gt[0]
                         if k64:
                             kerns.append((0x7F, ord(d), k64))
             else:

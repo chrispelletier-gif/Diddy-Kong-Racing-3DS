@@ -1022,8 +1022,8 @@ static int ui_is_fig(unsigned char c) {
 }
 
 /*
- * The clear columns between two glyphs drawn at x (whole pixels, their quarter ph), where their inks come nearest:
- * on the same row, or one row apart (corners meeting diagonally).
+ * The clear columns between two glyphs drawn at x (whole pixels, their quarter ph), where their inks come nearest on
+ * the same row (as the eye measures a slash's gap: "2/3" reads with the 2's foot and the 3's shoulder equally far off).
  */
 static int sUiNoShadow; /* outlined text without its drop shadow (small tab names, the racer's own lit row) */
 static int ui_ink_gap(const UiFont *u, unsigned char a, int xa, int pa, unsigned char b, int xb, int pb) {
@@ -1061,15 +1061,16 @@ static int ui_ink_gap(const UiFont *u, unsigned char a, int xa, int pa, unsigned
             }
         }
     }
-    for (r = 0; r < 64; r++) {
-        int d;
-        if (ra[r] < -(1 << 19)) {
-            continue;
+    {
+        /* the gap between the two inks' boxes: the first's rightmost solid column to the second's leftmost, whatever
+           rows they are on (as owner rule 25 measures a slash's gaps, ink to ink on both sides) */
+        int right = -(1 << 20), left = 1 << 20;
+        for (r = 0; r < 64; r++) {
+            right = ra[r] > right ? ra[r] : right;
+            left = lb[r] < left ? lb[r] : left;
         }
-        for (d = -1; d <= 1; d++) {
-            if (r + d >= 0 && r + d < 64 && lb[r + d] < (1 << 19) && lb[r + d] - ra[r] - 1 < best) {
-                best = lb[r + d] - ra[r] - 1;
-            }
+        if (right > -(1 << 19) && left < (1 << 19)) {
+            best = left - right - 1;
         }
     }
     return best;
@@ -1098,7 +1099,7 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
     n = i;
     /*
      * a fraction ("2/3" laps, "9/10" bananas): the slash exactly as far from the figure before it as from the one
-     * after it (where their inks come nearest), the nearer side opened by whole pixels, never closed
+     * after it (box to box: the clear columns between their inks), the nearer side opened by whole pixels, never closed
      */
     for (i = 1; i + 1 < n; i++) {
         unsigned char a = (unsigned char) s[i - 1], b = (unsigned char) s[i + 1];
@@ -1106,10 +1107,14 @@ static int ui_layout_ph(const UiFont *u, const char *s, int *xs, int *ph) {
             int k, gl, gr, t, dl, dr;
             gl = ui_ink_gap(u, a, lx[i - 1], lp[i - 1], '/', lx[i], lp[i]);
             gr = ui_ink_gap(u, '/', lx[i], lp[i], b, lx[i + 1], lp[i + 1]);
-            if (gl > 64 || gr > 64 || gl == gr) {
+            if (gl > 64 || gr > 64) {
                 continue;
             }
             t = gl > gr ? gl : gr;
+            t = t < 2 ? 2 : t; /* 2 clear columns at least, so every fraction in a look is spaced alike ("2/3", "3/3", "7/10") */
+            if (gl == t && gr == t) {
+                continue;
+            }
             dl = t - gl, dr = t - gr;
             for (k = i; k < n; k++) {
                 lx[k] += dl + (k > i ? dr : 0);
