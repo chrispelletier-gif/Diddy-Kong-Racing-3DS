@@ -385,7 +385,11 @@ freeze it and the page, to read them.
 The pages are set in a small fixed-width terminal font (5x7 glyphs in 6x9 cells, 47 columns by 14 lines), which fits
 them on three pages: PROFILER (the whole readout and the graph's key in the bars' colours), DRAW KINDS (every kind
 drawn, its waste columns included: `off`, `bck`, `tny` as per cent of its triangles and `over` in screens) and OBJECTS
-(the 12 costliest). `DKR_PROF_TERM=0` in `env.txt` goes back to the look's own fonts and the five pages above.
+(the 12 costliest). `DKR_PROF_TERM=0` in `env.txt` goes back to the look's own fonts and the five pages above. A
+line too long for the page wraps at a space onto the next row (indented by 2) rather than being cut, so a test run's
+status shows the bench row's whole name; when the page runs out of rows the graph's key gives way first. The host
+build checks this (`DKR_PROF_TERM_CHECK=1 port/build/host/dkr`, run by CI): every page, with the longest status of
+each kind of run, on both consoles' layouts, must fit with no line lost.
 
 With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
 the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's

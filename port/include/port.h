@@ -212,6 +212,8 @@ s32 port_apply_test_save(void *settings);
 s32 port_autorun_enabled(void);
 s32 port_autorun_active(void);
 s32 port_autorun_title(void);
+/* The longest status a test run can show on the profiler (port_profile.c prof_term_check) */
+int port_autorun_longest_status(int which, int sample, char *text, int size);
 s32 port_autorun_drives(void);
 s32 port_autorun_time_trial(void);
 s32 port_autorun_quit_race(void);

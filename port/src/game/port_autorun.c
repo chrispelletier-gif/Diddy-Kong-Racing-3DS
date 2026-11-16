@@ -1955,9 +1955,40 @@ __attribute__((weak)) void port_autorun_section_done(const char *section) {
 
 static s32 whole_ready(void);
 
+/*
+ * A test run's status as the profiler shows it: in the terminal font (DKR_PROF_TERM, port_profile.c term_fit) the
+ * mode line (race 12/40 is the progress: no bar), then the stop, the bench row's whole name and what is happening,
+ * wrapped to the page; in the readout's own font the three lines cut at 39 characters, with the progress bar.
+ */
+static void status_text(char *text, s32 size, const char *mode, s32 next, s32 count, s32 ok, s32 bad,
+                        const char *line1, const char *bar) {
+    char line0[96], cut[2][40];
+    s32 pct = count > 0 ? next * 100 / count : 0;
+    if (plat_switch("DKR_PROF_TERM", 1)) {
+        plat_snprintf(line0, sizeof(line0), "%s %d  race %d/%d  ok %d bad %d", mode, (int) sRun, (int) next + 1,
+                      (int) count, (int) ok, (int) bad);
+        plat_snprintf(text, size, "%s\n%s", line0, line1);
+        return;
+    }
+    plat_snprintf(line0, sizeof(line0), "%s %d  race %d/%d  ok %d bad %d", mode, (int) sRun, (int) next + 1,
+                  (int) count, (int) ok, (int) bad);
+    plat_snprintf(cut[0], sizeof(cut[0]), "%s", line0);
+    plat_snprintf(cut[1], sizeof(cut[1]), "%s", line1);
+    plat_snprintf(text, size, "%s\n%s\n%s\x1b[0m %3d%%", cut[0], cut[1], bar, (int) pct);
+}
+
+static const char *mode_name(void) {
+    return sMode == MODE_BENCH    ? "GPU BENCH"
+           : sMode == MODE_SWITCH ? (sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
+           : sMode == MODE_QUICK  ? "QUICK TEST"
+           : sMode == MODE_BOSS   ? "BOSS FIGHTS"
+           : sMode == MODE_WHOLE  ? (sShort ? "WHOLE GAME (SHORT)" : "WHOLE GAME")
+                                  : "TEST RUN";
+}
+
 static void show_status(void) {
-    char text[200];
-    char line[3][48];
+    char text[320];
+    char line1[192];
     char bar[160];
     Race *race = &sRaces[sNext < sNumRaces ? sNext : sNumRaces - 1];
     Object *obj = get_racer_object_by_port(PLAYER_ONE);
@@ -1995,21 +2026,11 @@ static void show_status(void) {
             what = (plat_time_ns() - sPhaseStartNs > 3000000000ULL) ? "(go to the title screen)" : "next";
             break;
     }
-    plat_snprintf(line[0], sizeof(line[0]), "%s %d  race %d/%d  ok %d bad %d",
-                  sMode == MODE_BENCH    ? "GPU BENCH"
-                  : sMode == MODE_SWITCH ? (sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
-                  : sMode == MODE_QUICK  ? "QUICK TEST"
-                  : sMode == MODE_BOSS  ? "BOSS FIGHTS"
-                  : sMode == MODE_WHOLE ? (sShort ? "WHOLE GAME (SHORT)" : "WHOLE GAME")
-                                        : "TEST RUN",
-                  (int) sRun,
-                  (int) sNext + 1, (int) sNumRaces, (int) sFinished, (int) sProblems);
     if (is_bench()) {
-        plat_snprintf(line[1], sizeof(line[1]), "%s, %s %s", stop_name(race), config_name(race->config),
-                      what);
+        plat_snprintf(line1, sizeof(line1), "%s, %s %s", stop_name(race), config_name(race->config), what);
     } else {
-        plat_snprintf(line[1], sizeof(line[1]), "%s %s %s %s", sCharacterNames[(s32) race->character],
-                      stop_name(race), sVehicleNames[(s32) race->vehicle], what);
+        plat_snprintf(line1, sizeof(line1), "%s %s %s %s", sCharacterNames[(s32) race->character], stop_name(race),
+                      sVehicleNames[(s32) race->vehicle], what);
     }
     // The progress bar: green for the races done, grey for the rest, with the percentage after it.
     filled = sNext * 32 / sNumRaces;
@@ -2021,10 +2042,72 @@ static void show_status(void) {
         bar[length++] = ' ';
     }
     bar[length] = '\0';
-    plat_snprintf(line[2], sizeof(line[2]), " %3d%%", (int) (sNext * 100 / sNumRaces));
-    line[0][39] = line[1][39] = '\0';
-    plat_snprintf(text, sizeof(text), "%s\n%s\n%s\x1b[0m%s", line[0], line[1], bar, line[2]);
+    status_text(text, (s32) sizeof(text), mode_name(), sNext, sNumRaces, sFinished, sProblems, line1, bar);
     prof_set_status(text);
+}
+
+/*
+ * The longest statuses a run can show (prof_term_check, on the PC), one for each kind of run (which = 0, 1, ...; returns
+ * 0 past the last): a bench with the longest row of its list, or a race run with the longest character, stop and
+ * vehicle, each with three-digit counts (or a run's usual ones with sample set), the longest stop name ("Snowflake Mountain coins") and the longest "what".
+ */
+static const char *longest_name(const char *a, const char *b) {
+    return strlen(b) > strlen(a) ? b : a;
+}
+
+int port_autorun_longest_status(int which, int sample, char *text, int size) {
+    static const char *const sWhat = "(go to the title screen)", *const sStop = "Snowflake Mountain coins";
+    const char *name = "", *mode;
+    char line1[192];
+    s32 savedRun = sRun, k;
+    switch (which) {
+        case 0:
+            mode = "SWITCH BENCH";
+            name = "all switches together (not the cost rows)";
+            for (k = 0; sSwitchesOld3ds[k].name != NULL; k++) {
+                name = longest_name(name, sSwitchesOld3ds[k].name);
+            }
+            for (k = 0; sSwitchesNew3ds[k].name != NULL; k++) {
+                name = longest_name(name, sSwitchesNew3ds[k].name);
+            }
+            break;
+        case 1:
+            mode = "SHELVED SWITCHES";
+            name = "all switches together (not the cost rows)";
+            for (k = 0; sSwitchesShelved[k].name != NULL; k++) {
+                name = longest_name(name, sSwitchesShelved[k].name);
+            }
+            break;
+        case 2:
+            mode = "GPU BENCH";
+            for (k = 0; k < BENCH_CONFIGS; k++) {
+                name = longest_name(name, sBenchConfigs[k].name);
+            }
+            break;
+        case 3:
+            mode = "WHOLE GAME (SHORT)";
+            break;
+        default:
+            return 0;
+    }
+    if (which < 3) {
+        plat_snprintf(line1, sizeof(line1), "%s, %s %s", sStop, name, sWhat);
+    } else {
+        const char *character = "", *vehicle = "";
+        for (k = 0; k < NUMBER_OF_CHARACTERS; k++) {
+            character = longest_name(character, sCharacterNames[k]);
+        }
+        for (k = 0; k < 3; k++) {
+            vehicle = longest_name(vehicle, sVehicleNames[k]);
+        }
+        plat_snprintf(line1, sizeof(line1), "%s %s %s %s", character, sStop, vehicle, sWhat);
+    }
+    /* sample: the counts of a run under way, for the PC's preview of the page (bottom_preview.c) */
+    sRun = sample ? 1 : 999;
+    status_text(text, (s32) size, mode, sample ? 11 : 998, sample ? 42 : 999, sample ? 11 : 999, sample ? 0 : 999,
+                line1, "\x1b[42m \x1b[47m ");
+    sRun = savedRun;
+    return 1;
 }
 
 /*
