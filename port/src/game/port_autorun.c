@@ -297,6 +297,15 @@ static const BenchSwitch sSwitchesNative[] = {
     // logic + scene with it off (within 0.3 ms), shared_core near rdp, scene about 5-7 ms. Drop both once confirmed.
     { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
     { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
+    // R5 (PR #545): the frame's record buffer goes straight from the frame queue to the renderer (DKR_FRAME_DIRECT), with
+    // no RSP task, osSpTaskStartGo or SP/DP events. 1: the renderer's thread as today (core 0, above the game). 2: the
+    // whole frame (dispatcher and GPU commands) on one thread on the system core (core 2 on a New 3DS), so core 0 runs
+    // only the game. Both set the same switch, so they race alone. One lap each to check (try HOME and sleep in them),
+    // then a race: watch scene, renderer, 1% low and late wakes.
+    { "frames straight to the renderer (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 1 },
+    { "frames straight to the renderer", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 0 },
+    { "whole frame on the system core, core 0 only the game (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 1 },
+    { "whole frame on the system core, core 0 only the game", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesOld3ds sSwitchesNative

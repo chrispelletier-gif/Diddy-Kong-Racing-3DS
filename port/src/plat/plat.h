@@ -56,6 +56,7 @@ enum PlatThreadKind {
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
     PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
     PLAT_THREAD_RCP2_SYS, /* The same on a New 3DS's system core (DKR_SPLIT_SYSCORE), below its services. */
+    PLAT_THREAD_RCP_SOLO, /* R5 (DKR_FRAME_DIRECT 2): the whole renderer on one thread, on the system core. */
 };
 
 void plat_init(void);
@@ -377,6 +378,9 @@ void plat_set_frame_step(int retraces);
 int plat_frame_step(void);
 /* The two-core renderer (gfx_split.c) going on or off: the system core's share it needs is held only while on. */
 void plat_split_render_cores(int on);
+/* R5 (DKR_FRAME_DIRECT 2): whether running the whole frame off the game's core needs a thread of its own
+ * (PLAT_THREAD_RCP_SOLO), because the renderer's usual thread shares the game's core (an Old 3DS). */
+int plat_frame_solo_thread(void);
 /* Applies DKR_SPLIT_BELOW_GAME to the two-core renderer's second thread when it shares the game's core. */
 void plat_split_backend_priority(void);
 /* Whether the renderer's second half can go on the system core instead (a New 3DS); raising/restoring its share

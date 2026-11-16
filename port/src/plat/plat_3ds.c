@@ -422,6 +422,14 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             core = 1;
             prio = PRIO_SYSCORE_AUDIO + 1;
             break;
+        case PLAT_THREAD_RCP_SOLO:
+            // R5: the frame's dispatcher and GPU commands together, where the two-core renderer's second thread
+            // goes (its share raised first by plat_split_render_cores), at that thread's priority: below the
+            // system's services there, so core 0 runs only the game.
+            stackSize = 128 * 1024;
+            core = 1;
+            prio = PRIO_SYSCORE_AUDIO + 1;
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
@@ -447,6 +455,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         if (kind == PLAT_THREAD_RCP2 || kind == PLAT_THREAD_RCP2_SYS) {
             prio = kind == PLAT_THREAD_RCP2_SYS ? split_backend_prio() : PRIO_RCP;
         }
+        if (kind == PLAT_THREAD_RCP_SOLO) {
+            prio = PRIO_RCP; // As the renderer's usual thread there
+        }
         core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
     }
@@ -464,6 +475,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
  */
 static int split_backend_prio(void) {
     return plat_switch("DKR_SPLIT_BELOW_GAME", 1) ? PRIO_GAME_LOWEST - 10 + 1 : PRIO_RCP;
+}
+
+int plat_frame_solo_thread(void) {
+    return sRcpCore == 0;
 }
 
 int plat_split_syscore_possible(void) {
