@@ -15,8 +15,8 @@ import csv
 import sys
 
 STAGES = ["logic_ms", "scene_ms", "render_wait_ms", "vsync_ms"]
-# shared_ms (newer recordings): the renderer's time on the game's core, out of logic_ms and scene_ms; counted with
-# the scene to find a frame's cause, as the recorder does (recorder.c rec_frame_cause).
+# shared_ms (newer recordings): the renderer's time on the game's core, out of logic_ms and scene_ms; its own
+# candidate, shown as the renderer (recorder.c rec_frame_cause with DKR_PROF_CORES on, the default since 2026-11-17).
 
 
 def number(row, key):
@@ -29,13 +29,13 @@ def number(row, key):
 def cause(row):
     """The biggest part of a frame's time, as the recorder's summary names it."""
     shared = number(row, "shared_ms")
-    stage = max(STAGES, key=lambda k: number(row, k) + (shared if k == "scene_ms" else 0))
+    stage = max(["logic_ms", "scene_ms", "shared_ms", "render_wait_ms", "vsync_ms"], key=lambda k: number(row, k))
     if stage == "logic_ms":
         return f"game logic {number(row, 'logic_ms'):.1f}"
     if stage == "scene_ms":
-        if shared > number(row, "scene_ms"):
-            return f"renderer on the game's core {shared:.1f} (scene {number(row, 'scene_ms'):.1f})"
         return f"game thread (scene, loads) {number(row, 'scene_ms'):.1f}"
+    if stage == "shared_ms":
+        return f"renderer on the game's core {shared:.1f} (scene {number(row, 'scene_ms'):.1f})"
     if stage == "vsync_ms":
         return f"retrace {number(row, 'vsync_ms'):.1f}"
     return (f"renderer wait {number(row, 'render_wait_ms'):.1f} (rdp {number(row, 'rdp_ms'):.1f}, "

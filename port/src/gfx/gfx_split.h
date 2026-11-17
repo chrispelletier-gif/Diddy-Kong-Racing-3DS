@@ -41,6 +41,9 @@ void gfx_split_set_hooks(void (*closeFn)(void), void (*keepFn)(void *));
 unsigned long long gfx_split_walk_waited_ns(void);
 /* The backend's busy time since start-up, in ns (never reset; the profiler's per-frame core times read its changes). */
 unsigned long long gfx_split_backend_busy_ns(void);
+/* P54 DKR_BACKEND_MIX: the backend's ms a timed frame by record type since this reader (0 the log, 1 the core window)
+ * last asked, as one line; returns its length (0: no frame timed). */
+int gfx_split_backend_mix(int reader, char *out, int size);
 void gfx_split_take_times(unsigned long long *walkWaitNs, unsigned long long *backendBusyNs,
                           unsigned int *backendFrames, unsigned int *backendWakes);
 
