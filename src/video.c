@@ -4,14 +4,9 @@
 #include "types.h"
 #ifdef TARGET_PORT
 #include "plat/plat.h"
-#ifdef TARGET_PORT
-#include "plat/plat.h"
-#ifdef PICA_ALL
 int port_frames_native(void);
 s32 port_frames_video_take(void);
 void port_frames_video_wait(void);
-#endif
-#endif
 #endif
 
 /************ .data ************/
@@ -311,11 +306,9 @@ s32 fb_update(s32 mesg) {
     if (mesg != MESG_SKIP_BUFFER_SWAP) {
         fb_swap();
     }
-#ifdef PICA_ALL
     if (port_frames_native()) {
         tempUpdateRate += port_frames_video_take(); // the retraces since the last look (port/src/os/frames.c)
     } else
-#endif
     while (osRecvMesg(gVideoMesgQueue, NULL, OS_MESG_NOBLOCK) != -1) {
         tempUpdateRate++;
     }
@@ -368,7 +361,6 @@ s32 fb_update(s32 mesg) {
         }
     }
 #endif
-#ifdef PICA_ALL
     if (port_frames_native()) {
         while (tempUpdateRate < gVideoDeltaTime) {
             port_frames_video_wait();
@@ -378,7 +370,6 @@ s32 fb_update(s32 mesg) {
         port_frames_video_wait();
         return tempUpdateRate;
     }
-#endif
     while (tempUpdateRate < gVideoDeltaTime) {
         osRecvMesg(gVideoMesgQueue, NULL, OS_MESG_BLOCK);
         tempUpdateRate++;

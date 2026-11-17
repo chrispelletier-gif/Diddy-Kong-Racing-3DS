@@ -126,9 +126,13 @@ void port_load_pick(s32 step);
 void port_load_menu_held(s32 held);
 void port_load_game_frame(s32 gameMode, s32 levelId);
 void port_gfx_run_task(void *task);
+/* R5: one frame from its record buffer; solo: on one thread with the two-core renderer's calls made directly. */
+void port_gfx_run_frame(const void *dl, int solo);
+/* R5 (DKR_FRAME_DIRECT): a frame's record buffer straight to a renderer thread (os_sp.c), direct 1 or 2. */
+void port_rcp_frame_start(const void *dl, s32 direct);
 void port_audio_run_task(void *task);
 /*
- * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one, roadmap O5).
+ * The rate the game's mixer runs at when it asks for requested (the player can choose a higher one).
  * Pitches and reverb lengths are scaled by gPortAudioRateScale (requested / chosen) to sound the same.
  */
 u32 port_audio_output_rate(u32 requested);
@@ -198,12 +202,24 @@ s32 port_gfx_frame_count(void);
 /* Texture pre-decoding (gfx_rdp.c): the game hands over each texture it loads and the memory of each one it frees. */
 void port_gfx_texture_loaded(const void *cmd, s32 numCommands);
 void port_gfx_texture_freed(const void *start, const void *end);
+/* R3: the texture queue's head as the game hands a frame over, and the renderer told it before that frame's walk,
+ * so a texture freed while the frame was built stays until the frame is drawn (gfx_rdp.c sTexFreeLater). */
+unsigned int port_gfx_texture_queue_head(void);
+void port_gfx_frame_textures(unsigned int head);
+/* P53 (DKR_LOAD_PREWARM): the textures queued so far decoded during a level load, on the renderer thread between
+ * frames (os_sp.c, gfx_rdp.c); drain also waits for the backend to upload them. */
+void port_rcp_textures_now(s32 drain);
+void port_gfx_textures_between_frames(int drain);
+/* P53: the race start's frames over the frame cap's period, and the longest (port_loadtime.c). */
+void port_race_start_stats(float *excessMs, float *worstMs);
 s32 port_apply_test_save(void *settings);
 
 /* Unattended test run (port/src/game/port_autorun.c). */
 s32 port_autorun_enabled(void);
 s32 port_autorun_active(void);
 s32 port_autorun_title(void);
+/* The longest status a test run can show on the profiler (port_profile.c prof_term_check) */
+int port_autorun_longest_status(int which, int sample, char *text, int size);
 s32 port_autorun_drives(void);
 s32 port_autorun_time_trial(void);
 s32 port_autorun_quit_race(void);
@@ -276,7 +292,7 @@ void port_setup_reset(void);
 void port_setup_restart(void);
 
 /*
- * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c, roadmap G9): port_race_hud_frame copies the
+ * The race HUD on the 3DS bottom screen (port/src/game/port_race_hud.c): port_race_hud_frame copies the
  * race's state for the bottom screen once a frame; port_race_hud_map takes the track map's sprite from minimap_init;
  * port_race_hud_hides says which HUD elements (HUD_*, or -1 for the track map) src/game_ui.c leaves off the top screen.
  */

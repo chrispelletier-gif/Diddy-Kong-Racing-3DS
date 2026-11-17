@@ -19,7 +19,9 @@ extern "C" {
 
 enum ProfStage {
     PROF_LOGIC,      /* Game thread: object updates (racers, AI, physics). */
-    PROF_SCENE,      /* Game thread: the rest of the frame, mostly building the display list. */
+    PROF_SCENE,      /* Game thread: the rest of the frame, mostly building the display list. With DKR_PROF_SHARED_CORE
+                      * (default on) only the game thread's own time: what other threads on its core took is
+                      * PROF_SHARED_CORE. */
     PROF_FRAME_WAIT, /* Game thread: waiting for the renderer to finish the previous frame. */
     PROF_VSYNC,      /* Game thread: waiting for the retrace that paces the frame rate. */
     PROF_RDP,        /* Renderer: display list interpretation and GPU command submission. */
@@ -30,6 +32,9 @@ enum ProfStage {
     PROF_GPU_FILL,   /* Within it, from the GPU timeline (3DS, gpu_cuts.inc): memory fills (the frame's clears), */
     PROF_GPU_LISTS,  /* the command lists (the draws) */
     PROF_GPU_COPY,   /* and copies (the picture to the screen). */
+    PROF_SHARED_CORE, /* Game thread: wall time other threads on its core took from it while it built the frame (Old
+                       * 3DS: the renderer's display list walk; DKR_PROF_SHARED_CORE). Taken out of PROF_LOGIC and
+                       * PROF_SCENE, so the game core's load is still logic + scene + this. */
     PROF_STAGE_COUNT
 };
 
@@ -133,8 +138,34 @@ void prof_window_read(int window, ProfStats *out);
 /* Which part of the system limits the frame rate, judged from a window's averages: "game CPU", "renderer CPU", "GPU". */
 const char *prof_limit(const ProfStats *stats);
 
+/*
+ * Each core's busy time per game frame, from prof_core_window_start (the uncapped switch bench rows, 2026-11-17): the
+ * game's core (its logic and scene and, on an Old 3DS, the display list walk), the renderer's core (an Old 3DS's
+ * system core running the two-core renderer's backend) and the GPU. The ceiling is the frame rate the longest of the
+ * three allows each frame, with no cap and no vsync: its average, its 1% low, and its share of frames that fit in one
+ * retrace (60 fps). limitPct: how often each part was the longest.
+ */
+enum ProfCore { PROF_CORE_GAME, PROF_CORE_RENDER, PROF_CORE_GPU, PROF_CORE_COUNT };
+typedef struct ProfCoreStats {
+    unsigned int frames;
+    double ms[PROF_CORE_COUNT];
+    int limitPct[PROF_CORE_COUNT];
+    double ceilingFps, ceilingLow1Fps;
+    int ceilingPct60;
+} ProfCoreStats;
+void prof_core_window_start(void);
+void prof_core_window_read(ProfCoreStats *out);
+/* The window's breakdown for cutting core time, as one line: the game core's sections (and the walk and sound inside
+ * each), the walk's parts and the draws' parts (each only when timed: DKR_WALK_PARTS, DKR_DRAW_PARTS). */
+int prof_core_breakdown(char *out, int size);
+
 /* Extra text shown under the profiler on the bottom screen (the unattended run's progress). NULL clears it. */
 void prof_set_status(const char *text);
+
+/* The PC's check that every page of the terminal-font readout fits its 47 columns and 14 lines: 0 when it does. */
+int prof_term_check(char *report, int size);
+/* The PC preview's PROFILER page in the terminal font, for a New 3DS or an Old 3DS (renderer on the game's core). */
+void prof_term_preview(int oldLayout, char *out, int size);
 
 /*
  * A player's build has no profiler (port_profile.c is left out of RELEASE=1): it is never on, and the calls compile
@@ -167,8 +198,6 @@ void prof_set_status(const char *text);
 /* The texture atlas's counts since the last call (commands drawn from a page, textures placed, sets reset); whether
  * it is on. */
 int gfx_atlas_take(unsigned long out[3]);
-/* v39 shared corners (DKR_WELD): the backend's vertices taken from its table and worked out since the last call. */
-int gfx_weld_take(unsigned long out[2]);
 /* The commands and triangles DKR_WALK_REJECT dropped since the last call (gfx_rdp.c). */
 void gfx_walk_reject_take(unsigned long *commands, unsigned long *tris);
 /* Model batches drawn by the native mesh path (NR1) and tags it left to the walk, since the last call. */

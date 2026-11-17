@@ -1,6 +1,6 @@
 #ifndef PORT_PLAT_H
 #define PORT_PLAT_H
-/* Everything on the PICA200 (the native renderer's switches and code; on master since PR #468). */
+/* Everything on the PICA200 (the native renderer's switches and code). Always on. */
 #define PICA_ALL 1
 
 /*
@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 /*
- * Code layout for the Old 3DS's 16 KB instruction cache (roadmap O9). The renderer's per-draw functions are PLAT_HOT:
+ * Code layout for the Old 3DS's 16 KB instruction cache. The renderer's per-draw functions are PLAT_HOT:
  * on ARM they are put in the .text.hot section, which the 3DS link places together, after the rest of the code, so
  * that a draw runs through one compact stretch of code rather than functions spread among cold ones. (A section
  * rather than GCC's hot attribute, which would also have the compiler optimise them harder and inline more into
@@ -56,6 +56,7 @@ enum PlatThreadKind {
     PLAT_THREAD_AUDIO,    /* Emulated RSP audio. May run on a different core. */
     PLAT_THREAD_RCP2,     /* The renderer's second half (two-core renderer, gfx_split.c): on a core the RDP's isn't. */
     PLAT_THREAD_RCP2_SYS, /* The same on a New 3DS's system core (DKR_SPLIT_SYSCORE), below its services. */
+    PLAT_THREAD_RCP_SOLO, /* R5 (DKR_FRAME_DIRECT 2): the whole renderer on one thread, on the system core. */
 };
 
 void plat_init(void);
@@ -77,12 +78,12 @@ void *plat_get_current_os_thread(void);
  */
 unsigned long long plat_idle_ns(void);
 unsigned long long plat_render_idle_ns(void);
-/* The time the bottom screen's own thread has spent drawing (ns), and how many areas it has drawn (P36: on an Old
- * 3DS it shares the game's core). 0 where there is no such thread. */
+/* The time the bottom screen's own thread has spent drawing (ns), and how many areas it has drawn (on an Old 3DS
+ * it shares the game's core). 0 where there is no such thread. */
 unsigned long long plat_screen_busy_ns(void);
-/* Nonzero on an Old 3DS (roadmap O8): some switches default differently there. */
+/* Nonzero on an Old 3DS: some switches default differently there. */
 int plat_old_3ds(void);
-/* v31: fn run on the system core as N64 thread osThread, the caller waiting; 0 if it can't be (Old 3DS only). */
+/* fn run on the system core as N64 thread osThread, the caller waiting; 0 if it can't be (Old 3DS only). */
 int plat_syscore_call(void (*fn)(void), void *osThread);
 int plat_core_id(void); /* The core the calling thread runs on (-1 if unknown) */
 unsigned long plat_screen_draws(void);
@@ -93,6 +94,16 @@ unsigned long long plat_time_ns(void);
 unsigned long long plat_ticks(void);
 unsigned long long plat_ticks_per_second(void);
 void plat_sleep_ns(unsigned long long ns);
+/* A lock between threads that sleeps while it waits rather than spinning (the holder may be a lower priority thread on
+ * this core). */
+static inline void plat_sleep_lock(volatile int *lock, unsigned long long ns) {
+    while (__atomic_exchange_n(lock, 1, __ATOMIC_ACQUIRE)) {
+        plat_sleep_ns(ns);
+    }
+}
+static inline void plat_sleep_unlock(volatile int *lock) {
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+}
 
 /* The global "kernel" lock and condition variable that protect every emulated message queue. */
 void plat_klock(void);
@@ -101,7 +112,7 @@ void plat_kwait(void);
 /* Waits with a timeout. Returns 0 if woken, 1 on timeout. */
 int plat_kwait_timeout(unsigned long long ns);
 void plat_kbroadcast(void);
-/* Roadmap P32: the same, on one of a few condition variables picked by key (a message queue), so a message wakes only
+/* The same, on one of a few condition variables picked by key (a message queue), so a message wakes only
  * the threads waiting on its queue (and any that share its variable). Kernel lock held. */
 int plat_kwait_on_timeout(const void *key, unsigned long long ns);
 void plat_kbroadcast_on(const void *key);
@@ -126,7 +137,8 @@ void plat_wait_vblank(void);
 /* Returns nonzero while the application should keep running. Called from the main thread. */
 int plat_main_loop_iteration(void);
 
-/* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. */
+/* Whole file helpers. plat_load_file returns a malloc'd buffer (or NULL) and writes the size to *size. The buffer has a
+ * NUL after the last byte (not counted in *size), so a text file can be used as a string. */
 void *plat_load_file(const char *path, unsigned int *size);
 int plat_save_file(const char *path, const void *data, unsigned int size);
 /* Saves on a background writer (in order with the other queued writes) and frees data there. */
@@ -147,7 +159,7 @@ int plat_snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((f
 const char *plat_getenv(const char *name);
 
 /*
- * Experimental switches (roadmap P29): a number from the environment / env.txt, or fallback when it isn't set, unless
+ * Experimental switches: a number from the environment / env.txt, or fallback when it isn't set, unless
  * the switch bench has overridden it for a race with plat_override_switch (value -1 drops the override, and
  * plat_clear_switch_overrides drops them all). gPlatSwitchEpoch counts the changes, so code that keeps a switch's
  * value reads it again when the epoch moves on (the renderer does at the start of each frame).
@@ -209,7 +221,7 @@ void plat_3ds_exit(void) __attribute__((noreturn));
  * the system's thread and taken once by the game thread at the start of its next frame.
  */
 void plat_request_game_pause(void);
-/* Ends the game the normal way, from any thread (after a save restore, or the update's "Quit to finish"). */
+/* Ends the game the normal way, from any thread (after a save restore, or the update's Quit). */
 void plat_request_quit(void);
 int plat_take_game_pause(void);
 
@@ -269,8 +281,8 @@ int plat_test_results_busy(void);
 /*
  * The 3DS render target: anti-aliasing (the GPU draws more pixels than the screen has and the display transfer averages
  * them; PLAT_AA_4X twice the resolution both ways, PLAT_AA_2X twice the height only). -1 is the player's setting
- * (the Settings menu, else DKR_AA). Colour and depth are always 32-bit: the 16-bit buffers setting was removed
- * (2026-10-29) because it changed the picture, fog among it. The renderer switches between two frames.
+ * (the Settings menu, else DKR_AA). Colour and depth are always 32-bit: a 16-bit buffers setting changed the picture,
+ * fog among it. The renderer switches between two frames.
  * plat_antialias says what the frames drawn now use (the host build only remembers the setting).
  */
 enum { PLAT_AA_OFF, PLAT_AA_4X, PLAT_AA_2X };
@@ -279,7 +291,7 @@ int plat_antialias(void);
 /* Nonzero while the screen shows 800 pixels across (the results' graphics column). */
 int plat_wide800_active(void);
 /*
- * Widescreen (roadmap item G3): how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
+ * Widescreen: how much wider than 4:3 the game's camera is to be, 1 for 4:3 or 1.25 to fill the
  * 3DS's 400x240 top screen. Read by the game thread each frame (src/camera.c); the 3DS Settings menu sets it, the host
  * build takes DKR_WIDESCREEN=1.
  */
@@ -305,7 +317,7 @@ float plat_camera_near(void);
 int plat_hud_edges(void);
 void plat_set_hud_edges(int on);
 /*
- * The frame rate cap (roadmap G6): the scheduler hands the game each finished frame after 2 retraces (30 fps, the
+ * The frame rate cap: the scheduler hands the game each finished frame after 2 retraces (30 fps, the
  * N64 game's own) or, at 60 fps, after 1. The game's logic already steps by however many retraces a frame took, and
  * falls back to 30 fps by itself when frames don't fit in one. plat_set_60fps is for the GPU benchmark (1 on, 0 off,
  * -1 the player's setting: settings.txt "fps60", else DKR_60FPS); the setting is saved by plat_set_60fps_setting.
@@ -366,6 +378,9 @@ void plat_set_frame_step(int retraces);
 int plat_frame_step(void);
 /* The two-core renderer (gfx_split.c) going on or off: the system core's share it needs is held only while on. */
 void plat_split_render_cores(int on);
+/* R5 (DKR_FRAME_DIRECT 2): whether running the whole frame off the game's core needs a thread of its own
+ * (PLAT_THREAD_RCP_SOLO), because the renderer's usual thread shares the game's core (an Old 3DS). */
+int plat_frame_solo_thread(void);
 /* Applies DKR_SPLIT_BELOW_GAME to the two-core renderer's second thread when it shares the game's core. */
 void plat_split_backend_priority(void);
 /* Whether the renderer's second half can go on the system core instead (a New 3DS); raising/restoring its share
@@ -375,8 +390,8 @@ int plat_split_syscore_share(int on);
 
 /* The usual setting of the switches from the other ports survey (DKR_GPU_TRANSFORM, DKR_TRACK_MESH, DKR_MODEL_MESH,
  * DKR_STEREO_ONCE) while settings.txt has none: off, until hardware says otherwise; a test build can be made with
- * them all on. Settings > Picture changes them mid-race (debug builds): GPU vertex maths 0 off, 1 on (P30), 2 also
- * the track recorded (P31), 3 also models (P34); 3D made once (P33) 0 or 1. A DKR_* variable wins over both. */
+ * them all on. Settings > Picture changes them mid-race (debug builds): GPU vertex maths 0 off, 1 on, 2 also
+ * the track recorded, 3 also models; 3D made once 0 or 1. A DKR_* variable wins over both. */
 #ifndef GFX_SURVEY_DEFAULT
 #define GFX_SURVEY_DEFAULT 0
 #endif

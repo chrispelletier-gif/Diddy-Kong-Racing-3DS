@@ -1,5 +1,5 @@
 /*
- * Native renderer ops (PICA_ALL test build, PORT_NATIVE_OPS): the game's draw-state calls write the port renderer's
+ * Native renderer ops (PORT_NATIVE_OPS): the game's draw-state calls write the port renderer's
  * own ops instead of N64 RDP/RSP commands.
  *
  * The game still records a frame for the renderer, which runs on the other core while the game builds the next one,

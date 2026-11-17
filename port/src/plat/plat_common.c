@@ -158,13 +158,14 @@ static void *load_file(const char *path, unsigned int *size) {
         fclose(f);
         return NULL;
     }
-    data = malloc((size_t) len);
+    data = malloc((size_t) len + 1);
     if (data == NULL || fread(data, 1, (size_t) len, f) != (size_t) len) {
         free(data);
         fclose(f);
         return NULL;
     }
     fclose(f);
+    ((char *) data)[len] = '\0'; // So a text file can be used as a string (not counted in *size).
     *size = (unsigned int) len;
     return data;
 }
@@ -337,26 +338,19 @@ static int switch_read(const char *name, int fallback) {
         }
     }
     env = plat_getenv(name);
-#ifdef PICA_ALL
-    // The "everything on the PICA200" build (PICA_ALL, on master since PR #468): the GPU route's switches on unless
-    // env.txt or the switch bench says otherwise.
+    // The GPU route's switches default on unless env.txt or the switch bench says otherwise.
     if (env == NULL) {
         // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
         // the user wants it off by default with one bench row turning it on (2026-11-05).
         // DKR_TEX_VRAM is not here: its default is the backend's own (tex_vram_default in port/3ds/gfx_c3d.c: on for
         // the Old 3DS since v28, benches #432/#436, after the race-start stalls of issues #406/#407; off elsewhere).
         static const char *const sOn[] = { "DKR_MODEL_MESH", "DKR_NATIVE_DRAW" };
-        if (strcmp(name, "DKR_SPLIT_RENDER") == 0) {
-            // Two cores on both consoles: the New 3DS bench row was perfect, user 2026-11-05 21:17 ("default on both").
-            return 1;
-        }
         for (i = 0; i < (int) (sizeof(sOn) / sizeof(sOn[0])); i++) {
             if (strcmp(sOn[i], name) == 0) {
                 return 1;
             }
         }
     }
-#endif
     return env != NULL ? atoi(env) : fallback;
 }
 
@@ -505,7 +499,9 @@ const char *plat_build_version(void) {
 #ifdef PORT_BUILD_VERSION
     return PORT_BUILD_VERSION;
 #else
-    return "host";
+    /* the host preview names a build as a device shows it (git describe), not "host" */
+    const char *e = getenv("DKR_BUILD_VERSION");
+    return e != NULL && e[0] != '\0' ? e : "host";
 #endif
 }
 

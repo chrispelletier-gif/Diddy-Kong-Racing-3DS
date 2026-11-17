@@ -58,7 +58,6 @@ static inline void store_shade(Vertex *v, s32 value) {
     v->a = second & 0xFF;
 }
 
-#ifdef PICA_ALL
 /*
  * GPU vertex lighting (off-GitHub "everything on the PICA200" test build, DKR_GPU_LIGHT): the two simple shading
  * routines below store each vertex's normal (signed bytes, 127 = 1) in its colour instead of the lit grey, and note
@@ -161,6 +160,7 @@ int port_gpu_light_get(const Vertex *verts, const void *model, float out[4]) {
  * level is always a capture) or when full.
  */
 #define NMAT_KEYS 1024
+static int sTexHandle; // R3 DKR_NATIVE_TEXHANDLE: captures name their texture by handle (nmat_texture)
 typedef struct NMatKey {
     const void *tex;
     s32 flags, texOffset, blocked;
@@ -172,7 +172,8 @@ extern s16 gUseDirectionalLighting;
 static NMatKey sNMatKeys[NMAT_KEYS];
 static u32 sNMatCount;
 static unsigned int sNMatLevel = 0xFFFFFFFFu;
-static int sNativeDraw;
+static int sNativeDraw, sNativeLeftovers;
+static int sNativeCamera; // DKR_NATIVE_CAMERA (G3)
 volatile unsigned char gPortNMatBad[NMAT_KEYS];
 
 static void nmat_level_reset(void) {
@@ -181,11 +182,15 @@ static void nmat_level_reset(void) {
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
         sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
+        // P53: the native frame stream's game side, on by default on an Old 3DS (gfx_rdp.c read_switches).
+        sNativeLeftovers = sNativeDraw && plat_switch("DKR_NATIVE_LEFTOVERS", plat_old_3ds()) != 0;
 #ifdef PORT_NATIVE_OPS
         // The game's draw-state calls write native ops with native draws (include/port_nops.h; DKR_NATIVE_OPS=0: N64
         // commands with native draws still on).
         gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
 #endif
+        sTexHandle = sNativeDraw && plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()) != 0;
+        sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", plat_old_3ds()) != 0;
     }
 }
 
@@ -199,6 +204,18 @@ static inline __attribute__((always_inline)) void nmat_level_check(void) {
 int port_native_draw(void) {
     nmat_level_check();
     return sNativeDraw;
+}
+
+/* G3 (DKR_NATIVE_CAMERA, default on on an Old 3DS (P53), else 0, read at each level load): billboard anchors and the weather's projection matrix
+ * as records (camera.c, weather.c). */
+int port_native_camera(void) {
+    nmat_level_check();
+    return sNativeCamera;
+}
+
+int port_native_leftovers(void) {
+    nmat_level_check();
+    return sNativeLeftovers;
 }
 
 /* The game freed texture memory [start, end): the materials made with it are caught again on their next use, as the
@@ -256,6 +273,39 @@ extern s16 gForceFlags;
 extern TextureHeader *gCurrentTextureHeader;
 void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset);
 
+/* A texture's load list (TextureHeader.cmd, count commands) in a capture: with DKR_NATIVE_TEXHANDLE the texture by
+ * handle (port_drawtag.h PORT_NTEX_TAG: the renderer sets what the list would have, from the textures it decoded at
+ * load), else the list call as ever. The renderer reads the list only if it has to learn the texture then, as it
+ * would have run it anyway. */
+static void nmat_texture(Gfx **dl, const Gfx *cmd, int count) {
+    Gfx *g;
+    if (!sTexHandle || count <= 0 || count > 0xFF) {
+        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(cmd), count);
+        return;
+    }
+    gDPNoOpTag((*dl)++, PORT_NTEX_TAG | (u32) count);
+    g = (*dl)++;
+    g->words.w0 = 0; // An RSP no-op to a renderer that skips the tag
+    g->words.w1 = OS_K0_TO_PHYSICAL(cmd);
+}
+
+void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset) {
+    TextureHeader *tex = (TextureHeader *) texture;
+    gForceFlags = TRUE;
+    gCurrentTextureHeader = NULL;
+    if (sTexHandle && tex != NULL) {
+        // The frame material_set will pick (its rule), by handle. As the current texture, material_set then leaves
+        // out its own load and sets only the settings, which are the same either way (gForceFlags).
+        if (texOffset && (texOffset < tex->numOfTextures << 8)) {
+            tex = (TextureHeader *) ((s8 *) tex + ((texOffset >> 16) * tex->textureSize));
+        }
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
+        gCurrentTextureHeader = tex;
+    }
+    material_set(dl, (TextureHeader *) texture, flags, texOffset);
+    gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+}
+
 /* One batch as a native draw record (the material's commands first when the renderer hasn't kept them). dynamic:
  * vertices or triangles made anew each frame (drawn through the renderer's vertex slots). Returns 0 with native draws
  * off, for the caller's own commands. */
@@ -268,10 +318,7 @@ int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const v
     }
     id = port_nmat_key(texture, flags, texOffset, &capture);
     if (capture) {
-        gForceFlags = TRUE;
-        gCurrentTextureHeader = NULL;
-        material_set(dl, (TextureHeader *) texture, flags, texOffset);
-        gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
+        port_nmat_capture(dl, id, texture, flags, texOffset);
     }
     port_native_record(dl, id, verts, numVerts, tris, numTris, textured, dynamic);
     return 1;
@@ -318,7 +365,7 @@ int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture,
     id = port_nmat_key(texture, (int) (0x40000000u | (u32) index), 0, &capture);
     if (capture) {
         gfx_init_basic_xlu(dl, (u32) index, prim, env);
-        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
         gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
     } else {
         gDPSetPrimColorRGBA((*dl)++, prim);
@@ -337,7 +384,7 @@ void material_load_simple(Gfx **dList, s32 flags);
  * the game does. */
 int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
     const Gfx *c, *dma = NULL;
-    u32 vtxAddr = 0, vtxCount = 0;
+    u32 vtxAddr = 0, vtxCount = 0, dmaCount = 0;
     s32 n;
     if (!port_native_draw() || frame == NULL) {
         return 0;
@@ -347,6 +394,7 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
         s32 kind = port_cmd(c->words.w0, c->words.w1, &pc);
         if (kind == PCMD_CALL && pc.count != 0) {
             dma = c;
+            dmaCount = pc.count;
         } else if (kind == PCMD_VTX) {
             vtxAddr = pc.addr;
             vtxCount = pc.count;
@@ -359,7 +407,11 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
                 gForceFlags = TRUE;
                 material_load_simple(dl, flags);
                 if (dma != NULL) {
-                    *(*dl)++ = *dma;
+                    if (sTexHandle) {
+                        nmat_texture(dl, (const Gfx *) (uintptr_t) dma->words.w1, (int) dmaCount);
+                    } else {
+                        *(*dl)++ = *dma;
+                    }
                 }
                 gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
             }
@@ -395,7 +447,7 @@ int port_native_rect(Gfx **dl, const void *texture) {
     }
     id = port_nmat_key(texture, 0x08000000, 0, &capture);
     if (capture) {
-        gDkrDmaDisplayList((*dl)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+        nmat_texture(dl, tex->cmd, tex->numberOfCommands);
         gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
     }
     gDPNoOpTag((*dl)++, PORT_NRECT_TAG | id);
@@ -476,7 +528,6 @@ static void gpu_light_set(ObjectModel *model, Object *obj, GpuLight *gl, s32 dir
     gl->l[2] = dirZ * c;
     gl->l[3] = ambient / 255.0f;
 }
-#endif
 
 /**
  * Updates the vertices of an animated object model for the object's current animation and frame.
@@ -745,7 +796,6 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
     dirX = shading->shadowDirX;
     dirY = shading->shadowDirY;
     dirZ = shading->shadowDirZ;
-#ifdef PICA_ALL
     {
         GpuLight *gl = gpu_light_take(obj, model);
         if (gl != NULL) {
@@ -754,7 +804,6 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
             return;
         }
     }
-#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;
@@ -829,7 +878,6 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
     dirX = (s32) dir.f[0];
     dirY = (s32) dir.f[1];
     dirZ = (s32) dir.f[2];
-#ifdef PICA_ALL
     {
         GpuLight *gl = gpu_light_take(obj, model);
         if (gl != NULL) {
@@ -838,7 +886,6 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
             return;
         }
     }
-#endif
     normals = model->normals;
     verts = obj->curVertData;
     batch = model->batches;

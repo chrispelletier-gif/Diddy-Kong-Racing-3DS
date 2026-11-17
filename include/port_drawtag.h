@@ -117,27 +117,44 @@ int port_native_track(void);
 int port_shadows_first(void); // DKR_SHADOWS_FIRST: solid objects' shadows drawn together first (tracks.c)
 extern unsigned int gPortLevelLoads;
 /*
- * GPU vertex lighting (off-GitHub PICA_ALL test build, DKR_GPU_LIGHT): render_mesh puts PORT_LIGHT_TAG | 1 and then
+ * GPU vertex lighting (DKR_GPU_LIGHT): render_mesh puts PORT_LIGHT_TAG | 1 and then
  * four no-ops whose second words are the light's floats (x, y, z, ambient) before a batch whose vertex colours hold
  * normals (obj_asm.c), and PORT_LIGHT_TAG alone after it.
  */
 #define PORT_LIGHT_TAG 0x504C0000 /* "PL" */
 /*
- * Native draws (PICA_ALL, DKR_NATIVE_DRAW): render_mesh records a batch as PORT_NDRAW_TAG | material followed by two
+ * Native draws (DKR_NATIVE_DRAW): render_mesh records a batch as PORT_NDRAW_TAG | material followed by two
  * data words (vertices and triangles; vertex count | split << 8 | textured << 16 and the triangle count) instead of its
  * N64 commands. A material's first use (or after gPortNMatBad) emits its commands in full, then PORT_NMAT_TAG |
  * material, for the renderer to keep their state.
  */
 #define PORT_NDRAW_TAG 0x50420000 /* "PB" */
 #define PORT_NMAT_TAG 0x504D0000  /* "PM" */
-/* A matrix load as floats (PICA_ALL native draws): PORT_MTXF_TAG | index, then a word whose w0 is the address of 16
+/* A matrix load as floats (native draws): PORT_MTXF_TAG | index, then a word whose w0 is the address of 16
  * floats (an MtxF written where the game's fixed point Mtx would have been). */
 #define PORT_MTXF_TAG 0x50580000 /* "PX" */
-/* A texture rectangle without its texture load (PICA_ALL native draws): PORT_NRECT_TAG | material, then the game's
+/* A billboard's anchor (G3, DKR_NATIVE_CAMERA): PORT_ANCHOR_TAG, then a word whose w0 is the address of one Vertex. It
+ * stands for the game's own one vertex load into slot 0 (the sprite's position, before the billboard matrix), which
+ * the renderer makes at once instead of through the RSP's lazy loads. */
+#define PORT_ANCHOR_TAG 0x50410000 /* "PA" */
+int port_native_camera(void);
+/* A texture rectangle without its texture load (native draws): PORT_NRECT_TAG | material, then the game's
  * G_TEXRECT and its two G_RDPHALF words. */
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */
+/* A texture by handle (roadmap R3, DKR_NATIVE_TEXHANDLE): PORT_NTEX_TAG | its load list's command count,
+ * then a word whose w1 is the load list (TextureHeader.cmd), in place of a list call to it. The renderer sets the
+ * tiles and TMEM state the list would have left from its table of the textures decoded at load (gfx_rdp.c
+ * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
+ * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
+#define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
+ * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
+void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);
 int port_native_rect(Gfx **dl, const void *tex);
 int port_native_draw(void);
+/* DKR_NATIVE_LEFTOVERS (needs native draws): the menus' and HUD's sprite frames and the pulsing-light track batches are
+ * draw records instead of display lists. */
+int port_native_leftovers(void);
 
 int port_native_batch(Gfx **dl, void *texture, int flags, int texOffset, const void *verts, int numVerts,
                       const void *tris, int numTris, int textured, int dynamic);

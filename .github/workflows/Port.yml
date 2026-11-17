@@ -296,6 +296,9 @@ jobs:
 
       - name: Build the host version
         run: make -C port TARGET=host -j"$(nproc)"
+      - name: Profiler pages fit the terminal font
+        # every page of the bottom screen's profiler, with the longest bench row, fits 47 columns by 14 lines
+        run: DKR_PROF_TERM_CHECK=1 port/build/host/dkr
 
       - name: Upload the host build
         uses: actions/upload-artifact@v4

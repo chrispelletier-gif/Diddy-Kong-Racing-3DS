@@ -61,7 +61,7 @@ enum GfxBlendMode {
     GFX_BLEND_ALPHA_CVG /* opaque, alpha tested (cutout) */
 };
 
-/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn (the sky drawn last, DKR_SKY_LAST). */
+/* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn. Nothing sets it now; it goes with the next simplify batch. */
 #define GFX_DEPTH_FAR 2
 
 enum GfxTextureFilter { GFX_FILTER_POINT, GFX_FILTER_BILINEAR };
@@ -69,7 +69,7 @@ enum GfxTextureWrap { GFX_WRAP_REPEAT, GFX_WRAP_MIRROR, GFX_WRAP_CLAMP };
 
 /*
  * The smallest format that holds a texture's pixels exactly, picked from the N64 format it was decoded from. The
- * 3DS renderer stores the texture on the GPU in it (roadmap item P7): 16 or 8 bits a texel instead of 32, so the GPU
+ * 3DS renderer stores the texture on the GPU in it: 16 or 8 bits a texel instead of 32, so the GPU
  * reads less memory. RGBA5551 and LA4 channels are widened by repeating their bits, like the N64 does.
  */
 enum GfxTextureFormat {
@@ -118,7 +118,7 @@ typedef struct GfxDrawState {
 } GfxDrawState;
 
 /*
- * Widescreen (roadmap item G3). The game's camera is widened to the shape of the screen (plat_aspect_scale), so 3D
+ * Widescreen. The game's camera is widened to the shape of the screen (plat_aspect_scale), so 3D
  * draws fill it. What is drawn flat on the screen (the HUD, text, menus: GfxDrawState.flat) keeps its 4:3 shape in
  * the middle, except where it reaches an edge of the N64 screen: fades, backgrounds and full screen fills are
  * stretched out to the edges of the wide one. gfx_flat_x takes a flat vertex's clip x (or a rectangle edge's, with
@@ -219,7 +219,7 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
 #define GFX_MAX_BATCH_TRIANGLES 256
 #define GFX_MAX_BATCH_VERTICES (GFX_MAX_BATCH_TRIANGLES * 3)
 /*
- * GPU vertex maths (roadmap item P30). While the backend says so (gfxb_gpu_transform, at the start of each frame), the
+ * GPU vertex maths. While the backend says so (gfxb_gpu_transform, at the start of each frame), the
  * frontend hands triangles over in the game's own model space where it can, with the draw's matrix, and the GPU
  * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes
  * as GfxVertex. A model vertex is one of the game's vertices with one triangle corner's texture coordinates.
@@ -236,11 +236,11 @@ typedef struct GfxModelParams {
     float texOffset[4];
     short fogMul, fogOffset; // With fog, the alpha is the fog factor clamp(z / w * fogMul + fogOffset, 0, 255)
     unsigned char fog;
-    unsigned char pad[3];   // pad[0]: lit (PICA_ALL GPU vertex lighting): the colours are normals, lit with light
+    unsigned char pad[3];   // pad[0]: lit (GPU vertex lighting): the colours are normals, lit with light
     float light[4];         // Light direction (x, y, z, over 127-unit normals) and ambient, as gfx_light_shade takes them
 } GfxModelParams;
 
-/* GPU vertex lighting (PICA_ALL): the grey of a vertex whose colour holds its normal (signed bytes). */
+/* GPU vertex lighting: the grey of a vertex whose colour holds its normal (signed bytes). */
 static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
     float d = (signed char) r * l[0] + (signed char) g * l[1] + (signed char) b * l[2];
     float v = l[3] + (d > 0.0f ? d : 0.0f);
@@ -273,7 +273,7 @@ void gfxb_gpu_kind_call(void *payload);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*
- * Meshes (roadmap items P31 and P34): model vertices copied once to memory the GPU reads, and drawn from there frame
+ * Meshes: model vertices copied once to memory the GPU reads, and drawn from there frame
  * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames
  * that use it. gfxb_draw_meshes draws parts of several meshes that share a state and parameters as one draw (a draw
  * costs the CPU about as much as a hundred triangles, so one per game command would undo the saving).
@@ -370,7 +370,7 @@ static inline unsigned int gfx_texel_bytes(int format) {
 }
 
 /*
- * Whether a texture gets mipmaps (roadmap item G1): bilinear, at least 16x16, and either opaque or repeating on both
+ * Whether a texture gets mipmaps: bilinear, at least 16x16, and either opaque or repeating on both
  * axes. A texture with transparency that is clamped on an axis is drawn once along it, often on a polygon much bigger
  * than its shape (kart shadows, the start line, track borders): its shape fades out before the edge texels that
  * the clamp stretches over the rest of the polygon. Smaller levels average the shape into those edge texels, so the
@@ -393,7 +393,7 @@ static inline int gfx_wants_mipmaps(const GfxTexture *tex) {
 }
 
 /*
- * The mipmap level bias of a texture that gets mipmaps (G1 follow-up), in levels: negative reads sharper ones. A
+ * The mipmap level bias of a texture that gets mipmaps, in levels: negative reads sharper ones. A
  * texture clamped on both axes is drawn once across its polygon: the signs with track names, door numbers, banners,
  * faces and eyes. Text there turned to mush with mipmaps, especially at an angle, where the GPU picks the level for
  * the more squashed direction, and such textures barely shimmer anyway as they don't repeat into the distance. So they
@@ -405,7 +405,7 @@ static inline float gfx_mip_lod_bias(const GfxTexture *tex, float signBias) {
 }
 
 /*
- * The next smaller mipmap level (roadmap item G1): each 2x2 block of src (w x h, RGBA8888) averaged into one pixel of
+ * The next smaller mipmap level: each 2x2 block of src (w x h, RGBA8888) averaged into one pixel of
  * dst ((w / 2) x (h / 2), which may be src itself). Colours are weighted by alpha, so the colour hidden under
  * transparent texels (often black) doesn't darken the edges of cutouts such as trees and fences.
  */

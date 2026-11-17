@@ -1,5 +1,5 @@
 /*
- * The native frame queue (PICA_ALL test build, DKR_NATIVE_FRAMES, on by default there; off in lockstep runs).
+ * The native frame queue (DKR_NATIVE_FRAMES, on by default; off in lockstep runs).
  *
  * Replaces the N64 scheduler's part in getting a frame to the screen. On the N64 (and in the port until now) the game
  * sent its display list task as a message to the scheduler, which queued it in its RSP/RDP state machine, started it
@@ -18,7 +18,6 @@
 #include "plat/plat.h"
 #include "plat/recorder.h"
 
-#ifdef PICA_ALL
 
 extern s32 D_800DE730[];      /* the scheduler's usual done message: swap the buffer */
 extern s32 gRetraceCounter32;
@@ -115,11 +114,33 @@ static OSScTask *take_ready_locked(void) {
     return t;
 }
 
+/*
+ * R5 (DKR_FRAME_DIRECT, read at each frame's start so the switch bench can change it between races): 0 the frame goes
+ * to the renderer as an RSP task (osSpTaskStartGo, os_sp.c's worker queue); 1 its record buffer goes straight to the
+ * renderer thread (port_rcp_frame_start), no OSTask; 2 the same, run on one thread off the game's core (an Old 3DS's
+ * system core) with the two-core renderer's calls made directly. start() runs only with no frame on the renderer
+ * (sRunning was NULL), so the renderer thread can change between frames.
+ */
+static s32 sDirect = -1;
+
 static void start(OSScTask *t) {
-    if (t != NULL) {
-        osSpTaskLoad(&t->list);
-        osSpTaskStartGo(&t->list);
+    s32 direct;
+    if (t == NULL) {
+        return;
     }
+    direct = plat_switch("DKR_FRAME_DIRECT", 0);
+    direct = direct < 0 ? 0 : direct > 2 ? 2 : direct;
+    if (direct != sDirect) {
+        plat_log("frames: handed to the renderer %s", direct == 2 ? "directly, on one thread off the game's core"
+                                                      : direct == 1 ? "directly" : "as RSP tasks");
+        sDirect = direct;
+    }
+    if (direct) {
+        port_rcp_frame_start((const void *) t->list.t.data_ptr, direct);
+        return;
+    }
+    osSpTaskLoad(&t->list);
+    osSpTaskStartGo(&t->list);
 }
 
 /* gfxtask_run_xbus: the game's display list task. */
@@ -265,10 +286,10 @@ void port_frames_run_audio(void *task) {
 }
 
 void port_describe_frames(char *buffer, s32 size) {
-    plat_snprintf(buffer, size, "frames: %s, %d queued, %s, %s held, %d done waiting, video %d audio %d, %u overflows",
-                  sNative > 0 ? "native" : "scheduler", (int) sQueueCount, sRunning ? "drawing" : "idle",
+    static const char *const sHandOff[3] = { "RSP tasks", "direct", "direct off the game's core" };
+    plat_snprintf(buffer, size, "frames: %s (%s), %d queued, %s, %s held, %d done waiting, video %d audio %d, %u overflows",
+                  sNative > 0 ? "native" : "scheduler", sHandOff[sDirect > 0 ? sDirect : 0], (int) sQueueCount, sRunning ? "drawing" : "idle",
                   sHeld ? "one" : "none", (int) sDoneCount, (int) sVideoTicks, (int) sAudioTicks,
                   (unsigned) sOverflows);
 }
 
-#endif

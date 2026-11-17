@@ -48,8 +48,6 @@ struct PlatSem {
 };
 
 static LightLock sKernelLock;
-static CondVar sKernelCond;
-static CondVar sKeyedConds[PLAT_KEYED_CONDS];
 static LightLock sIntLock;
 static __thread void *sCurrentOsThread;
 static int sRcpCore;
@@ -90,10 +88,6 @@ void plat_init(void) {
     bool isNew3DS = false;
 
     LightLock_Init(&sKernelLock);
-    CondVar_Init(&sKernelCond);
-    for (int i = 0; i < PLAT_KEYED_CONDS; i++) {
-        CondVar_Init(&sKeyedConds[i]);
-    }
     LightLock_Init(&sIntLock);
 
     // On a New 3DS the extra cores are free for us, so the emulated RCP gets a core of its own.
@@ -428,6 +422,14 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
             core = 1;
             prio = PRIO_SYSCORE_AUDIO + 1;
             break;
+        case PLAT_THREAD_RCP_SOLO:
+            // R5: the frame's dispatcher and GPU commands together, where the two-core renderer's second thread
+            // goes (its share raised first by plat_split_render_cores), at that thread's priority: below the
+            // system's services there, so core 0 runs only the game.
+            stackSize = 128 * 1024;
+            core = 1;
+            prio = PRIO_SYSCORE_AUDIO + 1;
+            break;
         default:
             prio = prio_from_n64(n64Priority);
             core = 0;
@@ -453,6 +455,9 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
         if (kind == PLAT_THREAD_RCP2 || kind == PLAT_THREAD_RCP2_SYS) {
             prio = kind == PLAT_THREAD_RCP2_SYS ? split_backend_prio() : PRIO_RCP;
         }
+        if (kind == PLAT_THREAD_RCP_SOLO) {
+            prio = PRIO_RCP; // As the renderer's usual thread there
+        }
         core = 0;
         thread->handle = threadCreate(thread_entry, thread, stackSize, prio, 0, true);
     }
@@ -470,6 +475,10 @@ PlatThread *plat_thread_create(PlatThreadFunc func, void *arg, int n64Priority, 
  */
 static int split_backend_prio(void) {
     return plat_switch("DKR_SPLIT_BELOW_GAME", 1) ? PRIO_GAME_LOWEST - 10 + 1 : PRIO_RCP;
+}
+
+int plat_frame_solo_thread(void) {
+    return sRcpCore == 0;
 }
 
 int plat_split_syscore_possible(void) {
@@ -596,7 +605,6 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
-#if PICA_ALL
     // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
     // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
     // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
@@ -623,7 +631,6 @@ unsigned long long plat_time_ns(void) {
         // 1e9 / SYSCLOCK_ARM11 in 32.32 fixed point (3.7298 ns a tick).
         return sSeconds * 1000000000ULL + ((rest * 16019311343ULL) >> 32);
     }
-#endif
     return (ticks / SYSCLOCK_ARM11) * 1000000000ULL + ((ticks % SYSCLOCK_ARM11) * 1000000000ULL) / SYSCLOCK_ARM11;
 }
 
@@ -648,7 +655,7 @@ void plat_kunlock(void) {
 }
 
 /*
- * v37 (DKR_KCOND, roadmap P50): the kernel lock's waits without libctru's condition variable, which can lose a
+ * The kernel lock's waits without libctru's condition variable, which can lose a
  * broadcast. Its waiter counts itself in the variable and unlocks the lock before it reaches the kernel's wait; a
  * broadcast in that gap zeroes the count and wakes no one, and when another waiter has counted itself in by the time
  * the first one reaches the kernel, the count is below zero again, so the first sleeps on, until its bound (4 ms).
@@ -656,23 +663,18 @@ void plat_kunlock(void) {
  * should have woken the game (the walk idle meanwhile): the 38-39 ms worst frame of every track.
  * Here a waiter counts itself under the lock, reads the variable's broadcast count and sleeps only while the count is
  * unchanged, which the kernel checks as it puts it to sleep (ARBITRATION_WAIT_IF_LESS_THAN count + 1), so a broadcast
- * at any moment after the read wakes it. Every broadcast does both kinds, so the switch can change while threads wait
- * (re-read with the GSP thread's priority, every 64 retraces). 0 = libctru's (old).
+ * at any moment after the read wakes it. (Kept on after the switch bench: libctru's waits had 10-34 late wakes a race.)
  */
 typedef struct KCond {
     volatile s32 count;   // Broadcasts so far (wraps; a waiter at the wrap just wakes early)
     volatile s32 waiters; // Under the kernel lock
 } KCond;
 static KCond sKernelK, sKeyedK[PLAT_KEYED_CONDS];
-static volatile int sKcondNew = 1;
 
 /* Returns whether it timed out (with no broadcast since it started). */
-static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
+static int kcond_wait(KCond *k, s64 ns) {
     s32 count;
     Result rc;
-    if (!sKcondNew) {
-        return CondVar_WaitTimeout(old, &sKernelLock, ns) != 0;
-    }
     k->waiters++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     count = __atomic_load_n(&k->count, __ATOMIC_SEQ_CST);
@@ -684,8 +686,7 @@ static int kcond_wait(KCond *k, CondVar *old, s64 ns) {
     return R_DESCRIPTION(rc) == RD_TIMEOUT && __atomic_load_n(&k->count, __ATOMIC_SEQ_CST) == count;
 }
 
-static void kcond_broadcast(KCond *k, CondVar *old) {
-    CondVar_Broadcast(old); // (No system call when no one waits on it)
+static void kcond_broadcast(KCond *k) {
     __atomic_add_fetch(&k->count, 1, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&k->waiters, __ATOMIC_SEQ_CST) > 0) {
         syncArbitrateAddress((s32 *) &k->count, ARBITRATION_SIGNAL, -1);
@@ -697,23 +698,23 @@ static void kcond_broadcast(KCond *k, CondVar *old) {
  * milliseconds instead of a frozen game (see QUEUE_WAIT_NS in os_core.c).
  */
 void plat_kwait(void) {
-    kcond_wait(&sKernelK, &sKernelCond, 4000000LL);
+    kcond_wait(&sKernelK, 4000000LL);
 }
 
 int plat_kwait_timeout(unsigned long long ns) {
-    return kcond_wait(&sKernelK, &sKernelCond, (s64) ns);
+    return kcond_wait(&sKernelK, (s64) ns);
 }
 
 void plat_kbroadcast(void) {
-    kcond_broadcast(&sKernelK, &sKernelCond);
+    kcond_broadcast(&sKernelK);
 }
 
 int plat_kwait_on_timeout(const void *key, unsigned long long ns) {
-    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)], (s64) ns);
+    return kcond_wait(&sKeyedK[PLAT_KEY_SLOT(key)], (s64) ns);
 }
 
 void plat_kbroadcast_on(const void *key) {
-    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)], &sKeyedConds[PLAT_KEY_SLOT(key)]);
+    kcond_broadcast(&sKeyedK[PLAT_KEY_SLOT(key)]);
 }
 
 void plat_intlock_lock(void) {
@@ -811,11 +812,6 @@ void plat_wait_vblank(void) {
         sVblankRefTick = now;
     }
     if ((calls++ & 63) == 0) {
-        int kcond = plat_switch("DKR_KCOND", 1) != 0;
-        if (kcond != sKcondNew) {
-            sKcondNew = kcond;
-            plat_log("kernel lock waits: %s", kcond ? "can't lose a wake-up" : "libctru's condition variable");
-        }
         gsp_priority_update();
     }
 }
@@ -1392,6 +1388,22 @@ static void screen_thread_start(int core) {
 }
 
 /* First thing in main, before plat_init. */
+/* A look (settings "bottomstyle" 0-7) as the screen's style and colour variant: 4-7 are Carbon, Jungle, Sunset and
+   Daylight. The grid layouts (O1h redo) are on unless DKR_BOTTOM_GRID=0 in env.txt. */
+static void apply_bottom_look(int look) {
+    static const unsigned char sStyleOf[8] = { 0, 1, 2, 3, 2, 3, 1, 1 }, sVariantOf[8] = { 0, 0, 0, 0, 1, 2, 3, 4 };
+    if (look < 0 || look > 7) {
+        look = 0;
+    }
+    bs_set_variant(sVariantOf[look]);
+    bs_set_style(sStyleOf[look]);
+}
+
+static void apply_bottom_grid(void) {
+    const char *env = plat_getenv("DKR_BOTTOM_GRID");
+    bs_set_grid(env == NULL || atoi(env) != 0);
+}
+
 void plat_3ds_console_init(void) {
     LightLock_Init(&sConsoleLock);
     LightLock_Init(&sCopyLock);
@@ -1401,6 +1413,9 @@ void plat_3ds_console_init(void) {
     gspWaitForVBlank();
     LightLock_Lock(&sConsoleLock);
     bs_init(consoleGetDefault()->font.gfx);
+    apply_bottom_grid();
+    /* the player's look from the first frame (settings.txt is on the SD card, readable before the ROM is) */
+    apply_bottom_look(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1412,7 +1427,7 @@ void plat_3ds_console_init(void) {
 void plat_rom_loaded(void) {
     LightLock_Lock(&sConsoleLock);
     bs_load_assets();
-    bs_set_style(settings_get("bottomstyle", 0));
+    apply_bottom_look(settings_get("bottomstyle", 0));
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
     sCopyLockOn = plat_switch("DKR_BS_COPY_LOCK", 1) != 0;
@@ -1488,7 +1503,7 @@ void plat_3ds_bottom_picture(unsigned short *out) {
 /* The bottom screen's look (Race HUD page, port_race_hud.c). */
 void plat_set_bottom_style(int style) {
     LightLock_Lock(&sConsoleLock);
-    bs_set_style(style);
+    apply_bottom_look(style);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
@@ -1807,7 +1822,7 @@ static void watchdog(void *arg) {
                     rec_event("watchdog: counting free memory took %.2f ms", spent / 1e6);
                 }
             }
-            snprintf(line[1], sizeof(line[1]), "gap %u drop %u tex %u gpu %lu.%luM heap %lu.%luM",
+            snprintf(line[1], sizeof(line[1]), "gap %u drop %u textures %u GPU %lu.%luM heap %lu.%luM",
                      now[PLAT_COUNTER_AUDIO_UNDERRUN], now[PLAT_COUNTER_AUDIO_DROPPED],
                      now[PLAT_COUNTER_TEXTURE_FAILED], sGpuFree / 10, sGpuFree % 10, sHeapFree / 10, sHeapFree % 10);
         }

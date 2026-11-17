@@ -1,5 +1,5 @@
 /*
- * The DSP voice sound engine (roadmap Phase 7, the audio rewrite).
+ * The DSP voice sound engine.
  *
  * The game's sequence players and sound player keep running unchanged on the N64 synthesizer driver (libultra's
  * alAudioFrame): they allocate physical voices and queue parameter changes on them (start, stop, volume, pan, pitch,

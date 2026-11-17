@@ -544,9 +544,9 @@ void snow_render(void) {
         if (gSnowVertCount >= 4) {
             i = 0;
             mtx = get_projection_matrix_s16();
+            if (!cam_load_perspective(&gCurrWeatherDisplayList, G_MTX_DKR_INDEX_0))
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
-#ifdef PICA_ALL
             if (port_native_draw()) {
                 while (i + gSnowVertOffset < gSnowVertCount) {
                     port_native_batch(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, &gSnowVerts[i],
@@ -558,7 +558,6 @@ void snow_render(void) {
                 port_native_end();
                 return;
             }
-#endif
             material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
             while (i + gSnowVertOffset < gSnowVertCount) {
                 vtx = &gSnowVerts[i];
@@ -1192,14 +1191,12 @@ void rain_render(RainGfxData *rainGfx, s32 time) {
     tri->uv2.v = v0;
     tri++;
 
-#ifdef PICA_ALL
     if (port_native_batch_xlu(
             &curDL, 0, COLOUR_RGBA32(rainGfx->primitiveRed, rainGfx->primitiveGreen, rainGfx->primitiveBlue, opacity),
             COLOUR_RGBA32(rainGfx->environmentRed, rainGfx->environmentGreen, rainGfx->environmentBlue, 0), tex,
             gRainVertices + gRainVertexFlip, 4, gCurrWeatherTriList, 2)) {
         port_native_end();
     } else
-#endif
     {
         gfx_init_basic_xlu(&curDL, 0,
                            COLOUR_RGBA32(rainGfx->primitiveRed, rainGfx->primitiveGreen, rainGfx->primitiveBlue, opacity),

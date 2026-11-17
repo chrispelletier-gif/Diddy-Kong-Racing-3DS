@@ -71,8 +71,6 @@ static int load_config(ReportConfig *config) {
     if (text == NULL) {
         return 0;
     }
-    text = realloc(text, size + 1);
-    text[size] = '\0';
     for (line = text; line != NULL && *line; line = next) {
         char *value, *end;
         next = strpbrk(line, "\r\n");
@@ -355,7 +353,6 @@ static void build_body(Report *report, const char *crashText, const char *recent
     static const char *const sKindNames[] = { "button", "crash", "unended", "testrun", "picture" };
     size_t capacity = 60000, length = 0;
     char *body = malloc(capacity);
-    bool isNew3DS = false;
     time_t now = time(NULL);
     struct tm *tm = gmtime(&now);
     int i;
@@ -363,7 +360,6 @@ static void build_body(Report *report, const char *crashText, const char *recent
     if (body == NULL) {
         return;
     }
-    APT_CheckNew3DS(&isNew3DS);
 #define ADD(...)                                                                                                       \
     do {                                                                                                               \
         if (length < capacity) {                                                                                       \
@@ -373,7 +369,7 @@ static void build_body(Report *report, const char *crashText, const char *recent
     ADD("<!-- dkr-bug-report v1 kind=%s -->\n", sKindNames[report->kind]);
     ADD("**What:** %s\n", sKinds[report->kind]);
     ADD("**Build:** `%s`\n", PORT_BUILD_VERSION);
-    ADD("**Console:** %s\n", isNew3DS ? "New 3DS" : "Old 3DS");
+    ADD("**Console:** %s\n", plat_old_3ds() ? "Old 3DS" : "New 3DS");
     if (tm != NULL) {
         ADD("**Console clock:** %04d-%02d-%02d %02d:%02d\n", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
             tm->tm_hour, tm->tm_min);
@@ -461,10 +457,6 @@ static int send_report_to(const ReportConfig *config, const char *issue, Report 
     return status;
 }
 
-static int send_report(const ReportConfig *config, Report *report, char *result, size_t resultSize) {
-    return send_report_to(config, NULL, report, result, resultSize);
-}
-
 /* Keeps a report that could not be sent, so it is not lost. */
 static void save_unsent(const Report *report) {
     FILE *file = fopen(DATA_DIR "/bugreport_unsent.txt", "w");
@@ -511,10 +503,6 @@ static int send_and_show(const ReportConfig *config, Report *report) {
 /* The start of the program: the previous run's files, and the offer to report it. */
 
 void plat_3ds_console_line(const char *text);
-
-static void show_console(const char *text) {
-    plat_3ds_console_line(text);
-}
 
 /*
  * An unattended run is going (port_autorun.c: the test run, GPU bench, quick test, boss fights or switch bench, each
@@ -585,13 +573,13 @@ int bugreport_boot(void) {
     }
 
     crashed = file_exists(DATA_DIR "/last_crash.txt");
-    show_console(crashed ? "The game crashed last time." : "The game did not exit normally last time.");
+    plat_3ds_console_line(crashed ? "The game crashed last time." : "The game did not exit normally last time.");
     unattended = test_run_active();
     if (unattended) {
-        show_console("The test run goes on: sending a report.");
+        plat_3ds_console_line("The test run goes on: sending a report.");
     } else {
-        show_console("Send a bug report with its log?");
-        show_console("A: Send     B: Skip");
+        plat_3ds_console_line("Send a bug report with its log?");
+        plat_3ds_console_line("A: Send     B: Skip");
     }
     while (!unattended) {
         u32 down;
@@ -620,10 +608,6 @@ int bugreport_boot(void) {
         report.kind = crashed ? REPORT_LAST_CRASHED : REPORT_LAST_UNENDED;
         if (crashed) {
             crashText = plat_load_file(DATA_DIR "/last_crash.txt", &size);
-            if (crashText != NULL) {
-                crashText = realloc(crashText, size + 1);
-                crashText[size] = '\0';
-            }
         }
         snprintf(report.title, sizeof(report.title), "[3DS bug report] %s",
                  crashed                                         ? "crash"
@@ -657,23 +641,19 @@ int bugreport_boot(void) {
             if (log == NULL) {
                 log = plat_load_file(DATA_DIR "/last_log.txt", &logSize);
             }
-            if (log != NULL) {
-                log = realloc(log, logSize + 1);
-                log[logSize] = '\0';
-            }
             build_body(&report, crashText, log);
             free(log);
         }
         free(crashText);
-        sShow = show_console;
-        show_console("Sending...");
+        sShow = plat_3ds_console_line;
+        plat_3ds_console_line("Sending...");
         if (send_and_show(&config, &report) >= 0) {
             remove(DATA_DIR "/last_crash.txt");
         }
         free_report(&report);
-        show_console("");
+        plat_3ds_console_line("");
         if (!unattended) {
-            show_console("Press A to start the game.");
+            plat_3ds_console_line("Press A to start the game.");
         }
         while (!unattended && aptMainLoop()) {
             hidScanInput();
@@ -994,6 +974,7 @@ static void send_test_results(void) {
         attach_recording(&report, &sRecording, "timeline.csv");
     }
     add_file(&report, "autorun_drawmix.csv");
+    add_file(&report, "autorun_cores.txt"); // Each race's core times and uncapped ceiling (port_autorun.c CORES_FILE)
 #ifdef PORT_PGO_GEN
     add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
 #endif

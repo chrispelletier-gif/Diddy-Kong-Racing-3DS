@@ -21,11 +21,13 @@
 #include <string.h>
 
 #include "menu_3ds.h"
+#include "plat/bottom_screen.h"
 #include "plat/plat.h"
 #if PLAT_DEBUG_TOOLS
 #include <curl/curl.h>
 #include <mbedtls/sha256.h>
 #include "net_3ds.h"
+#include "plat/curl_common.h"
 #else
 #define net_3ds_background(background) ((void) 0) /* No network in a player build. */
 #endif
@@ -63,7 +65,7 @@ enum UpdateState {
     STATE_CONFIRM,  /* Stop the test run / - / cancel. */
     STATE_BUSY,     /* Checking or downloading; taps are ignored. */
     STATE_CHOOSE,   /* master / newest / cancel. */
-    STATE_INSTALLED /* "Quit to finish the update". */
+    STATE_INSTALLED /* "Update installed: quit to finish it" and Quit. */
 };
 
 typedef struct Channel {
@@ -99,6 +101,11 @@ static volatile int sTapX, sTapY;
 #define TAP_REFRESH -3 // Not a tap: a race started or ended, so the idle buttons change.
 static LightEvent sTapEvent;
 static Channel sChannels[2] = { { "3ds-master-debug", "master" }, { "3ds-newest", "newest" } };
+
+/* A channel as the screen names it ("the stable build", as its button reads Stable; "master" is the branch). */
+static const char *channel_name(const char *label) {
+    return strcmp(label, "master") == 0 ? "stable" : label;
+}
 static int sChosen;
 
 /* The panel: rows 1-3 are the buttons (screen rows 26-28, y 200-223). */
@@ -202,8 +209,6 @@ static void load_config(Config *config) {
     if (text == NULL) {
         return;
     }
-    text = realloc(text, size + 1);
-    text[size] = '\0';
     for (line = text; line != NULL && *line; line = next) {
         char *value, *end;
         next = strpbrk(line, "\r\n");
@@ -270,7 +275,7 @@ static size_t on_data(char *data, size_t size, size_t count, void *user) {
         int percent = (int) ((unsigned long long) download->written * 100 / download->expected);
         if (percent / 5 != download->lastPercent / 5) {
             download->lastPercent = percent;
-            show_busy("Downloading %s: %d%%", sChannels[sChosen].label, percent);
+            show_busy("Downloading the %s build... %d%%", channel_name(sChannels[sChosen].label), percent);
         }
     }
     return length;
@@ -318,28 +323,13 @@ static long http_get(const Config *config, const char *url, int binary, Download
                                                     : "Accept: application/vnd.github+json");
     }
     curlError[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "dkr-3ds/" PORT_BUILD_VERSION);
+    curl_common_setup(curl, url, headers, "dkr-3ds/" PORT_BUILD_VERSION, on_data, download, curlError, caFile,
+                      net_3ds_ca_pem());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_data);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, download);
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curlError);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     // Give up on a download that stalls (under 1 KB/s for 30 seconds), not on a slow one.
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (caFile != NULL) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, caFile);
-    } else {
-        struct curl_blob blob;
-        blob.data = (void *) net_3ds_ca_pem();
-        blob.len = strlen(net_3ds_ca_pem());
-        blob.flags = CURL_BLOB_COPY;
-        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
-    }
     code = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     if (code != CURLE_OK && (status < 300 || status == 0)) {
@@ -595,7 +585,7 @@ static int download_verified(const char *url, unsigned long size, const char *sh
     mbedtls_sha256_init(&download.sha);
     mbedtls_sha256_starts_ret(&download.sha, 0);
 
-    show_busy("Downloading %s...", label);
+    show_busy("Downloading the %s build...", channel_name(label));
     error[0] = '\0';
     if (net_3ds_begin(error, sizeof(error)) != 0) {
         status = 0;
@@ -747,8 +737,8 @@ int update_3ds_touch(int x, int y) {
     if (plat_3ds_setup_touch(x, y)) {
         return 1; // The first-run setup's tiles and buttons take every tap while they show.
     }
-    if (!sStarted || y >= BUTTON_BOTTOM) {
-        return 0;
+    if (!sStarted || (y >= BUTTON_BOTTOM && !bs_grid_on())) {
+        return 0; // (the grid's bar runs to 232, its buttons take the whole band below the panels)
     }
     if (y < BUTTON_TOP) {
         if (sState != STATE_MENU) {
@@ -757,6 +747,16 @@ int update_3ds_touch(int x, int y) {
         sTapX = x;
         sTapY = y;
         sTappedButton = TAP_MENU;
+        LightEvent_Signal(&sTapEvent);
+        return 1;
+    }
+    if (bs_grid_on()) {
+        // The grid's bar: the buttons where they were drawn, nothing in the 8 px gaps between them.
+        button = sState == STATE_INSTALLED ? 0 : bs_grid_button_hit(x);
+        if (sState == STATE_BUSY || button < 0 || button >= count) {
+            return 1;
+        }
+        sTappedButton = button;
         LightEvent_Signal(&sTapEvent);
         return 1;
     }
@@ -900,7 +900,9 @@ static void update_thread(void *arg) {
                     net_3ds_background(0);
                     if (installed) {
                         sState = STATE_INSTALLED;
-                        draw_text_button("Quit to finish the update");
+                        /* the sentence in the panel, the button one word: the button is a third of the bar */
+                        show_busy("Update installed: quit to finish it");
+                        draw_text_button("Quit");
                     } else {
                         sState = STATE_CHOOSE;
                         draw_choices();

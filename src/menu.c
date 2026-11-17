@@ -1,12 +1,10 @@
 #include "menu.h"
 #ifdef TARGET_PORT
 #include "port.h"
-#ifdef TARGET_PORT
 #include "plat/options.h"
 #include "plat/plat.h"
 #include "port_drawtag.h"
 #include "plat/save_backups.h"
-#endif
 #endif
 #include "asset_enums.h"
 #include "asset_loading.h"
@@ -2336,14 +2334,12 @@ void func_8007FFEC(s32 numberOfPanels) {
 /* A menu panel drawn as a native record, with the settings just sent kept as its material (native draws on);
  * returns FALSE for the caller's own commands. */
 static s32 menu_panel_native(Gfx **dList, TextureHeader *tex, s32 texEnabled, Vertex *verts, Triangle *tris) {
-#ifdef PICA_ALL
     s32 mat = port_native_material_here(dList, tex, texEnabled);
     if (mat >= 0) {
         port_native_record(dList, mat, verts, 20, tris, 10, texEnabled, 1);
         port_native_end();
         return TRUE;
     }
-#endif
     return FALSE;
 }
 
@@ -10337,11 +10333,9 @@ s32 func_8008F618(Gfx **dList, Mtx **mtx) {
             flags = RENDER_VTX_ALPHA | RENDER_Z_UPDATE;
         }
 
-#ifdef PICA_ALL
         if (port_native_batch(dList, bgTexture, flags, 0, tempVertices, 4, tempTriangles, 2, hasTexture, 1)) {
             port_native_end();
         } else
-#endif
         {
             material_set(dList, bgTexture, flags, 0);
             gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempVertices), 4, 0);
@@ -15722,13 +15716,11 @@ void render_track_selection_viewport_border(ObjectModel *objMdl) {
             }
 #endif
 
-#ifdef PICA_ALL
             if (port_native_batch(&sMenuCurrDisplayList, tex, flags, texOffset, verts, numVerts, tris, numTris,
                                   texEnabled, 1)) {
                 port_native_end();
                 continue;
             }
-#endif
             material_set(&sMenuCurrDisplayList, tex, flags, texOffset);
             gSPVertexDKR(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVerts, 0);
             gSPPolygon(sMenuCurrDisplayList++, OS_K0_TO_PHYSICAL(tris), numTris, texEnabled);

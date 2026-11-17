@@ -3,8 +3,8 @@
  * If the DSP is unavailable (no dspfirm.cdc), output is discarded but timed as if it were played, so the
  * game's audio pacing still works.
  *
- * Also the Settings menu's Sound page (roadmap P9 and O5): which core mixes, the mixer rate, the DSP's
- * resampling filter and a larger output buffer.
+ * Also the Settings menu's Sound page: which core mixes, the mixer rate, the DSP's resampling filter and a larger
+ * output buffer.
  */
 #include <3ds.h>
 #include <dirent.h>

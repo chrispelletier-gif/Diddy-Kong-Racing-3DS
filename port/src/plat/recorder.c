@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "plat.h"
+#include "strbuf.h"
 
 /* One retrace, in microseconds (the 3DS screen refreshes at 59.83 Hz). */
 #define RETRACE_US 16716
@@ -34,10 +35,13 @@ static void init(void) {
 
 /* What took a frame's time: the game thread's biggest stage, or what the renderer it waited for was doing. */
 int rec_frame_cause(const RecFrame *r) {
-    if (r->logicUs >= r->sceneUs && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
+    /* the renderer's time on the game's core (sharedUs) held the game thread up too: counted with the scene, as
+     * before it was shown apart */
+    unsigned int scene = r->sceneUs + r->sharedUs;
+    if (r->logicUs >= scene && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
         return REC_CAUSE_LOGIC;
     }
-    if (r->sceneUs >= r->renderWaitUs && r->sceneUs >= r->vsyncUs) {
+    if (scene >= r->renderWaitUs && scene >= r->vsyncUs) {
         return REC_CAUSE_SCENE;
     }
     if (r->renderWaitUs >= r->vsyncUs) {
@@ -62,6 +66,11 @@ static void describe_cause(const RecFrame *r, char *out, size_t size) {
             snprintf(out, size, "game logic %u ms", r->logicUs / 1000);
             break;
         case REC_CAUSE_SCENE:
+            if (r->sharedUs > r->sceneUs) {
+                snprintf(out, size, "renderer on the game's core %u ms (the game's own scene %u ms)",
+                         r->sharedUs / 1000, r->sceneUs / 1000);
+                break;
+            }
             snprintf(out, size, "game thread outside the object updates (scene, loads, sound queue) %u ms",
                      r->sceneUs / 1000);
             break;
@@ -362,40 +371,12 @@ unsigned int rec_hitches_since(unsigned int since, char *out, int size, unsigned
 
 /* Formatting. */
 
-typedef struct Buf {
-    char *data;
-    size_t length, capacity;
-} Buf;
-
-static void add(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static void add(Buf *b, const char *fmt, ...) {
-    va_list args;
-    int n;
-    if (b->data == NULL) {
-        return;
+static char *finish(StrBuf *b) {
+    if (b->failed) {
+        free(b->data);
+        return NULL;
     }
-    for (;;) {
-        va_start(args, fmt);
-        n = vsnprintf(b->data + b->length, b->capacity - b->length, fmt, args);
-        va_end(args);
-        if (n < 0) {
-            return;
-        }
-        if (b->length + n < b->capacity) {
-            b->length += n;
-            return;
-        }
-        {
-            char *grown = realloc(b->data, b->capacity * 2 + n);
-            if (grown == NULL) {
-                free(b->data);
-                b->data = NULL;
-                return;
-            }
-            b->data = grown;
-            b->capacity = b->capacity * 2 + n;
-        }
-    }
+    return b->data;
 }
 
 /* The rings' whole entries, oldest first: the index of the first and how many. */
@@ -446,39 +427,33 @@ static unsigned int reference_ms(const RecState *s) {
     return count > 0 ? s->frames[(s->frameCount - 1) % REC_FRAMES].endMs : 0;
 }
 
-static void add_csv_text(Buf *b, const char *text) {
-    add(b, "\"");
+static void add_csv_text(StrBuf *b, const char *text) {
+    sb_addf(b, "\"");
     for (; *text != '\0'; text++) {
-        add(b, *text == '"' ? "\"\"" : "%c", *text);
+        sb_addf(b, *text == '"' ? "\"\"" : "%c", *text);
     }
-    add(b, "\"");
+    sb_addf(b, "\"");
 }
 
 #define MS(us) ((us) / 1000), ((us) / 10 % 100)
 
 char *rec_format_csv(const RecState *s) {
-    Buf b;
+    StrBuf b = { 0 };
     unsigned int frameCount, eventCount, f, e, fEnd, eEnd;
     unsigned int ref = reference_ms(s);
 
-    b.capacity = 160 * 1024;
-    b.length = 0;
-    b.data = malloc(b.capacity);
-    if (b.data == NULL) {
-        return NULL;
-    }
-    b.data[0] = '\0';
+    sb_reserve(&b, 160 * 1024);
     f = first_frame(s, &frameCount);
     e = first_event(s, &eventCount);
     fEnd = f + frameCount;
     eEnd = e + eventCount;
-    add(&b, "# DKR flight recorder, build %s; frame rate cap %u.%02u ms; %s\n", s->build, MS(s->targetUs),
+    sb_addf(&b, "# DKR flight recorder, build %s; frame rate cap %u.%02u ms; %s\n", s->build, MS(s->targetUs),
         press_recorded(s) ? "rel_ms is the time from the bug report shortcut (>>> row)" : "rel_ms is from the last frame");
-    add(&b, "# kind f = a game frame (times in ms; renderer/GPU/sound columns are their work since the row before), "
+    sb_addf(&b, "# kind f = a game frame (times in ms; renderer/GPU/sound columns are their work since the row before), "
             "e = an event, flags: 1 hitch, 2 shortcut pressed, 4 profiler on\n");
-    add(&b, "kind,frame,render_frame,t_ms,rel_ms,period_ms,logic_ms,scene_ms,render_wait_ms,vsync_ms,rdp_ms,tex_ms,"
+    sb_addf(&b, "kind,frame,render_frame,t_ms,rel_ms,period_ms,logic_ms,scene_ms,render_wait_ms,vsync_ms,rdp_ms,tex_ms,"
             "gpu_ms,gpu_wait_ms,audio_ms,tris,draws,tex_decodes,sound_gaps,rate,mode,level,menu,paused,racing,lap,cp,"
-            "flags,text\n");
+            "flags,shared_ms,text\n");
     while (f < fEnd || e < eEnd) {
         const RecFrame *row = f < fEnd ? &s->frames[f % REC_FRAMES] : NULL;
         const RecEvent *ev = NULL;
@@ -489,49 +464,43 @@ char *rec_format_csv(const RecState *s) {
             ev = NULL;
         }
         if (ev != NULL && (row == NULL || (int) (ev->ms - row->endMs) <= 0)) {
-            add(&b, "e,%u,,%u,%d,,,,,,,,,,,,,,,,,,,,,,,,", ev->frame, ev->ms, (int) (ev->ms - ref));
+            sb_addf(&b, "e,%u,,%u,%d,,,,,,,,,,,,,,,,,,,,,,,,,", ev->frame, ev->ms, (int) (ev->ms - ref));
             add_csv_text(&b, ev->text);
-            add(&b, "\n");
+            sb_addf(&b, "\n");
             e++;
             continue;
         }
         if (row == NULL) {
             break; // Only half-written events were left.
         }
-        add(&b,
+        sb_addf(&b,
             "f,%u,%u,%u,%d,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u.%02u,%u,%u,%u,%u,"
-            "%d,%s,%d,%d,%u,%u,%u,%u,%u,\n",
+            "%d,%s,%d,%d,%u,%u,%u,%u,%u,%u.%02u,\n",
             row->frame, row->renderFrame, row->endMs, (int) (row->endMs - ref), MS(row->periodUs), MS(row->logicUs),
             MS(row->sceneUs), MS(row->renderWaitUs), MS(row->vsyncUs), MS(row->rdpUs), MS(row->texUs),
             MS(row->gpuUs), MS(row->gpuWaitUs), MS(row->audioUs), row->tris, row->draws, row->texDecodes,
             row->soundGaps, row->rate, mode_name(row->mode), row->level, row->menu, row->paused, row->racing, row->lap,
-            row->checkpoint, row->flags);
+            row->checkpoint, row->flags, MS(row->sharedUs));
         f++;
     }
-    return b.data;
+    return finish(&b);
 }
 
 #define WORST 8
 
 char *rec_format_summary(const RecState *s) {
-    Buf b;
+    StrBuf b = { 0 };
     unsigned int frameCount, eventCount, f0, e0, i, j;
     unsigned int ref = reference_ms(s), hitches = 0, worstIdx[WORST], worstN = 0;
     unsigned int beforeFrames = 0, beforeWorst = 0, beforeHitches = 0;
     unsigned long long beforeUs = 0;
 
-    b.capacity = 8 * 1024;
-    b.length = 0;
-    b.data = malloc(b.capacity);
-    if (b.data == NULL) {
-        return NULL;
-    }
-    b.data[0] = '\0';
+    sb_reserve(&b, 8 * 1024);
     f0 = first_frame(s, &frameCount);
     e0 = first_event(s, &eventCount);
     if (frameCount == 0) {
-        add(&b, "No frames recorded.\n");
-        return b.data;
+        sb_addf(&b, "No frames recorded.\n");
+        return finish(&b);
     }
     for (i = f0; i < f0 + frameCount; i++) {
         const RecFrame *r = &s->frames[i % REC_FRAMES];
@@ -571,56 +540,56 @@ char *rec_format_summary(const RecState *s) {
     }
     {
         const RecFrame *first = &s->frames[f0 % REC_FRAMES], *last = &s->frames[(f0 + frameCount - 1) % REC_FRAMES];
-        add(&b, "Recorded %u frames over %.1f s (frame rate cap %u ms a frame); %u hitches (frames half as long again as "
+        sb_addf(&b, "Recorded %u frames over %.1f s (frame rate cap %u ms a frame); %u hitches (frames half as long again as "
             "the usual pace).\n",
             frameCount, (last->endMs - first->endMs) / 1000.0, s->targetUs / 1000, hitches);
     }
     if (press_recorded(s)) {
-        add(&b, "Shortcut pressed at %u ms, game frame %u. In the 2 s before it: %u frames (%.1f fps), slowest %u ms, "
+        sb_addf(&b, "Shortcut pressed at %u ms, game frame %u. In the 2 s before it: %u frames (%.1f fps), slowest %u ms, "
                 "%u hitches.\n",
             s->pressMs, s->pressFrame, beforeFrames, beforeUs ? beforeFrames * 1e6 / beforeUs : 0.0,
             beforeWorst / 1000, beforeHitches);
     }
     if (s->hitchCount > 0) {
         int c;
-        add(&b, "Hitches since start-up: %u (", s->hitchCount);
+        sb_addf(&b, "Hitches since start-up: %u (", s->hitchCount);
         for (c = 0; c < REC_CAUSE_COUNT; c++) {
-            add(&b, "%s%s %u", c > 0 ? ", " : "", rec_cause_name(c), s->causeCounts[c]);
+            sb_addf(&b, "%s%s %u", c > 0 ? ", " : "", rec_cause_name(c), s->causeCounts[c]);
         }
-        add(&b, ").\n");
+        sb_addf(&b, ").\n");
     }
-    add(&b, "\nSlowest frames (time from the %s; what took the time; what happened then):\n\n",
+    sb_addf(&b, "\nSlowest frames (time from the %s; what took the time; what happened then):\n\n",
         press_recorded(s) ? "press" : "last frame");
     for (i = 0; i < worstN; i++) {
         const RecFrame *r = &s->frames[worstIdx[i] % REC_FRAMES];
         unsigned int start = r->endMs - r->periodUs / 1000, shown = 0, n;
         char cause[200];
         describe_cause(r, cause, sizeof(cause));
-        add(&b, "- frame %u at %+.2f s, %s level %d menu %d%s: **%u ms**: %s", r->frame,
+        sb_addf(&b, "- frame %u at %+.2f s, %s level %d menu %d%s: **%u ms**: %s", r->frame,
             (int) (r->endMs - ref) / 1000.0, mode_name(r->mode), r->level, r->menu, r->paused ? " paused" : "",
             r->periodUs / 1000, cause);
         if (r->soundGaps) {
-            add(&b, "; %u sound gaps", r->soundGaps);
+            sb_addf(&b, "; %u sound gaps", r->soundGaps);
         }
         for (n = e0; n < e0 + eventCount && shown < 3; n++) {
             const RecEvent *ev = event_at(s, n);
             // Events during the frame, or within 5 ms of its ends.
             if (ev != NULL && (int) (ev->ms - start) >= -5 && (int) (ev->ms - r->endMs) <= 5) {
-                add(&b, "%s`%.70s`", shown == 0 ? "; during: " : ", ", ev->text);
+                sb_addf(&b, "%s`%.70s`", shown == 0 ? "; during: " : ", ", ev->text);
                 shown++;
             }
         }
-        add(&b, "\n");
+        sb_addf(&b, "\n");
     }
     if (s->hitchCount > 0) {
         unsigned int n = s->hitchCount > 10 ? s->hitchCount - 10 : 0;
-        add(&b, "\nThe last %u hitches (the hitch log reaches back further than the frames):\n\n", s->hitchCount - n);
+        sb_addf(&b, "\nThe last %u hitches (the hitch log reaches back further than the frames):\n\n", s->hitchCount - n);
         for (; n < s->hitchCount; n++) {
             const RecHitch *h = &s->hitches[n % REC_HITCHES];
-            add(&b, "- frame %u at %+.2f s: **%u ms**, %s\n", h->frame, (int) (h->endMs - ref) / 1000.0,
+            sb_addf(&b, "- frame %u at %+.2f s: **%u ms**, %s\n", h->frame, (int) (h->endMs - ref) / 1000.0,
                 h->periodUs / 1000, h->text);
         }
     }
-    return b.data;
+    return finish(&b);
 }
 #endif

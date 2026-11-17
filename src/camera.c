@@ -962,7 +962,6 @@ void set_ortho_matrix_height(f32 value) {
 }
 
 
-#ifdef PICA_ALL
 /* With native draws on, the model matrices go to the renderer as floats (PORT_MTXF_TAG): the Mtx a matrix would have
  * been converted into holds its MtxF instead. */
 static void cam_mtx_store(MtxF *mf, Mtx *m) {
@@ -983,12 +982,41 @@ static void cam_mtx_load(Gfx **dList, Mtx *m, u32 index) {
         gSPMatrixDKR((*dList)++, OS_K0_TO_PHYSICAL(m), index);
     }
 }
+/* G3 (DKR_NATIVE_CAMERA): a billboard's anchor (or a vehicle part's empty vertex) as one record instead of the game's
+ * own vertex load. Returns FALSE (nothing written) with the switch off. */
+static s32 cam_anchor(Gfx **dList, Vertex *v) {
+    if (!port_native_camera()) {
+        return FALSE;
+    }
+    gDPNoOpTag((*dList)++, PORT_ANCHOR_TAG);
+    (*dList)->words.w0 = OS_K0_TO_PHYSICAL(v);
+    (*dList)->words.w1 = 0;
+    (*dList)++;
+    return TRUE;
+}
+
+/* G3 (DKR_NATIVE_CAMERA): the perspective matrix loaded as floats (a PORT_MTXF_TAG record) instead of the game's fixed
+ * point gPerspectiveMatrix (weather.c). The renderer reads the floats when it runs the frame, which is after the game
+ * has moved on, so each load takes a copy of its own. Returns FALSE (nothing written) with the switch off. */
+#define CAM_PROJ_COPIES 16
+s32 cam_load_perspective(Gfx **dList, u32 index) {
+    static MtxF sProjCopies[CAM_PROJ_COPIES];
+    static u32 sProjNext;
+    MtxF *copy;
+
+    if (!port_native_camera()) {
+        return FALSE;
+    }
+    copy = &sProjCopies[sProjNext++ % CAM_PROJ_COPIES];
+    __builtin_memcpy(copy, &gPerspectiveMatrixF, sizeof(MtxF));
+    gDPNoOpTag((*dList)++, PORT_MTXF_TAG | index);
+    (*dList)->words.w0 = OS_K0_TO_PHYSICAL(copy);
+    (*dList)->words.w1 = 0;
+    (*dList)++;
+    return TRUE;
+}
 #define CAM_MTX_STORE(mf, m) cam_mtx_store(mf, m)
 #define CAM_MTX_LOAD(dl, m, index) cam_mtx_load(dl, m, index)
-#else
-#define CAM_MTX_STORE(mf, m) mtxf_to_mtx(mf, m)
-#define CAM_MTX_LOAD(dl, m, index) gSPMatrixDKR((*(dl))++, OS_K0_TO_PHYSICAL(m), index)
-#endif
 
 /**
  * Sets the current matrix to represent an orthogonal view.
@@ -1207,6 +1235,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Push an empty vertex because sprite vertices are hardcoded to start from index 1,
         // and billboard mode is not enabled for vehicle parts.
+        if (!cam_anchor(dList, &gVehiclePartVertex))
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(&gVehiclePartVertex), 1, 0);
     } else {
         // For non-vehicle parts, set up a standard billboard.
@@ -1220,6 +1249,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
+        if (!cam_anchor(dList, *vtx))
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 
@@ -1253,14 +1283,12 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
-#ifdef PICA_ALL
     if (port_native_draw()) {
         port_native_sprite(dList, sprite->frames[frameID],
                            sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                          RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
                            !(flags & RENDER_Z_UPDATE));
     } else
-#endif
     {
         // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
         material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
@@ -1313,7 +1341,9 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     vertex->b = 255;
     vertex->a = 255;
 
-    gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
+    if (!cam_anchor(dList, *vtx)) { // R4: as a record with DKR_NATIVE_CAMERA, like render_sprite_billboard's
+        gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
+    }
     (*vtx)++; // Can't be done in the macro?
     index = segment->animFrame;
 
@@ -1343,11 +1373,17 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
         index = (((u8) index) * sprite->numberOfFrames) >> 8;
     }
-    material_load_simple(dList, sprite->drawFlags | flags);
     if (index >= sprite->numberOfFrames) {
         index = sprite->numberOfFrames - 1;
     }
-    gSPDisplayList((*dList)++, sprite->frames[index]);
+    if (port_native_leftovers()) {
+        // DKR_NATIVE_LEFTOVERS: one draw record per tile instead of the frame's list (its loads and vertex slots).
+        port_native_sprite(dList, sprite->frames[index], sprite->drawFlags | flags, FALSE);
+    } else
+    {
+        material_load_simple(dList, sprite->drawFlags | flags);
+        gSPDisplayList((*dList)++, sprite->frames[index]);
+    }
     if (--gModelMatrixStackPos == 0) {
         index = G_MTX_DKR_INDEX_0;
     } else {

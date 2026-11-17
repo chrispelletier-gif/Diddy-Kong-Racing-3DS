@@ -1,12 +1,10 @@
 /*
- * The two-core renderer (roadmap P21, DKR_SPLIT_RENDER). The renderer has two halves of about the same size: the
- * display list walk (gfx_rdp.c: the RSP's vertex maths, texture decodes, batching) and the backend that turns its
- * draws into GPU commands (gfx_c3d.c on the 3DS). With the switch on, the walk queues its backend calls here instead
- * of making them, and a second renderer thread on the other core (plat.h PLAT_THREAD_RCP2) makes them in the same
- * order: the walk of frame N+1 runs while the backend builds frame N. An Old 3DS, whose one core held the whole
- * renderer and the game (bench #258: renderer 31 ms a frame), has the system core for the other half. On by default
- * there since switch bench #263 (Jungle Falls 21.0 to 29.0 fps, Crescent Island 20.0 to 29.1), and on a New 3DS since
- * switch bench #286 (renderer 7.4-8.4 to 3.7-4.3 ms; Haunted Woods' 1% low 30 to 58 fps).
+ * The two-core renderer (DKR_SPLIT_RENDER). The renderer has two halves of about the same size: the display list
+ * walk (gfx_rdp.c: the RSP's vertex maths, texture decodes, batching) and the backend that turns its draws into GPU
+ * commands (gfx_c3d.c on the 3DS). With the switch on, the walk queues its backend calls here instead of making them,
+ * and a second renderer thread on the other core (plat.h PLAT_THREAD_RCP2) makes them in the same order: the walk of
+ * frame N+1 runs while the backend builds frame N. An Old 3DS, whose one core held the whole renderer and the game,
+ * has the system core for the other half. On by default on both consoles (bench numbers: docs/bench-history.md).
  *
  * The queue is a byte ring of records, each a backend call with its arguments copied (the walk reuses its batch
  * buffers as soon as a call returns). One thread writes it (the walk's, sHead) and one reads it (sTail). The walk is
@@ -74,7 +72,7 @@ typedef struct SplitTexture {
     unsigned int ticket; // v33 OP_TEX_FREE from gfx_split_texture_free_later: done when sFreeDone reaches it
 } SplitTexture;
 
-/* v33 (DKR_TEX_FREE_QUEUE): the last free ticket given out (walk) and the last one the backend has done. */
+/* v33: the last free ticket given out (walk) and the last one the backend has done. */
 static unsigned int sFreeTicket;
 static volatile unsigned int sFreeDone;
 
@@ -109,6 +107,7 @@ static int sFailed;
 static unsigned long long sWalkWaitTotalNs, sWalkWaitTakenNs; // Never reset, for the draw mix (gfx_split_walk_waited_ns)
 static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBackendWaitNs;
 static unsigned int sBackendFrames, sBackendWakes;
+static volatile unsigned long long sBackendBusyTotalNs; // Never reset (gfx_split_backend_busy_ns, the uncapped bench)
 
 static void backend_thread(void *arg);
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
@@ -230,6 +229,7 @@ static void backend_thread(void *arg) {
                     gfxb_end_frame();
                     now = plat_time_ns();
                     sBackendBusyNs += now - sBackendFrameStart - sBackendWaitNs;
+                    sBackendBusyTotalNs += now - sBackendFrameStart - sBackendWaitNs;
                     sBackendFrames++;
                     break;
                 }
@@ -333,8 +333,8 @@ static int start_backend(void) {
 
 /*
  * A New 3DS can also run the backend on the system core (DKR_SPLIT_SYSCORE=1), with its share raised, instead of on
- * the game's core, which the game and the backend together fill in a busy race (#390: game core 2-14% idle, a 33 ms
- * frame every 8-16). Each core has a thread of its own; the queue is handed over empty, at a frame's start.
+ * the game's core, which the game and the backend together fill in a busy race. Each core has a thread of its own;
+ * the queue is handed over empty, at a frame's start.
  */
 static void choose_backend(void) {
     int want = plat_split_syscore_possible() && plat_switch("DKR_SPLIT_SYSCORE", 0) ? 1 : 0;
@@ -382,8 +382,29 @@ void gfx_split_drain(void) {
     }
 }
 
-int gfx_split_frame_start(int direct) {
+/* P53: between frames (a level load's texture uploads), wakes an idle backend thread for what is queued, which
+ * commit would otherwise leave until 16 KB or a frame's end are queued. Records outside a frame are run in order. */
+void gfx_split_kick(void) {
+    if (sStarted && sBackendIdle && sHead != sTail) {
+        sBackendIdle = 0;
+        plat_sem_post(sData);
+    }
+}
+
+static int sCoresHeld; // A solo frame (holdCores) keeps the system core's share raised
+
+int gfx_split_frame_start(int direct, int holdCores) {
     int want = !direct && plat_switch("DKR_SPLIT_RENDER", 1) != 0;
+    if (holdCores) {
+        // R5 placement 2: this frame runs whole on the system core. The queue empties first (a frame queued before
+        // may still be drawing on the second thread), then the share stays (refreshed, as DKR_SPLIT_SHARE may change).
+        gfx_split_drain();
+        sActive = FALSE;
+        sCoresHeld = TRUE;
+        plat_split_render_cores(TRUE);
+        gfxb_start_frame();
+        return FALSE;
+    }
     if (want && !sActive) {
         // The other core's share comes first: without it the second thread can't be made there.
         plat_split_render_cores(TRUE);
@@ -394,10 +415,11 @@ int gfx_split_frame_start(int direct) {
     }
     if (!want) {
         gfx_split_drain();
-        if (sActive) {
+        if (sActive || sCoresHeld) {
             plat_split_render_cores(FALSE);
         }
         sActive = FALSE;
+        sCoresHeld = FALSE;
         gfxb_start_frame();
         return FALSE;
     }
@@ -407,6 +429,7 @@ int gfx_split_frame_start(int direct) {
         plat_split_render_cores(TRUE); // Follows a change of the system core's share (the switch bench's)
     }
     sActive = TRUE;
+    sCoresHeld = FALSE;
     choose_backend();
     plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
@@ -433,6 +456,10 @@ void gfx_split_frame_end(void) {
 
 int gfx_split_active(void) {
     return sActive;
+}
+
+unsigned long long gfx_split_backend_busy_ns(void) {
+    return sBackendBusyTotalNs;
 }
 
 unsigned long long gfx_split_walk_waited_ns(void) {
@@ -520,10 +547,10 @@ static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) 
 }
 
 /*
- * v33 (DKR_TEX_FREE_QUEUE): a free that goes through the queue after the draws that still use the texture, as a
- * mesh's does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not
- * reuse tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now.
- * On an Old 3DS a mid-race free made the walk wait for the whole queue: frames of 49-54 ms (bench #457).
+ * A free that goes through the queue after the draws that still use the texture, as a mesh's
+ * does, instead of the walk waiting for the backend to catch up (gfx_split_texture_free). The caller must not reuse
+ * tex (its cache entry) before gfx_split_free_done says the ticket is done. Returns 0 when it was freed now. On an
+ * Old 3DS a mid-race free otherwise made the walk wait for the whole queue.
  */
 unsigned int gfx_split_texture_free_later(GfxTexture *tex) {
     SplitTexture *t;
@@ -624,7 +651,7 @@ void gfx_split_mesh_free(void *mesh) {
 }
 
 /*
- * v28 (DKR_NATIVE_REMOTE, PICA_ALL): work of the walk's own run on the backend thread, in order with the draws: room
+ * v28 (DKR_NATIVE_REMOTE): work of the walk's own run on the backend thread, in order with the draws: room
  * for bytes of the caller's (8-aligned), or NULL when the calls aren't queued this frame or the record is too big for
  * the ring (the caller then drains the queue and makes the call itself).
  */

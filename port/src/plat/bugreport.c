@@ -1,5 +1,7 @@
 /* Bug reports as GitHub issues (see bugreport.h). Platform independent apart from the caller's network setup. */
 #include "bugreport.h"
+#include "curl_common.h"
+#include "strbuf.h"
 
 #include <curl/curl.h>
 #include <stdio.h>
@@ -10,45 +12,6 @@
 /* GitHub refuses bodies over 65536 characters; this leaves room for the wrapper text. */
 #define BASE64_PER_COMMENT 56000
 #define BASE64_LINE 76
-
-typedef struct StrBuf {
-    char *data;
-    size_t length;
-    size_t capacity;
-    int failed;
-} StrBuf;
-
-static void sb_reserve(StrBuf *sb, size_t extra) {
-    size_t need = sb->length + extra + 1;
-    char *data;
-    if (sb->failed || need <= sb->capacity) {
-        return;
-    }
-    if (need < sb->capacity * 2) {
-        need = sb->capacity * 2;
-    }
-    data = realloc(sb->data, need);
-    if (data == NULL) {
-        sb->failed = 1;
-        return;
-    }
-    sb->data = data;
-    sb->capacity = need;
-}
-
-static void sb_add_n(StrBuf *sb, const char *text, size_t n) {
-    sb_reserve(sb, n);
-    if (sb->failed) {
-        return;
-    }
-    memcpy(sb->data + sb->length, text, n);
-    sb->length += n;
-    sb->data[sb->length] = '\0';
-}
-
-static void sb_add(StrBuf *sb, const char *text) {
-    sb_add_n(sb, text, strlen(text));
-}
 
 /* Appends text as the inside of a JSON string. */
 static void sb_add_json(StrBuf *sb, const char *text) {
@@ -83,11 +46,6 @@ static void sb_add_json(StrBuf *sb, const char *text) {
     }
 }
 
-static void sb_free(StrBuf *sb) {
-    free(sb->data);
-    memset(sb, 0, sizeof(*sb));
-}
-
 static size_t write_response(char *data, size_t size, size_t count, void *user) {
     StrBuf *sb = (StrBuf *) user;
     // Only the start of a response is looked at; the rest is dropped to save memory.
@@ -118,29 +76,14 @@ static long send_json(const BugReportConfig *config, const char *method, const c
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
     curlError[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, config->userAgent != NULL ? config->userAgent : "dkr-bugreport");
+    curl_common_setup(curl, url, headers, config->userAgent != NULL ? config->userAgent : "dkr-bugreport",
+                      write_response, response, curlError, config->caFile, config->caPem);
     if (method != NULL) {
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
     }
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) strlen(json));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_response);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curlError);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (config->caFile != NULL) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, config->caFile);
-    } else if (config->caPem != NULL) {
-        struct curl_blob blob;
-        blob.data = (void *) config->caPem;
-        blob.len = strlen(config->caPem);
-        blob.flags = CURL_BLOB_COPY;
-        curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob);
-    }
     code = curl_easy_perform(curl);
     if (code != CURLE_OK) {
         snprintf(error, errorSize, "%s", curlError[0] != '\0' ? curlError : curl_easy_strerror(code));
@@ -150,11 +93,6 @@ static long send_json(const BugReportConfig *config, const char *method, const c
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     return status;
-}
-
-static long post_json(const BugReportConfig *config, const char *path, const char *json, StrBuf *response,
-                      char *error, size_t errorSize) {
-    return send_json(config, NULL, path, json, response, error, errorSize);
 }
 
 /* Copies the string value of "key" in a JSON response (the first one, which for an issue is the issue's own). */
@@ -269,7 +207,7 @@ static long post_comment(const BugReportConfig *config, const char *commentsPath
         return 0;
     }
     curlError[0] = '\0';
-    status = post_json(config, commentsPath, json.data, &response, curlError, sizeof(curlError));
+    status = send_json(config, NULL, commentsPath, json.data, &response, curlError, sizeof(curlError));
     if (status != 201) {
         describe_failure(status, &response, curlError, result, resultSize);
     }
@@ -341,13 +279,6 @@ static int post_file(const BugReportConfig *config, const char *commentsPath, co
     return 0;
 }
 
-int bugreport_send(const BugReportConfig *config, const char *title, const char *body, const BugReportFile *files,
-                   int fileCount, unsigned int maxAttachmentBytes, BugReportProgress progress, char *result,
-                   size_t resultSize) {
-    return bugreport_send_to(config, NULL, title, body, files, fileCount, maxAttachmentBytes, progress, result,
-                             resultSize);
-}
-
 int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
                       const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
                       BugReportProgress progress, char *result, size_t resultSize) {
@@ -400,7 +331,7 @@ int bugreport_send_to(const BugReportConfig *config, const char *issue, const ch
     }
     snprintf(path, sizeof(path), "/repos/%s/issues", config->repo);
     curlError[0] = '\0';
-    status = post_json(config, path, json.data, &response, curlError, sizeof(curlError));
+    status = send_json(config, NULL, path, json.data, &response, curlError, sizeof(curlError));
     sb_free(&json);
     if (status != 201) {
         describe_failure(status, &response, curlError, result, resultSize);

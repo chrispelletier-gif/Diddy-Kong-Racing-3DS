@@ -19,8 +19,8 @@
 #define BS_HEIGHT 240
 
 enum { BS_AREA_TOP, BS_AREA_BUTTONS, BS_AREA_STATUS, BS_AREA_COUNT };
-#define BS_BUTTONS_Y 200
-#define BS_STATUS_Y 224
+#define BS_BUTTONS_Y 208
+#define BS_STATUS_Y 240
 
 /*
  * The Settings menu (menu_3ds.c): its pages as tabs down the left, the chosen page's rows on the right, each value
@@ -63,6 +63,9 @@ typedef struct BsMenu {
 
 /* monoFont: an 8x8 font of 256 characters, 8 bytes each, the highest bit leftmost (libctru's), for dense text. */
 void bs_init(const unsigned char *monoFont);
+void bs_grid_glyph_sheet(int on); /* host only: draw the digit check sheet in place of the home screen */
+void bs_preview_player_build(int on); /* host only: the home's version line as a player build shows it */
+void bs_preview_place_racers(RaceHud *hud, const short *degrees); /* host only: racers on the track map */
 /* Reads the fonts and pictures from the ROM. Call once, after the ROM is loaded and before the game's threads start. */
 void bs_load_assets(void);
 
@@ -70,6 +73,15 @@ void bs_add_message(const char *text);
 void bs_clear_messages(void);
 /* The look: 0 Classic, 1 Glass, 2 Broadcast, 3 Dock (the same layout, drawn in another style). */
 void bs_set_style(int style);
+void bs_set_variant(int v);
+void bs_set_grid(int on);
+int bs_grid_on(void);
+int bs_menu_rows(void); /* Settings rows a page shows: 4 on the grid, BS_MENU_ROWS otherwise */
+int bs_grid_button_hit(int x); /* the grid bar's button under x, or -1 */
+void bs_set_smooth_art(int on);
+void bs_log_enable(int on);
+void bs_log_reset(void);
+void bs_log_write(const char *path);
 /* The profiler's readout, lines separated by '\n'; "" removes it. */
 void bs_set_overlay(const char *text);
 /*

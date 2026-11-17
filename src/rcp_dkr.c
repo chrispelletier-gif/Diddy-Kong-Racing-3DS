@@ -1,11 +1,9 @@
 #ifdef TARGET_PORT
 #include "plat/plat.h"
 #include "port_drawtag.h"
-#ifdef PICA_ALL
 int port_frames_native(void);
 void port_frames_submit(void *task);
 OSMesg port_frames_wait_done(void);
-#endif
 #endif
 #include "rcp_dkr.h"
 #include "camera.h"
@@ -220,12 +218,10 @@ s32 gfxtask_run_xbus(Gfx *dlBegin, Gfx *dlEnd, UNUSED s32 recvMesg) {
     osWritebackDCacheAll();
 #ifdef TARGET_PORT
     port_rcp_gfx_submitted();
-#ifdef PICA_ALL
     if (port_frames_native()) {
         port_frames_submit(dkrtask); // straight to the native frame queue (port/src/os/frames.c)
         return 0;
     }
-#endif
 #endif
     osSendMesg(osScInterruptQ, dkrtask, OS_MESG_BLOCK);
     return 0;
@@ -385,7 +381,6 @@ UNUSED void gfxtask_run_fifo2(Gfx *dlBegin, Gfx *dlEnd, s32 recvMesg) {
     }
 }
 
-#ifdef PICA_ALL
 /* The done message of the next finished frame: from the native frame queue, or the scheduler's message. */
 #define PORT_WAIT_GFX_DONE(mesg)                                                                                       \
     do {                                                                                                               \
@@ -395,9 +390,6 @@ UNUSED void gfxtask_run_fifo2(Gfx *dlBegin, Gfx *dlEnd, s32 recvMesg) {
             osRecvMesg(&gGfxTaskMesgQueue, (OSMesg) &(mesg), OS_MESG_BLOCK);                                           \
         }                                                                                                              \
     } while (0)
-#else
-#define PORT_WAIT_GFX_DONE(mesg) osRecvMesg(&gGfxTaskMesgQueue, (OSMesg) &(mesg), OS_MESG_BLOCK)
-#endif
 
 /**
  * Called from the main game loop, will halt until a message comes through saying the graphics task
@@ -826,9 +818,7 @@ void texrect_draw(Gfx **dList, DrawTexture *element, s32 xPos, s32 yPos, u8 red,
                 t = -(uly << 3);
                 uly = 0;
             }
-#ifdef PICA_ALL
             if (port_native_rect(dList, tex) < 0)
-#endif
                 gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
             gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, 1024, 1024);
         }
@@ -940,9 +930,7 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
                     uly = 0;
                 }
 
-#ifdef PICA_ALL
                 if (port_native_rect(dList, tex) < 0)
-#endif
                     gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
                 gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, dsdx, dtdy);
             }
