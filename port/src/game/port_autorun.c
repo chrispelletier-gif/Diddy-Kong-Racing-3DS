@@ -297,20 +297,10 @@ static const BenchSwitch sSwitchesNative[] = {
     // logic + scene with it off (within 0.3 ms), shared_core near rdp, scene about 5-7 ms. Drop both once confirmed.
     { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
     { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
-    // R5 (PR #545): the frame's record buffer goes straight from the frame queue to the renderer (DKR_FRAME_DIRECT), with
-    // no RSP task, osSpTaskStartGo or SP/DP events. 1: the renderer's thread as today (core 0, above the game). 2: the
-    // whole frame (dispatcher and GPU commands) on one thread on the system core (core 2 on a New 3DS), so core 0 runs
-    // only the game. Both set the same switch, so they race alone. One lap each to check (try HOME and sleep in them),
-    // then a race: watch scene, renderer, 1% low and late wakes.
-    { "frames straight to the renderer (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 1 },
-    { "frames straight to the renderer", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 1, 1, 0 },
-    { "whole frame on the system core, core 0 only the game (bug check, 1 lap)", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 1 },
-    { "whole frame on the system core, core 0 only the game", { "DKR_FRAME_DIRECT", NULL, NULL }, 0, 2, 1, 0 },
-    // Bug report #548 (PR #549): the other karts with every distance times n (DKR_RACER_LOD_FAR, objects.c), no adaptive
-    // boost. 4: model 1 to 1280 units (the N64's 320), the 14-triangle model 5 only past 5760; 255: always model 1.
-    // Old 3DS rows (the New 3DS already races the game's own distances); each alone, they share a variable.
-    { "other karts' full detail out to 4x the N64's distances", { "DKR_RACER_LOD_FAR", NULL, NULL, NULL, NULL }, 0, 4, 1, 0 },
-    { "other karts always at full detail", { "DKR_RACER_LOD_FAR", NULL, NULL, NULL, NULL }, 0, 255, 1, 0 },
+    // R5 (PR #545, DKR_FRAME_DIRECT 1 and 2: frames straight to the renderer, whole frame on the system core) gained
+    // nothing in two benches, so its four rows went (the switch stays, default off).
+    // Bug report #548 (PR #549): other karts always at full detail (DKR_RACER_LOD_FAR=255) held 30 fps on the Old 3DS
+    // (bench #553, Whale Bay 29.8 fps, 99% of frames at 30), so it is the Old 3DS default and its rows went.
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesOld3ds sSwitchesNative
