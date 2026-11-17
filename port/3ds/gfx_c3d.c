@@ -2075,7 +2075,28 @@ static int sHistorySampled;
 static struct {
     const u8 *buffer;
     int frame;
+    int rows, bpp; // Its size and format when that frame was copied in (sRecentScreenRows, sRecentScreenBpp)
 } sHistoryBuf[6]; // The screen buffers (two of libctru's, three of ours) and the frame last copied into each
+
+/*
+ * P54 step 1 (DKR_HISTORY_CORE, Old 3DS default 1; 0 = as before, on the renderer's backend thread): the sampling and
+ * the flash watch run on a worker thread on the game's core (0), below the game's threads, so in its retrace wait: on
+ * an Old 3DS the backend's core is the one that limits the frame rate, and the history cost it ~4 ms a frame (#560).
+ * The backend hands the worker the screen buffer of the frame before (the GPU is done with it by the frame's end, and
+ * it is written again a frame later at the earliest), or skips the frame while the worker is still busy. The worker
+ * checks after reading that no newer frame was queued into that buffer meanwhile (else the sample is dropped).
+ * sHistoryLock guards sHistoryBuf between the backend (history_note_copy) and the worker; sHistory, sHistoryFrame and
+ * sHistoryNext are the worker's while it is busy (history_wait_idle before anyone else reads them).
+ */
+typedef struct {
+    const u8 *buffer;
+    int rows, bpp, frame;
+} HistoryJob;
+static HistoryJob sHistoryJob;
+static LightEvent sHistoryEvent;
+static LightLock sHistoryLock;
+static volatile int sHistoryBusy, sHistoryWorker; // sHistoryWorker: 1 running, -1 couldn't be started
+static unsigned int sHistorySkipped;              // Frames not sampled: the worker busy, or its sample dropped
 
 static void history_start(void) {
 #ifdef PORT_RELEASE
@@ -2084,6 +2105,7 @@ static void history_start(void) {
     sHistoryOn = plat_switch("DKR_FRAME_HISTORY", 1);
     sHistoryTest = sHistoryOn == 2;
 #endif
+    LightLock_Init(&sHistoryLock);
     if (sHistoryOn) {
         // An Old 3DS keeps 1 s at its 30 fps: its heap was down to 1 MB with 2 s (v35), and bug reports failed to send.
         int slots = is_old_3ds() ? HISTORY_FRAMES / 6 : HISTORY_FRAMES;
@@ -2095,6 +2117,18 @@ static void history_start(void) {
             sHistoryFrame[i] = -1;
         }
         plat_log("frame history for bug reports: last %d frames, %dx%d", sHistorySlots, HISTORY_W, HISTORY_H);
+    }
+}
+
+static int history_use_worker(void) {
+    return is_old_3ds() ? plat_switch("DKR_HISTORY_CORE", 1) != 0 : plat_switch("DKR_HISTORY_CORE", 0) != 0;
+}
+
+/* Waits (at most ~0.5 s) for the worker to finish its sample, so that sHistory can be read or written here. */
+static void history_wait_idle(void) {
+    int i;
+    for (i = 0; i < 500 && __atomic_load_n(&sHistoryBusy, __ATOMIC_ACQUIRE); i++) {
+        svcSleepThread(1000 * 1000);
     }
 }
 
@@ -2116,34 +2150,9 @@ static int *history_buffer_frame(const u8 *buffer, int add) {
 
 static void flash_watch(void);
 
-/* Called with sRecentScreen found for this frame, before its picture is copied in. */
-static void history_sample(void) {
-    const int rows = sRecentScreenRows, bpp = sRecentScreenBpp, step = rows >= 2 * TOP_WIDTH ? 4 : 2;
-    const u8 *src = sRecentScreen;
-    unsigned long long start;
-    int *frame, x, y;
-    u16 *out;
-
-    if (sHistoryOn < 0) {
-        history_start();
-    }
-    if (sHistorySlots != 0 && plat_switch("DKR_PROF_LEAN", 0)) {
-        return; // v33: the switch bench's lean profiling (port_profile.c), as in a player's build
-    }
-    if (sHistorySlots == 0 || sRecentFrozen || src == NULL || rows == 0 || rows / step < HISTORY_W || in_vram(src)) {
-        return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
-    }
-    frame = history_buffer_frame(src, 0);
-    if (frame == NULL || *frame < 0 || sFrameCount - 1 - *frame > 6) {
-        // Nothing drawn into it yet, or not for a long time: a buffer back in use after frames went to others (our
-        // three and libctru's two take turns as the third buffer comes and goes), whose picture isn't a recent one.
-        return;
-    }
-    start = plat_time_ns();
-    // A system call, not a request to the GSP service (which costs a round trip to another process).
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) src, rows * TOP_HEIGHT * bpp);
-    sHistoryInvalidateNs += plat_time_ns() - start;
-    out = sHistory + sHistoryNext * HISTORY_PIXELS;
+/* Reads one picture into out (HISTORY_W x HISTORY_H): every step-th column, every 2nd pixel down. */
+static void history_read(const u8 *src, int bpp, int step, u16 *out) {
+    int x, y;
     // Each buffer row is a screen column, bottom to top; the next one sampled is fetched ahead while this one is read.
     for (x = 0; x < HISTORY_W; x++) {
         const u8 *column = src + x * step * TOP_HEIGHT * bpp, *next = column + step * TOP_HEIGHT * bpp;
@@ -2163,29 +2172,155 @@ static void history_sample(void) {
             }
         }
     }
-    if (sHistoryTest && *frame >= 1200 && sHistoryTest == 1) {
+}
+
+/* DKR_FRAME_HISTORY=2's white box in frame 1200's picture, and its snapshot 90 frames later. */
+static void history_test(int frame, u16 *out) {
+    int x, y;
+    if (sHistoryTest && frame >= 1200 && sHistoryTest == 1) {
         sHistoryTest = 2;
         for (x = HISTORY_W / 3; x < HISTORY_W / 2; x++) {
             for (y = HISTORY_H / 2; y < HISTORY_H * 2 / 3; y++) {
                 out[x * HISTORY_H + y] = 0xFFFF;
             }
         }
-        plat_log("frame history test: white box in frame %d", *frame);
-    } else if (sHistoryTest == 2 && *frame >= 1290) {
+        plat_log("frame history test: white box in frame %d", frame);
+    } else if (sHistoryTest == 2 && frame >= 1290) {
         sHistoryTest = 0;
         gPlatSnapshotRequested = 1;
     }
-    sHistoryFrame[sHistoryNext] = *frame;
-    sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
-    flash_watch();
+}
+
+/* The history's time, logged every 600 samples (on the worker: with the frames it skipped). */
+static void history_count_time(unsigned long long start, int worker) {
     sHistoryNs += plat_time_ns() - start;
     if (++sHistorySampled == 600) {
-        plat_log("frame history: %llu us a frame (%llu of it cache invalidate)", sHistoryNs / 1000 / 600,
-                 sHistoryInvalidateNs / 1000 / 600);
+        if (worker) {
+            plat_log("frame history: %llu us a frame (%llu of it cache invalidate) (on the game core, %u skipped)",
+                     sHistoryNs / 1000 / 600, sHistoryInvalidateNs / 1000 / 600, sHistorySkipped);
+            sHistorySkipped = 0;
+        } else {
+            plat_log("frame history: %llu us a frame (%llu of it cache invalidate)", sHistoryNs / 1000 / 600,
+                     sHistoryInvalidateNs / 1000 / 600);
+        }
         sHistoryInvalidateNs = 0;
         sHistorySampled = 0;
         sHistoryNs = 0;
     }
+}
+
+/* The worker's sample of sHistoryJob (game core). */
+static void history_job_run(void) {
+    const HistoryJob job = sHistoryJob;
+    const int step = job.rows >= 2 * TOP_WIDTH ? 4 : 2, slot = sHistoryNext;
+    unsigned long long start = plat_time_ns();
+    u16 *out = sHistory + slot * HISTORY_PIXELS;
+    int *frame, same;
+    sHistoryFrame[slot] = -1; // Until it holds the picture
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) job.buffer, job.rows * TOP_HEIGHT * job.bpp);
+    sHistoryInvalidateNs += plat_time_ns() - start;
+    history_read(job.buffer, job.bpp, step, out);
+    // A newer frame queued into the buffer while it was read may have overwritten part of it: dropped.
+    LightLock_Lock(&sHistoryLock);
+    frame = history_buffer_frame(job.buffer, 0);
+    same = frame != NULL && *frame == job.frame;
+    LightLock_Unlock(&sHistoryLock);
+    if (!same) {
+        sHistorySkipped++;
+        return;
+    }
+    history_test(job.frame, out);
+    sHistoryFrame[slot] = job.frame;
+    sHistoryNext = (slot + 1) % sHistorySlots;
+    flash_watch();
+    history_count_time(start, 1);
+}
+
+static void history_worker(void *arg) {
+    (void) arg;
+    for (;;) {
+        LightEvent_Wait(&sHistoryEvent);
+        history_job_run();
+        __atomic_store_n(&sHistoryBusy, 0, __ATOMIC_RELEASE);
+    }
+}
+
+/* Backend thread, with sRecentScreen found for this frame: hands the frame before's picture to the worker. */
+static void history_hand_off(void) {
+    const int previous = sFrameCount - 2; // The frame before this one (sFrameCount already counts this one)
+    int i, rows, bpp;
+    if (sHistoryWorker == 0) {
+        LightEvent_Init(&sHistoryEvent, RESET_ONESHOT);
+        sHistoryWorker = threadCreate(history_worker, NULL, 16 * 1024, 0x3D, 0, true) != NULL ? 1 : -1;
+        plat_log("frame history: worker on the game core %s", sHistoryWorker > 0 ? "started" : "not started");
+    }
+    if (__atomic_load_n(&sHistoryBusy, __ATOMIC_ACQUIRE)) {
+        sHistorySkipped++; // (Its slot isn't written, so the flash watch doesn't compare across the gap.)
+        return;
+    }
+    for (i = 0; i < 6; i++) {
+        if (sHistoryBuf[i].frame == previous && previous >= 0 && sHistoryBuf[i].buffer != sRecentScreen) {
+            break;
+        }
+    }
+    if (i == 6) {
+        return; // Not seen (the first frames, or a buffer the history doesn't know)
+    }
+    rows = sHistoryBuf[i].rows;
+    bpp = sHistoryBuf[i].bpp;
+    if (rows == 0 || bpp == 0 || rows / (rows >= 2 * TOP_WIDTH ? 4 : 2) < HISTORY_W || in_vram(sHistoryBuf[i].buffer)) {
+        return;
+    }
+    sHistoryJob.buffer = sHistoryBuf[i].buffer;
+    sHistoryJob.rows = rows;
+    sHistoryJob.bpp = bpp;
+    sHistoryJob.frame = previous;
+    __atomic_store_n(&sHistoryBusy, 1, __ATOMIC_RELEASE);
+    LightEvent_Signal(&sHistoryEvent);
+}
+
+/* Called with sRecentScreen found for this frame, before its picture is copied in. */
+static void history_sample(void) {
+    const int rows = sRecentScreenRows, bpp = sRecentScreenBpp, step = rows >= 2 * TOP_WIDTH ? 4 : 2;
+    const u8 *src = sRecentScreen;
+    unsigned long long start;
+    int *frame;
+    u16 *out;
+
+    if (sHistoryOn < 0) {
+        history_start();
+    }
+    if (sHistorySlots != 0 && plat_switch("DKR_PROF_LEAN", 0)) {
+        return; // v33: the switch bench's lean profiling (port_profile.c), as in a player's build
+    }
+    if (sHistorySlots == 0 || sRecentFrozen) {
+        return;
+    }
+    if (sHistoryWorker >= 0 && history_use_worker()) {
+        history_hand_off();
+        return;
+    }
+    history_wait_idle(); // (The switch bench may have just turned the worker off.)
+    if (src == NULL || rows == 0 || rows / step < HISTORY_W || in_vram(src)) {
+        return; // In VRAM it is too slow to read from the CPU (not used for the top screen).
+    }
+    frame = history_buffer_frame(src, 0);
+    if (frame == NULL || *frame < 0 || sFrameCount - 1 - *frame > 6) {
+        // Nothing drawn into it yet, or not for a long time: a buffer back in use after frames went to others (our
+        // three and libctru's two take turns as the third buffer comes and goes), whose picture isn't a recent one.
+        return;
+    }
+    start = plat_time_ns();
+    // A system call, not a request to the GSP service (which costs a round trip to another process).
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) src, rows * TOP_HEIGHT * bpp);
+    sHistoryInvalidateNs += plat_time_ns() - start;
+    out = sHistory + sHistoryNext * HISTORY_PIXELS;
+    history_read(src, bpp, step, out);
+    history_test(*frame, out);
+    sHistoryFrame[sHistoryNext] = *frame;
+    sHistoryNext = (sHistoryNext + 1) % sHistorySlots;
+    flash_watch();
+    history_count_time(start, 0);
 }
 
 /* Called once this frame's picture has been queued for sRecentScreen. */
@@ -2194,8 +2329,16 @@ static void history_note_copy(void) {
     if (sHistorySlots == 0 || sRecentScreen == NULL) {
         return;
     }
+    LightLock_Lock(&sHistoryLock); // (The worker looks buffers up too.)
     frame = history_buffer_frame(sRecentScreen, 1);
     *frame = sFrameCount - 1; // The frame just ended (sFrameCount already counts it).
+    for (int i = 0; i < 6; i++) {
+        if (&sHistoryBuf[i].frame == frame) {
+            sHistoryBuf[i].rows = sRecentScreenRows;
+            sHistoryBuf[i].bpp = sRecentScreenBpp;
+        }
+    }
+    LightLock_Unlock(&sHistoryLock);
 }
 
 static inline int history_luma(u16 c) {
@@ -2319,6 +2462,7 @@ static void history_save(int snapshotFrame) {
     if (sHistorySlots == 0) {
         return;
     }
+    history_wait_idle(); // (A sample the worker is writing would be half the picture.)
     for (i = 0; i < sHistorySlots; i++) {
         int slot = (sHistoryNext + i) % sHistorySlots;
         if (sHistoryFrame[slot] >= 0) {

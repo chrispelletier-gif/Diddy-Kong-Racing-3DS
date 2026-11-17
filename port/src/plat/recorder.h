@@ -134,6 +134,8 @@ const char *rec_cause_name(int cause);
 unsigned int rec_frame_now(void);
 /* What took a frame's time (REC_CAUSE_*): the game thread's biggest stage, or what the renderer it waited for did. */
 int rec_frame_cause(const RecFrame *r);
+/* DKR_PROF_CORES (port_profile.c): the renderer's walk on the game's core is its own cause, not the scene's. */
+int port_prof_cores(void);
 #else
 #define rec_game_frame(row) ((void) (row))
 #define rec_event(...) ((void) 0)
