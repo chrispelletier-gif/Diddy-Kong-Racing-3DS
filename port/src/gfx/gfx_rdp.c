@@ -335,6 +335,7 @@ static u32 sTexSeqNow;
 /* Each entry's texture address (NULL when unused), packed so that dropping freed textures doesn't read every entry. */
 static const u8 *sTexCacheAddr[TEX_CACHE_SIZE];
 static s32 sPrewarming;       // Decoding textures the game has just loaded, outside of any display list
+static s32 sBetweenFrames;    // P53: prewarm_textures runs during a level load, outside any frame (no profiler time)
 static u32 sRecentEvictions;  // Entries replaced although drawn in the last 60 frames (should stay 0)
 
 /* A cheap hash of the texture data, used to notice when memory has been reused for something else. */
@@ -988,7 +989,9 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     if (pixels == NULL) {
         gPlatCounters[PLAT_COUNTER_TEXTURE_FAILED]++;
         e->used = FALSE;
-        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+        if (!sBetweenFrames) {
+            prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+        }
         walk_switch(WALK_TEXTURES);
         return NULL;
     }
@@ -1026,7 +1029,9 @@ __attribute__((noinline)) static TexCacheEntry *decode_into_cache(TexCacheEntry 
     e->atlasState[0] = e->atlasState[1] = 0;
     OPAQUE_FLUSH();
     gfx_split_texture_upload(&e->tex);
-    prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    if (!sBetweenFrames) {
+        prof_add(PROF_TEXTURE, plat_time_ns() - texStart);
+    }
     walk_switch(WALK_TEXTURES);
     if (!sPrewarming) {
         // Only the decodes that interrupt a frame: these are the hitches.
@@ -2319,13 +2324,16 @@ static void read_switches(void) {
     }
     sCpuCullSwitch = plat_switch("DKR_CPU_CULL", plat_old_3ds()) != 0;
     sWalkReject = plat_switch("DKR_WALK_REJECT", plat_old_3ds()) != 0; // Old 3DS default: bench run 17
-    sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", 0) != 0;
+    // P53 (2026-11-17): the native frame stream (R4: these three, and obj_asm.c's leftovers, texture handles and camera)
+    // is on by default on an Old 3DS, where it took Whale Bay's bunched early race from 1% of frames at 20 fps to none
+    // (switch benches #551, #553). The New 3DS, host and PC keep the walk (0).
+    sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", plat_old_3ds()) != 0;
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
-    sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", 0);
+    sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
-    sNativeFrame = plat_switch("DKR_NATIVE_FRAME", 0) != 0;
+    sNativeFrame = plat_switch("DKR_NATIVE_FRAME", plat_old_3ds()) != 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
 }
 
@@ -7950,6 +7958,10 @@ static s32 sweep_stale_textures(void) {
     return swept;
 }
 
+/* P53 (DKR_LOAD_PREWARM): what the passes during a level load did, for one log line at the load's end. */
+static s32 sLoadDecoded, sLoadFreed, sLoadPasses;
+static unsigned long long sLoadDecodeNs, sLoadFreeNs, sLoadPrewarmNs, sLoadUploadWaitNs;
+
 static void prewarm_textures(void) {
     static Tile savedTiles[ARRAY_COUNT(g.tiles)];
     static TmemLoad savedTmem[ARRAY_COUNT(g.tmem)];
@@ -7962,7 +7974,7 @@ static void prewarm_textures(void) {
     u32 savedTlutCount;
     s32 savedTlutFirst;
     s32 decoded = 0, freed = 0, swept = 0, i;
-    unsigned long long start, elapsed;
+    unsigned long long start, elapsed, mark, decodeNs = 0, freeNs = 0, sweepNs = 0;
     static u32 sDropsSeen;
     u32 drops = __atomic_load_n(&sTexQueueDropped, __ATOMIC_RELAXED);
 
@@ -8005,9 +8017,11 @@ static void prewarm_textures(void) {
     for (; tail != head; tail++) {
         TexQueueEntry *e = &sTexQueue[tail % TEX_QUEUE_SIZE];
         sTexSeqNow = tail;
+        mark = plat_time_ns();
         if (e->numCommands == 0) {
             free_notice(e->start, e->end, tail);
             freed++;
+            freeNs += plat_time_ns() - mark;
         } else {
             for (i = 0; i < ARRAY_COUNT(g.tmem); i++) {
                 g.tmem[i] = noLoad;
@@ -8024,6 +8038,7 @@ static void prewarm_textures(void) {
                     decoded++;
                 }
             }
+            decodeNs += plat_time_ns() - mark;
         }
     }
     sPrewarming = FALSE;
@@ -8041,16 +8056,69 @@ static void prewarm_textures(void) {
     g.tlutCount = savedTlutCount;
     g.tlutFirst = savedTlutFirst;
     sTriStateValid = FALSE;
+    if (sBetweenFrames) {
+        // P53: one of a level load's passes. The sweep (once per load) and the log line wait for its last pass.
+        sLoadDecoded += decoded;
+        sLoadFreed += freed;
+        sLoadDecodeNs += decodeNs;
+        sLoadFreeNs += freeNs;
+        return;
+    }
     // Level loads, not the odd object texture coming and going mid-race.
     if (decoded + freed >= 16) {
+        mark = plat_time_ns();
         swept = sweep_stale_textures();
+        sweepNs = plat_time_ns() - mark;
     }
     elapsed = plat_time_ns() - start;
     if (decoded + freed >= 16 || elapsed >= 1000000) {
-        plat_log("textures: %d decoded at load, %d freed, %d stale dropped, %.1f ms (frame %d, %u replaced while in "
-                 "use, %u not queued)",
-                 (int) decoded, (int) freed, (int) swept, elapsed / 1e6, (int) sFrameCount,
-                 (unsigned) sRecentEvictions, (unsigned) sTexQueueDropped);
+        plat_log("textures: %d decoded at load, %d freed, %d stale dropped, %.1f ms (decodes %.1f, frees %.1f, sweep "
+                 "%.1f; frame %d, %u replaced while in use, %u not queued)",
+                 (int) decoded, (int) freed, (int) swept, elapsed / 1e6, decodeNs / 1e6, freeNs / 1e6, sweepNs / 1e6,
+                 (int) sFrameCount, (unsigned) sRecentEvictions, (unsigned) sTexQueueDropped);
+    }
+}
+
+/*
+ * P53 (DKR_LOAD_PREWARM): the renderer thread, between frames, during a level load (os_sp.c's textures-only item):
+ * decodes the textures queued so far now, instead of at the next frame's set-up, and wakes the backend to upload them.
+ * With drain set (the load's end) it also waits for the backend to finish the uploads, runs the load's one sweep of
+ * stale textures and logs the load's line, so the first frame after the load starts with nothing left to do.
+ */
+void port_gfx_textures_between_frames(int drain) {
+    unsigned long long start = plat_time_ns();
+    port_gfx_init();
+    if (sOpaquePending) {
+        plat_log("textures between frames: a batch was still open"); // The frame's end flushes it; never expected
+        OPAQUE_FLUSH();
+    }
+    sBetweenFrames = TRUE;
+    prewarm_textures();
+    sBetweenFrames = FALSE;
+    sLoadPasses++;
+    gfx_split_kick(); // Uploads queued: the backend starts on them now, not once 16 KB or a frame's end are queued
+    sLoadPrewarmNs += plat_time_ns() - start;
+    if (drain) {
+        s32 swept = 0;
+        unsigned long long mark = plat_time_ns(), waitNs, sweepNs;
+        gfx_split_drain();
+        waitNs = plat_time_ns() - mark;
+        sLoadUploadWaitNs += waitNs;
+        mark = plat_time_ns();
+        if (sLoadDecoded + sLoadFreed >= 16) {
+            swept = sweep_stale_textures();
+        }
+        sweepNs = plat_time_ns() - mark;
+        if (sLoadDecoded + sLoadFreed > 0) {
+            plat_log("textures before the first frame: %d decoded, %d freed, %d stale dropped in %.1f ms during the "
+                     "load (%d passes; decodes %.1f, frees %.1f, sweep %.1f), uploads done %.1f ms after (frame %d, %u "
+                     "not queued)",
+                     (int) sLoadDecoded, (int) sLoadFreed, (int) swept, (sLoadPrewarmNs + sweepNs) / 1e6,
+                     (int) sLoadPasses, sLoadDecodeNs / 1e6, sLoadFreeNs / 1e6, sweepNs / 1e6,
+                     sLoadUploadWaitNs / 1e6, (int) sFrameCount, (unsigned) sTexQueueDropped);
+        }
+        sLoadDecoded = sLoadFreed = sLoadPasses = 0;
+        sLoadDecodeNs = sLoadFreeNs = sLoadPrewarmNs = sLoadUploadWaitNs = 0;
     }
 }
 

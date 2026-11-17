@@ -182,14 +182,15 @@ static void nmat_level_reset(void) {
         __builtin_memset(sNMatKeys, 0, sizeof(sNMatKeys));
         sNMatCount = 0;
         sNativeDraw = plat_switch("DKR_NATIVE_DRAW", 0) != 0 && !plat_switch("DKR_OLD_RENDERER", 0);
-        sNativeLeftovers = sNativeDraw && plat_switch("DKR_NATIVE_LEFTOVERS", 0) != 0;
+        // P53: the native frame stream's game side, on by default on an Old 3DS (gfx_rdp.c read_switches).
+        sNativeLeftovers = sNativeDraw && plat_switch("DKR_NATIVE_LEFTOVERS", plat_old_3ds()) != 0;
 #ifdef PORT_NATIVE_OPS
         // The game's draw-state calls write native ops with native draws (include/port_nops.h; DKR_NATIVE_OPS=0: N64
         // commands with native draws still on).
         gPortNativeOps = sNativeDraw && plat_switch("DKR_NATIVE_OPS", 1) != 0;
 #endif
-        sTexHandle = sNativeDraw && plat_switch("DKR_NATIVE_TEXHANDLE", 0) != 0;
-        sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", 0) != 0;
+        sTexHandle = sNativeDraw && plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()) != 0;
+        sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", plat_old_3ds()) != 0;
     }
 }
 
@@ -205,7 +206,7 @@ int port_native_draw(void) {
     return sNativeDraw;
 }
 
-/* G3 (DKR_NATIVE_CAMERA, default 0, read at each level load): billboard anchors and the weather's projection matrix
+/* G3 (DKR_NATIVE_CAMERA, default on on an Old 3DS (P53), else 0, read at each level load): billboard anchors and the weather's projection matrix
  * as records (camera.c, weather.c). */
 int port_native_camera(void) {
     nmat_level_check();

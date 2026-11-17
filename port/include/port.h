@@ -206,6 +206,12 @@ void port_gfx_texture_freed(const void *start, const void *end);
  * so a texture freed while the frame was built stays until the frame is drawn (gfx_rdp.c sTexFreeLater). */
 unsigned int port_gfx_texture_queue_head(void);
 void port_gfx_frame_textures(unsigned int head);
+/* P53 (DKR_LOAD_PREWARM): the textures queued so far decoded during a level load, on the renderer thread between
+ * frames (os_sp.c, gfx_rdp.c); drain also waits for the backend to upload them. */
+void port_rcp_textures_now(s32 drain);
+void port_gfx_textures_between_frames(int drain);
+/* P53: the race start's frames over the frame cap's period, and the longest (port_loadtime.c). */
+void port_race_start_stats(float *excessMs, float *worstMs);
 s32 port_apply_test_save(void *settings);
 
 /* Unattended test run (port/src/game/port_autorun.c). */

@@ -24,6 +24,8 @@ typedef struct RcpItem {
     OSTask *task;
     const void *dl;
     s32 solo; // The frame runs with the two-core renderer's calls made directly (placement 2)
+    s32 texOnly; // P53 (DKR_LOAD_PREWARM): no frame, the textures queued so far decoded between frames
+    s32 drain;   // texOnly: also wait for the backend to upload them
 } RcpItem;
 
 typedef struct RcpWorker {
@@ -48,6 +50,10 @@ static u8 sGfxSteps[GFX_STEP_RING];
 static unsigned int sGfxTexHeads[GFX_STEP_RING]; // R3: the texture queue's head as each frame was handed over
 /* Tasks handed to the workers whose completion has not been raised yet (kernel lock). */
 static s32 sRcpTasksBusy;
+/* P53: the worker that took the last frame (a textures-only item goes there, after it, never beside a frame), and
+ * the textures-only items asked for and done (kernel lock). */
+static RcpWorker *sLastFrameWorker = &sGfxWorker;
+static volatile u32 sTexOnlyAsked, sTexOnlyDone, sTexOnlyTarget;
 /* What the audio worker is doing, for the 3DS watchdog's stall report. */
 static const char *volatile sAudioStage = "not started";
 
@@ -59,17 +65,29 @@ static RcpItem worker_next(RcpWorker *worker) {
     return item;
 }
 
-static void worker_push(RcpWorker *worker, OSTask *task, const void *dl, s32 solo) {
-    RcpItem *item;
+/* The game thread (P53's textures-only items) and the scheduler's both hand items to the "rdp" worker: the slot is
+ * taken and filled under the kernel lock. */
+static void worker_enqueue(RcpWorker *worker, const RcpItem *src) {
     plat_klock();
     sRcpTasksBusy++;
-    plat_kunlock();
-    item = &worker->queue[worker->write % RCP_QUEUE_SIZE];
-    item->task = task;
-    item->dl = dl;
-    item->solo = solo;
+    worker->queue[worker->write % RCP_QUEUE_SIZE] = *src;
+    __sync_synchronize();
     worker->write++;
+    if (worker != &sAudioWorker && !src->texOnly) {
+        sLastFrameWorker = worker;
+    }
+    plat_kunlock();
     plat_sem_post(worker->sem);
+}
+
+static void worker_push(RcpWorker *worker, OSTask *task, const void *dl, s32 solo) {
+    RcpItem item;
+    item.task = task;
+    item.dl = dl;
+    item.solo = solo;
+    item.texOnly = FALSE;
+    item.drain = FALSE;
+    worker_enqueue(worker, &item);
 }
 
 /* Called after a task's completion event is raised, so lockstep never sees the RCP idle before it. */
@@ -142,6 +160,17 @@ static void frame_thread(void *arg) {
         const void *dl;
         gPlatGfxStage = "waiting for a display list";
         item = worker_next(worker);
+        if (item.texOnly) {
+            // P53: no frame, so no SP or DP event, no frame count and no profiler walk time.
+            gPlatGfxStage = "decoding textures during a load";
+            port_gfx_textures_between_frames(item.drain);
+            plat_klock();
+            sTexOnlyDone++;
+            plat_kbroadcast();
+            plat_kunlock();
+            task_done();
+            continue;
+        }
         if (item.task != NULL && !port_frames_native()) { // the native frame queue has no RSP to free
             port_raise_event(OS_EVENT_SP);
         }
@@ -259,6 +288,42 @@ void port_rcp_frame_start(const void *dl, s32 direct) {
         return;
     }
     worker_push(&sGfxWorker, NULL, dl, solo);
+}
+
+/*
+ * P53 (DKR_LOAD_PREWARM, port_loadtime.c): game thread, during a level load. The renderer thread that took the last
+ * frame decodes the textures the load has queued so far (and with drain set, waits for the backend to upload them),
+ * after that frame, so the first frames after the load don't. Waits until it is done: the decodes read the texture
+ * data out of the game's memory, which the load must not reuse meanwhile. Nothing to do before the first frame.
+ */
+static int texonly_idle(void) {
+    return (s32) (sTexOnlyDone - sTexOnlyTarget) >= 0;
+}
+
+void port_rcp_textures_now(s32 drain) {
+    RcpItem item;
+    int wasDisabled;
+    if (!sRcpStarted) {
+        return;
+    }
+    // The frames handed over so far finish first, so no frame (R5's native queue starts the next one from the
+    // renderer thread, maybe on the other worker) can run beside the item.
+    port_rcp_wait_idle();
+    plat_klock();
+    sTexOnlyTarget = ++sTexOnlyAsked;
+    plat_kunlock();
+    item.task = NULL;
+    item.dl = NULL;
+    item.solo = FALSE;
+    item.texOnly = TRUE;
+    item.drain = drain;
+    worker_enqueue(sLastFrameWorker, &item);
+    // As port_rcp_wait_idle: frames ahead of the item finish only if the VI and RCP threads can raise their events.
+    wasDisabled = port_int_release();
+    plat_klock();
+    port_kwait_until(texonly_idle);
+    plat_kunlock();
+    port_int_restore(wasDisabled);
 }
 
 void osSpTaskYield(void) {

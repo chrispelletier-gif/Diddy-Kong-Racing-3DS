@@ -32,6 +32,41 @@ static unsigned long long sPickNs[2]; // Tracks menu: A on the track, A on the l
 static unsigned long long sLastGameFrameNs;
 static unsigned long long sBgQueuedNs; // When the tracks menu asked for a background load.
 static s32 sBgStartDelayMs;           // How long the background load then took to start, or -1.
+/* P53 (DKR_LOAD_PREWARM, default on): this load decodes its textures as it goes, on the renderer thread between
+ * frames (port_rcp_textures_now after each step, and a wait for the uploads at the end), while the screen is black,
+ * instead of at the first frames after it (the race start's iris used to open on three slow frames). 0 = as before.
+ * Not for the tracks menu's background loads, which must not block on the renderer. */
+static s32 sPrewarmLoad;
+#define START_FRAMES 90 // P53: the race start's frames measured (race_start_frame)
+static s32 sStartFrames = -1; // Frames measured so far; -1 none (0: the next frame start is the baseline)
+static unsigned long long sStartPrevNs, sStartExcessNs, sStartWorstNs;
+s32 bgload_active(void);
+static s32 same_name(const char *a, const char *b);
+
+/* The step's textures, timed as a step of their own ("textures"). */
+static void prewarm_step(s32 drain) {
+    unsigned long long start, now;
+    s32 i;
+    if (!sPrewarmLoad || bgload_active()) {
+        return;
+    }
+    start = plat_time_ns();
+    port_rcp_textures_now(drain);
+    now = plat_time_ns();
+    for (i = 0; i < sStepCount; i++) {
+        if (same_name(sStepName[i], "textures")) {
+            break;
+        }
+    }
+    if (i == sStepCount && sStepCount < MAX_STEPS) {
+        sStepName[sStepCount] = "textures";
+        sStepNs[sStepCount++] = 0;
+    }
+    if (i < sStepCount) {
+        sStepNs[i] += now - start;
+    }
+    sLastMarkNs = now;
+}
 
 /* The tracks menu asked the background thread to load a track (bgload_start). */
 void port_load_bg_queued(void) {
@@ -47,6 +82,7 @@ void port_load_begin(void) {
     sStepCount = 0;
     sLoadStartNs = sLastMarkNs = plat_time_ns();
     sActive = TRUE;
+    sPrewarmLoad = plat_switch("DKR_LOAD_PREWARM", 1) != 0 && !bgload_active();
 }
 
 static s32 same_name(const char *a, const char *b) {
@@ -72,6 +108,7 @@ void port_load_step(const char *name) {
     if (i == sStepCount) {
         if (sStepCount == MAX_STEPS) {
             sLastMarkNs = now;
+            prewarm_step(FALSE);
             return;
         }
         sStepName[sStepCount] = name;
@@ -79,6 +116,7 @@ void port_load_step(const char *name) {
     }
     sStepNs[i] += now - sLastMarkNs;
     sLastMarkNs = now;
+    prewarm_step(FALSE);
 }
 
 void port_load_end(s32 levelId, const char *kind) {
@@ -89,6 +127,7 @@ void port_load_end(s32 levelId, const char *kind) {
         return;
     }
     port_load_step("rest");
+    prewarm_step(TRUE); // The uploads done too, so the first frame has none
     sActive = FALSE;
     now = plat_time_ns();
     len = plat_snprintf(sLine, sizeof(sLine), "level load %d (%s): %d ms:", (int) levelId, kind,
@@ -103,6 +142,10 @@ void port_load_end(s32 levelId, const char *kind) {
     }
     sLoadEndNs = now;
     sLoadWasGame = kind[0] == 'g';
+    if (sLoadWasGame) {
+        sStartFrames = 0;
+        sStartExcessNs = sStartWorstNs = 0;
+    }
     sWaitFirstFrame = TRUE;
 }
 
@@ -132,9 +175,40 @@ void port_load_menu_held(s32 held) {
     }
 }
 
+/*
+ * P53: the race start's pacing, for the test run's results (start_excess_ms, start_worst_ms). Over the first
+ * START_FRAMES game frames after a "game" load (the load's own frame left out), the time frames ran over the frame
+ * cap's period (only frames that missed a retrace: over 1.25 periods), and the longest frame.
+ */
+
+static void race_start_frame(unsigned long long now) {
+    unsigned long long period, cap;
+    if (sStartFrames < 0 || sStartFrames > START_FRAMES) {
+        return;
+    }
+    if (sStartFrames > 0) {
+        period = now - sStartPrevNs;
+        cap = (unsigned long long) plat_frame_retraces() * 1000000000ULL / 60ULL;
+        if (period * 4 > cap * 5) {
+            sStartExcessNs += period - cap;
+        }
+        if (period > sStartWorstNs) {
+            sStartWorstNs = period;
+        }
+    }
+    sStartPrevNs = now;
+    sStartFrames++;
+}
+
+void port_race_start_stats(float *excessMs, float *worstMs) {
+    *excessMs = sStartFrames > 1 ? sStartExcessNs / 1e6f : 0.0f;
+    *worstMs = sStartFrames > 1 ? sStartWorstNs / 1e6f : 0.0f;
+}
+
 /* Game thread, at the top of every frame: logs a frame that took much longer than it should. */
 void port_load_game_frame(s32 gameMode, s32 levelId) {
     unsigned long long now = plat_time_ns();
+    race_start_frame(now);
     if (sLastGameFrameNs != 0 && now - sLastGameFrameNs > LONG_FRAME_MS * 1000000ULL) {
         plat_log("long game frame: %d ms (mode %d, level %d)", (int) ((now - sLastGameFrameNs) / 1000000ULL),
                  (int) gameMode, (int) levelId);

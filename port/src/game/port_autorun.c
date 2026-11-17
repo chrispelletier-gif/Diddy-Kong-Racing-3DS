@@ -258,7 +258,7 @@ typedef struct BenchSwitch {
  * shadows first, flicker, batched pieces, 3D, back face culling, ...) are out of the list, their switches untouched;
  * their last results are in port/docs/bench-history.md. DKR_NATIVE_HEAP has no row: it is read once at boot, because
  * the game's pool is sized by it, so a race can't flip it (test it by starting the game with the switch on).
- * One list serves both consoles. */
+ * The New 3DS's list (the Old 3DS has its own below since P53). */
 static const BenchSwitch sSwitchesNative[] = {
     // R2 (PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots. One lap to check the
     // sprites (hub trees, balloons), then a full race for the speed.
@@ -320,10 +320,31 @@ static const BenchSwitch sSwitchesNative[] = {
       0, 60, 1, 0 },
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
+    // P53 (2026-11-17): a level's textures are decoded and uploaded during its load, behind the black screen
+    // (DKR_LOAD_PREWARM, default on), not on the first three frames after it, where the race start's iris opened in
+    // jerks. The usual races do it; this row races one lap the old way, to compare the results' race start columns.
+    { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
-#define sSwitchesOld3ds sSwitchesNative
 #define sSwitchesNew3ds sSwitchesNative
+/*
+ * Old 3DS (P53, 2026-11-17): the native frame stream (R4 and the four switches it needs) is the Old 3DS default, so
+ * its rows went; one 1-lap row turns all five off to compare. The New 3DS keeps them (sSwitchesNative).
+ */
+static const BenchSwitch sSwitchesOld3ds[] = {
+    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
+    { "native switches off (old walk, 1 lap)",
+      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
+      1, 0, 1, 1 },
+    { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
+    // The uncapped rows (PR #556, see sSwitchesNative); its "all native switches" row is the usual one here now.
+    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
+    { "uncapped (60 cap), walk/draw parts timed (costs fps)",
+      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
+    { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
+    { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
+    { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
+};
 /*
  * New 3DS: the shelved switches bench ("Shelved switches" in the Test run menu, 2026-11-01; the user asked whether
  * anything shelved earlier is worth another look now that the profiler times every part, the renderer runs on two
@@ -1410,7 +1431,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
                   "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes,shared_core_ms,game_core_ms,renderer_core_ms,"
-                  "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit\n",
+                  "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit,start_mark,start_excess_ms,"
+                  "start_worst_ms\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1484,9 +1506,20 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     } else {
         prof_core_window_read(&cores);
     }
-    plat_snprintf(line + length, sizeof(line) - length, ",%.2f,%.2f,%.1f,%.1f,%d,%s\n", cores.ms[PROF_CORE_GAME],
+    plat_snprintf(line + length, sizeof(line) - length, ",%.2f,%.2f,%.1f,%.1f,%d,%s", cores.ms[PROF_CORE_GAME],
                   cores.ms[PROF_CORE_RENDER], cores.ceilingFps, cores.ceilingLow1Fps, cores.ceilingPct60,
                   cores.frames ? core_limit_name(&cores) : "-");
+    length = strlen(line);
+    // Then (2026-11-17, P53) the race start: the "start" mark (the summaries find these columns by it, wherever
+    // later columns put them), the time the first 90 frames after the load ran over the frame cap's period (frames
+    // that missed a retrace), and the longest of them (port_loadtime.c).
+    {
+        float excess = 0.0f, worst = 0.0f;
+        if (stats != &empty) {
+            port_race_start_stats(&excess, &worst);
+        }
+        plat_snprintf(line + length, sizeof(line) - length, ",start,%.1f,%.1f\n", excess, worst);
+    }
     append_file(results_file(), line, header);
     if (stats != &empty && cores.frames > 0) {
         record_cores(outcome, &cores, stats);
@@ -2355,7 +2388,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 24) // The whole game run has three columns of its own; then the flashes
+#define MAX_FIELDS (COL_COUNT + 40) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 3
@@ -2374,6 +2407,8 @@ typedef struct BenchGroup {
     s32 timelineRaces; // Races with the GPU timeline's columns (gpu_fill_ms, gpu_lists_ms, gpu_copy_ms; 2026-11-07)
     double gpuFill, gpuLists, gpuCopy;
     s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
+    s32 startRaces; // Races with the race start's columns (after the "start" mark; P53, 2026-11-17)
+    double startExcess, startWorst;
 } BenchGroup;
 
 static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
@@ -2396,6 +2431,16 @@ static const char *timeline_cell(const BenchGroup *g) {
     }
     plat_snprintf(cell, sizeof(cell), "%.2f / %.2f / %.2f", g->gpuFill / g->timelineRaces,
                   g->gpuLists / g->timelineRaces, g->gpuCopy / g->timelineRaces);
+    return cell;
+}
+
+/* The switch bench's race start cells: ms the first 90 frames ran over the cap, and the longest ("-" without). */
+static const char *start_cells(const BenchGroup *g) {
+    static char cell[48];
+    if (g->startRaces == 0) {
+        return "- | -";
+    }
+    plat_snprintf(cell, sizeof(cell), "%.0f | %.0f", g->startExcess / g->startRaces, g->startWorst / g->startRaces);
     return cell;
 }
 
@@ -2564,6 +2609,14 @@ static void bench_summary(char *out, s32 size) {
             g->gpuLists += parse_decimal(fields[gapsColumn + 14]);
             g->gpuCopy += parse_decimal(fields[gapsColumn + 15]);
         }
+        for (i = COL_COUNT; i + 2 < numFields; i++) {
+            if (str_equal(fields[i], "start")) {
+                g->startRaces++;
+                g->startExcess += parse_decimal(fields[i + 1]);
+                g->startWorst += parse_decimal(fields[i + 2]);
+                break;
+            }
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -2600,12 +2653,14 @@ static void bench_summary(char *out, s32 size) {
         length = plat_snprintf(out, size,
                                "\n### Switches (averages of the finished races)\n\n"
                                "Each switch is flipped by itself; saved is against the usual settings' races. "
+                               "Start ms over: how long the first 90 frames after the load ran past the cap (frames "
+                               "that missed a retrace); start worst: the longest of them, ms. "
                                "Render settings, the bench's own in every race (see apply_config): %d fps cap, "
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
                                "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | frame to frame ms "
-                               "| pace changes | limit | flashes | GPU fills / draws / copies ms |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|\n",
+                               "| pace changes | limit | flashes | GPU fills / draws / copies ms | start ms over | start worst |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|--:|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -2638,7 +2693,7 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
@@ -2646,7 +2701,7 @@ static void bench_summary(char *out, s32 size) {
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
                         (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g),
-                        timeline_cell(g));
+                        timeline_cell(g), start_cells(g));
                     continue;
                 }
                 length += plat_snprintf(

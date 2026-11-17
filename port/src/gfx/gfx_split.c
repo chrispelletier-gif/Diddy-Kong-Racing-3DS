@@ -382,6 +382,15 @@ void gfx_split_drain(void) {
     }
 }
 
+/* P53: between frames (a level load's texture uploads), wakes an idle backend thread for what is queued, which
+ * commit would otherwise leave until 16 KB or a frame's end are queued. Records outside a frame are run in order. */
+void gfx_split_kick(void) {
+    if (sStarted && sBackendIdle && sHead != sTail) {
+        sBackendIdle = 0;
+        plat_sem_post(sData);
+    }
+}
+
 static int sCoresHeld; // A solo frame (holdCores) keeps the system core's share raised
 
 int gfx_split_frame_start(int direct, int holdCores) {
