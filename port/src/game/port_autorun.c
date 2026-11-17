@@ -1182,7 +1182,7 @@ static void record_draw_mix(const char *outcome) {
             continue;
         }
         length += plat_snprintf(text + length, sizeof(text) - length,
-                                "%s,kind,%s,%.1f,%.1f,%.1f,%.3f,%.3f,,,,%.1f,%.1f,%.1f,%.3f,,,,,\n", prefix,
+                                "%s,kind,%s,%.1f,%.1f,%.1f,%.3f,%.3f,,,,%.1f,%.1f,%.1f,%.3f,,,,,,\n", prefix,
                                 prof_kind_name(k), st->tris / frames, st->draws / frames, st->verts / frames,
                                 st->renderNs / 1e6 / timed, st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a,
                                 st->backface * 100.0 / a, st->tiny * 100.0 / a,
@@ -1190,10 +1190,10 @@ static void record_draw_mix(const char *outcome) {
     }
     if (scene.frames > 0) {
         length += plat_snprintf(text + length, sizeof(text) - length,
-                                "%s,scene,level,,,,,,,,,,,,,%.1f,%.1f,%.1f,%.1f,%.1f\n", prefix,
+                                "%s,scene,level,,,,,,,,,,,,,%.1f,%.1f,%.1f,%.1f,%.1f,%.3f\n", prefix,
                                 (double) scene.segments / scene.frames, (double) scene.segmentsAllowed / scene.frames,
                                 (double) scene.segmentsDrawn / scene.frames, (double) scene.objects / scene.frames,
-                                (double) scene.objectsDrawn / scene.frames);
+                                (double) scene.objectsDrawn / scene.frames, mix.walkNs / 1e6 / gameTimed);
     }
     objFrames = obj->frames ? (double) obj->frames : 1.0;
     objTimed = obj->timedFrames ? (double) obj->timedFrames : 1.0;
@@ -1221,7 +1221,7 @@ static void record_draw_mix(const char *outcome) {
         {
             const ProfObjStats *o = &obj->objs[best];
             length += plat_snprintf(text + length, sizeof(text) - length,
-                                    "%s,object,%s,%.1f,,,%.3f,%.3f,%.3f,%.1f,%.1f,,,,,,,,,\n", prefix,
+                                    "%s,object,%s,%.1f,,,%.3f,%.3f,%.3f,%.1f,%.1f,,,,,,,,,,\n", prefix,
                                     prof_object_name(best), o->tris / objFrames, o->renderNs / 1e6 / objRenderTimed,
                                     o->buildNs / 1e6 / objTimed, o->logicNs / 1e6 / objTimed, o->updates / objFrames,
                                     o->drawn / objFrames);
@@ -1230,7 +1230,7 @@ static void record_draw_mix(const char *outcome) {
     append_file(DRAWMIX_FILE, text,
                 "run,race,track,character,vehicle,graphics,config,outcome,what,name,tris,draws,verts,rdp_ms,build_ms,"
                 "logic_ms,updated,drawn,off_pct,back_pct,tiny_pct,overdraw,segments,segments_allowed,segments_drawn,"
-                "objects,objects_drawn\n");
+                "objects,objects_drawn,walk_ms\n");
 
     // The run's totals.
     for (k = 0; k < PROF_KINDS; k++) {
@@ -1250,6 +1250,7 @@ static void record_draw_mix(const char *outcome) {
     sRunMix.frames += mix.frames;
     sRunMix.timedFrames += mix.timedFrames;
     sRunMix.gameTimedFrames += mix.gameTimedFrames;
+    sRunMix.walkNs += mix.walkNs;
     sRunMix.auditedFrames += mix.auditedFrames;
     sRunScene.frames += scene.frames;
     sRunScene.segments += scene.segments;
@@ -2391,7 +2392,7 @@ enum BenchColumn {
 #define MAX_FIELDS (COL_COUNT + 40) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
-#define BENCH_LIMITS 3
+#define BENCH_LIMITS 6
 
 typedef struct BenchGroup {
     char track[32];
@@ -2406,12 +2407,15 @@ typedef struct BenchGroup {
     double jitter, paceChanges;
     s32 timelineRaces; // Races with the GPU timeline's columns (gpu_fill_ms, gpu_lists_ms, gpu_copy_ms; 2026-11-07)
     double gpuFill, gpuLists, gpuCopy;
-    s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
+    s32 limits[BENCH_LIMITS]; // races per prof_limit answer (sLimitNames)
     s32 startRaces; // Races with the race start's columns (after the "start" mark; P53, 2026-11-17)
     double startExcess, startWorst;
 } BenchGroup;
 
-static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+/* prof_limit's answers: DKR_PROF_CORES=0 (and results written before P54) gives the first three, =1 the GPU and the last
+ * three. */
+static const char *const sLimitNames[BENCH_LIMITS] = { "GPU",       "renderer CPU",  "game CPU",
+                                                       "game core", "renderer core", "retrace" };
 
 /* The switch bench's steadiness cells: the frame to frame change (ms) and the pace changes a race ("-" without). */
 static const char *steady_cells(const BenchGroup *g) {

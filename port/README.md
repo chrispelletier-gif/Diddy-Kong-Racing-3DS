@@ -346,7 +346,7 @@ below turn it on as well. While it is off it costs nothing measurable (each timi
 
 | Line | Meaning |
 | ---- | ------- |
-| `PROFILER 29.8 fps limit: GPU` | Frames per second, and which part limits them: the game CPU, the renderer CPU or the GPU. |
+| `PROFILER 29.8 fps limit: GPU` | Frames per second, and which part limits them: the game core, the renderer core or the GPU, or the retrace when all three have time to spare. |
 | `30fps 97% 20fps 3% slower 0%` | Share of frames shown at 30 fps, at 20 fps, and slower. |
 | `worst frame 61 ms hitches 2` | The longest frame, and frames over 50 ms. |
 | `game logic / scene / wait` | Game thread, ms per frame: object updates (racers, AI), building the display list, waiting for the renderer. |
@@ -367,11 +367,21 @@ work; the `game` total and the `held back by` answer still count it, as it is th
 has a core of its own, so nothing changes there. `DKR_PROF_SHARED_CORE=0` in `env.txt` counts it in `scene` again,
 as before 2026-11-15 (older Old 3DS results' `scene_ms` is about today's `scene_ms + shared_core_ms`).
 
+The limit is judged by core (`DKR_PROF_CORES`, on by default since 2026-11-17), as the uncapped bench counts them:
+the game core is `logic + scene + shared`, the renderer core is the two-core renderer's backend (an Old 3DS's system
+core; a New 3DS's renderer whole), and the GPU its drawing; `retrace` means all three are under 90% of the frame's
+budget. The last line, `spare ms`, gives what each of them has left of the budget (negative when it runs over); it is
+the first line left out when a test run's status needs the room. In the draw mix (log, `walk_ms` in
+`autorun_drawmix.csv`, Old 3DS) the walk's time is taken out of the kind being built and shown as
+`renderer walk on this core`, so `menus/other` is the game's own work. `DKR_PROF_CORES=0` gives the view before
+(`game CPU` / `renderer CPU`, the walk counted with the scene in the graph and with the kind in the draw mix).
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the
 right; the top is 50 ms, with lines at 60 and 30 fps), each bar coloured by what took its time (green game logic,
-cyan building the display list, yellow the renderer, orange texture decoding, red the GPU, grey waiting for the
+cyan building the display list, yellow the renderer (on an Old 3DS also the display list walk on the game's core),
+orange texture decoding, red the GPU, grey waiting for the
 retrace; a white tip marks a hitch), over one of four pages. Tap under the graph for the next page; tap the graph to
 freeze it and the page, to read them.
 

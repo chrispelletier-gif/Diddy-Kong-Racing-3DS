@@ -128,6 +128,7 @@ typedef struct ProfStats {
     unsigned int paceChanges;     /* Game frames whose pace (one, two, three retraces or more) differs from the one before. */
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
     unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
+    unsigned long long backendBusyNs; /* The two-core renderer's backend busy time (gfx_split_backend_busy_ns; 0 without) */
 } ProfStats;
 
 /* A window of statistics: started with prof_window_start, read (any number of times) with prof_window_read. */
@@ -135,7 +136,9 @@ enum ProfWindow { PROF_WINDOW_OVERLAY, PROF_WINDOW_SESSION, PROF_WINDOW_COUNT };
 void prof_window_start(int window);
 void prof_window_read(int window, ProfStats *out);
 
-/* Which part of the system limits the frame rate, judged from a window's averages: "game CPU", "renderer CPU", "GPU". */
+/* Which part of the system limits the frame rate, judged from a window's averages. DKR_PROF_CORES=1 (default), by core
+ * as the uncapped table counts them: "game core", "renderer core", "GPU", or "retrace" when all three are under 90% of
+ * the cap's period. DKR_PROF_CORES=0: "game CPU", "renderer CPU", "GPU" as before. */
 const char *prof_limit(const ProfStats *stats);
 
 /*
@@ -223,6 +226,9 @@ typedef struct ProfDrawMix {
     ProfKindStats kinds[PROF_KINDS];
     unsigned long frames, timedFrames, auditedFrames;
     unsigned long gameTimedFrames; /* Frames the game thread timed its building in (buildNs). */
+    /* P54 DKR_PROF_CORES: other threads' time on the game's core (an Old 3DS's walk, the sound players there) while
+     * the game built its kinds, taken out of their buildNs (port_profile.c). */
+    unsigned long long walkNs;
 } ProfDrawMix;
 /* Adds the renderer's draw mix since the last call to out (gfx_rdp.c), and starts afresh. */
 void gfx_draw_mix_take(ProfDrawMix *out);
