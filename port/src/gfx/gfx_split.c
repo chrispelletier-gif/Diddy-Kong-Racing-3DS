@@ -21,6 +21,7 @@
 #include "plat/plat.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "plat/profile.h"
 
 /* The queue's size, a power of two (the ring's offsets wrap with the unsigned counters): 2 MB on a New 3DS, 1 MB on
  * an Old 3DS, where a crowded frame queues about 200 KB and the heap is tight. Set before the queue is allocated. */
@@ -110,6 +111,71 @@ static unsigned int sBackendFrames, sBackendWakes;
 static volatile unsigned long long sBackendBusyTotalNs; // Never reset (gfx_split_backend_busy_ns, the uncapped bench)
 
 static void backend_thread(void *arg);
+
+/*
+ * P54 2b-A (DKR_BACKEND_MIX, default 1 while the profiler is on): the backend's time by record type, on timed frames
+ * (an Old 3DS's 1 in 8, as the game sections; every frame elsewhere), to find where the renderer core's 22-27 ms a
+ * frame go. Two clock reads a record on timed frames only. Totals never reset; each reader keeps where it last read.
+ */
+enum { MIX_PIECES, MIX_DRAWS, MIX_MODELS, MIX_TEXTURES, MIX_FRAME, MIX_CLOSE, MIX_OTHER, MIX_COUNT };
+static const char *const sMixNames[MIX_COUNT] = { "native pieces", "draws", "model/mesh", "textures",
+                                                  "frame start/end", "batch close", "other" };
+static volatile unsigned long long sMixTicks[MIX_COUNT];
+static volatile unsigned int sMixFrames;
+static unsigned long long sMixReadTicks[2][MIX_COUNT];
+static unsigned int sMixReadFrames[2], sMixCount;
+static int sMixOn; // This frame is timed (decided at its OP_START)
+
+static int mix_kind(unsigned int op, const void *p) {
+    switch (op) {
+        case OP_CALL:
+            return ((const SplitCall *) p)->fn == sKeepFn ? MIX_PIECES : MIX_OTHER;
+        case OP_CLEAR_COLOR:
+        case OP_CLEAR_DEPTH:
+        case OP_TRIANGLES:
+        case OP_INDEXED:
+            return MIX_DRAWS;
+        case OP_MODEL:
+        case OP_MESHES:
+        case OP_MESH_FREE:
+            return MIX_MODELS;
+        case OP_TEX_UPLOAD:
+        case OP_TEX_FREE:
+        case OP_TEX_SHARE:
+            return MIX_TEXTURES;
+        case OP_START:
+        case OP_END:
+            return MIX_FRAME;
+        default:
+            return MIX_OTHER;
+    }
+}
+
+int gfx_split_backend_mix(int reader, char *out, int size) {
+    double perTick = 1e3 / (double) plat_ticks_per_second(), ms[MIX_COUNT];
+    unsigned int frames = sMixFrames - sMixReadFrames[reader], k;
+    int at;
+    for (k = 0; k < MIX_COUNT; k++) {
+        unsigned long long now = sMixTicks[k];
+        ms[k] = frames ? (now - sMixReadTicks[reader][k]) * perTick / frames : 0.0;
+        sMixReadTicks[reader][k] = now;
+    }
+    sMixReadFrames[reader] += frames;
+    if (frames == 0 || size <= 0) {
+        if (size > 0) {
+            out[0] = '\0';
+        }
+        return 0;
+    }
+    at = plat_snprintf(out, size, "backend records a frame (ms):");
+    for (k = 0; k < MIX_COUNT && at < size; k++) {
+        at += plat_snprintf(out + at, size - at, "%s %s %.2f", k ? "," : "", sMixNames[k], ms[k]);
+    }
+    if (at < size) {
+        at += plat_snprintf(out + at, size - at, " (%u frames timed)", frames);
+    }
+    return at < size ? at : size - 1;
+}
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
@@ -198,12 +264,19 @@ static void backend_thread(void *arg) {
         while (sTail != sHead) {
             SplitRecord *rec;
             unsigned int op, bytes;
+            unsigned long long mixStart;
+            int mixKind = MIX_OTHER;
             void *p;
             __sync_synchronize(); // The record is read after the head that covers it.
             rec = (SplitRecord *) (sRing + sTail % SPLIT_RING_BYTES);
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
+            if (op == OP_START) {
+                sMixOn = plat_switch("DKR_BACKEND_MIX", 1) && prof_enabled() &&
+                         (!plat_old_3ds() || ++sMixCount % 8 == 0);
+            }
+            mixStart = sMixOn ? plat_ticks() : 0;
             if (sBackendPrefetch && sTail + bytes != sHead) {
                 // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
                 // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
@@ -215,6 +288,14 @@ static void backend_thread(void *arg) {
             }
             if (sCloseFn != NULL && (op != OP_CALL || ((SplitCall *) p)->fn != sKeepFn) && op != OP_WRAP) {
                 sCloseFn();
+                if (mixStart != 0) {
+                    unsigned long long now = plat_ticks();
+                    sMixTicks[MIX_CLOSE] += now - mixStart;
+                    mixStart = now;
+                }
+            }
+            if (mixStart != 0) {
+                mixKind = mix_kind(op, p); // (before the record runs: an OP_CALL's payload is the walk's after)
             }
             switch (op) {
                 case OP_START:
@@ -285,6 +366,13 @@ static void backend_thread(void *arg) {
                     break;
                 default:
                     break;
+            }
+            if (mixStart != 0) {
+                sMixTicks[mixKind] += plat_ticks() - mixStart;
+                if (op == OP_END) {
+                    sMixFrames++;
+                    sMixOn = 0;
+                }
             }
             // Done with the record before the walk may write over it (op and bytes were read before, as locals).
             __sync_synchronize();

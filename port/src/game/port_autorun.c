@@ -1354,8 +1354,8 @@ static s32 sCoreLineCount;
 
 /* Each race's core times and game core breakdown, into CORES_FILE (and, for the usual and uncapped rows, the issue). */
 static void record_cores(const char *outcome, const ProfCoreStats *c, const ProfStats *stats) {
-    static char breakdown[1024];
-    static char text[1536];
+    static char breakdown[1536];
+    static char text[2048];
     Race *race = &sRaces[sNext];
     s32 config = is_bench() ? race->config : -1;
     prof_core_breakdown(breakdown, sizeof(breakdown));

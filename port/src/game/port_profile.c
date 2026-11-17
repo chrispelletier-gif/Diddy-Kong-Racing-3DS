@@ -1811,6 +1811,12 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
+            {
+                char mix[320];
+                if (gfx_split_backend_mix(0, mix, sizeof(mix)) > 0) {
+                    port_log("%s", mix); // P54 2b-A (DKR_BACKEND_MIX)
+                }
+            }
             sLogFrames = frames;
             __builtin_memcpy(sLogPerFrame, perFrame, sizeof(sLogPerFrame));
             sLogWalkTimed = walkTimed;
@@ -1909,6 +1915,7 @@ void prof_core_window_start(void) {
     }
     sCoreSecFramesStart = sSecRunFrames;
     sCoreRenderedStart = sRenderedFrames;
+    gfx_split_backend_mix(1, NULL, 0); // (from here)
     sCoreOn = TRUE;
 }
 
@@ -2015,6 +2022,17 @@ int prof_core_breakdown(char *out, int size) {
     if (length < size) {
         length += plat_snprintf(out + length, size - length, "; frame end waits: GPU %.2f, screen %.2f",
                                 part[PROF_PART_END_GPU_WAIT], part[PROF_PART_PRESENT_WAIT]);
+    }
+    if (length < size - 2) {
+        /* P54 2b-A: the renderer core's time by record type (DKR_BACKEND_MIX) */
+        s32 at = length;
+        length += plat_snprintf(out + length, size - length, "; ");
+        if (gfx_split_backend_mix(1, out + length, size - length) == 0) {
+            length = at;
+            out[length] = '\0';
+        } else {
+            length += (s32) strlen(out + length);
+        }
     }
     return length < size ? length : size - 1;
 }
