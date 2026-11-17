@@ -125,6 +125,7 @@
 #define PROBLEMS_FILE "autorun_problems.txt"
 #define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
 #define DRAWMIX_FILE "autorun_drawmix.csv" // Each race's cost per kind of thing drawn and per object kind (profile.h)
+#define CORES_FILE "autorun_cores.txt" // Each race's core times, uncapped ceiling and game core breakdown (profile.h)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -186,11 +187,11 @@ static const BenchConfig sBenchConfigs[] = {
  * is raced at its usual setting and, by itself, at its test setting; a switch can set up to five variables together,
  * and several switches can share a variable (one that the others need).
  */
-#define BENCH_SWITCH_VARS 5
+#define BENCH_SWITCH_VARS 6
 typedef struct BenchSwitch {
     const char *name; // For the results: what the test setting does.
     const char *env[BENCH_SWITCH_VARS];
-    short usual, test;
+    short usual, test; // usual -1: the switch's own default on each console (no override)
     s8 alone; // A measurement, not a setting: left out of the race with every switch flipped together.
     s8 check; // Checks a bug fix, not performance: raced for one lap (user rule 2026-11-01). When every row is one,
               // the usual races are one lap too.
@@ -301,6 +302,24 @@ static const BenchSwitch sSwitchesNative[] = {
     // nothing in two benches, so its four rows went (the switch stays, default off).
     // Bug report #548 (PR #549): other karts always at full detail (DKR_RACER_LOD_FAR=255) held 30 fps on the Old 3DS
     // (bench #553, Whale Bay 29.8 fps, 99% of frames at 30), so it is the Old 3DS default and its rows went.
+    // Uncapped (2026-11-17, owner: "how much higher is the fps uncapped on the Old 3DS? could we target 60?"). The
+    // bench's 30 fps cap (Old 3DS) is lifted to the 60 fps one: a frame is shown at the first retrace after it is done,
+    // and the game logic steps by the retraces each frame really took (port_rate.c, the New 3DS's 60 fps path: half
+    // steps on one-retrace frames, whole ones on two), so the race runs at its normal speed. The frame rate and 1% low
+    // are what the Old 3DS really shows at 60 (whole retraces only); the results' ceiling columns (profile.h
+    // ProfCoreStats) give what it could reach with no cap or vsync at all: per frame, the longest of the game core, the
+    // renderer's core and the GPU. Each race's breakdown (game core sections, with the walk inside each) is in
+    // autorun_cores.txt. Measurements, raced alone and for the track's own laps: the usual settings, then with every
+    // native switch (the frame stream, R4, and the four it needs), then with the walk's and the draws' parts timed (their
+    // clock reads are system calls on an Old 3DS and cost it 2.5-4 fps, so that row's fps is low: it is there for where
+    // the renderer's time goes). On a New 3DS, which already races at 60, the first row matches its usual one.
+    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
+    { "uncapped (60 cap), all native switches + frame stream",
+      { "DKR_FPS_PIN", "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA",
+        "DKR_NATIVE_TEXHANDLE" },
+      0, 60, 1, 0 },
+    { "uncapped (60 cap), walk/draw parts timed (costs fps)",
+      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
     // P53 (2026-11-17): a level's textures are decoded and uploaded during its load, behind the black screen
     // (DKR_LOAD_PREWARM, default on), not on the first three frames after it, where the race start's iris opened in
     // jerks. The usual races do it; this row races one lap the old way, to compare the results' race start columns.
@@ -318,6 +337,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
       1, 0, 1, 1 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
+    // The uncapped rows (PR #556, see sSwitchesNative); its "all native switches" row is the usual one here now.
+    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
+    { "uncapped (60 cap), walk/draw parts timed (costs fps)",
+      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
     { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
     { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
@@ -370,7 +393,7 @@ static s32 switch_race_laps(s32 config) {
     return all ? 1 : 0;
 }
 #define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
-#define MAX_CONFIGS 24 // (the switch bench's usual races, its rows and the all-together race: 18 on an Old 3DS)
+#define MAX_CONFIGS 32 // (the switch bench's usual races, its rows and the all-together race: 18 now)
 
 static s32 sMode; // enum Mode
 
@@ -414,7 +437,6 @@ static void apply_config(s32 config) {
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
-        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
         lean_apply(); // The lean bench only (v34; DKR_BENCH_FULL_PROFILE=1 keeps the profiler's lines and frame history)
         plat_override_switch("BENCH_RENDER_AHEAD", 1);
         plat_override_switch("BENCH_WIDESCREEN", 2);
@@ -429,6 +451,9 @@ static void apply_config(s32 config) {
                 plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
             }
         }
+        // The bench's own frame rate cap, after the usual settings (the uncapped rows share its variable), so that only
+        // those rows' test setting changes it.
+        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             if (config == i + 1 || (config == SWITCH_ALL && !sSwitches[i].alone)) {
                 for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
@@ -1293,10 +1318,106 @@ static s32 outcome_ok(const char *outcome) {
     return str_equal(outcome, "finished") || str_equal(outcome, "played") || str_equal(outcome, "toured");
 }
 
+/* The core that was the longest on most of a race's frames, for its ceiling. */
+static const char *core_limit_name(const ProfCoreStats *c) {
+    static const char *const sNames[PROF_CORE_COUNT] = { "game core", "renderer core", "GPU" };
+    s32 i, best = 0;
+    for (i = 1; i < PROF_CORE_COUNT; i++) {
+        if (c->limitPct[i] > c->limitPct[best]) {
+            best = i;
+        }
+    }
+    return sNames[best];
+}
+
+/* Whether a switch bench row lifts the frame rate cap (the uncapped rows). */
+static s32 config_uncapped(s32 config) {
+    s32 k;
+    if (sMode != MODE_SWITCH || config < 1 || config >= SWITCH_CONFIGS) {
+        return FALSE;
+    }
+    for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[config - 1].env[k] != NULL; k++) {
+        if (str_equal(sSwitches[config - 1].env[k], "DKR_FPS_PIN")) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* The uncapped section of the switch bench's issue: the usual and uncapped rows' races of this launch, with what
+ * each core took and where the game core's time went (the parts-timed row's breakdown in full). */
+#define CORE_LINES 16
+static char sCoreLines[CORE_LINES][256];
+static char sCoreBreakdowns[CORE_LINES][1024]; // The parts-timed row's, else empty
+static s32 sCoreLineCount;
+
+/* Each race's core times and game core breakdown, into CORES_FILE (and, for the usual and uncapped rows, the issue). */
+static void record_cores(const char *outcome, const ProfCoreStats *c, const ProfStats *stats) {
+    static char breakdown[1024];
+    static char text[1536];
+    Race *race = &sRaces[sNext];
+    s32 config = is_bench() ? race->config : -1;
+    prof_core_breakdown(breakdown, sizeof(breakdown));
+    plat_snprintf(text, sizeof(text),
+                  "run %d race %d, %s, %s, %s: %u frames, %d fps cap; game core %.2f ms, renderer core %.2f ms, GPU "
+                  "%.2f ms a frame (longest on %d%%/%d%%/%d%% of frames); ceiling %.1f fps, 1%% low %.1f, %d%% of "
+                  "frames within 16.7 ms; %s\n",
+                  (int) sRun, (int) sNext + 1, stop_name(race), outcome, config >= 0 ? config_name(config) : "-",
+                  c->frames, 60 / plat_frame_retraces(), c->ms[PROF_CORE_GAME], c->ms[PROF_CORE_RENDER],
+                  c->ms[PROF_CORE_GPU], c->limitPct[PROF_CORE_GAME], c->limitPct[PROF_CORE_RENDER],
+                  c->limitPct[PROF_CORE_GPU], c->ceilingFps, c->ceilingLow1Fps, c->ceilingPct60, breakdown);
+    append_file(CORES_FILE, text, NULL);
+    if ((config == 0 || config_uncapped(config)) && sCoreLineCount < CORE_LINES) {
+        s32 parts = config_uncapped(config) && sSwitches[config - 1].env[1] != NULL &&
+                    str_equal(sSwitches[config - 1].env[1], "DKR_WALK_PARTS");
+        sCoreBreakdowns[sCoreLineCount][0] = '\0';
+        if (parts) {
+            plat_snprintf(sCoreBreakdowns[sCoreLineCount], sizeof(sCoreBreakdowns[0]), "%s, ceiling %.1f fps): %s",
+                          stop_name(race), c->ceilingFps, breakdown);
+        }
+        plat_snprintf(sCoreLines[sCoreLineCount++], sizeof(sCoreLines[0]),
+                      "| %s | %s | %.1f | %.1f | %d%% | %.1f / %.1f / %.1f | %.1f | %.1f | %d%% | %s |\n",
+                      stop_name(race), config_name(config),
+                      stats->elapsedNs ? stats->gameFrames * 1e9 / stats->elapsedNs : 0.0,
+                      stats->low1FrameUs ? 1e6 / stats->low1FrameUs : 0.0,
+                      (int) pct(stats->pacedFrames[0], stats->gameFrames), c->ms[PROF_CORE_GAME],
+                      c->ms[PROF_CORE_RENDER], c->ms[PROF_CORE_GPU], c->ceilingFps, c->ceilingLow1Fps,
+                      c->ceilingPct60, core_limit_name(c));
+    }
+}
+
+/* The issue's uncapped section (switch bench): its table, then the parts-timed races' breakdowns. */
+static s32 core_summary(char *out, s32 size) {
+    s32 length, i;
+    if (sCoreLineCount == 0) {
+        return 0;
+    }
+    length = plat_snprintf(out, size,
+                           "\n### Uncapped (the 60 fps cap) against the usual cap\n\n"
+                           "fps, 1%% low and at 60 are what the screen showed. Core ms: the game's core (logic, scene "
+                           "and, on an Old 3DS, the walk) / the renderer's core (an Old 3DS's backend) / the GPU, a "
+                           "frame. Ceiling: the frame rate the longest of the three allows each frame, with no cap and "
+                           "no vsync; within 16.7 ms is its share of frames that would make 60. Every race's line is in `"
+                           CORES_FILE "`.\n\n"
+                           "| track | row | fps | 1%% low | at 60 | core ms game / renderer / GPU | ceiling fps | "
+                           "ceiling 1%% low | within 16.7 ms | longest |\n|---|---|--:|--:|--:|--:|--:|--:|--:|---|\n");
+    for (i = 0; i < sCoreLineCount && length < size; i++) {
+        length += plat_snprintf(out + length, size - length, "%s", sCoreLines[i]);
+    }
+    for (i = 0; i < sCoreLineCount && length < size; i++) {
+        if (sCoreBreakdowns[i][0] != '\0') {
+            length += plat_snprintf(out + length, size - length, "\nWhere the time goes, parts timed (%s\n",
+                                    sCoreBreakdowns[i]);
+        }
+    }
+    return length < size ? length : size - 1;
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
-    char header[640];
-    char line[640];
+    static char header[1024];
+    static char line[1024];
+    ProfCoreStats cores;
     Race *race = &sRaces[sNext];
     ProfStats empty;
     u32 slow, i;
@@ -1309,7 +1430,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "worst_gpu_ms,triangles,draws,texture_uploads,idle_pct,limit,unsticks,unstuck_at%s%s,"
                   "audio_gaps,audio_drops,sound,graphics,low1pct_fps,paced_60fps_pct,paced_30fps_pct,"
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
-                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes,shared_core_ms,start_mark,start_excess_ms,"
+                  "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes,shared_core_ms,game_core_ms,renderer_core_ms,"
+                  "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit,start_mark,start_excess_ms,"
                   "start_worst_ms\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
@@ -1375,6 +1497,19 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   stats == &empty ? 0 : (unsigned) (gPlatCounters[PLAT_COUNTER_LATE_WAKES] - sWakesStart),
                   ms(stats, PROF_SHARED_CORE, stats->gameFrames));
     length = strlen(line);
+    // Then (2026-11-17, the uncapped rows) each core's busy time a frame and the ceiling they allow with no cap or
+    // vsync (profile.h ProfCoreStats): game_core_ms is the game's core whole (logic, scene and an Old 3DS's walk),
+    // renderer_core_ms the other core's (an Old 3DS's backend), the GPU is gpu_draw_ms; ceiling_limit says which was
+    // the longest on most frames.
+    if (stats == &empty) {
+        bzero(&cores, sizeof(cores));
+    } else {
+        prof_core_window_read(&cores);
+    }
+    plat_snprintf(line + length, sizeof(line) - length, ",%.2f,%.2f,%.1f,%.1f,%d,%s", cores.ms[PROF_CORE_GAME],
+                  cores.ms[PROF_CORE_RENDER], cores.ceilingFps, cores.ceilingLow1Fps, cores.ceilingPct60,
+                  cores.frames ? core_limit_name(&cores) : "-");
+    length = strlen(line);
     // Then (2026-11-17, P53) the race start: the "start" mark (the summaries find these columns by it, wherever
     // later columns put them), the time the first 90 frames after the load ran over the frame cap's period (frames
     // that missed a retrace), and the longest of them (port_loadtime.c).
@@ -1386,6 +1521,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         plat_snprintf(line + length, sizeof(line) - length, ",start,%.1f,%.1f\n", excess, worst);
     }
     append_file(results_file(), line, header);
+    if (stats != &empty && cores.frames > 0) {
+        record_cores(outcome, &cores, stats);
+    }
     port_log("autorun: %s", line);
     if (outcome_ok(outcome)) {
         sFinished++;
@@ -1575,6 +1713,7 @@ static void init(void) {
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
     reset_hitches();
     reset_draw_mix();
+    sCoreLineCount = 0;
     if (sNext == 0) {
         io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
         io_queue(DRAWMIX_FILE, "", NULL, FALSE);
@@ -1871,6 +2010,7 @@ static void start_menu_pass(void) {
     sDriving = TRUE;
     sRaceLevel = level_id();
     prof_window_start(PROF_WINDOW_SESSION);
+    prof_core_window_start();
     prof_draw_mix_window(NULL, NULL, TRUE);
     sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
     sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
@@ -2972,6 +3112,10 @@ static void send_results(const char *why) {
     } else if (sMode == MODE_BOSS && length > 0 && length < (s32) sizeof(summary)) {
         boss_summary(summary + length, sizeof(summary) - length);
     } else if (sMode != MODE_FULL && length > 0 && length < (s32) sizeof(summary)) {
+        if (sMode == MODE_SWITCH && length < (s32) sizeof(summary) - 4096) {
+            // Before the switch table, which is often cut short (2026-11-17: the uncapped rows' answer first).
+            length += core_summary(summary + length, 3072);
+        }
         bench_summary(summary + length, sizeof(summary) - length);
     }
     length = (s32) strlen(summary);
@@ -3254,6 +3398,7 @@ void port_autorun_frame(s32 updateRate) {
                     level_header()->laps = sRaces[sNext].laps; // The short whole game run: one lap
                 }
                 prof_window_start(PROF_WINDOW_SESSION);
+                prof_core_window_start();
                 prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];

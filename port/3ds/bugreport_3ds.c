@@ -974,6 +974,7 @@ static void send_test_results(void) {
         attach_recording(&report, &sRecording, "timeline.csv");
     }
     add_file(&report, "autorun_drawmix.csv");
+    add_file(&report, "autorun_cores.txt"); // Each race's core times and uncapped ceiling (port_autorun.c CORES_FILE)
 #ifdef PORT_PGO_GEN
     add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
 #endif

@@ -414,6 +414,9 @@ extern volatile int gPortSoundPlayersCore;
 extern volatile unsigned long long gPortSoundPlayersStartNs, gPortWalkTotalNs, gPortWalkStartNs;
 static unsigned long long sSecOtherNs[PORT_SEC_COUNT], sSecWorstOtherNs[PORT_SEC_COUNT], sSecOtherLast;
 static unsigned long long sSecOtherSumNs[PORT_SEC_COUNT];
+/* The same, never reset by the log lines: the core window's (prof_core_window_start) per-race breakdown. */
+static unsigned long long sSecRunNs[PORT_SEC_COUNT], sSecRunOtherNs[PORT_SEC_COUNT];
+static u32 sSecRunFrames;
 static s32 sOverlayDue, sIdleLog = -1; // v32 DKR_PROF_IDLE_LOG: the readout waits for the next frame's BUILT mark
 
 /* The walk's time so far (and the sound players' when they share the game's core): what other threads on the game's
@@ -444,12 +447,14 @@ void port_game_section(int section) {
     now = plat_time_ns();
     spent = now - sSecStartNs;
     sSecNs[sSecNow] += spent;
+    sSecRunNs[sSecNow] += spent;
     sSecFrameNs[sSecNow] += spent;
     {
         unsigned long long other = sec_other_now(now), inside = other - sSecOtherLast;
         inside = inside < spent ? inside : spent; // (64-bit reads of another core's counters may tear)
         sSecOtherNs[sSecNow] += inside;
         sSecOtherSumNs[sSecNow] += inside;
+        sSecRunOtherNs[sSecNow] += inside;
         sSecOtherLast = other;
     }
     sSecStartNs = now;
@@ -1743,6 +1748,158 @@ int port_rec_frame_detail(char *out, int size) {
     return length < size ? length : size - 1;
 }
 
+/*
+ * The uncapped bench (2026-11-17, "how high does the Old 3DS go uncapped, could it reach 60?"): each game frame's busy
+ * time on each core, as if nothing waited for a retrace. Frames are pipelined (the game builds one while the renderer
+ * draws the one before and the GPU the one before that), so with no cap a frame would take the longest of the three:
+ * - the game's core: the game's own logic and scene, plus whatever else ran there since the frame before (an Old 3DS's
+ *   display list walk and the sound players on core 0, shared_core_now; with DKR_PROF_SHARED_CORE on, the default, so
+ *   that the walk inside the build is not counted twice);
+ * - the renderer's core: the two-core renderer's backend (an Old 3DS's system core) when it runs, else (a New 3DS,
+ *   whose walk and backend share core 2) the renderer's whole time;
+ * - the GPU's drawing.
+ * The ceiling is that longest time's frame rate: what the frame rate would be with the cap and the vsync gone and the
+ * game logic still stepping by real time. Its 1% low comes from the same per-frame maxima. The waits (render wait,
+ * vsync) are not counted anywhere, so the ceiling is the hardware's, not the pacing's.
+ */
+#define CORE_BIN_US 250
+#define CORE_BINS 400 /* to 100 ms */
+static u32 sCoreBins[CORE_BINS];
+static unsigned long long sCoreSumUs[PROF_CORE_COUNT + 1]; /* game, renderer, GPU, and the per-frame maxima */
+static u32 sCoreFrames, sCoreLimit[PROF_CORE_COUNT];
+static unsigned long long sCoreOtherLast, sCoreBackendLast;
+static s32 sCoreOn;
+/* The window's start for the breakdown's parts. */
+static unsigned long long sCoreSecStart[PORT_SEC_COUNT], sCoreSecOtherStart[PORT_SEC_COUNT], sCorePartStart[PROF_PART_COUNT];
+static u32 sCoreSecFramesStart, sCoreRenderedStart;
+
+void prof_core_window_start(void) {
+    s32 i;
+    bzero(sCoreBins, sizeof(sCoreBins));
+    bzero(sCoreSumUs, sizeof(sCoreSumUs));
+    bzero(sCoreLimit, sizeof(sCoreLimit));
+    sCoreFrames = 0;
+    sCoreOtherLast = shared_core_now(plat_time_ns());
+    sCoreBackendLast = gfx_split_backend_busy_ns();
+    for (i = 0; i < PORT_SEC_COUNT; i++) {
+        sCoreSecStart[i] = sSecRunNs[i];
+        sCoreSecOtherStart[i] = sSecRunOtherNs[i];
+    }
+    for (i = 0; i < PROF_PART_COUNT; i++) {
+        sCorePartStart[i] = sPartNs[i];
+    }
+    sCoreSecFramesStart = sSecRunFrames;
+    sCoreRenderedStart = sRenderedFrames;
+    sCoreOn = TRUE;
+}
+
+/* record_frame: one game frame's core times (us). */
+static void core_frame(u32 ownUs, u32 renderUs, u32 gpuUs, unsigned long long now) {
+    unsigned long long other = shared_core_now(now), backend = gfx_split_backend_busy_ns();
+    u32 otherUs = other > sCoreOtherLast ? (u32) ((other - sCoreOtherLast) / 1000) : 0;
+    u32 backendUs = backend > sCoreBackendLast ? (u32) ((backend - sCoreBackendLast) / 1000) : 0;
+    u32 t[PROF_CORE_COUNT], worst;
+    s32 i, limit = 0;
+    sCoreOtherLast = other;
+    sCoreBackendLast = backend;
+    if (!sCoreOn) {
+        return;
+    }
+    t[PROF_CORE_GAME] = ownUs + otherUs;
+    t[PROF_CORE_RENDER] = gfx_split_active() ? backendUs : plat_old_3ds() ? 0 : renderUs;
+    t[PROF_CORE_GPU] = gpuUs;
+    for (i = 1; i < PROF_CORE_COUNT; i++) {
+        if (t[i] > t[limit]) {
+            limit = i;
+        }
+    }
+    worst = t[limit];
+    if (worst == 0) {
+        return; // (a frame with nothing timed: a load)
+    }
+    for (i = 0; i < PROF_CORE_COUNT; i++) {
+        sCoreSumUs[i] += t[i];
+    }
+    sCoreSumUs[PROF_CORE_COUNT] += worst;
+    sCoreLimit[limit]++;
+    sCoreBins[worst / CORE_BIN_US < CORE_BINS ? worst / CORE_BIN_US : CORE_BINS - 1]++;
+    sCoreFrames++;
+}
+
+void prof_core_window_read(ProfCoreStats *out) {
+    u32 seen = 0, slowest;
+    s32 i;
+    bzero(out, sizeof(*out));
+    out->frames = sCoreFrames;
+    if (sCoreFrames == 0) {
+        return;
+    }
+    for (i = 0; i < PROF_CORE_COUNT; i++) {
+        out->ms[i] = sCoreSumUs[i] / 1000.0 / sCoreFrames;
+        out->limitPct[i] = (int) (sCoreLimit[i] * 100ULL / sCoreFrames);
+    }
+    out->ceilingFps = sCoreSumUs[PROF_CORE_COUNT] ? sCoreFrames * 1e6 / sCoreSumUs[PROF_CORE_COUNT] : 0.0;
+    slowest = (sCoreFrames + 99) / 100;
+    for (i = CORE_BINS - 1; i > 0; i--) {
+        seen += sCoreBins[i];
+        if (seen >= slowest) {
+            break;
+        }
+    }
+    out->ceilingLow1Fps = 1e6 / (i * CORE_BIN_US + CORE_BIN_US / 2);
+    // The frames that would make 60 fps: all three cores' parts done in a retrace.
+    for (seen = 0, i = 0; i < CORE_BINS && (i + 1) * CORE_BIN_US <= 16667; i++) {
+        seen += sCoreBins[i];
+    }
+    out->ceilingPct60 = (int) (seen * 100ULL / sCoreFrames);
+}
+
+int prof_core_breakdown(char *out, int size) {
+    u32 secFrames = sSecRunFrames - sCoreSecFramesStart, rendered = sRenderedFrames - sCoreRenderedStart;
+    double part[PROF_PART_COUNT];
+    s32 length = 0, k, n;
+    for (k = 0; k < PROF_PART_COUNT; k++) {
+        part[k] = rendered ? (sPartNs[k] - sCorePartStart[k]) / 1e6 / rendered : 0.0;
+    }
+    if (secFrames > 0) {
+        length += plat_snprintf(out + length, size - length, "game core sections (ms a frame; [walk/sound inside]):");
+        for (k = 0, n = 0; k < PORT_SEC_COUNT && length < size; k++) {
+            double ms = (sSecRunNs[k] - sCoreSecStart[k]) / 1e6 / secFrames;
+            double other = (sSecRunOtherNs[k] - sCoreSecOtherStart[k]) / 1e6 / secFrames;
+            if (ms < 0.05) {
+                continue;
+            }
+            length += plat_snprintf(out + length, size - length, "%s %s %.2f", n++ ? "," : "", sSecNames[k], ms);
+            if (other >= 0.05 && length < size) {
+                length += plat_snprintf(out + length, size - length, " [%.2f]", other);
+            }
+        }
+    } else {
+        length += plat_snprintf(out, size, "game core sections: not timed (lean profiling)");
+    }
+    if (length < size && part[PROF_PART_WALK_COMMANDS] + part[PROF_PART_WALK_VERTICES] + part[PROF_PART_WALK_TRIANGLES] > 0.0) {
+        length += plat_snprintf(out + length, size - length,
+                                "; walk parts (ms a frame): commands %.2f, matrices %.2f, vertices %.2f, triangles %.2f, "
+                                "rectangles %.2f, draw state %.2f, texture lookups %.2f, frame end %.2f",
+                                part[PROF_PART_WALK_COMMANDS], part[PROF_PART_WALK_MATRICES],
+                                part[PROF_PART_WALK_VERTICES], part[PROF_PART_WALK_TRIANGLES],
+                                part[PROF_PART_WALK_RECTS], part[PROF_PART_WALK_DRAWSTATE],
+                                part[PROF_PART_WALK_TEXTURES], part[PROF_PART_WALK_FRAMEEND]);
+    }
+    if (length < size && part[PROF_PART_BACKEND] > 0.0) {
+        length += plat_snprintf(out + length, size - length,
+                                "; draw parts (ms a frame): draws %.2f (clipping %.2f, GPU settings %.2f of which "
+                                "written twice %.2f, vertex/index writes %.2f)",
+                                part[PROF_PART_BACKEND], part[PROF_PART_CLIP], part[PROF_PART_STATE],
+                                part[PROF_PART_STATE_TWICE], part[PROF_PART_WRITE]);
+    }
+    if (length < size) {
+        length += plat_snprintf(out + length, size - length, "; frame end waits: GPU %.2f, screen %.2f",
+                                part[PROF_PART_END_GPU_WAIT], part[PROF_PART_PRESENT_WAIT]);
+    }
+    return length < size ? length : size - 1;
+}
+
 /* The flight recorder's row for the frame just ended: the game thread's stages, and what the renderer, the GPU and
  * the sound did since the row before (from the running totals). */
 static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned long long now) {
@@ -1786,6 +1943,7 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
         sDetailOther = other > sDetailOtherLast ? other - sDetailOtherLast : 0;
         sDetailOtherLast = other;
     }
+    core_frame(row.logicUs + row.sceneUs, row.rdpUs + row.texUs, row.gpuUs, now);
     rec_game_frame(&row);
     if (sMonDirty && sOverlayShown) {
         // A tap on the monitor: show it now rather than at the next second.
@@ -1835,6 +1993,7 @@ void prof_game_mark(int mark, int updateRate) {
             sSecOtherLast = sec_other_now(now);
             sSecNow = PORT_SEC_TOP;
             sSecFrames += sSecStartNs != 0;
+            sSecRunFrames += sSecStartNs != 0;
             sOtherAtStartNs = sKindBuildNs[PORT_DRAW_OTHER];
             break;
         case PROF_MARK_BUILT: {
