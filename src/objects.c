@@ -4038,16 +4038,17 @@ void set_temp_model_transforms(Object *obj) {
                         if (get_current_viewport() != objRacer->playerIndex) {
                             s32 bias = plat_switch("DKR_RACER_LOD", plat_old_3ds() ? 2 : 0); // Old 3DS: 3-player distances (bench run 16)
                             /*
-                             * DKR_RACER_LOD_FAR=n (default 0 = the distances above; bug report #548): on an Old 3DS
+                             * DKR_RACER_LOD_FAR=n (Old 3DS 255, else 0 = the rows above; bug report #548): on an Old 3DS
                              * the 3-player row puts other karts on model 3 at best, model 4 past 384 units and the
                              * 14-triangle model 5 past 544, a visible swap as the camera closes in. n > 0 (1 player
                              * only) uses the 1-player row with every threshold times n (4: model 1 to 1280 units, 2 to
                              * 2240, 3 to 4160, 4 to 5760; 255: always model 1, never model 0, as on the N64) and no
                              * adaptive boost, so a slow patch can't bring the swaps back. Hold and smoothing work on
-                             * the scaled thresholds. Bench rows n = 4 and 255 (Old 3DS list, port_autorun.c).
+                             * the scaled thresholds. Old 3DS bench #553 (Whale Bay 29.8 fps, 99% of frames at 30)
+                             * held 30 fps with 255, so it is the Old 3DS default; 0 brings back the 3-player row.
                              */
                             if (lodLayout == 0) {
-                                lodFar = plat_switch("DKR_RACER_LOD_FAR", 0);
+                                lodFar = plat_switch("DKR_RACER_LOD_FAR", plat_old_3ds() ? 255 : 0); // Old 3DS: always (#553)
                                 if (lodFar > 0) {
                                     bias = 0; // The 1-player row, scaled below (DKR_RACER_LOD_FAR)
                                 }

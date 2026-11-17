@@ -760,6 +760,53 @@ enum { GA_LEFT, GA_CENTRE, GA_RIGHT };
  * Text placed in the box x0..x1, y0..y1: its capitals' band centred top to bottom, its ink at the left edge, centred,
  * or at the right edge. tab: digits tabular (numbers). Returns the ink's left and right in *inkL, *inkR (may be NULL).
  */
+/*
+ * A whole-pixel label (Classic and the drawn sets) whose room leaves an odd column: where that column goes, every letter
+ * drawn as it is everywhere else (not one of them a column wider: see ui_widen_on). Tried in turn: a word space a
+ * pixel wider, a button's icon gap (iconW) a pixel wider, every gap between the letters a pixel wider (spread; not
+ * Classic's buttons: a row of them would be spaced unalike, so those sit a pixel left). (Not Classic's
+ * drop shadow: it joins the outline, so the dark ink would sit a pixel off the middle.)
+ * 1: found (*ink the ink to centre; *track, *space and *iconGap to draw with), 0: none.
+ */
+static int ui_whole_fit(int kind, const char *s, Colour c, int room, int iconW, int iconGap0, int track0, Ink *ink, int *track,
+                        int *space, int *iconGap, int spread) {
+    Ink kq;
+#define FITS_(k) (!((room - ((k).x1 - (k).x0) - (iconW ? iconW + *iconGap : 0)) & 1))
+    *track = track0, *space = 0, *iconGap = iconGap0;
+    sUiTrack = track0;
+    sUiSpaceExtra = 0;
+    MEASURE(gdraw_raw(kind, 0, 0, s, c), kq);
+    if (strchr(s, ' ') != NULL) {
+        Ink kw;
+        sUiSpaceExtra = 64;
+        MEASURE(gdraw_raw(kind, 0, 0, s, c), kw);
+        sUiSpaceExtra = 0;
+        if (FITS_(kw)) {
+            *space = 64, *ink = kw;
+            return 1;
+        }
+    }
+    if (iconW) {
+        *iconGap = iconGap0 + 1;
+        if (FITS_(kq)) {
+            *ink = kq;
+            return 1;
+        }
+        *iconGap = iconGap0;
+    }
+    if (!spread) {
+        return 0;
+    }
+    sUiTrack = track0 + 64;
+    MEASURE(gdraw_raw(kind, 0, 0, s, c), kq);
+    sUiTrack = track0;
+    if (FITS_(kq)) {
+        *track = track0 + 64, *ink = kq;
+        return 1;
+    }
+    return 0;
+#undef FITS_
+}
 static int sFaceY0, sFaceY1; /* gtext_ex: the face's rows (top to baseline) at y 0, for the log */
 
 /*
@@ -897,14 +944,25 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
          * letters are spread or drawn together by a fraction of a pixel (unseen), the pen moved a quarter pixel
          * over, until both are exactly in the middle (a lone capital: drawn in its variant a column wider if need be)
          */
-        int t, sg, q, wd, fw = 0, base = sUiTrack, done = 0, alone = s[0] >= 'A' && s[0] <= 'Z' && s[1] == '\0', fq = 0, ft = base;
+        int t, sg, q, wd, fw = 0, base = sUiTrack, done = 0, chipSpace = 0, alone = s[0] >= 'A' && s[0] <= 'Z' && s[1] == '\0', fq = 0, ft = base;
         Ink fk = k;
         /* the least spread first: every pen phase at each tracking before a wider one; a lone capital: its own
            glyph, then its variant a column wider (then, drawn by hand, its narrow form) */
         /* a lone capital drawn by hand for the key caps (both forms there): only those, so every cap letter of a look
            is drawn alike */
         int handDrawn = alone && gfont(kind)->glyphs[(gfont(kind)->phases + 1) * UI_NG + s[0] - 0x21].width > 0;
-        if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
+        if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1) && !ui_widen_on()) {
+            /* whole pixels: the odd column taken up where it isn't seen (ui_whole_fit), else the label a pixel left */
+            int sp = 0, ig = 0;
+            if (ui_whole_fit(kind, s, c, x1 - x0, 0, 0, base, &fk, &ft, &sp, &ig, 1)) {
+                chipSpace = sp;
+                done = 2;
+            } else {
+                fk = k, ft = base;
+                done = 1;
+            }
+            fq = 0, fw = 0;
+        } else if (gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1)) {
             /* Classic: one letter a column wider (see sUiWiden), not its letters spread */
             Ink kq;
             sUiWiden = 1;
@@ -916,7 +974,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
                 sUiWiden = 0;
             }
         }
-        for (wd = handDrawn ? 1 : 0; wd <= (alone ? 2 : 0) && done < 2; wd++) {
+        for (wd = handDrawn ? 1 : 0; wd <= (alone ? 2 : 0) && done < 2 && !(gfont(kind)->phases == 1 && !alone && !ui_widen_on()); wd++) {
             for (t = 0; t <= (alone ? 0 : 64) && done < 2; t += 2) {
                 for (sg = 1; sg >= -1 && done < 2; sg -= 2) {
                     for (q = 0; q < 64 && done < 2; q += 16) {
@@ -952,9 +1010,11 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
             inkX1 = k.x1;
             x = x0 + (x1 - x0 - (k.x1 - k.x0)) / 2 - k.x0;
         }
-        if (done == 0) { /* (a lone "B": its solid stem and half-covered bowl can't both be centred; its ink is) */
+        if (done == 0 || (done == 1 && gfont(kind)->phases == 1 && !alone && ((x1 - x0 - (k.x1 - k.x0)) & 1))) {
+            /* (a lone "B": its solid stem and half-covered bowl can't both be centred; its ink is) */
             log_rec('E', x0, y0, x1, y1, done, "uneven-label");
         }
+        sUiSpaceExtra = chipSpace;
         sPenTrack = base + 1; /* restored after drawing */
     }
     if (sPenLeft) {
@@ -968,6 +1028,7 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
         sUiTrack = sPenTrack - 1;
         sPenTrack = 0;
     }
+    sUiSpaceExtra = 0;
     sPen0 = 0;
     sUiWide = 0;
     sUiWiden = 0;
@@ -1456,7 +1517,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
         const char *t = label + (grey || on || pressed || focus);
         char shown[40];
         Colour ink = grey ? (Colour){ 150, 155, 178, 255 } : WHITE, top, bottom, edge, hole;
-        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, btnWiden = 0, iconSolidL = 0;
+        int kind = sStyle == 3 ? GF_BODY : GF_HEAD, iconW = 0, textW, textX0 = 0, groupW, gx, trk = gbtn_track(), btnTrack = 0, btnPen = 0, btnWiden = 0, iconSolidL = 0, iconGap = GICON_GAP, btnSpace = 0;
         Ink ik;
         /* disabled differs by more than colour: it loses its icon and its fill goes flat */
         if (gicon_known(t)) { /* disabled keeps its icon, greyed with its label */
@@ -1656,7 +1717,18 @@ static void gbuttons(const char (*buttons)[40], int count) {
                 sPen0 = 0;
                 MEASURE(gdraw_raw(kind, 0, 0, shown, ink), kq);
                 gw = kq.x1 - kq.x0 + (iconW ? iconW + GICON_GAP : 0);
-                if ((x1 - x0 - gw) & 1) {
+                if (((x1 - x0 - gw) & 1) && !ui_widen_on()) {
+                    /* the odd column taken up where it isn't seen (ui_whole_fit), else the label a pixel left */
+                    int tr = trk, sp = 0;
+                    if (ui_whole_fit(kind, shown, ink, x1 - x0, iconW, GICON_GAP, trk, &kq, &tr, &sp, &iconGap, !gfont(kind)->outlined)) {
+                        kt = kq, fq = 0, ft = tr;
+                        btnSpace = sp;
+                    } else {
+                        kt = kq, fq = 0, ft = trk;
+                        log_rec('E', x0, y0, x1, y1, 1, "uneven-button");
+                    }
+                    done = 2;
+                } else if ((x1 - x0 - gw) & 1) {
                     /* one letter a column wider (see sUiWiden), not the letters spread */
                     sUiWiden = 1;
                     sUiTrack = trk;
@@ -1711,7 +1783,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
             textW = kt.x1 - kt.x0;
             textX0 = 0; /* (gtext_ex sets a left-aligned label's ink at its x) */
         }
-        groupW = textW + (iconW ? iconW + GICON_GAP : 0);
+        groupW = textW + (iconW ? iconW + iconGap : 0);
         gx = x0 + (x1 - x0 - groupW) / 2;
         if (iconW) {
             Ink k;
@@ -1724,7 +1796,7 @@ static void gbuttons(const char (*buttons)[40], int count) {
             QUIET(gicon_raw(t, ix, iy, ink, hole));
             sUiFlat = 0;
             log_rec('P', ix + k.x0, iy + k.y0, ix + k.x1, iy + k.y1, 0, "icon");
-            gx += iconW + GICON_GAP;
+            gx += iconW + iconGap;
         }
         /* centred on the capitals' band only, so labels side by side share one baseline (descenders hang below) */
         /* Classic disabled: the label's face alone (no outline, no shadow) in the other looks' grey, as dim as theirs */
@@ -1733,7 +1805,9 @@ static void gbuttons(const char (*buttons)[40], int count) {
         sUiTrack = btnTrack; /* (the tracking and pen the label was centred with, above) */
         sPen0 = btnPen;
         sUiWiden = btnWiden;
+        sUiSpaceExtra = btnSpace;
         gtext_ex(kind, gx - textX0, y0 + pressed, gx - textX0 + 1000, y1 + pressed, shown, ink, GA_LEFT, 0, NULL, NULL);
+        sUiSpaceExtra = 0;
         sUiTrack = 0;
         sFlatMode = 0;
         sUiFlat = 0;
