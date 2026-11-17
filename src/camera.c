@@ -995,6 +995,17 @@ static s32 cam_anchor(Gfx **dList, Vertex *v) {
     return TRUE;
 }
 
+/* P54 2b-D (DKR_NATIVE_PARTICLES): a sprite particle's colours, for the next billboard to send with its anchor and
+ * matrix as one PORT_PART_TAG record (port_drawtag.h), and its restores, for the record after it. */
+static s32 sPartPending;
+static u32 sPartEnv, sPartPrim, sPartRestore;
+void cam_particle_next(u32 env, u32 prim, s32 restorePrim, s32 restoreEnv) {
+    sPartPending = TRUE;
+    sPartEnv = env;
+    sPartPrim = prim;
+    sPartRestore = (restorePrim ? 1 << 3 : 0) | (restoreEnv ? 1 << 4 : 0);
+}
+
 /* G3 (DKR_NATIVE_CAMERA): the perspective matrix loaded as floats (a PORT_MTXF_TAG record) instead of the game's fixed
  * point gPerspectiveMatrix (weather.c). The renderer reads the floats when it runs the frame, which is after the game
  * has moved on, so each load takes a copy of its own. Returns FALSE (nothing written) with the switch off. */
@@ -1162,12 +1173,20 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
     s32 tiltAngle;
     s32 result;
     s32 frameID;
+    s32 particle = sPartPending; // A particle's record (cam_particle_next)
 
+    sPartPending = FALSE;
     if (obj == NULL) {
         stubbed_printf("\nCam do 2D sprite called with NULL pointer!");
     }
 
     result = TRUE;
+    if (particle && (flags & RENDER_VEHICLE_PART)) {
+        // Not a billboard: the colours as the game's own commands, the rest as ever (particle 2: no records).
+        gDPSetEnvColorRGBA((*dList)++, sPartEnv);
+        gDPSetPrimColorRGBA((*dList)++, sPartPrim);
+        particle = 2;
+    }
     if (flags & RENDER_VEHICLE_PART) {
         // Vehicle parts like wheels, propellers, and fans are implemented as sprites,
         // each with 16 frames representing different orientations.
@@ -1249,7 +1268,16 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
-        if (!cam_anchor(dList, *vtx))
+        if (particle == 1) {
+            // The particle's record (port_drawtag.h PORT_PART_TAG): its colours, this anchor and the matrix below.
+            gDPNoOpTag((*dList)++, PORT_PART_TAG);
+            (*dList)->words.w0 = OS_K0_TO_PHYSICAL(*vtx);
+            (*dList)->words.w1 = 0; // The matrix, below
+            (*dList)++;
+            (*dList)->words.w0 = sPartEnv;
+            (*dList)->words.w1 = sPartPrim;
+            (*dList)++;
+        } else if (!cam_anchor(dList, *vtx))
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 
@@ -1266,9 +1294,14 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         mtxf_billboard(gModelMatrixF[gModelMatrixStackPos], tiltAngle, obj->trans.scale, gVideoAspectRatio);
         CAM_MTX_STORE(gModelMatrixF[gModelMatrixStackPos], *mtx);
         gModelMatrix[gModelMatrixStackPos] = *mtx;
+        if (particle == 1) {
+            (*dList)[-2].words.w1 = OS_K0_TO_PHYSICAL(*mtx); // The record's matrix (it loads it and turns billboards on)
+            (*mtx)++;
+        } else {
         CAM_MTX_LOAD(dList, (*mtx)++, G_MTX_DKR_INDEX_2);
         // Enable billboard mode; subsequent vertices will be rendered relative to the anchor point
         gDkrEnableBillboard((*dList)++);
+        }
     }
     // Calculate the correct animation frame based on the current animation mode.
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
@@ -1287,7 +1320,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         port_native_sprite(dList, sprite->frames[frameID],
                            sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                          RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
-                           !(flags & RENDER_Z_UPDATE));
+                           !(flags & RENDER_Z_UPDATE) ? (particle ? 2 : 1) : 0);
     } else
     {
         // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
@@ -1307,10 +1340,23 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
     } else {
         frameID = G_MTX_DKR_INDEX_1;
     }
+    if (particle == 1) {
+        // The record after a particle: this matrix index, billboards off and the colours the game sets back.
+        gDPNoOpTag((*dList)++, PORT_PART_TAG | 1 | (frameID == G_MTX_DKR_INDEX_1 ? 1 << 1 : 0) | sPartRestore);
+        return result;
+    }
     gSPSelectMatrixDKR((*dList)++, frameID);
 
     // Disable billboard mode
     gDkrDisableBillboard((*dList)++);
+    if (particle) {
+        if (sPartRestore & (1 << 3)) {
+            gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        }
+        if (sPartRestore & (1 << 4)) {
+            gDPSetEnvColor((*dList)++, 255, 255, 255, 0);
+        }
+    }
 
     return result;
 }

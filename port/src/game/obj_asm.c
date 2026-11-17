@@ -174,6 +174,7 @@ static u32 sNMatCount;
 static unsigned int sNMatLevel = 0xFFFFFFFFu;
 static int sNativeDraw, sNativeLeftovers;
 static int sNativeCamera; // DKR_NATIVE_CAMERA (G3)
+static int sNativeParticles; // DKR_NATIVE_PARTICLES (P54 2b-D)
 volatile unsigned char gPortNMatBad[NMAT_KEYS];
 
 static void nmat_level_reset(void) {
@@ -191,6 +192,7 @@ static void nmat_level_reset(void) {
 #endif
         sTexHandle = sNativeDraw && plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()) != 0;
         sNativeCamera = sNativeDraw && plat_switch("DKR_NATIVE_CAMERA", plat_old_3ds()) != 0;
+        sNativeParticles = sNativeCamera && plat_switch("DKR_NATIVE_PARTICLES", 0) != 0;
     }
 }
 
@@ -211,6 +213,14 @@ int port_native_draw(void) {
 int port_native_camera(void) {
     nmat_level_check();
     return sNativeCamera;
+}
+
+/* P54 2b-D (DKR_NATIVE_PARTICLES, default 0, needs DKR_NATIVE_CAMERA): a sprite particle's colours, anchor, matrix
+ * and billboard mode as one PORT_PART_TAG record, and its matrix, billboard and colour restores as another
+ * (particles.c, camera.c), instead of about ten small records. */
+int port_native_particles(void) {
+    nmat_level_check();
+    return sNativeParticles;
 }
 
 int port_native_leftovers(void) {
@@ -381,7 +391,7 @@ void material_load_simple(Gfx **dList, s32 flags);
 /* A sprite frame (sprite_init_frame's list: per tile its texture's load commands, every fifth tile a vertex load, two
  * triangles) as one draw record per tile, each tile's settings kept as a material. The anchor, matrix and billboard
  * mode are the caller's, as for the frame's list. whitePrim: the primitive colour set to white after the settings, as
- * the game does. */
+ * the game does; 2 (a particle's record has just set it white): only after a capture's settings. */
 int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
     const Gfx *c, *dma = NULL;
     u32 vtxAddr = 0, vtxCount = 0, dmaCount = 0;
@@ -415,7 +425,7 @@ int port_native_sprite(Gfx **dl, const Gfx *frame, int flags, int whitePrim) {
                 }
                 gDPNoOpTag((*dl)++, PORT_NMAT_TAG | id);
             }
-            if (whitePrim) {
+            if (whitePrim == 1 || (whitePrim == 2 && capture)) {
                 gDPSetPrimColor((*dl)++, 0, 0, 255, 255, 255, 255);
                 whitePrim = FALSE;
             }

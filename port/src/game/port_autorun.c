@@ -333,6 +333,10 @@ static const BenchSwitch sSwitchesNative[] = {
  */
 static const BenchSwitch sSwitchesOld3ds[] = {
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
+    // P54 2b-D (DKR_NATIVE_PARTICLES): each sprite particle as two records instead of about ten (same frames on the PC,
+    // ~10% less walk time for the "effects" kind). Read the game core ms and the effects kind's walk time; watch the
+    // smoke, dust and sparks.
+    { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
     { "native switches off (old walk, 1 lap)",
       { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
       1, 0, 1, 1 },
