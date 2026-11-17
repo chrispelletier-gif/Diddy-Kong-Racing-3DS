@@ -332,6 +332,11 @@ static const BenchSwitch sSwitchesNative[] = {
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { "native track, fills finished before drawing", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
     { "fills finished before drawing", { "DKR_FILL_WAIT", NULL, NULL }, 0, 1, 1, 0 },
+    // Core balance plan 2b-B (2026-11-17): native kart and object draws on the GPU's vertex maths (DKR_NATIVE_GPU,
+    // see the Old 3DS list), with the track too and the fills waited for.
+    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
+    { "track, karts and objects on the GPU, fills finished before drawing",
+      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -360,6 +365,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { "native track, depth fill finished before drawing",
       { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
+    // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
+    // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
+    // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
+    // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
+    // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
+    { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
+    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
+    { "track, karts and objects on the GPU, depth fill finished before drawing",
+      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

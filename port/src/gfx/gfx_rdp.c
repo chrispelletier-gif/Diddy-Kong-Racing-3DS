@@ -2236,6 +2236,8 @@ static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and fla
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
+static s32 sNativeGpuSwitch;   // DKR_NATIVE_GPU (core balance 2b-B): native kart (1) and object (2) draws, GPU maths
+static u32 sNGpuStats[3];      // native_gpu_draw's draws by the GPU, left out, left to the CPU
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 // DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
 // rest are transformed here as without it (a bench row put the racers' or the track's maths alone on the GPU, as a
@@ -2319,6 +2321,7 @@ static void read_switches(void) {
     // The native track (NR4) turns the backend's GPU vertex maths on for itself: the other kinds stay on the CPU
     // path unless DKR_GPU_TRANSFORM is on too.
     sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+    sNativeGpuSwitch = plat_switch("DKR_NATIVE_GPU", 0);
     if (!plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)) {
         sGpuKinds = 0;
     }
@@ -3879,6 +3882,12 @@ static void track_frame_start(void) {
                  (unsigned) sTrackStats[1], (unsigned) sTrackStats[2], (unsigned) sTrackStats[3],
                  (unsigned) sTrackStats[4]);
         __builtin_memset(sTrackStats, 0, sizeof(sTrackStats));
+    }
+    if (sNativeGpuSwitch && sFrameCount % 600 == 0) {
+        plat_log("native GPU maths: %u draws by the GPU, %u left out, %u left to the CPU (GPU maths %s)",
+                 (unsigned) sNGpuStats[0], (unsigned) sNGpuStats[1], (unsigned) sNGpuStats[2],
+                 sGpuTransform ? "on" : "off");
+        __builtin_memset(sNGpuStats, 0, sizeof(sNGpuStats));
     }
 }
 
@@ -5609,6 +5618,120 @@ static NOINLINE void native_remote_send(const NMat *mat, const GfxDrawState *sta
     sOpaquePending = TRUE;
 }
 
+/*
+ * Core balance plan 2b-B (DKR_NATIVE_GPU, 2026-11-17): a native draw of a kart (1) or of any object (2) handed to the
+ * GPU's vertex maths (transform.v.pica, as P30 does for vertex-slot draws) instead of being transformed, tested and
+ * clipped by a CPU core. The old P30/P31/P34 switches no longer reach these draws: since the native records, a model
+ * is drawn here, never through the vertex slots. Each corner of the mesh tables becomes one model vertex (the game's
+ * position and colour, the corner's texture coordinates), with the fog and the light as uniforms, and the triangles go
+ * as one draw per culling mode. Only a draw with one vertex load (one matrix) whose box the backend takes
+ * (gfxb_model_check: inside the guard band) goes this way; a box wholly outside is left out, as the CPU path would
+ * drop it; anything else is left to the CPU path. Returns TRUE when the draw is done (drawn or left out).
+ */
+static GfxModelVertex sNGpuVerts[NATIVE_MAX_CORNERS];
+static u16 sNGpuIndices[2][MAX_BATCH_TRIANGLES * 3];
+static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, s32 total, s32 count,
+                                    const NativeMesh *mesh, s32 matrix, u8 frontCull) {
+    GfxDrawState state;
+    GfxModelParams params;
+    TexAxis ax[4];
+    s16 boxMin[3], boxMax[3];
+    s32 i, k, verdict, n[2] = { 0, 0 };
+    u32 numCorners = mesh->numCorners;
+
+    if (numCorners > NATIVE_MAX_CORNERS || count > MAX_BATCH_TRIANGLES || total <= 0) {
+        return FALSE;
+    }
+    boxMin[0] = boxMax[0] = vtx[0].x;
+    boxMin[1] = boxMax[1] = vtx[0].y;
+    boxMin[2] = boxMax[2] = vtx[0].z;
+    for (i = 1; i < total; i++) {
+        s16 c[3] = { vtx[i].x, vtx[i].y, vtx[i].z };
+        for (k = 0; k < 3; k++) {
+            boxMin[k] = c[k] < boxMin[k] ? c[k] : boxMin[k];
+            boxMax[k] = c[k] > boxMax[k] ? c[k] : boxMax[k];
+        }
+    }
+    model_params_matrix(g.matrices[matrix], &params);
+    verdict = gfxb_model_check(params.mtx, boxMin, boxMax);
+    if (verdict == GFX_MODEL_HIDDEN) {
+        sNGpuStats[1]++;
+        return TRUE;
+    }
+    if (verdict != GFX_MODEL_GPU) {
+        sNGpuStats[2]++;
+        return FALSE;
+    }
+    nmat_state(mat, &state, textured);
+    state.flat = 0;
+    for (k = 0; k < 4; k++) {
+        params.texScale[k] = 0.0f;
+        params.texOffset[k] = 0.0f;
+    }
+    if (state.textures[0] != NULL || state.textures[1] != NULL) {
+        nmat_axes(mat, &state, textured, ax);
+        for (k = 0; k < 2; k++) {
+            if (state.textures[k] != NULL) {
+                tex_axis_factors(&ax[k * 2], &params.texScale[k * 2], &params.texOffset[k * 2]);
+                tex_axis_factors(&ax[k * 2 + 1], &params.texScale[k * 2 + 1], &params.texOffset[k * 2 + 1]);
+            }
+        }
+    }
+    params.fog = mat->fog != 0;
+    params.fogMul = params.fog ? g.fogMul : 0;
+    params.fogOffset = params.fog ? g.fogOffset : 0;
+    params.pad[0] = sLightOn ? 1 : 0;
+    params.pad[1] = params.pad[2] = 0;
+    if (sLightOn) {
+        __builtin_memcpy(params.light, sLight, sizeof(params.light));
+    } else {
+        params.light[0] = params.light[1] = params.light[2] = params.light[3] = 0.0f;
+    }
+    for (i = 0; i < (s32) numCorners; i++) {
+        const Vertex *src = &vtx[mesh->cornerVertex[i]];
+        GfxModelVertex *v = &sNGpuVerts[i];
+        TexCoords uv;
+        uv.texCoords = mesh->cornerUv[i];
+        v->x = src->x;
+        v->y = src->y;
+        v->z = src->z;
+        v->one = 1;
+        v->u = uv.u;
+        v->v = uv.v;
+        v->r = src->r;
+        v->g = src->g;
+        v->b = src->b;
+        v->a = src->a;
+    }
+    for (i = 0; i < count; i++) {
+        s32 group = mesh->backface[i] ? 0 : 1;
+        u16 *out = &sNGpuIndices[group][n[group] * 3];
+        out[0] = mesh->triCorners[i * 3];
+        out[1] = mesh->triCorners[i * 3 + 1];
+        out[2] = mesh->triCorners[i * 3 + 2];
+        n[group]++;
+    }
+    if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+        flush_batch(); // What the CPU path left waiting came first
+    }
+    if (!opaque_sortable(&state)) {
+        OPAQUE_FLUSH(); // Its order matters: after the held opaque draws, as the CPU path would be
+    }
+    for (k = 0; k < 2; k++) {
+        if (n[k] > 0) {
+            state.cullMode = k == 0 ? 0 : frontCull;
+            gfx_split_draw_model(&state, &params, sNGpuVerts, (int) numCorners, sNGpuIndices[k], n[k]);
+            prof_count(PROF_TRIANGLES, n[k]);
+            prof_count(PROF_DRAWS, 1);
+            sMix.kinds[sDrawKind].draws++;
+            sMix.kinds[sDrawKind].tris += (unsigned long) n[k];
+        }
+    }
+    sNGpuStats[0]++;
+    sTriStateValid = FALSE;
+    return TRUE;
+}
+
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
@@ -5766,6 +5889,18 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             sWalkRejectedTris += (u32) count;
             return 2;
         }
+    }
+    if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
+        (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
+        !REF_ACTIVE() && !UNLIKELY(sTracing) &&
+        native_gpu_draw(mat, textured, vtx, total, count, mesh, loads[0].matrix, frontCull)) {
+        g.curMatrix = cur;
+        g.vertexIndex = 0;
+        g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+        sMix.kinds[sDrawKind].verts += (unsigned long) total;
+        sObjTris[sDrawObj] += count;
+        sNDrawStats[0]++;
+        return 2;
     }
     if (sRemote && sModelCount == 0 && sMeshPartCount == 0) {
         // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
@@ -8234,7 +8369,8 @@ void port_gfx_run_frame(const void *frameDl, int solo) {
     forget_all_loads();
     sLightOn = FALSE;
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
-    sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch) && gfxb_gpu_transform();
+    sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch || sNativeGpuSwitch) &&
+                    gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sCullMargin = sCpuCull ? gfxb_cpu_cull_margin() : 0.0f;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
