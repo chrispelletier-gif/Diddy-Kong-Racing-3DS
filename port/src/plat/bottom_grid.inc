@@ -838,6 +838,14 @@ static int sPenLeft; /* gtext_ex: a left-aligned label's pen phase (+1), its fir
 static int sOptical; /* set: one-line labels with descenders are lifted (the buttons) */
 
 static const char *glabel(const char *s, char *buf, int size);
+static int gbox_baseline(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = plat_getenv("DKR_UI_BASELINE");
+        on = e == NULL || atoi(e) != 0;
+    }
+    return on;
+}
 static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Colour c, int align, int tab, int *inkL,
                      int *inkR) {
     int top, h, y, x, inkX0 = 0, inkX1 = 0, crisp = sUiCrispAll;
@@ -869,6 +877,18 @@ static void gtext_ex(int kind, int x0, int y0, int x1, int y1, const char *s, Co
             sUiFlat = flat; /* in a box: all the ink the eye sees, outline, shadow and descenders included */
         }
         MEASURE(tab ? gdraw_tab(kind, 0, 0, s, c) : gdraw_raw(kind, 0, 0, s, c), f);
+        if (gink_box_has(x0, y0, y1) && !tab && gbox_baseline() && f.y1 > f.y0) {
+            /*
+             * in a box: centred on a capital's ink (H, outline and shadow included), so every label in boxes of one
+             * height shares one baseline whatever its letters: Settings' g hangs below, its round S overshoots above,
+             * and neither moves it off Pause's line. DKR_UI_BASELINE=0 in env.txt: centred on all its ink as before.
+             */
+            Ink hk;
+            MEASURE(gdraw_raw(kind, 0, 0, "H", c), hk);
+            if (hk.y1 > hk.y0) {
+                f.y0 = hk.y0, f.y1 = hk.y1;
+            }
+        }
         sUiFlat = flat;
         if (f.y1 > f.y0 && !(tab && gsprite_nums(kind))) {
             fy0 = f.y0;
@@ -3458,8 +3478,16 @@ static void gchallenge(const RaceHud *hud) {
 }
 
 /* The hub: the balloons and worlds on the left half, the map and the amulets on the right. */
+static int ghub_cols(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = plat_getenv("DKR_HUB_COLS");
+        on = e == NULL || atoi(e) != 0;
+    }
+    return on;
+}
 static void ghub(const RaceHud *hud) {
-    int i;
+    int i, hubTrophyX = -1, hubNameX1 = 96, hubKeyGap = 3;
     char count[16], line[16];
     static const char *const sTitle[RACE_HUD_WORLDS + 1] = { "Timber's Island", "Dino Domain", "Sherbet Island",
                                                              "Snowflake Mountain", "Dragon Forest", "Future Fun Land" };
@@ -3485,13 +3513,46 @@ static void ghub(const RaceHud *hud) {
     if (hud->world >= 0 && hud->world <= RACE_HUD_WORLDS) {
         gtitle(GF_HEAD, GX0 + GPAD, gy0(2), gc1(1) - GPAD, gy1(2), sTitle[hud->world], gink_onbg(), GA_LEFT);
     }
+    {
+        /*
+         * the worlds' columns, laid from the right: the count on the row's padding, then its key and trophy, the same
+         * gap (cols) from the count to the key and from the trophy to the widest name, so no name runs into its trophy
+         * (Sherbet Island in Barlow did). DKR_HUB_COLS=0 in env.txt: the trophy at x 100 as before.
+         */
+        int right = gc1(1) - gpad_x(SK_ROW), nameX = gc0(0) + gpad_x(SK_ROW), nameW = 0, cntW = 0, trW = 0, keyW = 0, j, g;
+        Ink k;
+        for (j = 0; j < RACE_HUD_WORLDS; j++) { /* (each measured as drawn: its ink's right edge) */
+            MEASURE(gtitle(GF_BODY, nameX, gy0(3), 1000, gy1(3), sWorldShortNames[j], WHITE, GA_LEFT), k);
+            nameW = k.x1 > nameW ? k.x1 : nameW;
+        }
+        MEASURE(gnum(GF_BODY, 120, gy0(3), right, gy1(3), "8/8", WHITE, GA_RIGHT), k);
+        cntW = k.x0; /* (the count's left ink edge) */
+        for (j = 0; j < 2; j++) {
+            MEASURE(picture(&sTrophy[j], 0, 0), k);
+            trW = k.x1 - k.x0 > trW ? k.x1 - k.x0 : trW;
+            MEASURE(picture(&sKey[j], 0, 0), k);
+            keyW = k.x1 - k.x0 > keyW ? k.x1 - k.x0 : keyW;
+        }
+        {
+            int room = cntW - nameW - trW - 3 - keyW; /* the clear columns for the two gaps */
+            g = room / 2;
+            g = g > 7 ? 7 : g;
+            /* (an odd column left over: the trophy a pixel further from its key, so the name's and count's gaps match) */
+            hubKeyGap = 3 + (g < 7 && (room & 1) ? 1 : 0);
+            hubTrophyX = g >= 2 && ghub_cols() ? cntW - g - keyW - hubKeyGap - trW : -1;
+        }
+        hubNameX1 = hubTrophyX >= 0 ? hubTrophyX - g : 96;
+        if (g < 2 && ghub_cols()) {
+            log_rec('E', nameX, gy0(3), right, gy1(3), g, "hub-names-too-wide");
+        }
+    }
     for (i = 0; i < RACE_HUD_WORLDS; i++) {
         int y0 = gy0(3 + i), y1 = gy1(3 + i), balloons = hud->worldBalloons[i], tx;
         Colour ink = balloons > 0 ? WHITE : gink_dim();
         gbox(gc0(0), y0, gc1(1), y1, SK_ROW);
-        gtitle(GF_BODY, gc0(0) + gpad_x(SK_ROW), y0, 96, y1, sWorldShortNames[i], ink, GA_LEFT); /* a row label: the look's label case */
-        tx = gpic_left(hud->worldTrophy[i] > 0 ? &sTrophy[1] : &sTrophy[0], 100, y0, y1, hud->worldTrophy[i] <= 0);
-        gpic_left((hud->worldKeys & (1 << i)) ? &sKey[1] : &sKey[0], tx + 3, y0, y1, !(hud->worldKeys & (1 << i)));
+        gtitle(GF_BODY, gc0(0) + gpad_x(SK_ROW), y0, hubNameX1, y1, sWorldShortNames[i], ink, GA_LEFT); /* a row label: the look's label case */
+        tx = gpic_left(hud->worldTrophy[i] > 0 ? &sTrophy[1] : &sTrophy[0], hubTrophyX >= 0 ? hubTrophyX : 100, y0, y1, hud->worldTrophy[i] <= 0);
+        gpic_left((hud->worldKeys & (1 << i)) ? &sKey[1] : &sKey[0], tx + (hubTrophyX >= 0 ? hubKeyGap : 3), y0, y1, !(hud->worldKeys & (1 << i)));
         snprintf(line, sizeof(line), "%d/8", balloons);
         gnum(GF_BODY, 120, y0, gc1(1) - gpad_x(SK_ROW), y1, line, hud->worldBosses & (1 << i) ? BEHIND : ink, GA_RIGHT);
     }

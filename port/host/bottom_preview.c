@@ -694,6 +694,22 @@ static void preview_modes(const char *dir, RaceHud *race) {
     set_racer(&hud.racers[0], 9, RACE_HUD_NOT_SPECIAL, 1, RACE_HUD_NO_GAP);
     bs_set_race_hud(&hud);
     save(dir, "17_hub");
+    /* the hub with its map (the worlds' list beside it, its names, trophies and keys in half the screen) */
+    {
+    RaceHud hubPlain = hud; /* (restored after: the screens below use the plain hub's save) */
+    for (i = 0; i < RACE_HUD_WORLDS; i++) {
+        hud.worldBalloons[i] = i < 2 ? 8 : i == 2 ? 6 : 0;
+        hud.worldTrophy[i] = i < 2 ? 3 : 0;
+    }
+    hud.balloons = 28;
+    hud.ttAmulet = 2;
+    hud.wizpigAmulet = 2;
+    arena_map(&hud, 0);
+    hud.racerCount = 1;
+    bs_set_race_hud(&hud);
+    save(dir, "17b_hub_map");
+    hud = hubPlain;
+    }
 
     // The menus' companions, with the idle buttons.
     {
