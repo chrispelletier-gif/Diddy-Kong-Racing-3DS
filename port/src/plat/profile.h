@@ -138,6 +138,27 @@ void prof_window_read(int window, ProfStats *out);
 /* Which part of the system limits the frame rate, judged from a window's averages: "game CPU", "renderer CPU", "GPU". */
 const char *prof_limit(const ProfStats *stats);
 
+/*
+ * Each core's busy time per game frame, from prof_core_window_start (the uncapped switch bench rows, 2026-11-17): the
+ * game's core (its logic and scene and, on an Old 3DS, the display list walk), the renderer's core (an Old 3DS's
+ * system core running the two-core renderer's backend) and the GPU. The ceiling is the frame rate the longest of the
+ * three allows each frame, with no cap and no vsync: its average, its 1% low, and its share of frames that fit in one
+ * retrace (60 fps). limitPct: how often each part was the longest.
+ */
+enum ProfCore { PROF_CORE_GAME, PROF_CORE_RENDER, PROF_CORE_GPU, PROF_CORE_COUNT };
+typedef struct ProfCoreStats {
+    unsigned int frames;
+    double ms[PROF_CORE_COUNT];
+    int limitPct[PROF_CORE_COUNT];
+    double ceilingFps, ceilingLow1Fps;
+    int ceilingPct60;
+} ProfCoreStats;
+void prof_core_window_start(void);
+void prof_core_window_read(ProfCoreStats *out);
+/* The window's breakdown for cutting core time, as one line: the game core's sections (and the walk and sound inside
+ * each), the walk's parts and the draws' parts (each only when timed: DKR_WALK_PARTS, DKR_DRAW_PARTS). */
+int prof_core_breakdown(char *out, int size);
+
 /* Extra text shown under the profiler on the bottom screen (the unattended run's progress). NULL clears it. */
 void prof_set_status(const char *text);
 

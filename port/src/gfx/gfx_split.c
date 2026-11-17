@@ -107,6 +107,7 @@ static int sFailed;
 static unsigned long long sWalkWaitTotalNs, sWalkWaitTakenNs; // Never reset, for the draw mix (gfx_split_walk_waited_ns)
 static unsigned long long sWalkWaitNs, sBackendBusyNs, sBackendFrameStart, sBackendWaitNs;
 static unsigned int sBackendFrames, sBackendWakes;
+static volatile unsigned long long sBackendBusyTotalNs; // Never reset (gfx_split_backend_busy_ns, the uncapped bench)
 
 static void backend_thread(void *arg);
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
@@ -228,6 +229,7 @@ static void backend_thread(void *arg) {
                     gfxb_end_frame();
                     now = plat_time_ns();
                     sBackendBusyNs += now - sBackendFrameStart - sBackendWaitNs;
+                    sBackendBusyTotalNs += now - sBackendFrameStart - sBackendWaitNs;
                     sBackendFrames++;
                     break;
                 }
@@ -445,6 +447,10 @@ void gfx_split_frame_end(void) {
 
 int gfx_split_active(void) {
     return sActive;
+}
+
+unsigned long long gfx_split_backend_busy_ns(void) {
+    return sBackendBusyTotalNs;
 }
 
 unsigned long long gfx_split_walk_waited_ns(void) {
