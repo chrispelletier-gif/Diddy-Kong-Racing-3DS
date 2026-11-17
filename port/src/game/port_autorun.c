@@ -343,6 +343,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
     { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
     { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
+    // P54 step 2 (DKR_WALK_VERTS, gfx_c3d.c "The walk writes the vertices"): the walk (game core) tests, converts and
+    // cuts each draw's vertices, which the renderer's core did, the one that limits the Old 3DS. Read the renderer
+    // core ms (expect 5-8 ms less), the game core ms (as much more; must stay under ~28), flashes 0 and the share of
+    // frames at 30. Then one lap with the self-check: the renderer's core also makes each draw's vertices the old way
+    // and compares; the log must say "walk verts: N draws checked, 0 differ" (its fps is low: it does both).
+    { "walk writes the GPU vertices (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 0, 0 },
+    { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
+      { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

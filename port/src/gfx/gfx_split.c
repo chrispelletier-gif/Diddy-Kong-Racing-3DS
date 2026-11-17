@@ -440,6 +440,7 @@ int gfx_split_frame_start(int direct, int holdCores) {
             sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
     }
     commit(reserve(OP_START, 0));
+    gfxb_walk_frame_start(); // DKR_WALK_VERTS: the walk's copy of the frame's settings (after the start record)
     return TRUE;
 }
 
@@ -528,6 +529,9 @@ void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, i
         gfx_split_drain();
         gfxb_draw_indexed(state, verts, numVerts, indices, numTriangles);
         return;
+    }
+    if (gfxb_walk_draw_indexed(state, verts, numVerts, indices, numTriangles)) {
+        return; // DKR_WALK_VERTS: the walk made the GPU's vertices and queued them (a call record)
     }
     d = reserve(OP_INDEXED, sizeof(SplitDraw) + vertBytes + indexBytes);
     d->state = *state;
@@ -666,6 +670,17 @@ void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
 }
 
 void gfx_split_call_commit(void *payload) {
+    commit((SplitCall *) payload - 1);
+}
+
+/* The same for a record that turned out to need only bytes of the room reserved (no more than that): the rest of the
+ * reservation is left for the next record. */
+void gfx_split_call_commit_shrink(void *payload, unsigned int bytes) {
+    SplitRecord *rec = (SplitRecord *) ((SplitCall *) payload - 1) - 1;
+    unsigned int total = sizeof(SplitRecord) + round8(sizeof(SplitCall) + bytes);
+    if (total < rec->bytes) {
+        rec->bytes = total;
+    }
     commit((SplitCall *) payload - 1);
 }
 
