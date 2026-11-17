@@ -338,11 +338,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       1, 0, 1, 1 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
     // The uncapped rows (PR #556, see sSwitchesNative); its "all native switches" row is the usual one here now.
-    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
+    // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
+    // within 16.7 ms, the renderer's core the longest), so the plain uncapped row went: every race's ceiling columns
+    // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
-    { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
+    // The two profiler check rows (DKR_PROF_SHARED_CORE) went after benches #553 and #560 confirmed the split.
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
