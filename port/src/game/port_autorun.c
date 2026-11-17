@@ -344,6 +344,30 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
     // The two profiler check rows (DKR_PROF_SHARED_CORE) went after benches #553 and #560 confirmed the split.
+    // P54 (2026-11-17, proposals/3ds-old3ds-core-balance-plan.md): the core that limits the Old 3DS is the system core
+    // (the renderer's backend, 28-32 ms a frame of 33.4 in #560), not the game's (~10-14 ms spare a frame). Each row is
+    // raced alone for the track's own laps; read the results' renderer_core_ms and game_core_ms (and the flashes
+    // column), and the "backend records" part of each autorun_cores.txt line (DKR_BACKEND_MIX).
+    // Step 1: the frame history (test builds only, ~4 ms a frame) now samples on the game's core; the old way.
+    { "frame history on the renderer core (old way)", { "DKR_HISTORY_CORE", NULL, NULL }, 1, 0, 1, 0 },
+    // Step 1b: two moves onto the system core from when the game's core was the limit (v28, v31), raced back: the
+    // native draws' vertex maths (DKR_NATIVE_REMOTE, default 3) all on the walk, or only opaque draws' on the backend;
+    // the N64 sound players (~0.5 ms) on the game's core; then both.
+    { "native vertex maths all on the walk (NATIVE_REMOTE 0)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 0, 1, 0 },
+    { "only opaque native draws' maths on the backend (NATIVE_REMOTE 1)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 1, 1,
+      0 },
+    { "sound players on the game core (PLAYERS_SYSCORE 0)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
+    { "native maths on the walk + sound players on the game core",
+      { "DKR_NATIVE_REMOTE", "DKR_PLAYERS_SYSCORE", NULL }, -1, 0, 1, 0 },
+    // Step 3: fewer GPU settings written per draw, never raced on an Old 3DS in today's renderer. Watch for flicker or
+    // dropouts (an AI racer's head, far cliffs, the intro logo) as well as the times.
+    { "GPU settings: only the changes set (STATE_CACHE 2)", { "DKR_STATE_CACHE", NULL, NULL }, 1, 2, 1, 0 },
+    { "GPU settings written twice only where known (REWRITE 0)", { "DKR_REWRITE", NULL, NULL }, 1, 0, 1, 0 },
+    // Step 4: the bottom screen's thread on the game's core again, now that it has the spare time (v30 moved it).
+    { "bottom screen thread on the game core (BS_SYSCORE 0)", { "DKR_BS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
+    // 2b-C: the texture atlas (fewer draws: most batch breaks are texture changes) lost ~2 ms on each core in run 15
+    // (v35), when both were full; the game's core has room now.
+    { "texture atlas (TEX_ATLAS 1)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
