@@ -14,6 +14,7 @@ int gfx_split_frame_start(int direct, int holdCores);
 void gfx_split_frame_end(void);
 int gfx_split_active(void);
 void gfx_split_drain(void);
+void gfx_split_kick(void);
 void gfx_split_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gfx_split_clear_depth(const short rect[4]);
 void gfx_split_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
