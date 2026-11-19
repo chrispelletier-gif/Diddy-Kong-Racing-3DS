@@ -13,6 +13,9 @@ for the PC, and writes down the PICA200 command words of every draw and the GPU 
          with the defaults (only changed settings sent): the registers must hold the same values at every draw. Any
          difference is a state cache bug. It doesn't see ordering (which registers a draw still reads while the next
          list is written): the Crescent Island hang was that kind, texture registers written right after a draw.
+  walk   (once the backend has DKR_WALK_VERTS, PR #563) the Old 3DS records with the walk making each draw's
+         vertices (REPLAY_WALK=1 DKR_WALK_VERTS=1 DKR_WALK_VERTS_CHECK=1) against the lean draw: every draw's
+         command words and vertex data must be the same, and the backend's own self-check must count 0 differ.
 
   backend_replay.py deps --dir DEPS
   backend_replay.py build --deps DEPS --port PORT_DIR --out DIR
@@ -54,6 +57,7 @@ RECORD_ENV = {"DKR_SPLIT_RENDER": "0"}
 REPLAY_ENV = {"REPLAY_QUIET": "1"}
 CONSOLES = [("New 3DS", {"REPLAY_OLD3DS": "0"}), ("Old 3DS", {"REPLAY_OLD3DS": "1"})]
 STATE_FULL = {"DKR_STATE_CACHE": "0", "DKR_FAST_STATE": "0"}
+WALK = {"REPLAY_OLD3DS": "1", "REPLAY_WALK": "1", "DKR_WALK_VERTS": "1", "DKR_WALK_VERTS_CHECK": "1"}
 MAX_SHOWN = 8
 MAX_DIFF_LINES = 2000
 
@@ -284,6 +288,8 @@ def check(records, head, base, out_dir, expected):
                 if base:
                     jobs[("base", tag)] = pool.submit(replay, base, rec, env,
                                                       os.path.join(out_dir, tag + ".base.words"))
+                if env["REPLAY_OLD3DS"] == "1":
+                    jobs[("walk", tag)] = pool.submit(replay, head, rec, WALK, os.path.join(out_dir, tag + ".walk.words"))
         results = {}
         for k, j in jobs.items():
             try:
@@ -293,6 +299,25 @@ def check(records, head, base, out_dir, expected):
                 report.append("- replay failed (%s %s):\n\n```\n%s\n```" % (k[0], k[1], e))
                 if k[0] != "base":
                     ok = False
+
+    walk_rows, walk_shown, walk_bad, walk_none = [], [], 0, False
+    with open(os.path.join(out_dir, "walk-diff.txt"), "w") as wd:
+        for rec in records:
+            name = os.path.basename(rec)[:-len(".rec")]
+            tag = "%s-1" % name
+            h, w = results.get(("head", tag)), results.get(("walk", tag))
+            if h is None or w is None:
+                continue
+            if "walk_none" in w:
+                walk_none = True
+                continue
+            lines, diff, shown = compare_words(os.path.join(out_dir, tag + ".head.words"),
+                                               os.path.join(out_dir, tag + ".walk.words"), name + ", walk", wd)
+            differ = int(w.get("walk_differ", 0))
+            walk_bad += diff + differ
+            walk_shown += shown
+            walk_rows.append("| %s | %d | %d | %d | %d | %d |" % (name, w["draws"], w.get("walk_drawn", 0), diff,
+                                                                  w.get("walk_checked", 0), differ))
 
     words_rows, state_rows = [], []
     words_shown, state_shown = [], []
@@ -361,6 +386,27 @@ def check(records, head, base, out_dir, expected):
     else:
         report.append("The GPU registers are the same at every draw. (Ordering against the GPU, such as texture "
                       "registers written right after a draw, is not modelled.)")
+    report.append("")
+    report.append("### Walk: Old 3DS, the walk making the vertices (DKR_WALK_VERTS) against the lean draw")
+    report.append("")
+    if walk_none or not walk_rows:
+        report.append("This backend has no DKR_WALK_VERTS (PR #563): not checked.")
+    else:
+        report.append("| record | draws | made by the walk | draws whose words or data differ | self-checked | "
+                      "self-check differ |")
+        report.append("|---|---|---|---|---|---|")
+        report += walk_rows
+        report.append("")
+        if walk_bad:
+            ok = False
+            report.append("**The walk's draws differ from the lean draw's (%d).**" % walk_bad)
+            report.append("")
+            report.append("```")
+            report += walk_shown[:MAX_SHOWN]
+            report.append("```")
+        else:
+            report.append("Every draw the walk made has the lean draw's command words and vertex data, and the "
+                          "self-check found no difference.")
     text = "\n".join(report) + "\n"
     with open(os.path.join(out_dir, "report.md"), "w") as f:
         f.write(text)

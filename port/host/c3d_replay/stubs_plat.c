@@ -185,6 +185,32 @@ int gfx_split_active(void) {
     return plat_switch("REPLAY_SPLIT", 1);
 }
 
+/*
+ * The two-core renderer's call records (gfx_split.c), as DKR_WALK_VERTS (PR #563) queues a draw the walk made: here
+ * the record runs as soon as it is committed, on the one thread, in the order the walk made it. Records over a
+ * quarter of the 3DS's ring are refused, as there.
+ */
+#define REPLAY_CALL_BYTES (256 * 1024)
+static void (*sCallFn)(void *);
+static unsigned long long sCallRoom[REPLAY_CALL_BYTES / 8];
+
+void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
+    if (bytes > REPLAY_CALL_BYTES) {
+        return NULL;
+    }
+    sCallFn = fn;
+    return sCallRoom;
+}
+
+void gfx_split_call_commit(void *payload) {
+    sCallFn(payload);
+}
+
+void gfx_split_call_commit_shrink(void *payload, unsigned int bytes) {
+    (void) bytes;
+    sCallFn(payload);
+}
+
 void bugreport_request(void) {
 }
 

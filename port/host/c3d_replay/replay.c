@@ -34,6 +34,18 @@
 #include "record_format.h"
 #include "replay.h"
 
+/*
+ * DKR_WALK_VERTS (P54 step 2, PR #563): with REPLAY_WALK=1 each frame's draws go through the walk's side as on the
+ * 3DS's two-core renderer: gfxb_walk_frame_start after the frame's start, then gfxb_walk_draw_indexed for each
+ * indexed draw (its record runs at once, stubs_plat.c gfx_split_call_*); a draw it leaves goes to gfxb_draw_indexed.
+ * Weak: a backend without them (before #563) replays as before. gfxb_walk_stats gives the self-check's counts.
+ */
+extern void gfxb_walk_frame_start(void) __attribute__((weak));
+extern int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                                  const unsigned short *indices, int numTriangles) __attribute__((weak));
+extern void gfxb_walk_stats(unsigned int *drawn, unsigned int *checked, unsigned int *differ) __attribute__((weak));
+static int sWalk; // REPLAY_WALK=1 and the backend has the walk's side
+
 /******** GPU register model ********/
 
 #define NUM_REGS 0x400
@@ -437,6 +449,13 @@ int main(int argc, char **argv) {
         return 2;
     }
     model_init();
+    {
+        const char *walk = getenv("REPLAY_WALK");
+        sWalk = walk != NULL && atoi(walk) != 0 && gfxb_walk_frame_start != NULL && gfxb_walk_draw_indexed != NULL;
+        if (walk != NULL && atoi(walk) != 0 && !sWalk) {
+            printf("walk_none 1 ");
+        }
+    }
 
     while ((op = fgetc(sIn)) != EOF) {
         GfxDrawState state;
@@ -453,6 +472,9 @@ int main(int argc, char **argv) {
                 sFrame = (unsigned int) read_s32();
                 sDrawInFrame = 0;
                 gfxb_start_frame();
+                if (sWalk) {
+                    gfxb_walk_frame_start();
+                }
                 break;
             case REC_END_FRAME:
                 gfxb_end_frame();
@@ -491,7 +513,9 @@ int main(int argc, char **argv) {
                 m = read_s32();
                 idx = scratch(1, 6 * (size_t) m);
                 read_bytes(idx, 6 * (size_t) m);
-                gfxb_draw_indexed(&state, v, n, idx, m);
+                if (!sWalk || !gfxb_walk_draw_indexed(&state, v, n, idx, m)) {
+                    gfxb_draw_indexed(&state, v, n, idx, m);
+                }
                 break;
             }
             case REC_DRAW_MODEL: {
@@ -601,6 +625,11 @@ int main(int argc, char **argv) {
         }
     }
 done:
+    if (sWalk && gfxb_walk_stats != NULL) {
+        unsigned int drawn, checked, differ;
+        gfxb_walk_stats(&drawn, &checked, &differ);
+        printf("walk_drawn %u walk_checked %u walk_differ %u ", drawn, checked, differ);
+    }
     printf("frames %d draws %llu words %llu words/draw %.2f jobs %llu\n", keptFrames, sDraws, sWordsTotal,
            sDraws ? (double) sWordsTotal / (double) sDraws : 0.0, sJobs);
     if (sWordsOut != NULL) {
