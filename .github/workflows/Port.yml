@@ -350,7 +350,7 @@ jobs:
             echo "### Texture memo check"
             echo
             for log in $logs; do
-              echo "- $(basename "$(dirname "$log")"): $(grep "hits checked" "$log" | tail -n 1 | sed 's/.*texture memo check: //')"
+              echo "- $(basename "$(dirname "$(dirname "$log")")"): $(grep "hits checked" "$log" | tail -n 1 | sed 's/.*texture memo check: //')"
             done
           } >> "$GITHUB_STEP_SUMMARY"
           if grep -q "texture memo check: first difference" $logs; then
