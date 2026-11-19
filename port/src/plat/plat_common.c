@@ -319,7 +319,10 @@ const char *plat_getenv(const char *name) {
 }
 #endif
 
-#define MAX_SWITCH_OVERRIDES 16
+/* The switch bench sets every row's variables at their usual values before a race's own (port_autorun.c apply_config):
+ * over 16 names on an Old 3DS on 2026-11-19, when this was 16 and every one past the 16th was dropped without a word, so
+ * the later rows raced the usual settings (found by P56's check rows). A full table now says so in the log. */
+#define MAX_SWITCH_OVERRIDES 64
 
 static volatile struct {
     const char *volatile name; // NULL: a free entry
@@ -406,6 +409,10 @@ int plat_switch(const char *name, int fallback) {
     return e->value;
 }
 
+static PLAT_COLD void override_table_full(const char *name, int value) {
+    plat_log("switch override table full (%d): %s=%d NOT applied", MAX_SWITCH_OVERRIDES, name, value);
+}
+
 void plat_override_switch(const char *name, int value) {
     int i, free = -1;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
@@ -421,6 +428,9 @@ void plat_override_switch(const char *name, int value) {
         i = free;
     }
     if (i < 0) {
+        if (value >= 0) {
+            override_table_full(name, value);
+        }
         return;
     }
     // The value before the name, as the renderer may be reading the table on the other core.
