@@ -27,16 +27,19 @@ import sys
 BUDGETS = {"hot_span": 55516, "walk_set": 32052, "backend_set": 18112}
 SLACK = 1024
 
+# A name ending in "?" is optional: GCC may inline it, or it only exists once a PR that adds it is merged (P54 step 2,
+# PR #563: the walk's vertex conversion and the cutting it shares with the backend). Any other name missing from the
+# ELF fails the check, so a renamed function can't quietly drop out of a total.
 WALK_SET = (
     "run_command_list draw_dkr_triangles load_vertices load_vertices_now make_draw_state lookup_texture "
     "command_off_screen frame_hash tex_memo_confirm load_matrix tex_axis_init handle_call call_display_list "
-    "flush_cpu_batch forget_covered_loads shared_vertices_clear port_gfx_run_frame"
+    "flush_cpu_batch forget_covered_loads shared_vertices_clear port_gfx_run_frame gfxb_walk_draw_indexed?"
 ).split()
 
 BACKEND_SET = (
     "gfxb_draw_indexed hang_draw_start test_and_write_vertices use_vertex_format bind_texture apply_fog "
-    "apply_combiner drain_before_draw set_all_state write_settings_twice set_draw_state clip_cut_lean "
-    "clip_cut_triangles C3Di_UpdateContext C3D_DrawElements C3D_DrawArrays C3D_UpdateUniforms C3Di_SetTex "
+    "apply_combiner drain_before_draw set_all_state write_settings_twice? set_draw_state? clip_cut_lean "
+    "clip_cut_k? clip_triangle_band? walk_draw_ready? clip_cut_triangles C3Di_UpdateContext C3D_DrawElements C3D_DrawArrays C3D_UpdateUniforms C3Di_SetTex "
     "C3Di_TexEnvBind C3Di_EffectBind C3Di_BufInfoBind C3Di_AttrInfoBind prof_enabled"
 ).split()
 
@@ -151,9 +154,11 @@ def measure_set(syms, names, where, title, lines, missing):
     lines.append("| function | address | size |")
     lines.append("|---|---|---|")
     for name in names:
+        optional = name.endswith("?")
+        name = name.rstrip("?")
         found = find(syms, name, where)
         if not found:
-            missing.append(name)
+            missing.append(name + ("?" if optional else ""))
             continue
         for addr, size, sym, _ in found:
             lines.append("| {} | 0x{:x} | {} |".format(sym, addr, fmt(size)))
@@ -244,15 +249,19 @@ def main():
         note = "(port_gfx_run_frame inlined into frame_thread)"
     walk = measure_set(syms, walk_names, WALK_WHERE, "walk_set " + note, lines, missing)
     backend = measure_set(syms, BACKEND_SET, BACKEND_WHERE, "backend_set", lines, missing)
+    required_missing = [n for n in missing if not n.endswith("?")]
     if missing:
         lines.append("")
-        lines.append("not in this ELF: " + ", ".join(missing))
+        lines.append("not in this ELF (? = optional): " + ", ".join(missing))
 
     totals = {"hot_span": hot_span, "walk_set": walk, "backend_set": backend}
     lines.append("")
     lines.append("| total | bytes | budget |")
     lines.append("|---|---|---|")
     failures = []
+    if required_missing:
+        failures.append("measured functions not found in the ELF (renamed or inlined?): " + ", ".join(required_missing) +
+                        "; fix the name in hot_size.py, or mark it optional with a trailing ?")
     for key, value in totals.items():
         budget = BUDGETS.get(key)
         lines.append("| {} | {} | {} |".format(key, fmt(value), fmt(budget) if budget is not None else "not set"))
