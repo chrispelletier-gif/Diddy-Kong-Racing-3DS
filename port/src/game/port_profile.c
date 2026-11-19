@@ -109,6 +109,7 @@ typedef struct Window {
     unsigned long long startNs;
     unsigned long long startIdleNs;
     unsigned long long startRenderIdleNs;
+    unsigned long long startBackendNs;
     // Game thread statistics, kept per window directly.
     u32 rateFrames[PROF_RATE_BUCKETS];
     u32 worstFrameUs;
@@ -294,6 +295,7 @@ void prof_window_start(int window) {
     w->startNs = plat_time_ns();
     w->startIdleNs = plat_idle_ns();
     w->startRenderIdleNs = plat_render_idle_ns();
+    w->startBackendNs = gfx_split_backend_busy_ns();
     w->worstFrameUs = 0;
     w->worstBuildUs = 0;
     w->hitches = 0;
@@ -338,6 +340,7 @@ void prof_window_read(int window, ProfStats *out) {
     out->elapsedNs = plat_time_ns() - w->startNs;
     out->idleNs = plat_idle_ns() - w->startIdleNs;
     out->renderIdleNs = plat_render_idle_ns() - w->startRenderIdleNs;
+    out->backendBusyNs = gfx_split_backend_busy_ns() - w->startBackendNs;
     out->worstFrameUs = w->worstFrameUs;
     out->worstBuildUs = w->worstBuildUs;
     out->hitches = w->hitches;
@@ -360,15 +363,47 @@ static double per_frame_ms(const ProfStats *s, s32 stage, u32 frames) {
     return frames ? s->stageNs[stage] / 1e6 / frames : 0.0;
 }
 
-const char *prof_limit(const ProfStats *s) {
-    double game = per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames) +
-                  per_frame_ms(s, PROF_SHARED_CORE, s->gameFrames); // (the game core's whole load, as before the split)
-    double render = per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
-    double gpu = per_frame_ms(s, PROF_GPU_DRAW, s->renderedFrames);
-    if (gpu > game && gpu > render) {
-        return "GPU";
+/* P54 step 0: the renderer core's busy ms a game frame, as the uncapped table counts it (core_frame): the two-core
+ * renderer's backend when it runs (an Old 3DS's system core), else a New 3DS's renderer whole (an Old 3DS without the
+ * split has its renderer on the game's core, counted there). */
+static double renderer_core_ms(const ProfStats *s) {
+    if (gfx_split_active()) {
+        return s->gameFrames ? s->backendBusyNs / 1e6 / s->gameFrames : 0.0;
     }
-    return (game >= render) ? "game CPU" : "renderer CPU";
+    return plat_old_3ds() ? 0.0
+                          : per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
+}
+
+/* The game core's ms a game frame: the game's logic and scene and the renderer's time there (an Old 3DS's walk). */
+static double game_core_ms(const ProfStats *s) {
+    return per_frame_ms(s, PROF_LOGIC, s->gameFrames) + per_frame_ms(s, PROF_SCENE, s->gameFrames) +
+           per_frame_ms(s, PROF_SHARED_CORE, s->gameFrames);
+}
+
+/* The cap's period in ms (one retrace a game frame at 60 fps, two at 30). */
+static double cap_period_ms(void) {
+    return 1000.0 / 60.0 * (plat_frame_retraces() > 0 ? plat_frame_retraces() : 1);
+}
+
+const char *prof_limit(const ProfStats *s) {
+    double game = game_core_ms(s); // (the game core's whole load, as before the split)
+    double gpu = per_frame_ms(s, PROF_GPU_DRAW, s->renderedFrames);
+    if (port_prof_cores()) {
+        double render = renderer_core_ms(s), period = cap_period_ms();
+        if (game < period * 0.9 && render < period * 0.9 && gpu < period * 0.9) {
+            return "retrace";
+        }
+        if (gpu > game && gpu > render) {
+            return "GPU";
+        }
+        return (game >= render) ? "game core" : "renderer core";
+    } else {
+        double render = per_frame_ms(s, PROF_RDP, s->renderedFrames) + per_frame_ms(s, PROF_TEXTURE, s->renderedFrames);
+        if (gpu > game && gpu > render) {
+            return "GPU";
+        }
+        return (game >= render) ? "game CPU" : "renderer CPU";
+    }
 }
 
 void prof_set_status(const char *text) {
@@ -477,6 +512,10 @@ static void sec_frame_done(void) {
     __builtin_memset(sSecOtherNs, 0, sizeof(sSecOtherNs));
 }
 static unsigned long long sKindStartNs, sOtherAtStartNs;
+/* P54 step 0 (DKR_PROF_CORES): on timed frames, shared_core_now() at the last kind switch, so that the walk's time on
+ * the game's core while a kind was built comes off that kind (and its object) and is shown apart (sKindWalkNs). */
+static s32 sKindCores;
+static unsigned long long sKindOtherNs, sKindWalkNs;
 static s32 sKindNow, sObjNow = PROF_OBJ_NONE;
 static unsigned long sGameTimedFrames;
 static ProfSceneCounts sScene;
@@ -542,6 +581,18 @@ unsigned int gPortLevelLoads;
 
 /* DKR_SHADOWS_FIRST (tracks.c render_scene's objects): 1 on, 0 off; default on for the Old 3DS, whose renderer pays
  * per draw. */
+/* P54 step 0: DKR_PROF_CORES (default 1) shows the time by core: the graph and hitch causes give the renderer's walk on
+ * the game's core (Old 3DS) as the renderer, the limit names the busiest core, and the draw mix takes the walk out of
+ * the kind being built. 0 = the view before (the walk counted with the game's scene). */
+int port_prof_cores(void) {
+    static int epoch = -1, on;
+    if (epoch != gPlatSwitchEpoch) {
+        epoch = gPlatSwitchEpoch;
+        on = plat_switch("DKR_PROF_CORES", 1) != 0;
+    }
+    return on;
+}
+
 int port_shadows_first(void) {
     static int epoch = -1, on;
     if (epoch != gPlatSwitchEpoch) {
@@ -570,9 +621,19 @@ void port_draw_kind_game(int kind, int object) {
         return; // Not a timed frame
     }
     now = plat_time_ns();
-    sKindBuildNs[sKindNow] += now - sKindStartNs;
-    if (sObjNow < PROF_OBJ_BUCKETS) {
-        sObjLive.objs[sObjNow].buildNs += now - sKindStartNs;
+    {
+        unsigned long long spent = now - sKindStartNs;
+        if (sKindCores) {
+            unsigned long long other = shared_core_now(now), walk = other > sKindOtherNs ? other - sKindOtherNs : 0;
+            walk = walk < spent ? walk : spent; // (64-bit reads of another core's counters may tear)
+            sKindOtherNs = other;
+            sKindWalkNs += walk;
+            spent -= walk;
+        }
+        sKindBuildNs[sKindNow] += spent;
+        if (sObjNow < PROF_OBJ_BUCKETS) {
+            sObjLive.objs[sObjNow].buildNs += spent;
+        }
     }
     sKindStartNs = now;
     sKindNow = kind & (PROF_KINDS - 1);
@@ -599,6 +660,8 @@ void prof_kind_build_take(ProfDrawMix *out) {
     }
     out->gameTimedFrames += sGameTimedFrames;
     sGameTimedFrames = 0;
+    out->walkNs += sKindWalkNs;
+    sKindWalkNs = 0;
 }
 
 void prof_scene_frame(int segments, int segmentsAllowed, int segmentsDrawn, int objects) {
@@ -651,6 +714,7 @@ static void add_mix(ProfDrawMix *to, const ProfDrawMix *from) {
     to->timedFrames += from->timedFrames;
     to->auditedFrames += from->auditedFrames;
     to->gameTimedFrames += from->gameTimedFrames;
+    to->walkNs += from->walkNs;
 }
 
 static void add_scene(ProfSceneCounts *to, const ProfSceneCounts *from) {
@@ -725,11 +789,15 @@ void prof_format_draw_mix(const ProfDrawMix *m, const ProfSceneCounts *scene, ch
                             s->tiny * 100.0 / a, s->areaPx / audited / (400.0 * 240.0));
     }
     if (scene->frames > 0 && at < size) {
-        plat_snprintf(out + at, size - at,
-                      "; segments %.1f of %.1f (visibility table %.1f), objects %.1f of %.1f",
-                      (double) scene->segmentsDrawn / scene->frames, (double) scene->segments / scene->frames,
-                      (double) scene->segmentsAllowed / scene->frames, (double) scene->objectsDrawn / scene->frames,
-                      (double) scene->objects / scene->frames);
+        at += plat_snprintf(out + at, size - at,
+                            "; segments %.1f of %.1f (visibility table %.1f), objects %.1f of %.1f",
+                            (double) scene->segmentsDrawn / scene->frames, (double) scene->segments / scene->frames,
+                            (double) scene->segmentsAllowed / scene->frames,
+                            (double) scene->objectsDrawn / scene->frames, (double) scene->objects / scene->frames);
+    }
+    if (m->walkNs != 0 && at < size) {
+        /* P54: taken out of the kinds' build times above (DKR_PROF_CORES) */
+        plat_snprintf(out + at, size - at, "; renderer walk on this core %.2f", m->walkNs / 1e6 / gameTimed);
     }
 }
 
@@ -835,6 +903,8 @@ enum { TERM_SUMMARY, TERM_KINDS, TERM_OBJECTS, TERM_PAGES };
 #define TERM_OBJ_ROW "%-12.12s %3.0f %3.0f %5.0f %6.2f %6.2f %6.2f\n"
 /* A line that may give way when a page has too many (the graph's key: the bars' colours are in the README) */
 #define TERM_DROPPABLE '\x01'
+/* A line that gives way before the droppable ones (P54: the summary's spare time, before the graph's key) */
+#define TERM_DROPPABLE_FIRST '\x02'
 
 /* The PROFILER page's numbers, kept each second, so that the page and prof_term_check format them the same way. */
 typedef struct {
@@ -842,6 +912,9 @@ typedef struct {
     int cap, onTime, late, later, idleGame, idleRender;
     unsigned worst, hitches, tris, draws, loads;
     const char *limit;
+    /* P54 DKR_PROF_CORES: each core's ms a frame, for the spare time line (cores 0: no line) */
+    double coreGame, coreRender;
+    int cores;
 } TermNumbers;
 static TermNumbers sTermNumbers;
 
@@ -852,12 +925,18 @@ static TermNumbers sTermNumbers;
  */
 /* A part of a frame's time: one decimal, or whole ms from 10 ms when its line would not fit 47 columns. */
 static const char *term_ms(char *out, double ms, s32 whole) {
-    plat_snprintf(out, 8, whole && ms >= 9.95 ? "%.0f" : "%.1f", ms);
+    plat_snprintf(out, 8, whole && (ms >= 9.95 || ms <= -9.95) ? "%.0f" : "%.1f", ms);
     return out;
 }
 
+/* The budget left a frame (may be negative), kept within what the spare line's columns hold. */
+static double term_spare(double budget, double ms) {
+    double spare = budget - ms;
+    return spare > 99.9 ? 99.9 : spare < -99.9 ? -99.9 : spare;
+}
+
 static int term_summary_text(char *out, int size, const TermNumbers *n) {
-    char logic[8], scene[8], sound[8], tex[8], game[64], render[64];
+    char logic[8], scene[8], sound[8], tex[8], game[64], render[64], spare[64], a[8], b[8], c[8];
     s32 whole;
     int at;
     /* the game's and the renderer's lines: with decimals if they fit, else the parts of 10 ms or more whole */
@@ -893,6 +972,19 @@ static int term_summary_text(char *out, int size, const TermNumbers *n) {
                         "waiting: game %.1f render %.1f, idle %d%% %d%%\n",
                         render, n->gpu, (int) (n->gpu * 100.0 / n->budget + 0.5), n->tris, n->draws, n->waitGame,
                         n->waitRender, n->idleGame, n->idleRender);
+    if (n->cores) {
+        /* P54: what each core has left of the budget (the busiest core is the limit); the first line to give way */
+        for (whole = 0; whole < 2; whole++) {
+            plat_snprintf(spare, sizeof(spare), "spare ms: game core %s renderer %s GPU %s",
+                          term_ms(a, term_spare(n->budget, n->coreGame), whole),
+                          term_ms(b, term_spare(n->budget, n->coreRender), whole),
+                          term_ms(c, term_spare(n->budget, n->gpu), whole));
+            if (strlen(spare) <= TERM_COLS) {
+                break;
+            }
+        }
+        at += plat_snprintf(out + at, size - at, "%c%s\n", TERM_DROPPABLE_FIRST, spare);
+    }
     return at;
 }
 
@@ -916,6 +1008,9 @@ static int term_fit(const char *in, char *out, int size) {
         }
         if (*p == TERM_DROPPABLE) {
             d = 1;
+            p++;
+        } else if (*p == TERM_DROPPABLE_FIRST) {
+            d = 2;
             p++;
         }
         len = (s32) (e - p) < (s32) sizeof(buf) - 1 ? (s32) (e - p) : (s32) sizeof(buf) - 1;
@@ -968,7 +1063,23 @@ static int term_fit(const char *in, char *out, int size) {
         line++;
     }
     for (i = line - 1; i >= 0 && nrows > TERM_LINES; i--) {
-        if (droppable[i]) {
+        if (droppable[i] == 2) {
+            s32 r, k = 0;
+            for (r = 0; r < nrows; r++) {
+                if (owner[r] != i) {
+                    if (k != r) {
+                        memcpy(rows[k], rows[r], sizeof(rows[k]));
+                        owner[k] = owner[r];
+                    }
+                    k++;
+                }
+            }
+            nrows = k;
+            dropped++;
+        }
+    }
+    for (i = line - 1; i >= 0 && nrows > TERM_LINES; i--) {
+        if (droppable[i] == 1) {
             s32 r, k = 0;
             for (r = 0; r < nrows; r++) {
                 if (owner[r] != i) {
@@ -1004,7 +1115,8 @@ static int term_fit(const char *in, char *out, int size) {
 /*
  * The PC's check (host_main.c, DKR_PROF_TERM_CHECK=1, run by CI): each terminal page with its widest numbers and the
  * longest test run status (port_autorun_longest_status), with and without the Old 3DS's renderer-on-this-core line,
- * must fit 47 columns by 14 lines with nothing cut and no line lost but the graph's key. Returns 0 when all fit.
+ * must fit 47 columns by 14 lines with nothing cut and no line lost but the spare line and the graph's key. Returns 0
+ * when all fit.
  */
 int prof_term_check(char *report, int size) {
     static char text[2048], fitted[TERM_LINES * (TERM_COLS + 1) + 1];
@@ -1028,7 +1140,9 @@ int prof_term_check(char *report, int size) {
                 }
                 n.fps = 59.9;
                 n.cap = 60;
-                n.limit = "renderer CPU";
+                n.limit = "renderer core";
+                n.cores = 1;
+                n.coreGame = n.coreRender = 999.9; /* spare -99.9: the widest */
                 n.onTime = n.late = n.later = n.idleGame = n.idleRender = 100;
                 n.worst = 9999;
                 n.steady = n.logic = n.scene = n.sound = n.tex = n.waitGame = n.waitRender = 99.9;
@@ -1071,10 +1185,12 @@ int prof_term_check(char *report, int size) {
             }
             out += plat_snprintf(report + out, size - out, "prof_term_check: status %d, page %d, %s: %d rows%s%s\n%s\n\n",
                    (int) which, (int) page + 1, layout ? "Old 3DS (renderer on this core)" : "New 3DS", (int) rows,
-                   result % 100 ? ", the graph's key left out" : "", result >= 100 ? ", CUT SHORT" : "", fitted);
-            /* only the summary's key may give way, and only when the status needs its row */
+                   result % 100 == 2 ? ", the spare line and the graph's key left out"
+                   : result % 100 ? ", the spare line left out" : "", result >= 100 ? ", CUT SHORT" : "", fitted);
+            /* only the summary's spare line and key may give way (the spare line first), and only when the status
+             * needs their rows */
             if (row != 0 || rows > TERM_LINES || result >= 100 || (page != TERM_SUMMARY && result != 0) ||
-                result % 100 > 1) {
+                result % 100 > 2) {
                 out += plat_snprintf(report + out, size - out, "prof_term_check: FAILED (row %d too wide, or too many rows, or a line lost)\n", (int) row);
                 failures++;
             }
@@ -1092,7 +1208,7 @@ int prof_term_check(char *report, int size) {
                     if (same == len) {
                         break;
                     }
-                    if (len - (*line == TERM_DROPPABLE) > TERM_COLS) {
+                    if (len - (*line == TERM_DROPPABLE || *line == TERM_DROPPABLE_FIRST) > TERM_COLS) {
                         out += plat_snprintf(report + out, size - out, "prof_term_check: FAILED, summary line %d is %d columns: %.*s\n", (int) i, (int) len,
                                (int) len, line);
                         failures++;
@@ -1119,7 +1235,7 @@ void prof_term_preview(int oldLayout, char *out, int size) {
     static char text[1536];
     char status[320];
     TermNumbers n = { 29.3, 33.3, 1.8, 27.0, 15.2, 9.8, 2.0, 0.0, 29.0, 0.4, 12.1, 5.0, 2.2,
-                      30, 95, 5, 0, 4, 6, 50, 1, 1058, 137, 3, "renderer CPU" };
+                      30, 95, 5, 0, 4, 6, 50, 1, 1058, 137, 3, "renderer core", 27.0, 29.0, 1 };
     s32 at;
     if (oldLayout) {
         n.scene = 6.0;
@@ -1605,6 +1721,9 @@ static void show_overlay(void) {
             n->fps = fps;
             n->cap = (int) (60 / target);
             n->limit = prof_limit(&s);
+            n->cores = port_prof_cores();
+            n->coreGame = game_core_ms(&s);
+            n->coreRender = renderer_core_ms(&s);
             n->onTime = percent(onTime, s.gameFrames);
             n->late = percent(late, s.gameFrames);
             n->later = percent(later, s.gameFrames);
@@ -1691,6 +1810,12 @@ static void show_overlay(void) {
                          perFrame[PROF_PART_STATE_TWICE], perFrame[PROF_PART_WRITE],
                          s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
+            }
+            {
+                char mix[320];
+                if (gfx_split_backend_mix(0, mix, sizeof(mix)) > 0) {
+                    port_log("%s", mix); // P54 2b-A (DKR_BACKEND_MIX)
+                }
             }
             sLogFrames = frames;
             __builtin_memcpy(sLogPerFrame, perFrame, sizeof(sLogPerFrame));
@@ -1790,6 +1915,7 @@ void prof_core_window_start(void) {
     }
     sCoreSecFramesStart = sSecRunFrames;
     sCoreRenderedStart = sRenderedFrames;
+    gfx_split_backend_mix(1, NULL, 0); // (from here)
     sCoreOn = TRUE;
 }
 
@@ -1897,6 +2023,17 @@ int prof_core_breakdown(char *out, int size) {
         length += plat_snprintf(out + length, size - length, "; frame end waits: GPU %.2f, screen %.2f",
                                 part[PROF_PART_END_GPU_WAIT], part[PROF_PART_PRESENT_WAIT]);
     }
+    if (length < size - 2) {
+        /* P54 2b-A: the renderer core's time by record type (DKR_BACKEND_MIX) */
+        s32 at = length;
+        length += plat_snprintf(out + length, size - length, "; ");
+        if (gfx_split_backend_mix(1, out + length, size - length) == 0) {
+            length = at;
+            out[length] = '\0';
+        } else {
+            length += (s32) strlen(out + length);
+        }
+    }
     return length < size ? length : size - 1;
 }
 
@@ -1985,6 +2122,8 @@ void prof_game_mark(int mark, int updateRate) {
             sGameTimed = prof_enabled() && (!plat_old_3ds() || sGameFrameCount % 8 == 0);
             sGameTimedFrames += sGameTimed;
             sKindStartNs = sGameTimed ? now : 0;
+            sKindCores = sGameTimed && sSharedOn && port_prof_cores();
+            sKindOtherNs = sKindCores ? shared_core_now(now) : 0;
             if (sSecStartNs != 0) {
                 port_game_section(PORT_SEC_TOP); // The last frame's code after its end
                 sec_frame_done();
@@ -2006,7 +2145,14 @@ void prof_game_mark(int mark, int updateRate) {
                 port_draw_kind_game(PORT_DRAW_OTHER, -1);
                 other = sKindBuildNs[PORT_DRAW_OTHER];
                 other -= other >= sOtherAtStartNs ? sOtherAtStartNs : 0; // (A take may have emptied it since.)
-                sKindBuildNs[PORT_DRAW_OTHER] -= other > sLogicNs ? sLogicNs : other;
+                {
+                    /* with the walk already taken out of the kinds (sKindCores), only the logic's own time is */
+                    unsigned long long logic = sLogicNs;
+                    if (sKindCores) {
+                        logic -= sLogicOtherNs < logic ? sLogicOtherNs : logic;
+                    }
+                    sKindBuildNs[PORT_DRAW_OTHER] -= other > logic ? logic : other;
+                }
                 sKindStartNs = 0;
             }
             if (sSharedOn) {

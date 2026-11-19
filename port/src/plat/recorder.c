@@ -34,15 +34,27 @@ static void init(void) {
 }
 
 /* What took a frame's time: the game thread's biggest stage, or what the renderer it waited for was doing. */
+/* P54 step 0 (DKR_PROF_CORES, default 1): the renderer's walk on the game's core (sharedUs, Old 3DS) is its own
+ * candidate and shows as the renderer, not added to the game's scene (that made the Old 3DS graph cyan when the game
+ * itself was a third of the core). 0 = the old view. */
+static int shared_is_renderer(const RecFrame *r) {
+    return port_prof_cores() && r->sharedUs > 0 && r->sharedUs >= r->renderWaitUs;
+}
+
 int rec_frame_cause(const RecFrame *r) {
-    /* the renderer's time on the game's core (sharedUs) held the game thread up too: counted with the scene, as
-     * before it was shown apart */
-    unsigned int scene = r->sceneUs + r->sharedUs;
-    if (r->logicUs >= scene && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
+    int cores = port_prof_cores();
+    /* with the switch off, the renderer's time on the game's core (sharedUs) held the game thread up too: counted
+     * with the scene, as before it was shown apart */
+    unsigned int scene = cores ? r->sceneUs : r->sceneUs + r->sharedUs;
+    unsigned int shared = cores ? r->sharedUs : 0;
+    if (r->logicUs >= scene && r->logicUs >= shared && r->logicUs >= r->renderWaitUs && r->logicUs >= r->vsyncUs) {
         return REC_CAUSE_LOGIC;
     }
-    if (scene >= r->renderWaitUs && scene >= r->vsyncUs) {
+    if (scene >= shared && scene >= r->renderWaitUs && scene >= r->vsyncUs) {
         return REC_CAUSE_SCENE;
+    }
+    if (shared >= r->renderWaitUs && shared >= r->vsyncUs) {
+        return REC_CAUSE_RENDERER;
     }
     if (r->renderWaitUs >= r->vsyncUs) {
         if (r->gpuWaitUs > r->rdpUs + r->texUs) {
@@ -66,7 +78,7 @@ static void describe_cause(const RecFrame *r, char *out, size_t size) {
             snprintf(out, size, "game logic %u ms", r->logicUs / 1000);
             break;
         case REC_CAUSE_SCENE:
-            if (r->sharedUs > r->sceneUs) {
+            if (!port_prof_cores() && r->sharedUs > r->sceneUs) {
                 snprintf(out, size, "renderer on the game's core %u ms (the game's own scene %u ms)",
                          r->sharedUs / 1000, r->sceneUs / 1000);
                 break;
@@ -78,6 +90,13 @@ static void describe_cause(const RecFrame *r, char *out, size_t size) {
             snprintf(out, size, "waiting %u ms for the retrace (the frame was ready; the screen side was late)",
                      r->vsyncUs / 1000);
             break;
+        case REC_CAUSE_RENDERER:
+            if (shared_is_renderer(r)) {
+                snprintf(out, size, "renderer on the game's core %u ms (the game's own scene %u ms)",
+                         r->sharedUs / 1000, r->sceneUs / 1000);
+                break;
+            }
+            /* fall through */
         default:
             snprintf(out, size,
                      "waiting %u ms for the renderer (display list %u ms, textures %u ms / %u decoded, waiting for the "

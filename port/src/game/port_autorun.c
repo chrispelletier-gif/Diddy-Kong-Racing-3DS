@@ -351,11 +351,36 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       1, 0, 1, 1 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
     // The uncapped rows (PR #556, see sSwitchesNative); its "all native switches" row is the usual one here now.
-    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
+    // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
+    // within 16.7 ms, the renderer's core the longest), so the plain uncapped row went: every race's ceiling columns
+    // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
-    { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
+    // The two profiler check rows (DKR_PROF_SHARED_CORE) went after benches #553 and #560 confirmed the split.
+    // P54 (2026-11-17, proposals/3ds-old3ds-core-balance-plan.md): the core that limits the Old 3DS is the system core
+    // (the renderer's backend, 28-32 ms a frame of 33.4 in #560), not the game's (~10-14 ms spare a frame). Each row is
+    // raced alone for the track's own laps; read the results' renderer_core_ms and game_core_ms (and the flashes
+    // column), and the "backend records" part of each autorun_cores.txt line (DKR_BACKEND_MIX).
+    // Step 1: the frame history (test builds only, ~4 ms a frame) now samples on the game's core; the old way.
+    { "frame history on the renderer core (old way)", { "DKR_HISTORY_CORE", NULL, NULL }, 1, 0, 1, 0 },
+    // Step 1b: two moves onto the system core from when the game's core was the limit (v28, v31), raced back: the
+    // native draws' vertex maths (DKR_NATIVE_REMOTE, default 3) all on the walk, or only opaque draws' on the backend;
+    // the N64 sound players (~0.5 ms) on the game's core; then both.
+    { "native vertex maths all on the walk (NATIVE_REMOTE 0)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 0, 1, 0 },
+    { "only opaque native draws' maths on the backend (NATIVE_REMOTE 1)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 1, 1,
+      0 },
+    { "sound players on the game core (PLAYERS_SYSCORE 0)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
+    { "native maths on the walk + sound players on the game core",
+      { "DKR_NATIVE_REMOTE", "DKR_PLAYERS_SYSCORE", NULL }, -1, 0, 1, 0 },
+    // Step 3: fewer GPU settings written per draw, never raced on an Old 3DS in today's renderer. Watch for flicker or
+    // dropouts (an AI racer's head, far cliffs, the intro logo) as well as the times.
+    { "GPU settings: only the changes set (STATE_CACHE 2)", { "DKR_STATE_CACHE", NULL, NULL }, 1, 2, 1, 0 },
+    { "GPU settings written twice only where known (REWRITE 0)", { "DKR_REWRITE", NULL, NULL }, 1, 0, 1, 0 },
+    // Step 4: the bottom screen's thread on the game's core again, now that it has the spare time (v30 moved it).
+    { "bottom screen thread on the game core (BS_SYSCORE 0)", { "DKR_BS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
+    // 2b-C: the texture atlas (fewer draws: most batch breaks are texture changes) lost ~2 ms on each core in run 15
+    // (v35), when both were full; the game's core has room now.
+    { "texture atlas (TEX_ATLAS 1)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 1, 1, 0 },
     // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306). The GSP can run the frame's depth
     // fill alongside its first command lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear
     // drawn instead). Rows: the depth fill back on with the wait (should be clean, and the fill is cheaper), the native
@@ -1215,7 +1240,7 @@ static void record_draw_mix(const char *outcome) {
             continue;
         }
         length += plat_snprintf(text + length, sizeof(text) - length,
-                                "%s,kind,%s,%.1f,%.1f,%.1f,%.3f,%.3f,,,,%.1f,%.1f,%.1f,%.3f,,,,,\n", prefix,
+                                "%s,kind,%s,%.1f,%.1f,%.1f,%.3f,%.3f,,,,%.1f,%.1f,%.1f,%.3f,,,,,,\n", prefix,
                                 prof_kind_name(k), st->tris / frames, st->draws / frames, st->verts / frames,
                                 st->renderNs / 1e6 / timed, st->buildNs / 1e6 / gameTimed, st->offscreen * 100.0 / a,
                                 st->backface * 100.0 / a, st->tiny * 100.0 / a,
@@ -1223,10 +1248,10 @@ static void record_draw_mix(const char *outcome) {
     }
     if (scene.frames > 0) {
         length += plat_snprintf(text + length, sizeof(text) - length,
-                                "%s,scene,level,,,,,,,,,,,,,%.1f,%.1f,%.1f,%.1f,%.1f\n", prefix,
+                                "%s,scene,level,,,,,,,,,,,,,%.1f,%.1f,%.1f,%.1f,%.1f,%.3f\n", prefix,
                                 (double) scene.segments / scene.frames, (double) scene.segmentsAllowed / scene.frames,
                                 (double) scene.segmentsDrawn / scene.frames, (double) scene.objects / scene.frames,
-                                (double) scene.objectsDrawn / scene.frames);
+                                (double) scene.objectsDrawn / scene.frames, mix.walkNs / 1e6 / gameTimed);
     }
     objFrames = obj->frames ? (double) obj->frames : 1.0;
     objTimed = obj->timedFrames ? (double) obj->timedFrames : 1.0;
@@ -1254,7 +1279,7 @@ static void record_draw_mix(const char *outcome) {
         {
             const ProfObjStats *o = &obj->objs[best];
             length += plat_snprintf(text + length, sizeof(text) - length,
-                                    "%s,object,%s,%.1f,,,%.3f,%.3f,%.3f,%.1f,%.1f,,,,,,,,,\n", prefix,
+                                    "%s,object,%s,%.1f,,,%.3f,%.3f,%.3f,%.1f,%.1f,,,,,,,,,,\n", prefix,
                                     prof_object_name(best), o->tris / objFrames, o->renderNs / 1e6 / objRenderTimed,
                                     o->buildNs / 1e6 / objTimed, o->logicNs / 1e6 / objTimed, o->updates / objFrames,
                                     o->drawn / objFrames);
@@ -1263,7 +1288,7 @@ static void record_draw_mix(const char *outcome) {
     append_file(DRAWMIX_FILE, text,
                 "run,race,track,character,vehicle,graphics,config,outcome,what,name,tris,draws,verts,rdp_ms,build_ms,"
                 "logic_ms,updated,drawn,off_pct,back_pct,tiny_pct,overdraw,segments,segments_allowed,segments_drawn,"
-                "objects,objects_drawn\n");
+                "objects,objects_drawn,walk_ms\n");
 
     // The run's totals.
     for (k = 0; k < PROF_KINDS; k++) {
@@ -1283,6 +1308,7 @@ static void record_draw_mix(const char *outcome) {
     sRunMix.frames += mix.frames;
     sRunMix.timedFrames += mix.timedFrames;
     sRunMix.gameTimedFrames += mix.gameTimedFrames;
+    sRunMix.walkNs += mix.walkNs;
     sRunMix.auditedFrames += mix.auditedFrames;
     sRunScene.frames += scene.frames;
     sRunScene.segments += scene.segments;
@@ -1386,8 +1412,8 @@ static s32 sCoreLineCount;
 
 /* Each race's core times and game core breakdown, into CORES_FILE (and, for the usual and uncapped rows, the issue). */
 static void record_cores(const char *outcome, const ProfCoreStats *c, const ProfStats *stats) {
-    static char breakdown[1024];
-    static char text[1536];
+    static char breakdown[1536];
+    static char text[2048];
     Race *race = &sRaces[sNext];
     s32 config = is_bench() ? race->config : -1;
     prof_core_breakdown(breakdown, sizeof(breakdown));
@@ -2424,7 +2450,7 @@ enum BenchColumn {
 #define MAX_FIELDS (COL_COUNT + 40) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
-#define BENCH_LIMITS 3
+#define BENCH_LIMITS 6
 
 typedef struct BenchGroup {
     char track[32];
@@ -2439,12 +2465,15 @@ typedef struct BenchGroup {
     double jitter, paceChanges;
     s32 timelineRaces; // Races with the GPU timeline's columns (gpu_fill_ms, gpu_lists_ms, gpu_copy_ms; 2026-11-07)
     double gpuFill, gpuLists, gpuCopy;
-    s32 limits[BENCH_LIMITS]; // GPU, renderer CPU, game CPU
+    s32 limits[BENCH_LIMITS]; // races per prof_limit answer (sLimitNames)
     s32 startRaces; // Races with the race start's columns (after the "start" mark; P53, 2026-11-17)
     double startExcess, startWorst;
 } BenchGroup;
 
-static const char *const sLimitNames[BENCH_LIMITS] = { "GPU", "renderer CPU", "game CPU" };
+/* prof_limit's answers: DKR_PROF_CORES=0 (and results written before P54) gives the first three, =1 the GPU and the last
+ * three. */
+static const char *const sLimitNames[BENCH_LIMITS] = { "GPU",       "renderer CPU",  "game CPU",
+                                                       "game core", "renderer core", "retrace" };
 
 /* The switch bench's steadiness cells: the frame to frame change (ms) and the pace changes a race ("-" without). */
 static const char *steady_cells(const BenchGroup *g) {
