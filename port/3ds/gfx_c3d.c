@@ -3917,6 +3917,11 @@ PLAT_COLD static void draw_test_pattern(void) {
  */
 static unsigned long long sFillWaitTicks;
 static u32 sFillWaits;
+static u32 sFillWaitTimeouts;
+// A fill finishes well under a millisecond; 100 ms means the GSP is stuck or very late. Waiting forever would hang
+// this thread for good, so give up and log it. The queue is then left running with its fills still in it (stopping or
+// clearing it under a job in flight is not safe), so the command list queues behind them: the frame without the wait.
+#define FILL_WAIT_TIMEOUT_NS 100000000LL
 static void fill_wait(void) {
     gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
     unsigned long long t0;
@@ -3925,7 +3930,12 @@ static void fill_wait(void) {
     }
     t0 = svcGetSystemTick();
     gxCmdQueueRun(queue);
-    gxCmdQueueWait(queue, -1);
+    if (!gxCmdQueueWait(queue, FILL_WAIT_TIMEOUT_NS)) {
+        if (sFillWaitTimeouts++ < 8) {
+            plat_log("fill wait: timed out after 100 ms (%u so far)", (unsigned) sFillWaitTimeouts);
+        }
+        return;
+    }
     gxCmdQueueStop(queue);
     gxCmdQueueClear(queue);
     sFillWaitTicks += svcGetSystemTick() - t0;
