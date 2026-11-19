@@ -95,6 +95,15 @@ jobs:
       - name: Build dkr.3dsx
         run: make -C port TARGET=3ds ${{ matrix.make-flags }} -j"$(nproc)"
 
+      # Old 3DS instruction cache budget (P56): fails the debug build when the hot renderer code grows past its budget
+      # or memcpy calls itself / memmove / memset; the player's build only prints the numbers.
+      - name: Hot code size and memcpy check
+        run: |
+          command -v python3 >/dev/null || { apt-get update && apt-get install -y python3; }
+          bin="${DEVKITARM:-/opt/devkitpro/devkitARM}/bin"
+          python3 port/tools/hot_size.py ${{ matrix.out }}/dkr.elf --nm "$bin/arm-none-eabi-nm" \
+            --objdump "$bin/arm-none-eabi-objdump" ${{ matrix.variant == 'release' && '--report-only' || '' }}
+
       # makerom and bannertool are not in devkitPro; fetch pinned releases and check them before use.
       - name: Install makerom and bannertool
         run: |
