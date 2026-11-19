@@ -364,6 +364,34 @@ enum PlatCounter {
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 
 /*
+ * P56 K2: the ARM11's performance counters (DKR_PMU, debug builds, default 0; port/3ds/pmu_3ds.c, stubs elsewhere).
+ * plat_pmu_on: 0 off (or not available), 1 PMN1 counts instruction cache misses, 2 data cache read misses (PMN0 is
+ * always the cycles the core waited for instructions). The counters are per core, not per thread. plat_pmu_frame
+ * samples the calling core once a frame for a slot (PLAT_PMU_GAME on the game thread, PLAT_PMU_RENDER on the
+ * renderer's core) and adds what it counted since the slot's last sample to the slot's totals.
+ */
+typedef struct PlatPmuSample {
+    unsigned long long cycles, pmn0, pmn1;
+    int kind; /* plat_pmu_totals: the DKR_PMU kind of the last frame added (0 none yet) */
+} PlatPmuSample;
+enum { PLAT_PMU_GAME, PLAT_PMU_RENDER, PLAT_PMU_SLOTS };
+int plat_pmu_on(void);
+void plat_pmu_thread_start(void); /* Sets the calling core's events (plat_pmu_frame does on a thread's first use). */
+void plat_pmu_sample(PlatPmuSample *s);
+void plat_pmu_frame(int slot);
+void plat_pmu_totals(int slot, PlatPmuSample *sum, unsigned int *frames);
+void plat_pmu_exit(void);
+/*
+ * P56 K7: the top screen's pictures (3DS; 0 elsewhere, not measured): how many were replaced before they reached the
+ * screen (a swap while the one before was still waiting to be shown) and the longest time between two that reached
+ * it, since window (0 or 1, the profiler's windows) was restarted. restart: start that window afresh. Returns 1 where
+ * measured.
+ */
+int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs);
+/* P56 K9: plat_time_ns calls so far (debug builds; any thread, increments may race: a rough count). */
+extern volatile unsigned int gPlatClockReads;
+
+/*
  * Frames the game may run ahead of the renderer: 1 (the N64's: the game builds a frame while the renderer draws the
  * one before, and waits for it) or 2 (one more, so a slow frame in the renderer is absorbed instead of missed, at the
  * cost of one frame of input lag). Saved as renderahead= in settings.txt; DKR_RENDER_AHEAD in env.txt for a test.

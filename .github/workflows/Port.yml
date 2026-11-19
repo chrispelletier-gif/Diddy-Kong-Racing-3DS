@@ -299,6 +299,9 @@ jobs:
       - name: Profiler pages fit the terminal font
         # every page of the bottom screen's profiler, with the longest bench row, fits 47 columns by 14 lines
         run: DKR_PROF_TERM_CHECK=1 port/build/host/dkr
+      - name: Pictures shown logic
+        # P56 K7: the replaced pictures and the longest gap between shown ones (port/src/plat/shown.h)
+        run: gcc -Iport/src -o "$RUNNER_TEMP/shown_test" port/tools/shown_test.c && "$RUNNER_TEMP/shown_test"
 
       - name: Upload the host build
         uses: actions/upload-artifact@v4

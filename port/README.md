@@ -376,6 +376,18 @@ the first line left out when a test run's status needs the room. In the draw mix
 `renderer walk on this core`, so `menus/other` is the game's own work. `DKR_PROF_CORES=0` gives the view before
 (`game CPU` / `renderer CPU`, the walk counted with the scene in the graph and with the kind in the draw mix).
 
+CPU counters and the timings beside them (roadmap P56, 2026-11-19). `DKR_PMU=1` in `env.txt` (debug builds, off by
+default) reads the ARM11's own performance counters once a frame on the game's core and, when it is another core, on
+the renderer's (`port/3ds/pmu_3ds.c`): cycles, the cycles the core waited for instructions (the fetch stall, which
+an instruction cache that is too small for the hot code shows as) and instruction cache misses; `DKR_PMU=2` counts
+data cache read misses instead of the instruction cache's. The counters belong to a core, not a thread, so the
+numbers are everything that ran on that core. A CPU line after the `spare ms` line (and given way before it) shows
+`stall game% / renderer%` when they are on, the DSP sound callback's ms a frame (`sound cb`, the
+`audio_ndsp.c` callback on the game's core) and the clock reads a frame (`clocks`, `plat_time_ns` calls: each is a
+system call on an Old 3DS). Each race's results line ends with them (`,pmu,...,shown,...,sndcb,...,clk,...`, see
+`pmu_cells` in `port_autorun.c`), along with the pictures replaced before they reached the screen and the longest gap
+between two that did (`port/src/plat/shown.h`). The switch bench's table has the fetch stall and the replaced count.
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the

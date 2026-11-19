@@ -10,6 +10,7 @@
 #include <dirent.h>
 
 volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+volatile unsigned int gPlatClockReads; // P56 K9 (plat.h)
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;

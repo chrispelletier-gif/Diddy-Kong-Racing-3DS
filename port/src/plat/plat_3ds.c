@@ -326,6 +326,7 @@ void plat_3ds_exit(void) {
     unsigned long long start = plat_time_ns();
 
     sQuitting = 1;
+    plat_pmu_exit(); // P56: the CPU counters unlocked for the next application
     plat_log_drain();
     while (sRendererParked == 0 && plat_time_ns() - start < 1000000000ULL) {
         svcSleepThread(1000000);
@@ -605,6 +606,12 @@ void *plat_get_current_os_thread(void) {
 unsigned long long plat_time_ns(void) {
     // The system tick runs at SYSCLOCK_ARM11 (268MHz).
     unsigned long long ticks = svcGetSystemTick();
+#if PLAT_DEBUG_TOOLS
+    // P56 K9: how often the clock is read (each read is a system call on an Old 3DS). Only plat_time_ns: plat_ticks
+    // and the backend's own svcGetSystemTick calls are not counted. A plain increment from every thread and core
+    // (lost increments in a race are tolerated: a rough count).
+    gPlatClockReads++;
+#endif
     // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
     // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest
     // of a second (under 2^29 ticks) becomes nanoseconds by a fixed-point multiply, under a nanosecond from the
