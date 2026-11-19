@@ -23,8 +23,8 @@ import re
 import subprocess
 import sys
 
-# Budgets in bytes, from master's CI debug build. A total may exceed its budget by up to SLACK bytes.
-BUDGETS = {"hot_span": None, "walk_set": None, "backend_set": None}
+# Budgets in bytes, from the CI debug build of PR #565 (master f07de6f + this check). A total may exceed its budget by up to SLACK bytes.
+BUDGETS = {"hot_span": 55516, "walk_set": 32052, "backend_set": 18112}
 SLACK = 1024
 
 WALK_SET = (
