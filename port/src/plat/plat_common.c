@@ -10,7 +10,26 @@
 #include <dirent.h>
 
 volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
-volatile unsigned int gPlatClockReads; // P56 K9 (plat.h)
+/* P56 K9 (plat.h): a slot per thread, 32 bytes apart (the ARM11's cache line); threads past the last share it. */
+static volatile unsigned int sClockReadSlots[PLAT_CLOCK_READ_SLOTS][8] __attribute__((aligned(32)));
+static volatile int sClockReadSlotsUsed;
+__thread volatile unsigned int *gPlatClockReadSlot;
+
+volatile unsigned int *plat_clock_read_slot_new(void) {
+    int i = __sync_fetch_and_add(&sClockReadSlotsUsed, 1);
+    gPlatClockReadSlot = sClockReadSlots[i < PLAT_CLOCK_READ_SLOTS ? i : PLAT_CLOCK_READ_SLOTS - 1];
+    return gPlatClockReadSlot;
+}
+
+unsigned int plat_clock_reads(void) {
+    unsigned int sum = 0;
+    int i;
+    for (i = 0; i < PLAT_CLOCK_READ_SLOTS; i++) {
+        sum += sClockReadSlots[i][0];
+    }
+    return sum;
+}
+volatile unsigned int gPlatOverridesDropped; // Switch overrides the full table turned away (plat.h)
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;
@@ -411,6 +430,7 @@ int plat_switch(const char *name, int fallback) {
 }
 
 static PLAT_COLD void override_table_full(const char *name, int value) {
+    gPlatOverridesDropped++;
     plat_log("switch override table full (%d): %s=%d NOT applied", MAX_SWITCH_OVERRIDES, name, value);
 }
 

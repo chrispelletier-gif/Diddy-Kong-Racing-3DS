@@ -3684,3 +3684,46 @@ s32 port_sweep_level_vertex(const void *vertices) {
     }
     return FALSE;
 }
+
+/*
+ * CI (host_main.c, DKR_BENCH_OVERRIDE_CHECK=1; DKR_HOST_OLD3DS=1 for the Old 3DS list): sets every switch bench race's
+ * switches as the bench does (apply_config) and checks that none was turned away by a full override table
+ * (gPlatOverridesDropped), and that each row's own race reads each of its variables back at the row's test setting.
+ * Until 2026-11-19 the table held 16 and silently dropped the rest, so most rows of both consoles raced the usual
+ * settings. Returns the number of failures.
+ */
+int port_autorun_override_check(char *report, int size) {
+    s32 config, k, at = 0, failures = 0, configs;
+    s32 savedMode = sMode;
+    sMode = MODE_SWITCH;
+    sShort = 0;
+    configs = config_count();
+    for (config = 0; config < configs; config++) {
+        unsigned int dropped = gPlatOverridesDropped;
+        apply_config(config);
+        if (gPlatOverridesDropped != dropped) {
+            failures++;
+            at += plat_snprintf(report + at, size - at, "race %d (%s): %u switch overrides NOT applied (table full)\n",
+                                (int) config, config_name(config), gPlatOverridesDropped - dropped);
+        }
+        if (config >= 1 && config < SWITCH_CONFIGS) {
+            const BenchSwitch *row = &sSwitches[config - 1];
+            for (k = 0; k < BENCH_SWITCH_VARS && row->env[k] != NULL; k++) {
+                s32 value = plat_switch(row->env[k], -12345);
+                if (value != row->test) {
+                    failures++;
+                    at += plat_snprintf(report + at, size - at, "race %d (%s): %s reads %d, not its test setting %d\n",
+                                        (int) config, row->name, row->env[k], (int) value, (int) row->test);
+                }
+            }
+        }
+        if (at >= size - 1) {
+            at = size - 1;
+        }
+    }
+    apply_config(-1);
+    at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
+                        plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) configs, (int) (SWITCH_CONFIGS - 1), (int) failures);
+    sMode = savedMode;
+    return failures;
+}

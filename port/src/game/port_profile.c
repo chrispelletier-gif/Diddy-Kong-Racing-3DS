@@ -306,7 +306,7 @@ void prof_window_start(int window) {
     for (i = 0; i < PLAT_PMU_SLOTS; i++) {
         plat_pmu_totals(i, &w->startPmu[i], &w->startPmuFrames[i]);
     }
-    w->startClockReads = gPlatClockReads;
+    w->startClockReads = plat_clock_reads();
     {
         unsigned int replaced, gap;
         plat_shown_stats(window, TRUE, &replaced, &gap);
@@ -333,7 +333,7 @@ static void cpu_window_read(int window, const Window *w, ProfCpuStats *out) {
         out->pmn1[i] = now.pmn1 - w->startPmu[i].pmn1;
     }
     out->shownMeasured = plat_shown_stats(window, FALSE, &out->replaced, &out->longestShownGapUs);
-    out->clockReads = gPlatClockReads - w->startClockReads;
+    out->clockReads = plat_clock_reads() - w->startClockReads;
 }
 
 /* P56: the summary's line for the CPU counters (DKR_PMU), the sound callback and the clock reads, a game frame each. */

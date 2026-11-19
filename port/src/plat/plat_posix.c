@@ -327,7 +327,7 @@ static unsigned long long monotonic_ns(void) {
 
 unsigned long long plat_time_ns(void) {
 #if PLAT_DEBUG_TOOLS
-    gPlatClockReads++; // P56 K9: counted as on the 3DS (plat_ticks is not)
+    plat_count_clock_read(); // P56 K9: counted as on the 3DS (plat_ticks is not)
 #endif
     return monotonic_ns();
 }

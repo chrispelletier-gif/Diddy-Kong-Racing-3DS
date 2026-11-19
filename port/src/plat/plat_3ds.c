@@ -608,9 +608,9 @@ unsigned long long plat_time_ns(void) {
     unsigned long long ticks = svcGetSystemTick();
 #if PLAT_DEBUG_TOOLS
     // P56 K9: how often the clock is read (each read is a system call on an Old 3DS). Only plat_time_ns: plat_ticks
-    // and the backend's own svcGetSystemTick calls are not counted. A plain increment from every thread and core
-    // (lost increments in a race are tolerated: a rough count).
-    gPlatClockReads++;
+    // and the backend's own svcGetSystemTick calls are not counted
+    // (each thread counts in its own slot: plat.h plat_count_clock_read).
+    plat_count_clock_read();
 #endif
     // v27: no 64-bit divides (two library calls of ~150 cycles each; the profiler asks dozens of times a frame, the
     // game thread around every racer and object update). Each thread keeps the whole seconds it last saw; the rest

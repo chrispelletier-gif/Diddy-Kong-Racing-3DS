@@ -82,6 +82,7 @@ static void apt_hook(APT_HookType hook, void *param) {
             break;
         case APTHOOK_ONEXIT:
             port_si_flush();
+            plat_pmu_exit(); // P56: the CPU counters unlocked even if the exit doesn't reach plat_3ds_exit
             break;
         default:
             break;

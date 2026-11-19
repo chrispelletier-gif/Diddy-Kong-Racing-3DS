@@ -169,6 +169,9 @@ const char *plat_getenv(const char *name);
 int plat_switch(const char *name, int fallback) PLAT_NOINLINE;
 void plat_trace(const char *name, const char *fmt, ...);
 void plat_override_switch(const char *name, int value);
+/* Overrides plat_override_switch turned away because its table was full (each is also logged). CI's switch bench check
+ * (port_autorun.c port_autorun_override_check) needs it to stay 0 for every race of both consoles' lists. */
+extern volatile unsigned int gPlatOverridesDropped;
 void plat_clear_switch_overrides(void);
 extern volatile int gPlatSwitchEpoch;
 
@@ -388,8 +391,21 @@ void plat_pmu_exit(void);
  * measured.
  */
 int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs);
-/* P56 K9: plat_time_ns calls so far (debug builds; any thread, increments may race: a rough count). */
-extern volatile unsigned int gPlatClockReads;
+/*
+ * P56 K9: plat_time_ns calls so far (debug builds). Each thread counts in its own slot, a cache line of its own, so the
+ * Old 3DS's two cores don't pass one line back and forth on every clock read; plat_clock_reads sums the slots.
+ */
+#define PLAT_CLOCK_READ_SLOTS 16
+extern __thread volatile unsigned int *gPlatClockReadSlot;
+volatile unsigned int *plat_clock_read_slot_new(void);
+unsigned int plat_clock_reads(void);
+static inline void plat_count_clock_read(void) {
+    volatile unsigned int *slot = gPlatClockReadSlot;
+    if (__builtin_expect(slot == 0, 0)) {
+        slot = plat_clock_read_slot_new();
+    }
+    (*slot)++;
+}
 
 /*
  * Frames the game may run ahead of the renderer: 1 (the N64's: the game builds a frame while the renderer draws the
