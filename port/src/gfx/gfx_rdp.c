@@ -1235,11 +1235,6 @@ static NOINLINE HOT GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *
         m = tex_memo_find(tex_memo_set(&key), &key, &found);
         if (found) {
             tex = tex_memo_check(m, &key);
-#if PLAT_DEBUG_TOOLS
-            if (__builtin_expect(sTexMemoCheck, 0) && tex != NULL) {
-                tex_memo_check_answer(tileIndex, pinned, tex);
-            }
-#endif
         }
     }
     if (tex == NULL) {
@@ -1248,6 +1243,11 @@ static NOINLINE HOT GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *
             *m = key;
         }
     }
+#if PLAT_DEBUG_TOOLS
+    else if (__builtin_expect(sTexMemoCheck, 0)) {
+        tex_memo_check_answer(tileIndex, pinned, tex); // (the memo answered: P56 K4)
+    }
+#endif
     walk_switch(part);
     return tex;
 }
