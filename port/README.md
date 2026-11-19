@@ -526,6 +526,12 @@ from the complete save) on both builds, and writes `report.md` and side by side 
 every frame that differs. CI runs it on every push with `--max-images 0` and uploads only the report and logs (the
 repository is public, so no game frames), and publishes the 3DS build only once it passes.
 
+CI also plays the same scenarios once more with the Old 3DS's texture lookup memo forced on and checked
+(`DKR_TEX_MEMO=1 DKR_TEX_MEMO_CHECK=1`, roadmap P56): at every memo hit the full lookup runs too
+(`tex_memo_check_answer` in `gfx_rdp.c`), and a different texture is a memo bug, which fails the run with the tile
+in the log. The same texture found in another cache entry (a duplicate in the cache, the same picture) is counted
+apart and only reported. The memo is off on a PC by default, so this is the only place a PC tests it.
+
 `port/tools/n64_compare/` checks the renderer against a real N64 instead: an accurate emulator (ares, running the
 game's own F3DDKR microcode on its emulated RSP and paraLLEl-RDP for the RDP) plays the ROM and saves chosen frames'
 display lists with the pictures it drew from them, and the port's renderer replays the same display lists, so both

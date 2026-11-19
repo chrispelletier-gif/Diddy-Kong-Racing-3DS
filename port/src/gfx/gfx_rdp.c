@@ -1163,6 +1163,66 @@ __attribute__((noinline)) static GfxTexture *find_texture(s32 tileIndex, const G
     return &e->tex;
 }
 
+#if PLAT_DEBUG_TOOLS
+/*
+ * P56 K4 (DKR_TEX_MEMO_CHECK=1, debug builds, default 0): every memo answer checked against the full lookup's. A
+ * different answer is a memo bug. The memo's answer is still the one drawn, so the check doesn't change the picture,
+ * except in the buggy case itself, when the full lookup may decode its answer over a cache entry (perhaps the memo's,
+ * which is then drawn with the new contents). The full lookup also marks the entry it finds as used this frame, so
+ * the cache's choice of entries to free can differ from a run without the check. Cold and out of line, so the memo's
+ * hit path only gains one branch not taken.
+ */
+static s32 sTexMemoCheck;
+static u32 sMemoChecked, sMemoDiffer, sMemoDuplicate, sMemoLoggedFrame;
+
+static s32 tex_cache_index(const GfxTexture *t) {
+    s32 i;
+    for (i = 0; i < TEX_CACHE_SIZE; i++) {
+        if (&sTexCache[i].tex == t || &sTexCache[i].otherFilter == t) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static COLD void tex_memo_check_answer(s32 tileIndex, const GfxTexture *pinned, const GfxTexture *memoTex) {
+    const GfxTexture *full = find_texture(tileIndex, pinned, NULL);
+    sMemoChecked++;
+    if (full != memoTex) {
+        const Tile *tile = &g.tiles[tileIndex & 7];
+        const TmemLoad *load = &g.tmem[(tile->tmem / 8) & 63];
+        s32 a = tex_cache_index(memoTex), b = tex_cache_index(full);
+        const TexCacheEntry *ea = a >= 0 ? &sTexCache[a] : NULL, *eb = b >= 0 ? &sTexCache[b] : NULL;
+        /* Two cache entries holding the same texture (the same bytes, hash, size, format, palette and wrap modes),
+         * with the same filter: the picture is the same, only the entry is another (a duplicate in the cache, which
+         * splits batches). Counted apart; anything else is a memo bug. */
+        if (ea != NULL && eb != NULL && ea->used && eb->used && ea->addr == eb->addr && ea->tlut == eb->tlut &&
+            ea->hash == eb->hash && ea->width == eb->width && ea->height == eb->height && ea->fmt == eb->fmt &&
+            ea->siz == eb->siz && ea->lineSwapped == eb->lineSwapped && ea->wrapS == eb->wrapS &&
+            ea->wrapT == eb->wrapT && ea->tlutType == eb->tlutType && memoTex->filter == full->filter) {
+            if (sMemoDuplicate++ == 0) {
+                plat_log("texture memo check: first duplicate (the same texture in two cache entries), frame %d: memo "
+                         "entry %d, full lookup entry %d, load %p, dims %ux%u", (int) sFrameCount, (int) a, (int) b,
+                         (const void *) load->addr, (unsigned) ea->width, (unsigned) ea->height);
+            }
+        } else if (sMemoDiffer++ == 0) {
+            plat_log("texture memo check: first difference, frame %d tile %d: fmt %d siz %d tmem %d, load %p %lu bytes "
+                     "(row stride %lu), dims %ux%u; memo: cache entry %d hash %08lx, full lookup: entry %d hash %08lx",
+                     (int) sFrameCount, (int) (tileIndex & 7), tile->fmt, tile->siz, tile->tmem, (const void *) load->addr,
+                     (unsigned long) load->size, (unsigned long) load->rowStride,
+                     (unsigned) (((tile->lrs - tile->uls) >> 2) + 1), (unsigned) (((tile->lrt - tile->ult) >> 2) + 1),
+                     (int) a, a >= 0 ? (unsigned long) sTexCache[a].hash : 0UL, (int) b,
+                     b >= 0 ? (unsigned long) sTexCache[b].hash : 0UL);
+        }
+    }
+    if ((u32) sFrameCount - sMemoLoggedFrame >= 600) {
+        sMemoLoggedFrame = (u32) sFrameCount;
+        plat_log("texture memo check: %lu hits checked, %lu differ, %lu the same texture in another cache entry",
+                 (unsigned long) sMemoChecked, (unsigned long) sMemoDiffer, (unsigned long) sMemoDuplicate);
+    }
+}
+#endif
+
 /* The texture the tile shows: from the memo, the cache, or decoded into it. Out of line: one copy of the memo's code
  * instead of one per call in make_draw_state. The memo sits out prewarm_textures, whose lookups are one-offs against
  * a scratch tile and TMEM state. */
@@ -1175,6 +1235,11 @@ static NOINLINE HOT GfxTexture *lookup_texture(s32 tileIndex, const GfxTexture *
         m = tex_memo_find(tex_memo_set(&key), &key, &found);
         if (found) {
             tex = tex_memo_check(m, &key);
+#if PLAT_DEBUG_TOOLS
+            if (__builtin_expect(sTexMemoCheck, 0) && tex != NULL) {
+                tex_memo_check_answer(tileIndex, pinned, tex);
+            }
+#endif
         }
     }
     if (tex == NULL) {
@@ -2295,6 +2360,9 @@ static void read_switches(void) {
     // Remembers what each tile's texture lookup resolved to (tex_memo_check). Stale entries are checked, so it can
     // be switched either way between frames.
     sTexMemoOn = plat_switch("DKR_TEX_MEMO", plat_old_3ds()) != 0;
+#if PLAT_DEBUG_TOOLS
+    sTexMemoCheck = plat_switch("DKR_TEX_MEMO_CHECK", 0) != 0; // P56 K4 (tex_memo_check_answer)
+#endif
     {
         s32 atlas = plat_switch("DKR_TEX_ATLAS", 0);
         // The kinds it takes: all of them, but only the racers in the measurement (3).
