@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "plat/plat.h"
+#include "plat/profile.h"
 #include "audio/voices.h"
 
 typedef short s16;
@@ -169,6 +170,12 @@ void host_soft_audio_queue(unsigned numBytes) {
     // Stay a buffer and a little behind the game, as a real output does: that is what its frame sizing settles at.
     while ((double) (sFrames + 1) * PV_FRAME_SAMPLES * sSynthRate / PV_OUTPUT_RATE + numBytes / 4 + 112 <=
            (double) sQueuedSamples) {
-        mix_frame();
+        {
+            /* P56 K8: the DSP frame callback's stand-in, timed as the 3DS's (PROF_SOUND_CALLBACK) */
+            unsigned long long start = plat_time_ns();
+            mix_frame();
+            prof_add(PROF_SOUND_CALLBACK, plat_time_ns() - start);
+            prof_count(PROF_SOUND_CALLBACKS, 1);
+        }
     }
 }

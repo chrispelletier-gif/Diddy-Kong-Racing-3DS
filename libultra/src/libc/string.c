@@ -14,7 +14,12 @@
  */
 int gPortOldMemcpy; // DKR_OLD_MEMCPY=1: the N64's byte at a time copy (set each frame, port_game_native_frame)
 
-void* memcpy(void* s1, const void* s2, size_t n) {
+/*
+ * no-tree-loop-distribute-patterns: GCC may turn the copy loops below into a call to memcpy (itself) or memmove (which
+ * copies overlapping bytes differently from the N64's forward byte copy kept here). port/tools/hot_size.py checks the
+ * built ELF for such calls in CI.
+ */
+__attribute__((optimize("no-tree-loop-distribute-patterns"))) void* memcpy(void* s1, const void* s2, size_t n) {
     unsigned char* d = (unsigned char*)s1;
     const unsigned char* s = (const unsigned char*)s2;
     if (gPortOldMemcpy || (s < d && d < s + n)) {

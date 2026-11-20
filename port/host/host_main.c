@@ -8,6 +8,7 @@
  *   DKR_DUMP_EVERY  write every Nth frame to DKR_DUMP_DIR/frame_XXXXX.ppm (default: 0 = never)
  *   DKR_INPUT       scripted input, see host_input.c
  *   DKR_PROF_TERM_CHECK  check that every profiler page fits the terminal font's 47 columns and 14 lines, then exit
+ *   DKR_BENCH_OVERRIDE_CHECK  check that every switch bench race's switches reach the game (port_autorun.c), then exit
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,7 @@
 #include "plat/plat.h"
 
 void port_boot(void);
+int port_autorun_override_check(char *report, int size);
 void port_si_flush(void);
 int host_frames_rendered(void);
 int plat_60fps_setting(void);
@@ -99,6 +101,13 @@ int main(int argc, char **argv) {
         int failed = prof_term_check(report, (int) sizeof(report));
         fputs(report, stdout);
         return failed;
+    }
+    if (getenv("DKR_BENCH_OVERRIDE_CHECK") != NULL) {
+        /* CI: no switch bench override is turned away by a full table, on either console's list */
+        static char report[32768];
+        int failed = port_autorun_override_check(report, (int) sizeof(report));
+        fputs(report, stdout);
+        return failed != 0;
     }
     add_game_menu_options();
     port_boot();

@@ -48,6 +48,28 @@ def pacing(group):
     return f"{mean(num(r, 'low1pct_fps') for r in paced):.1f} | {mean(num(r, 'paced_20fps_pct') + num(r, 'paced_slower_pct') for r in paced):.0f}%"
 
 
+def measured(group, key):
+    """The rows whose key holds a number (P56 columns are "-" where not measured; older files lack them)."""
+    out = []
+    for r in group:
+        try:
+            float(r.get(key) or "x")
+            out.append(r)
+        except ValueError:
+            pass
+    return out
+
+
+def cpu_cells(group):
+    """P56: the fetch stall % of the game's core / the renderer's (DKR_PMU) and the pictures replaced a race."""
+    cells = []
+    for key in ("game_ifstall_pct", "render_ifstall_pct"):
+        rows = measured(group, key)
+        cells.append(f"{mean(num(r, key) for r in rows):.1f}" if rows else "-")
+    replaced = measured(group, "replaced")
+    return " / ".join(cells) + " | " + (f"{mean(num(r, 'replaced') for r in replaced):.0f}" if replaced else "-")
+
+
 def group_table(rows, key, title):
     groups = defaultdict(list)
     for row in rows:
@@ -57,8 +79,8 @@ def group_table(rows, key, title):
         "",
         f"| {title} | races | fps | 1% low | frames slower than 30 | 30 fps | 20 fps | worst frame | hitches/race | "
         + " | ".join(label for _, label in STAGES)
-        + " | limit |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|" + "---:|" * len(STAGES) + "---|",
+        + " | limit | fetch stall % game / renderer | pictures replaced |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|" + "---:|" * len(STAGES) + "---|---:|---:|",
     ]
     for name, group in sorted(groups.items(), key=lambda item: mean(num(r, "fps") for r in item[1])):
         limits = defaultdict(int)
@@ -71,7 +93,7 @@ def group_table(rows, key, title):
             f"{max(num(r, 'worst_frame_ms') for r in group):.0f} ms | "
             f"{mean(num(r, 'hitches') for r in group):.1f} | "
             + " | ".join(f"{mean(num(r, key) for r in group):.1f}" for key, _ in STAGES)
-            + f" | {limit} |"
+            + f" | {limit} | {cpu_cells(group)} |"
         )
     return lines
 
