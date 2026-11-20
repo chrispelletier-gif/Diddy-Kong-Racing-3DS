@@ -236,3 +236,11 @@ const char *prof_kind_name(int kind) {
     (void) kind;
     return "kind";
 }
+
+/* P56 K2 (#567): the backend reads the CPU counters at frame start on the renderer's core; none here. */
+int plat_pmu_on(void) {
+    return 0;
+}
+void plat_pmu_frame(int slot) {
+    (void) slot;
+}
