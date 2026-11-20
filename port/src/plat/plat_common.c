@@ -10,6 +10,26 @@
 #include <dirent.h>
 
 volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+/* P56 K9 (plat.h): a slot per thread, 32 bytes apart (the ARM11's cache line); threads past the last share it. */
+static volatile unsigned int sClockReadSlots[PLAT_CLOCK_READ_SLOTS][8] __attribute__((aligned(32)));
+static volatile int sClockReadSlotsUsed;
+__thread volatile unsigned int *gPlatClockReadSlot;
+
+volatile unsigned int *plat_clock_read_slot_new(void) {
+    int i = __sync_fetch_and_add(&sClockReadSlotsUsed, 1);
+    gPlatClockReadSlot = sClockReadSlots[i < PLAT_CLOCK_READ_SLOTS ? i : PLAT_CLOCK_READ_SLOTS - 1];
+    return gPlatClockReadSlot;
+}
+
+unsigned int plat_clock_reads(void) {
+    unsigned int sum = 0;
+    int i;
+    for (i = 0; i < PLAT_CLOCK_READ_SLOTS; i++) {
+        sum += sClockReadSlots[i][0];
+    }
+    return sum;
+}
+volatile unsigned int gPlatOverridesDropped; // Switch overrides the full table turned away (plat.h)
 const char *volatile gPlatGfxStage = "not started";
 volatile int gPlatSnapshotRequested;
 volatile int gPlatSnapshotSaved;
@@ -319,7 +339,10 @@ const char *plat_getenv(const char *name) {
 }
 #endif
 
-#define MAX_SWITCH_OVERRIDES 16
+/* The switch bench sets every row's variables at their usual values before a race's own (port_autorun.c apply_config):
+ * over 16 names on an Old 3DS on 2026-11-19, when this was 16 and every one past the 16th was dropped without a word, so
+ * the later rows raced the usual settings (found by P56's check rows). A full table now says so in the log. */
+#define MAX_SWITCH_OVERRIDES 64
 
 static volatile struct {
     const char *volatile name; // NULL: a free entry
@@ -406,6 +429,11 @@ int plat_switch(const char *name, int fallback) {
     return e->value;
 }
 
+static PLAT_COLD void override_table_full(const char *name, int value) {
+    gPlatOverridesDropped++;
+    plat_log("switch override table full (%d): %s=%d NOT applied", MAX_SWITCH_OVERRIDES, name, value);
+}
+
 void plat_override_switch(const char *name, int value) {
     int i, free = -1;
     for (i = 0; i < MAX_SWITCH_OVERRIDES; i++) {
@@ -421,6 +449,9 @@ void plat_override_switch(const char *name, int value) {
         i = free;
     }
     if (i < 0) {
+        if (value >= 0) {
+            override_table_full(name, value);
+        }
         return;
     }
     // The value before the name, as the renderer may be reading the table on the other core.

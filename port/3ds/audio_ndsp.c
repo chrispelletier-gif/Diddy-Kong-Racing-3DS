@@ -14,6 +14,7 @@
 
 #include "plat/options.h"
 #include "plat/plat.h"
+#include "plat/profile.h"
 #include "plat/settings.h"
 #include "audio/voices.h"
 
@@ -415,7 +416,7 @@ static void voices_apt_hook(APT_HookType hook, void *param) {
     }
 }
 
-static void voices_frame(void *arg) {
+static void voices_frame_run(void *arg) {
     static u16 sLastFrameId = 0xFFFF;
     int bus;
     (void) arg;
@@ -462,6 +463,19 @@ static void voices_frame(void *arg) {
         fwrite(ndspVars[NDSP_OUTPUT_REGION][ndspBufferId], 1, PV_FRAME_SAMPLES * 4, sVoiceDump);
     }
     sVoiceFrames++;
+}
+
+/* The DSP frame callback, on libctru's ndsp thread (priority 0x18, the application's core: the game's). P56 K8: timed
+ * whole in debug builds (PROF_SOUND_CALLBACK; one clock read pair a call, ~200 calls a second). */
+static void voices_frame(void *arg) {
+#if PLAT_DEBUG_TOOLS
+    unsigned long long start = plat_time_ns();
+    voices_frame_run(arg);
+    prof_add(PROF_SOUND_CALLBACK, plat_time_ns() - start);
+    prof_count(PROF_SOUND_CALLBACKS, 1);
+#else
+    voices_frame_run(arg);
+#endif
 }
 
 int pv_backend_init(unsigned synthRate) {
