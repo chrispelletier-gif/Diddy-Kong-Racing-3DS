@@ -169,6 +169,9 @@ const char *plat_getenv(const char *name);
 int plat_switch(const char *name, int fallback) PLAT_NOINLINE;
 void plat_trace(const char *name, const char *fmt, ...);
 void plat_override_switch(const char *name, int value);
+/* Overrides plat_override_switch turned away because its table was full (each is also logged). CI's switch bench check
+ * (port_autorun.c port_autorun_override_check) needs it to stay 0 for every race of both consoles' lists. */
+extern volatile unsigned int gPlatOverridesDropped;
 void plat_clear_switch_overrides(void);
 extern volatile int gPlatSwitchEpoch;
 
@@ -362,6 +365,47 @@ enum PlatCounter {
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
+
+/*
+ * P56 K2: the ARM11's performance counters (DKR_PMU, debug builds, default 0; port/3ds/pmu_3ds.c, stubs elsewhere).
+ * plat_pmu_on: 0 off (or not available), 1 PMN1 counts instruction cache misses, 2 data cache read misses (PMN0 is
+ * always the cycles the core waited for instructions). The counters are per core, not per thread. plat_pmu_frame
+ * samples the calling core once a frame for a slot (PLAT_PMU_GAME on the game thread, PLAT_PMU_RENDER on the
+ * renderer's core) and adds what it counted since the slot's last sample to the slot's totals.
+ */
+typedef struct PlatPmuSample {
+    unsigned long long cycles, pmn0, pmn1;
+    int kind; /* plat_pmu_totals: the DKR_PMU kind of the last frame added (0 none yet) */
+} PlatPmuSample;
+enum { PLAT_PMU_GAME, PLAT_PMU_RENDER, PLAT_PMU_SLOTS };
+int plat_pmu_on(void);
+void plat_pmu_thread_start(void); /* Sets the calling core's events (plat_pmu_frame does on a thread's first use). */
+void plat_pmu_sample(PlatPmuSample *s);
+void plat_pmu_frame(int slot);
+void plat_pmu_totals(int slot, PlatPmuSample *sum, unsigned int *frames);
+void plat_pmu_exit(void);
+/*
+ * P56 K7: the top screen's pictures (3DS; 0 elsewhere, not measured): how many were replaced before they reached the
+ * screen (a swap while the one before was still waiting to be shown) and the longest time between two that reached
+ * it, since window (0 or 1, the profiler's windows) was restarted. restart: start that window afresh. Returns 1 where
+ * measured.
+ */
+int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs);
+/*
+ * P56 K9: plat_time_ns calls so far (debug builds). Each thread counts in its own slot, a cache line of its own, so the
+ * Old 3DS's two cores don't pass one line back and forth on every clock read; plat_clock_reads sums the slots.
+ */
+#define PLAT_CLOCK_READ_SLOTS 16
+extern __thread volatile unsigned int *gPlatClockReadSlot;
+volatile unsigned int *plat_clock_read_slot_new(void);
+unsigned int plat_clock_reads(void);
+static inline void plat_count_clock_read(void) {
+    volatile unsigned int *slot = gPlatClockReadSlot;
+    if (__builtin_expect(slot == 0, 0)) {
+        slot = plat_clock_read_slot_new();
+    }
+    (*slot)++;
+}
 
 /*
  * Frames the game may run ahead of the renderer: 1 (the N64's: the game builds a frame while the renderer draws the

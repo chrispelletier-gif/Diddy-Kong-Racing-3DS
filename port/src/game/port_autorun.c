@@ -373,6 +373,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // 2b-C: the texture atlas (fewer draws: most batch breaks are texture changes) lost ~2 ms on each core in run 15
     // (v35), when both were full; the game's core has room now.
     { "texture atlas (TEX_ATLAS 1)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 1, 1, 0 },
+    // P56 K2 (2026-11-19, proposals/3ds-kohjoh-lessons-plan.md B1): can the game read the ARM11's own counters on a
+    // retail Old 3DS? One lap each, measurements (left out of the all-together race). Read the results' pmu columns:
+    // game_mcycles should be near 268 x the frame time in s (about 8.9 Mcycles a 33 ms frame), the fetch stall a
+    // plausible per cent, pmn1 nonzero; zeros, or "CPU counters: not available" in the log, mean the feature goes.
+    // PMU 1: PMN1 = instruction cache misses; PMU 2: data cache read misses. Both rows go after the first bench; if
+    // they worked, DKR_PMU becomes 1 by default in debug builds so every row carries the numbers.
+    { "CPU counters readable, I-cache misses (PMU 1, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
+    { "CPU counters readable, D-cache misses (PMU 2, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -1444,10 +1452,50 @@ static s32 core_summary(char *out, s32 size) {
     return length < size ? length : size - 1;
 }
 
+/*
+ * P56 (proposals/3ds-kohjoh-lessons-plan.md package B), a game frame each over the race (stats NULL: not measured):
+ * ,pmu,<game core Mcycles>,<its fetch stall %>,<its PMN1 thousands>,<renderer core the same three>,<PMN1 kind>
+ * (DKR_PMU, profile.h ProfCpuStats; the renderer's "-" when it shares the game's core, kind icache or dcache);
+ * ,shown,<pictures replaced before they reached the screen in the race>,<longest gap between two shown, ms>;
+ * ,sndcb,<the DSP frame callback, ms a game frame>; ,clk,<plat_time_ns calls a game frame>. "-" where not measured.
+ */
+static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
+    const ProfCpuStats *c = stats != NULL ? &stats->cpu : NULL;
+    u32 frames = stats != NULL ? stats->gameFrames : 0;
+    s32 at = 0, k;
+    at += plat_snprintf(out + at, size - at, ",pmu");
+    for (k = 0; k < 2; k++) {
+        u32 n = c != NULL ? c->pmuFrames[k] : 0;
+        if (c != NULL && c->pmuKind && n > 0) {
+            // (Zeros are written as zeros: counters that read 0 on the hardware are the finding, not "not measured")
+            at += plat_snprintf(out + at, size - at, ",%.2f,%.1f,%.1f", c->cycles[k] / 1e6 / n,
+                                c->cycles[k] ? c->fetchStall[k] * 100.0 / c->cycles[k] : 0.0, c->pmn1[k] / 1e3 / n);
+        } else {
+            at += plat_snprintf(out + at, size - at, ",-,-,-");
+        }
+    }
+    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || !c->pmuKind ? "-" : c->pmuKind == 2 ? "dcache" : "icache");
+    if (c != NULL && c->shownMeasured) {
+        at += plat_snprintf(out + at, size - at, ",shown,%u,%.1f", c->replaced, c->longestShownGapUs / 1000.0);
+    } else {
+        at += plat_snprintf(out + at, size - at, ",shown,-,-");
+    }
+    if (stats != NULL && stats->counters[PROF_SOUND_CALLBACKS] > 0 && frames > 0) {
+        at += plat_snprintf(out + at, size - at, ",sndcb,%.3f", stats->stageNs[PROF_SOUND_CALLBACK] / 1e6 / frames);
+    } else {
+        at += plat_snprintf(out + at, size - at, ",sndcb,-");
+    }
+    if (c != NULL && frames > 0) {
+        at += plat_snprintf(out + at, size - at, ",clk,%.0f\n", (double) c->clockReads / frames);
+    } else {
+        plat_snprintf(out + at, size - at, ",clk,-\n");
+    }
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
-    static char header[1024];
-    static char line[1024];
+    static char header[1536];
+    static char line[1536];
     ProfCoreStats cores;
     Race *race = &sRaces[sNext];
     ProfStats empty;
@@ -1463,7 +1511,9 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "paced_20fps_pct,paced_slower_pct,flashes,aa_low_pct,jitter_ms,pace_changes,gpu_fill_ms,"
                   "gpu_lists_ms,gpu_copy_ms,late_retraces,late_wakes,shared_core_ms,game_core_ms,renderer_core_ms,"
                   "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit,start_mark,start_excess_ms,"
-                  "start_worst_ms\n",
+                  "start_worst_ms,pmu_mark,game_mcycles,game_ifstall_pct,game_pmn1_k,render_mcycles,render_ifstall_pct,"
+                  "render_pmn1_k,pmn1_kind,shown_mark,replaced,longest_shown_gap_ms,sndcb_mark,sound_callback_ms,"
+                  "clk_mark,clock_reads\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1549,8 +1599,12 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         if (stats != &empty) {
             port_race_start_stats(&excess, &worst);
         }
-        plat_snprintf(line + length, sizeof(line) - length, ",start,%.1f,%.1f\n", excess, worst);
+        plat_snprintf(line + length, sizeof(line) - length, ",start,%.1f,%.1f", excess, worst);
     }
+    length = strlen(line);
+    // Then (2026-11-19, P56) the CPU's own counters, the pictures shown, the sound callback and the clock reads, each
+    // group led by its mark word as the race start's: pmu_cells says what they hold.
+    pmu_cells(line + length, sizeof(line) - length, stats == &empty ? NULL : stats);
     append_file(results_file(), line, header);
     if (stats != &empty && cores.frames > 0) {
         record_cores(outcome, &cores, stats);
@@ -2419,7 +2473,7 @@ enum BenchColumn {
 };
 /* The most columns a line has: the benchmark's two, the sound's three, the graphics settings and the frame pacing's
  * four. */
-#define MAX_FIELDS (COL_COUNT + 40) // The whole game run has three columns of its own; then the flashes
+#define MAX_FIELDS (COL_COUNT + 60) // The whole game run has three columns of its own; then the flashes
 
 #define BENCH_MAX_TRACKS 8
 #define BENCH_LIMITS 6
@@ -2440,6 +2494,10 @@ typedef struct BenchGroup {
     s32 limits[BENCH_LIMITS]; // races per prof_limit answer (sLimitNames)
     s32 startRaces; // Races with the race start's columns (after the "start" mark; P53, 2026-11-17)
     double startExcess, startWorst;
+    // P56: races with the CPU counters measured (after the "pmu" mark; the renderer's core apart, it may be "-"), and
+    // with the pictures replaced (after "shown")
+    s32 stallRaces[2], shownRaces;
+    double stall[2], replaced;
 } BenchGroup;
 
 /* prof_limit's answers: DKR_PROF_CORES=0 (and results written before P54) gives the first three, =1 the GPU and the last
@@ -2465,6 +2523,18 @@ static const char *timeline_cell(const BenchGroup *g) {
     }
     plat_snprintf(cell, sizeof(cell), "%.2f / %.2f / %.2f", g->gpuFill / g->timelineRaces,
                   g->gpuLists / g->timelineRaces, g->gpuCopy / g->timelineRaces);
+    return cell;
+}
+
+/* P56: the switch bench's CPU cell: the fetch stall % of the game's core / the renderer's (DKR_PMU, "-" without), and the
+ * pictures replaced before they reached the screen a race. */
+static const char *cpu_cells(const BenchGroup *g) {
+    static char cell[48];
+    char a[12], b[12], r[12];
+    plat_snprintf(a, sizeof(a), g->stallRaces[0] ? "%.1f" : "-", g->stallRaces[0] ? g->stall[0] / g->stallRaces[0] : 0.0);
+    plat_snprintf(b, sizeof(b), g->stallRaces[1] ? "%.1f" : "-", g->stallRaces[1] ? g->stall[1] / g->stallRaces[1] : 0.0);
+    plat_snprintf(r, sizeof(r), g->shownRaces ? "%.0f" : "-", g->shownRaces ? g->replaced / g->shownRaces : 0.0);
+    plat_snprintf(cell, sizeof(cell), "%s / %s | %s", a, b, r);
     return cell;
 }
 
@@ -2651,6 +2721,23 @@ static void bench_summary(char *out, s32 size) {
                 break;
             }
         }
+        for (i = COL_COUNT; i + 7 < numFields; i++) {
+            if (str_equal(fields[i], "pmu")) {
+                // ,pmu,game mcycles,stall %,pmn1 k,render mcycles,stall %,pmn1 k,kind (pmu_cells)
+                s32 core;
+                for (core = 0; core < 2; core++) {
+                    if (fields[i + 2 + 3 * core][0] != '-') {
+                        g->stallRaces[core]++;
+                        g->stall[core] += parse_decimal(fields[i + 2 + 3 * core]);
+                    }
+                }
+                if (i + 9 < numFields && str_equal(fields[i + 8], "shown") && fields[i + 9][0] != '-') {
+                    g->shownRaces++;
+                    g->replaced += parse_decimal(fields[i + 9]);
+                }
+                break;
+            }
+        }
         if (port_atoi(fields[COL_WORST_FRAME]) > g->worstFrame) {
             g->worstFrame = port_atoi(fields[COL_WORST_FRAME]);
         }
@@ -2693,8 +2780,9 @@ static void bench_summary(char *out, s32 size) {
                                "anti-aliasing %s, %s, 3D off.\n\n"
                                "| track | switch | races | fps | 1%% low | frames 60/30/20/slower %% | 30 fps | 60 fps | GPU ms "
                                "| GPU saved | rdp ms | rdp saved | worst GPU | worst frame | frame to frame ms "
-                               "| pace changes | limit | flashes | GPU fills / draws / copies ms | start ms over | start worst |\n"
-                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|--:|--:|\n",
+                               "| pace changes | limit | flashes | GPU fills / draws / copies ms | start ms over | start worst "
+                               "| fetch stall %% game / renderer | pictures replaced |\n"
+                               "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|--:|--:|--:|--:|--:|\n",
                                60 / plat_frame_retraces(), aa >= 0 && aa < 3 ? sAaNames[aa] : "?",
                                plat_old_3ds() ? "the N64's 4:3, 400 pixels"
                                               : "Balanced widescreen, 800 pixels (the 4x setting, drawn as 2x there), "
@@ -2727,7 +2815,7 @@ static void bench_summary(char *out, s32 size) {
                 if (sMode == MODE_SWITCH) {
                     length += plat_snprintf(
                         out + length, size - length,
-                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s | %s |\n",
+                        "| %s | %s | %d | %.1f | %s | %.0f%% | %.0f%% | %.1f | %s%.1f | %.1f | %s%.1f | %d | %d | %s | %s | %s | %s | %s | %s |\n",
                         groups[t][0].track, config_name(k), (int) g->races, bench_avg(g->fps, g->races),
                         pacing_cells(g), bench_avg(g->pct30, g->races), bench_avg(g->pct60, g->races), bench_avg(g->gpu, g->races),
                         base->races ? "" : "?",
@@ -2735,7 +2823,7 @@ static void bench_summary(char *out, s32 size) {
                         bench_avg(g->rdp, g->races), base->races ? "" : "?",
                         base->races ? bench_avg(base->rdp, base->races) - bench_avg(g->rdp, g->races) : 0.0,
                         (int) g->worstGpu, (int) g->worstFrame, steady_cells(g), sLimitNames[limit], flash_cell(g),
-                        timeline_cell(g), start_cells(g));
+                        timeline_cell(g), start_cells(g), cpu_cells(g));
                     continue;
                 }
                 length += plat_snprintf(
@@ -3600,4 +3688,47 @@ s32 port_sweep_level_vertex(const void *vertices) {
         }
     }
     return FALSE;
+}
+
+/*
+ * CI (host_main.c, DKR_BENCH_OVERRIDE_CHECK=1; DKR_HOST_OLD3DS=1 for the Old 3DS list): sets every switch bench race's
+ * switches as the bench does (apply_config) and checks that none was turned away by a full override table
+ * (gPlatOverridesDropped), and that each row's own race reads each of its variables back at the row's test setting.
+ * Until 2026-11-19 the table held 16 and silently dropped the rest, so most rows of both consoles raced the usual
+ * settings. Returns the number of failures.
+ */
+int port_autorun_override_check(char *report, int size) {
+    s32 config, k, at = 0, failures = 0, configs;
+    s32 savedMode = sMode;
+    sMode = MODE_SWITCH;
+    sShort = 0;
+    configs = config_count();
+    for (config = 0; config < configs; config++) {
+        unsigned int dropped = gPlatOverridesDropped;
+        apply_config(config);
+        if (gPlatOverridesDropped != dropped) {
+            failures++;
+            at += plat_snprintf(report + at, size - at, "race %d (%s): %u switch overrides NOT applied (table full)\n",
+                                (int) config, config_name(config), gPlatOverridesDropped - dropped);
+        }
+        if (config >= 1 && config < SWITCH_CONFIGS) {
+            const BenchSwitch *row = &sSwitches[config - 1];
+            for (k = 0; k < BENCH_SWITCH_VARS && row->env[k] != NULL; k++) {
+                s32 value = plat_switch(row->env[k], -12345);
+                if (value != row->test) {
+                    failures++;
+                    at += plat_snprintf(report + at, size - at, "race %d (%s): %s reads %d, not its test setting %d\n",
+                                        (int) config, row->name, row->env[k], (int) value, (int) row->test);
+                }
+            }
+        }
+        if (at >= size - 1) {
+            at = size - 1;
+        }
+    }
+    apply_config(-1);
+    at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
+                        plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) configs, (int) (SWITCH_CONFIGS - 1), (int) failures);
+    sMode = savedMode;
+    return failures;
 }

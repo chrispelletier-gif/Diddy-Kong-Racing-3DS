@@ -121,6 +121,10 @@ typedef struct Window {
     unsigned long long jitterSumUs;
     u32 jitterCount, lastPeriodUs, lastPace, paceChanges;
     u32 periodBins[PERIOD_BINS]; // Game frame periods in half milliseconds, the last bin taking all longer ones.
+    // P56: the CPU counters' totals (plat_pmu_totals) and the clock reads at the window's start.
+    PlatPmuSample startPmu[PLAT_PMU_SLOTS];
+    unsigned int startPmuFrames[PLAT_PMU_SLOTS];
+    u32 startClockReads;
 } Window;
 
 static Window sWindows[PROF_WINDOW_COUNT];
@@ -299,7 +303,58 @@ void prof_window_start(int window) {
     w->worstFrameUs = 0;
     w->worstBuildUs = 0;
     w->hitches = 0;
+    for (i = 0; i < PLAT_PMU_SLOTS; i++) {
+        plat_pmu_totals(i, &w->startPmu[i], &w->startPmuFrames[i]);
+    }
+    w->startClockReads = plat_clock_reads();
+    {
+        unsigned int replaced, gap;
+        plat_shown_stats(window, TRUE, &replaced, &gap);
+    }
     sMaxClearRequest[window]++;
+}
+
+/* P56: the window's CPU counters, pictures shown and clock reads (profile.h ProfCpuStats). */
+static void cpu_window_read(int window, const Window *w, ProfCpuStats *out) {
+    s32 i;
+    bzero(out, sizeof(*out));
+    for (i = 0; i < PLAT_PMU_SLOTS; i++) {
+        PlatPmuSample now;
+        unsigned int frames;
+        plat_pmu_totals(i, &now, &frames);
+        out->pmuFrames[i] = frames - w->startPmuFrames[i];
+        if (i == PLAT_PMU_GAME && out->pmuFrames[i] > 0) {
+            // The kind the window's frames were counted with (not DKR_PMU now: a bench row's switches are gone by
+            // the time its results are written)
+            out->pmuKind = now.kind;
+        }
+        out->cycles[i] = now.cycles - w->startPmu[i].cycles;
+        out->fetchStall[i] = now.pmn0 - w->startPmu[i].pmn0;
+        out->pmn1[i] = now.pmn1 - w->startPmu[i].pmn1;
+    }
+    out->shownMeasured = plat_shown_stats(window, FALSE, &out->replaced, &out->longestShownGapUs);
+    out->clockReads = plat_clock_reads() - w->startClockReads;
+}
+
+/* P56: the summary's line for the CPU counters (DKR_PMU), the sound callback and the clock reads, a game frame each. */
+static const char *cpu_line(const ProfStats *s) {
+    static char line[128];
+    s32 at = 0;
+    line[0] = '\0';
+    if (s->cpu.pmuKind && s->cpu.pmuFrames[0]) {
+        at += plat_snprintf(line + at, sizeof(line) - at, "fetch stall: game core %d%%",
+                            s->cpu.cycles[0] ? (int) (s->cpu.fetchStall[0] * 100 / s->cpu.cycles[0]) : 0);
+        if (s->cpu.pmuFrames[1]) {
+            at += plat_snprintf(line + at, sizeof(line) - at, " render core %d%%",
+                                s->cpu.cycles[1] ? (int) (s->cpu.fetchStall[1] * 100 / s->cpu.cycles[1]) : 0);
+        }
+        at += plat_snprintf(line + at, sizeof(line) - at, "\n");
+    }
+    plat_snprintf(line + at, sizeof(line) - at, "sound callback %.2f ms, clock reads %u a frame\n",
+                  s->counters[PROF_SOUND_CALLBACKS] && s->gameFrames
+                      ? s->stageNs[PROF_SOUND_CALLBACK] / 1e6 / s->gameFrames : 0.0,
+                  s->gameFrames ? s->cpu.clockReads / s->gameFrames : 0);
+    return line;
 }
 
 /* The frame time that the slowest 1% of a window's game frames took at least: the middle of the half-millisecond bin
@@ -350,6 +405,7 @@ void prof_window_read(int window, ProfStats *out) {
     }
     out->jitterUs = w->jitterCount ? (unsigned int) (w->jitterSumUs / w->jitterCount) : 0;
     out->paceChanges = w->paceChanges;
+    cpu_window_read(window, w, &out->cpu);
     if (sMaxCleared[window] == sMaxClearRequest[window]) {
         out->worstRenderUs = sRenderMaxUs[window];
         out->worstGpuUs = sGpuMaxUs[window];
@@ -844,7 +900,7 @@ enum { MON_SUMMARY, MON_TIME, MON_KINDS, MON_OBJECTS, MON_WASTE, MON_PAGES };
 /* Lines on a page, its title included: what the bottom screen's grid shows with readable line spacing */
 #define MON_LINES 9
 static volatile s32 sMonPage, sMonFrozen, sMonDirty;
-static char sSummaryText[512];
+static char sSummaryText[640];
 static const char *const sMonPageNames[MON_PAGES] = { "PROFILER", "FRAME TIME", "DRAW KINDS", "OBJECTS",
                                                                    "WASTE" };
 
@@ -915,6 +971,11 @@ typedef struct {
     /* P54 DKR_PROF_CORES: each core's ms a frame, for the spare time line (cores 0: no line) */
     double coreGame, coreRender;
     int cores;
+    /* P56: the CPU counters' fetch stall per core (%, -1 not measured), the sound callback (ms a game frame, -1 none
+     * timed) and the clock reads a game frame */
+    int stallGame, stallRender;
+    double soundCb;
+    unsigned clockReads;
 } TermNumbers;
 static TermNumbers sTermNumbers;
 
@@ -984,6 +1045,22 @@ static int term_summary_text(char *out, int size, const TermNumbers *n) {
             }
         }
         at += plat_snprintf(out + at, size - at, "%c%s\n", TERM_DROPPABLE_FIRST, spare);
+    }
+    {
+        /* P56: the CPU counters (DKR_PMU), the sound callback and the clock reads; gives way with the spare line */
+        char stall[24], cb[8];
+        stall[0] = '\0';
+        if (n->stallGame >= 0) {
+            plat_snprintf(stall, sizeof(stall), n->stallRender >= 0 ? "stall %d%%/%d%%, " : "stall %d%%, ",
+                          n->stallGame, n->stallRender);
+        }
+        if (n->soundCb >= 0.0) {
+            term_ms(cb, n->soundCb, 0);
+        } else {
+            plat_snprintf(cb, sizeof(cb), "-");
+        }
+        at += plat_snprintf(out + at, size - at, "%c%ssound cb %s, clocks %u\n", TERM_DROPPABLE_FIRST, stall, cb,
+                            n->clockReads > 99999 ? 99999 : n->clockReads);
     }
     return at;
 }
@@ -1143,6 +1220,9 @@ int prof_term_check(char *report, int size) {
                 n.limit = "renderer core";
                 n.cores = 1;
                 n.coreGame = n.coreRender = 999.9; /* spare -99.9: the widest */
+                n.stallGame = n.stallRender = 100;
+                n.soundCb = 99.9;
+                n.clockReads = 99999;
                 n.onTime = n.late = n.later = n.idleGame = n.idleRender = 100;
                 n.worst = 9999;
                 n.steady = n.logic = n.scene = n.sound = n.tex = n.waitGame = n.waitRender = 99.9;
@@ -1185,12 +1265,13 @@ int prof_term_check(char *report, int size) {
             }
             out += plat_snprintf(report + out, size - out, "prof_term_check: status %d, page %d, %s: %d rows%s%s\n%s\n\n",
                    (int) which, (int) page + 1, layout ? "Old 3DS (renderer on this core)" : "New 3DS", (int) rows,
-                   result % 100 == 2 ? ", the spare line and the graph's key left out"
-                   : result % 100 ? ", the spare line left out" : "", result >= 100 ? ", CUT SHORT" : "", fitted);
-            /* only the summary's spare line and key may give way (the spare line first), and only when the status
-             * needs their rows */
+                   result % 100 == 3 ? ", the spare and CPU lines and the graph's key left out"
+                   : result % 100 == 2 ? ", the spare and CPU lines left out"
+                   : result % 100 ? ", the CPU line left out" : "", result >= 100 ? ", CUT SHORT" : "", fitted);
+            /* only the summary's spare line, its CPU counters line (P56) and key may give way (those two first), and
+             * only when the status needs their rows */
             if (row != 0 || rows > TERM_LINES || result >= 100 || (page != TERM_SUMMARY && result != 0) ||
-                result % 100 > 2) {
+                result % 100 > 3) {
                 out += plat_snprintf(report + out, size - out, "prof_term_check: FAILED (row %d too wide, or too many rows, or a line lost)\n", (int) row);
                 failures++;
             }
@@ -1235,7 +1316,8 @@ void prof_term_preview(int oldLayout, char *out, int size) {
     static char text[1536];
     char status[320];
     TermNumbers n = { 29.3, 33.3, 1.8, 27.0, 15.2, 9.8, 2.0, 0.0, 29.0, 0.4, 12.1, 5.0, 2.2,
-                      30, 95, 5, 0, 4, 6, 50, 1, 1058, 137, 3, "renderer core", 27.0, 29.0, 1 };
+                      30, 95, 5, 0, 4, 6, 50, 1, 1058, 137, 3, "renderer core", 27.0, 29.0, 1,
+                      -1, -1, 0.4, 180 }; /* (P56: CPU counters off) */
     s32 at;
     if (oldLayout) {
         n.scene = 6.0;
@@ -1703,6 +1785,7 @@ static void show_overlay(void) {
                       "waiting: game %.1f render %.1f\n"
                       "idle: game core %d%% render core %d%%\n"
                       "tris %u draws %u texture loads %u\n"
+                      "%s"
                       "%s",
                       fps, (int) (60 / target), prof_limit(&s), percent(onTime, s.gameFrames), percent(late, s.gameFrames),
                       percent(later, s.gameFrames), s.worstFrameUs / 1000, budget, s.hitches, s.jitterUs / 1000.0,
@@ -1714,7 +1797,7 @@ static void show_overlay(void) {
                       percent((u32) (s.renderIdleNs / 1000), (u32) (s.elapsedNs / 1000)),
                       s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0,
                       s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0, s.counters[PROF_TEXTURE_UPLOADS],
-                      sStatus);
+                      cpu_line(&s), sStatus);
         /* the terminal font's page (term_summary_text) formats the same numbers */
         {
             TermNumbers *n = &sTermNumbers;
@@ -1746,6 +1829,13 @@ static void show_overlay(void) {
             n->tris = s.renderedFrames ? s.counters[PROF_TRIANGLES] / s.renderedFrames : 0;
             n->draws = s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0;
             n->loads = s.counters[PROF_TEXTURE_UPLOADS];
+            /* (counters that read 0 show 0%, not "-") */
+            n->stallGame = !s.cpu.pmuKind || !s.cpu.pmuFrames[0] ? -1
+                           : s.cpu.cycles[0] ? (int) (s.cpu.fetchStall[0] * 100 / s.cpu.cycles[0]) : 0;
+            n->stallRender = !s.cpu.pmuKind || !s.cpu.pmuFrames[1] ? -1
+                             : s.cpu.cycles[1] ? (int) (s.cpu.fetchStall[1] * 100 / s.cpu.cycles[1]) : 0;
+            n->soundCb = s.counters[PROF_SOUND_CALLBACKS] ? per_frame_ms(&s, PROF_SOUND_CALLBACK, s.gameFrames) : -1.0;
+            n->clockReads = s.gameFrames ? s.cpu.clockReads / s.gameFrames : 0;
         }
     }
     if (sEnabled || sUserOn) {
@@ -2112,6 +2202,10 @@ void prof_game_mark(int mark, int updateRate) {
     sMarkNs[mark] = now;
     switch (mark) {
         case PROF_MARK_LOOP_START:
+            // P56 K2 (DKR_PMU): the game's core counted once a game frame, here (everything it ran in the frame).
+            if (__builtin_expect(plat_pmu_on() != 0, 0)) {
+                plat_pmu_frame(PLAT_PMU_GAME);
+            }
             sLogicNs = 0;
             sSharedOn = plat_switch("DKR_PROF_SHARED_CORE", 1) != 0;
             sLogicOtherNs = 0;
