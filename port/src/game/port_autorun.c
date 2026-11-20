@@ -321,6 +321,17 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // smoke, dust and sparks.
     { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
+    // P57 A (2026-11-20, proposals/3ds-old3ds-perf-next-plan.md): the race-start stall (250-294 ms in the first racing
+    // frame's set-up, run 45). Every race now keeps the run's SD writes away from the load and its first 5 s
+    // (DKR_AUTORUN_QUIET) and applies the old level's texture frees at the load's end (DKR_LOAD_FREES); these rows race
+    // one lap each the old way, to compare the results' race start columns. Read log.txt's "STALL set-up" lines: each
+    // names the set-up's steps with their ms, the drains and the log waits.
+    { "autorun SD writes at the race start (old way, 1 lap)", { "DKR_AUTORUN_QUIET", NULL, NULL }, 1, 0, 1, 1 },
+    { "old level's texture frees at the first frame (old way, 1 lap)", { "DKR_LOAD_FREES", NULL, NULL }, 1, 0, 1, 1 },
+    // P57 B: the CPU counters again (they worked in run 45, on NATIVE_REMOTE 3), now on NATIVE_REMOTE 0, so the
+    // game core's hot code work (P57 D) starts from today's numbers. PMU 1: I-cache misses; PMU 2: D-cache misses.
+    { "CPU counters, I-cache misses (PMU 1, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
+    { "CPU counters, D-cache misses (PMU 2, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -656,11 +667,24 @@ typedef struct IoJob {
     char *text;
     char *header;       // Appends: written first if the file doesn't exist yet or is empty (or NULL).
     s32 append;         // Added to the end of the file, else it replaces the file.
+    unsigned long long queuedNs; // P57 A1: when it was handed over (on the timeline with when it ran)
 } IoJob;
 
 static IoJob sIoJobs[IO_JOBS];
 static volatile u32 sIoQueued, sIoDone; // Jobs queued by the game thread, jobs the writer has finished.
 static PlatSem *sIoWake;
+/*
+ * P57 A2 (DKR_AUTORUN_QUIET, default 1; 2026-11-20): the run keeps off the SD card around a race start. The Old 3DS's
+ * race-start stall (250-294 ms in the first racing frame's set-up, run 45) overlapped this writer's save of the state
+ * file (115 bytes, 569 ms: the writer is below every game thread on the game's core, so it ran during the load and
+ * the first frames). So the title waits for the writer to finish before the load starts (port_autorun_title), and
+ * jobs queued from the load until QUIET_SECONDS after it are held here (sIoHeld, after the queued ones in sIoJobs) and
+ * handed to the writer then. 0 = the old way, for the bench's row that races it.
+ */
+#define QUIET_SECONDS 5
+static u32 sIoHeld;
+static s32 sQuiet;
+static unsigned long long sQuietUntilNs;
 
 static void io_thread(UNUSED void *arg) {
     for (;;) {
@@ -681,6 +705,8 @@ static void io_thread(UNUSED void *arg) {
         } else {
             plat_save_file(job->path, job->text, strlen(job->text));
         }
+        rec_event("autorun SD job %s: queued at %llu, ran %llu..%llu", job->path, job->queuedNs / 1000000ULL,
+                  start / 1000000ULL, plat_time_ns() / 1000000ULL);
         if (plat_time_ns() - start > 50000000ULL) {
             port_log("autorun: writing %s took %d ms", job->path, (int) ((plat_time_ns() - start) / 1000000ULL));
         }
@@ -691,8 +717,25 @@ static void io_thread(UNUSED void *arg) {
     }
 }
 
-/* Waits until the writer has written everything queued. */
+/* Hands the held jobs to the writer, in order. */
+static void io_release(void) {
+    while (sIoHeld > 0) {
+        sIoHeld--;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sIoQueued++;
+        plat_sem_post(sIoWake);
+    }
+}
+
+/* Whether a job queued now is held (the load and the first QUIET_SECONDS of the race). */
+static s32 io_quiet(void) {
+    return sQuiet && (sPhase == PHASE_LOADING ||
+                      ((sPhase == PHASE_COUNTDOWN || sPhase == PHASE_RACING) && plat_time_ns() < sQuietUntilNs));
+}
+
+/* Waits until the writer has written everything queued (and held). */
 static void io_flush(void) {
+    io_release();
     while (sIoDone != sIoQueued) {
         plat_sleep_ns(1000000);
     }
@@ -708,6 +751,9 @@ static void io_queue(const char *name, const char *text, const char *header, s32
         // Below every game thread, on the game's core, which is idle most of each frame.
         plat_thread_create(io_thread, NULL, 2, PLAT_THREAD_GAME, "autorun files");
     }
+    if (sIoQueued + sIoHeld - sIoDone >= IO_JOBS) {
+        io_release(); // Full of held jobs: they go now rather than wait for ever
+    }
     while (sIoQueued - sIoDone >= IO_JOBS) {
         plat_sleep_ns(1000000);
     }
@@ -722,11 +768,17 @@ static void io_queue(const char *name, const char *text, const char *header, s32
             bcopy(header, headerCopy, strlen(header) + 1);
         }
     }
-    job = &sIoJobs[sIoQueued % IO_JOBS];
+    job = &sIoJobs[(sIoQueued + sIoHeld) % IO_JOBS];
     make_path(job->path, sizeof(job->path), name);
     job->text = copy;
     job->header = headerCopy;
     job->append = append;
+    job->queuedNs = plat_time_ns();
+    if (io_quiet()) {
+        sIoHeld++;
+        return;
+    }
+    io_release();
     __atomic_thread_fence(__ATOMIC_RELEASE);
     sIoQueued++;
     plat_sem_post(sIoWake);
@@ -2406,6 +2458,16 @@ s32 port_autorun_title(void) {
     } else {
         lean_apply(); // The lean quick test's (v34)
     }
+    sQuiet = plat_switch("DKR_AUTORUN_QUIET", 1) != 0; // After the row's switches: its old-way row turns it off
+    if (sQuiet) {
+        // P57 A2: the state file (just queued) and anything before it are on the card before the load starts.
+        unsigned long long mark = plat_time_ns();
+        io_flush();
+        plat_saves_drain();
+        if (plat_time_ns() - mark > 20000000ULL) {
+            port_log("autorun: SD writes finished before the load, %d ms", (int) ((plat_time_ns() - mark) / 1000000ULL));
+        }
+    }
     set_phase(PHASE_LOADING);
     sRaceRetraces = 0;
     sStuckRetraces = 0;
@@ -3507,6 +3569,9 @@ void port_autorun_frame(s32 updateRate) {
     if (!port_autorun_active()) {
         return;
     }
+    if (sIoHeld > 0 && !io_quiet()) {
+        io_release(); // P57 A2: the quiet window after the race start is over
+    }
     if (sPhase == PHASE_RACING && sNext < sNumRaces && sRaces[sNext].kind == STOP_MENUS) {
         const char *outcome;
         sRaceRetraces += updateRate;
@@ -3524,6 +3589,7 @@ void port_autorun_frame(s32 updateRate) {
         case PHASE_LOADING:
             if (racer != NULL) {
                 sLoadNs = plat_time_ns() - sPhaseStartNs;
+                sQuietUntilNs = plat_time_ns() + QUIET_SECONDS * 1000000000ULL;
                 set_phase(PHASE_COUNTDOWN);
             } else if (plat_time_ns() - sPhaseStartNs > 120000000000ULL) {
                 end_race("load_timeout", 0);

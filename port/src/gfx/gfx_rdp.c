@@ -658,9 +658,14 @@ static void tex_memo_forget(void);
  * backend has passed their free, as its queued draws may still point at the entry's textures. Only for frees at a
  * frame's start (dropped and stale textures), where no batch of the walk's own uses them.
  */
-#define TEX_DYING_MAX 64
+#define TEX_DYING_MAX 512
 static u16 sTexDying[TEX_DYING_MAX];
 static s32 sTexDyingCount;
+/*
+ * How many dying entries before the walk waits for the backend (dying_reclaim(TRUE)): 64 (one drain for every 64
+ * frees, six for a level's) unless P57 A3 (DKR_LOAD_FREES) is on, which makes it 512, so a level's frees take one.
+ */
+static s32 sTexDyingMax = 64;
 
 /* A dying entry whose free the backend has done: its pixels go and it can be used again. */
 static s32 dying_try(TexCacheEntry *e) {
@@ -716,9 +721,9 @@ static void free_entry_later(TexCacheEntry *e) {
         free_entry(e);
         return;
     }
-    if (sTexDyingCount == TEX_DYING_MAX) {
+    if (sTexDyingCount >= sTexDyingMax) {
         dying_reclaim(TRUE); // A level's worth of frees: one wait for all of them
-        if (sTexDyingCount == TEX_DYING_MAX) {
+        if (sTexDyingCount >= sTexDyingMax) {
             free_entry(e);
             return;
         }
@@ -7626,29 +7631,104 @@ static COLD void census_log(void) {
 #endif
 
 #if PLAT_DEBUG_TOOLS
-/* Stall finder (debug builds): logs any frame start/end step that takes 40 ms or more. */
-static unsigned long long sStallT, sStallLimit;
+/*
+ * Stall finder (debug builds): logs any frame start/end step that takes 40 ms or more, with the drains (cross-core
+ * waits for the backend, gfx_split_drain) and the log/SD queue waits (plat_log_waits) made during it.
+ * P57 A1 (2026-11-20): the frame set-up is marked step by step ("frame set-up: ..."), and when the set-up as a whole
+ * takes 40 ms or more one "STALL set-up" line gives every step's time, so a stall spread over several steps is named
+ * too (the Old 3DS's race-start stall, 250-294 ms "in frame set-up" in run 45).
+ */
+#define SETUP_STEPS 16
+static unsigned long long sStallT, sStallLimit, sStallDrainNs, sStallLogNs;
 static u32 sStallW0, sStallW1;
+static unsigned int sStallDrains, sStallLogWaits;
 static const char *sStallWhat;
-static void stall_mark(const char *what, u32 w0, u32 w1) {
-    unsigned long long t = plat_ticks();
+static const char *sSetupWhat[SETUP_STEPS];
+static u32 sSetupUs[SETUP_STEPS];
+static s32 sSetupSteps, sSetupOn;
+static unsigned long long sSetupT, sSetupDrainNs, sSetupLogNs;
+static unsigned int sSetupDrains, sSetupLogWaits;
+
+static COLD void stall_mark(const char *what, u32 w0, u32 w1) {
+    unsigned long long t = plat_ticks(), drainNs, logNs;
+    unsigned int drains, logWaits;
     if (sStallLimit == 0) {
         sStallLimit = plat_ticks_per_second() / 25;
     }
-    if (sStallWhat != NULL && t - sStallT >= sStallLimit) {
-        plat_log("STALL %d ms in %s (command %08x %08x, kind %d), frame %d",
-                 (int) ((t - sStallT) * 1000 / plat_ticks_per_second()), sStallWhat, (unsigned) sStallW0,
-                 (unsigned) sStallW1, (int) sDrawKind, (int) sFrameCount);
+    gfx_split_drain_counts(&drains, &drainNs);
+    plat_log_waits(&logWaits, &logNs);
+    if (sStallWhat != NULL) {
+        if (sSetupOn && sSetupSteps < SETUP_STEPS) {
+            sSetupWhat[sSetupSteps] = sStallWhat;
+            sSetupUs[sSetupSteps++] = (u32) ((t - sStallT) * 1000000 / plat_ticks_per_second());
+        }
+        if (t - sStallT >= sStallLimit) {
+            plat_log("STALL %d ms in %s (command %08x %08x, kind %d), frame %d; drains %u (%.1f ms), log waits %u "
+                     "(%.1f ms)",
+                     (int) ((t - sStallT) * 1000 / plat_ticks_per_second()), sStallWhat, (unsigned) sStallW0,
+                     (unsigned) sStallW1, (int) sDrawKind, (int) sFrameCount, drains - sStallDrains,
+                     (drainNs - sStallDrainNs) / 1e6, logWaits - sStallLogWaits, (logNs - sStallLogNs) / 1e6);
+        }
     }
     sStallT = t;
     sStallWhat = what;
     sStallW0 = w0;
     sStallW1 = w1;
+    sStallDrains = drains;
+    sStallDrainNs = drainNs;
+    sStallLogWaits = logWaits;
+    sStallLogNs = logNs;
+}
+
+/* The set-up's steps are kept from here (after the frame's first mark)... */
+static COLD void setup_begin(void) {
+    sSetupOn = TRUE;
+    sSetupSteps = 0;
+    sSetupT = plat_ticks();
+    gfx_split_drain_counts(&sSetupDrains, &sSetupDrainNs);
+    plat_log_waits(&sSetupLogWaits, &sSetupLogNs);
+}
+
+/* ...to here (after the mark that ends it), and logged when they took 40 ms or more together. */
+static COLD void setup_end(void) {
+    unsigned long long t = plat_ticks(), drainNs, logNs;
+    unsigned int drains, logWaits;
+    char line[512];
+    s32 i, n = 0;
+    sSetupOn = FALSE;
+    if (t - sSetupT < sStallLimit) {
+        return;
+    }
+    gfx_split_drain_counts(&drains, &drainNs);
+    plat_log_waits(&logWaits, &logNs);
+    line[0] = '\0';
+    for (i = 0; i < sSetupSteps && n < (s32) sizeof(line) - 1; i++) {
+        const char *what = sSetupWhat[i];
+        if (__builtin_strncmp(what, "frame set-up: ", 14) == 0) {
+            what += 14;
+        }
+        n += plat_snprintf(line + n, sizeof(line) - n, "%s%s %u.%u", i > 0 ? ", " : "", what,
+                           (unsigned) (sSetupUs[i] / 1000), (unsigned) (sSetupUs[i] / 100 % 10));
+    }
+    plat_log("STALL set-up %d ms, frame %d (ms): %s; drains %u (%.1f ms), log waits %u (%.1f ms)",
+             (int) ((t - sSetupT) * 1000 / plat_ticks_per_second()), (int) sFrameCount, line, drains - sSetupDrains,
+             (drainNs - sSetupDrainNs) / 1e6, logWaits - sSetupLogWaits, (logNs - sSetupLogNs) / 1e6);
 }
 #define STALL_MARK(what, w0, w1) stall_mark(what, w0, w1)
+#define SETUP_BEGIN() setup_begin()
+#define SETUP_END() setup_end()
 #else
 #define STALL_MARK(what, w0, w1)
+#define SETUP_BEGIN()
+#define SETUP_END()
 #endif
+/* A set-up step inside a function that also runs between frames (a level load's passes), where nothing is timed. */
+#define SETUP_MARK(what)                                                                                               \
+    do {                                                                                                               \
+        if (!sBetweenFrames) {                                                                                         \
+            STALL_MARK(what, 0, 0);                                                                                    \
+        }                                                                                                              \
+    } while (0)
 
 /*
  * A sprite particle's records (P54 2b-D, DKR_NATIVE_PARTICLES, port_drawtag.h PORT_PART_TAG): what the game's
@@ -8389,12 +8469,14 @@ static void prewarm_textures(void) {
         handle_forget_all(); // (R3) Nor a handle of a list loaded over since
     }
     if (sTexFreeLaterCount > 0) {
+        SETUP_MARK("frame set-up: frees kept for later");
         apply_frees_later(!sTexHandleOn);
     }
     sTexSeqNow = tail;
     if (tail == head) {
         return;
     }
+    SETUP_MARK("frame set-up: texture queue (decodes, frees)");
     if (sPrewarmOff < 0) {
         const char *env = plat_getenv("DKR_TEX_PREWARM");
         sPrewarmOff = (env != NULL && env[0] == '0');
@@ -8469,12 +8551,14 @@ static void prewarm_textures(void) {
     }
     // Level loads, not the odd object texture coming and going mid-race.
     if (decoded + freed >= 16) {
+        SETUP_MARK("frame set-up: stale sweep");
         mark = plat_time_ns();
         swept = sweep_stale_textures();
         sweepNs = plat_time_ns() - mark;
     }
     elapsed = plat_time_ns() - start;
     if (decoded + freed >= 16 || elapsed >= 1000000) {
+        SETUP_MARK("frame set-up: textures log line");
         plat_log("textures: %d decoded at load, %d freed, %d stale dropped, %.1f ms (decodes %.1f, frees %.1f, sweep "
                  "%.1f; frame %d, %u replaced while in use, %u not queued)",
                  (int) decoded, (int) freed, (int) swept, elapsed / 1e6, decodeNs / 1e6, freeNs / 1e6, sweepNs / 1e6,
@@ -8490,7 +8574,9 @@ static void prewarm_textures(void) {
  */
 void port_gfx_textures_between_frames(int drain) {
     unsigned long long start = plat_time_ns();
+    s32 loadFrees = plat_switch("DKR_LOAD_FREES", 1) != 0, laterFrees = 0;
     port_gfx_init();
+    sTexDyingMax = loadFrees ? TEX_DYING_MAX : 64;
     if (sOpaquePending) {
         plat_log("textures between frames: a batch was still open"); // The frame's end flushes it; never expected
         OPAQUE_FLUSH();
@@ -8508,6 +8594,16 @@ void port_gfx_textures_between_frames(int drain) {
         waitNs = plat_time_ns() - mark;
         sLoadUploadWaitNs += waitNs;
         mark = plat_time_ns();
+        if (loadFrees && sTexFreeLaterCount > 0) {
+            // P57 A3 (DKR_LOAD_FREES, default 1): the frees the load noted (the old level's textures, kept until a
+            // frame after them was walked, R3) go now, behind the black screen, after the drain above (nothing queued
+            // still uses them), not in the first racing frame's set-up. Every frame handed over has been walked
+            // (port_rcp_textures_now waits for them), so none still draws them. 0 = as before.
+            laterFrees = sTexFreeLaterCount;
+            apply_frees_later(TRUE);
+            dying_reclaim(TRUE);
+            mark = plat_time_ns();
+        }
         if (sLoadDecoded + sLoadFreed >= 16) {
             swept = sweep_stale_textures();
         }
@@ -8515,10 +8611,10 @@ void port_gfx_textures_between_frames(int drain) {
         if (sLoadDecoded + sLoadFreed > 0) {
             plat_log("textures before the first frame: %d decoded, %d freed, %d stale dropped in %.1f ms during the "
                      "load (%d passes; decodes %.1f, frees %.1f, sweep %.1f), uploads done %.1f ms after (frame %d, %u "
-                     "not queued)",
+                     "not queued; %d kept frees applied at the load's end)",
                      (int) sLoadDecoded, (int) sLoadFreed, (int) swept, (sLoadPrewarmNs + sweepNs) / 1e6,
                      (int) sLoadPasses, sLoadDecodeNs / 1e6, sLoadFreeNs / 1e6, sweepNs / 1e6,
-                     sLoadUploadWaitNs / 1e6, (int) sFrameCount, (unsigned) sTexQueueDropped);
+                     sLoadUploadWaitNs / 1e6, (int) sFrameCount, (unsigned) sTexQueueDropped, (int) laterFrees);
         }
         sLoadDecoded = sLoadFreed = sLoadPasses = 0;
         sLoadDecodeNs = sLoadFreeNs = sLoadPrewarmNs = sLoadUploadWaitNs = 0;
@@ -8613,10 +8709,12 @@ void port_gfx_run_frame(const void *frameDl, int solo) {
     }
 #endif
     STALL_MARK(NULL, 0, 0);
-    STALL_MARK("frame set-up", 0, 0);
+    SETUP_BEGIN();
+    STALL_MARK("frame set-up: switches", 0, 0);
     REF_CALL(refb_start_frame());
     sTracing = sFrameCount == sTraceFrame;
     read_switches();
+    STALL_MARK("frame set-up: native maths hand-over", 0, 0);
     {
         // The buckets change threads only with the queue empty (see sRemote).
         static s32 hooked;
@@ -8631,9 +8729,13 @@ void port_gfx_run_frame(const void *frameDl, int solo) {
         }
         native_remote_take();
     }
+    STALL_MARK("frame set-up: triangle lists", 0, 0);
     native_tris_take();
+    STALL_MARK("frame set-up: dying textures", 0, 0);
     dying_reclaim(FALSE);
+    STALL_MARK("frame set-up: textures", 0, 0);
     prewarm_textures();
+    STALL_MARK("frame set-up: loads forgotten", 0, 0);
     forget_all_loads();
     sLightOn = FALSE;
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
@@ -8643,7 +8745,9 @@ void port_gfx_run_frame(const void *frameDl, int solo) {
     sCullMargin = sCpuCull ? gfxb_cpu_cull_margin() : 0.0f;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
+    STALL_MARK("frame set-up: track", 0, 0);
     track_frame_start();
+    STALL_MARK("frame set-up: meshes", 0, 0);
     if (!sTrackMesh && !sModelMesh) {
         if (sMeshBytes > 0) {
             gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
@@ -8666,6 +8770,7 @@ void port_gfx_run_frame(const void *frameDl, int solo) {
     }
     gPlatGfxStage = "running a display list";
     STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
+    SETUP_END();
     walk_begin();
     sCensusSkip = TRUE;
     if (UNLIKELY(sCensusOn > 0) && gPortNativeOps) { // (Frames before the first level load still write N64 commands)

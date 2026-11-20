@@ -145,6 +145,9 @@ int plat_save_file(const char *path, const void *data, unsigned int size);
 void plat_save_file_later(const char *path, void *data, unsigned int size);
 /* Waits for every queued background write. */
 void plat_saves_drain(void);
+/* P57 A1: the calling thread's waits for the log (its lock, or room in the SD writer's queue) of 2 ms or more so far:
+ * how many and their total ns. Zero where logging never waits (the PC). */
+void plat_log_waits(unsigned int *count, unsigned long long *ns);
 /* How many plat_save_file_later writes have failed since start-up, so the caller can write those saves again. */
 unsigned int plat_saves_failed(void);
 /* Adds data to the end of a file, making it if there is none. Returns 0 if anything failed. */

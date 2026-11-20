@@ -839,6 +839,31 @@ const char *plat_data_dir(void) {
 #define LOG_BOOT_LINES 200
 
 static LightLock sLogLock;
+/* P57 A1 (plat_log_waits): this thread's waits for the log lock or for room in the writer's queue, of 2 ms or more. */
+#define LOG_WAIT_COUNTED_NS 2000000ULL
+static __thread unsigned int tLogWaits;
+static __thread unsigned long long tLogWaitNs;
+
+static void log_wait_add(unsigned long long ns) {
+    if (ns >= LOG_WAIT_COUNTED_NS) {
+        tLogWaits++;
+        tLogWaitNs += ns;
+    }
+}
+
+void plat_log_waits(unsigned int *count, unsigned long long *ns) {
+    *count = tLogWaits;
+    *ns = tLogWaitNs;
+}
+
+/* The log lock, with the wait counted when it is held by another thread. */
+static void log_lock(void) {
+    if (LightLock_TryLock(&sLogLock) != 0) { // Nonzero: another thread holds it
+        unsigned long long start = plat_time_ns();
+        LightLock_Lock(&sLogLock);
+        log_wait_add(plat_time_ns() - start);
+    }
+}
 static int sLogLines;
 static int sLogDebug;
 static volatile int sLogAsync; // Start-up lines written by the writer thread (from when the ROM is loaded)
@@ -912,6 +937,7 @@ typedef struct WriteJob {
     FILE *file;
     char *data; /* Owned. */
     unsigned int size;
+    unsigned long long queuedNs; /* P57 A1: saves say when they were queued and when they ran, on the timeline. */
     char path[256];
 } WriteJob;
 
@@ -944,11 +970,17 @@ static void run_job(WriteJob *job) {
                 fclose(job->file);
             }
             break;
-        case JOB_SAVE:
+        case JOB_SAVE: {
+            unsigned long long start = plat_time_ns();
             if (!plat_save_file(job->path, job->data, job->size)) {
                 __atomic_add_fetch(&sSaveFailures, 1, __ATOMIC_RELEASE);
             }
+            if (job->queuedNs != 0) {
+                rec_event("SD save job %s: queued at %llu, ran %llu..%llu", job->path, job->queuedNs / 1000000ULL,
+                          start / 1000000ULL, plat_time_ns() / 1000000ULL);
+            }
             break;
+        }
     }
     free(job->data);
     __sync_fetch_and_sub(&sBytesPending, job->size);
@@ -987,8 +1019,12 @@ static void queue_job(int kind, FILE *file, char *data, unsigned int size, const
         sWriter = threadCreate(writer_thread, NULL, 16 * 1024, 0x3E, 0, true);
         sWriterState = sWriter != NULL ? 1 : -1;
     }
-    while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
-        svcSleepThread(2000000);
+    if (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
+        unsigned long long start = plat_time_ns();
+        while (sWriterState > 0 && sBytesPending > WRITE_PENDING_MAX) {
+            svcSleepThread(2000000);
+        }
+        log_wait_add(plat_time_ns() - start);
     }
     job = calloc(1, sizeof(*job));
     if (job == NULL) {
@@ -1009,6 +1045,7 @@ static void queue_job(int kind, FILE *file, char *data, unsigned int size, const
     job->file = file;
     job->data = data;
     job->size = size;
+    job->queuedNs = plat_time_ns();
     if (path != NULL) {
         snprintf(job->path, sizeof(job->path), "%s", path);
     }
@@ -1140,7 +1177,7 @@ static void log_line(const char *prefix, const char *text) {
         LightLock_Init(&sLogLock);
         sLogLockReady = 1;
     }
-    LightLock_Lock(&sLogLock);
+    log_lock();
     {
         char line[600];
         int length = snprintf(line, sizeof(line), "%7llu %s%s\n", plat_time_ns() / 1000000ULL, prefix, text);
