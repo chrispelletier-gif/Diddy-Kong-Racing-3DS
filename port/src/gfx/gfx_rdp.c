@@ -1935,13 +1935,13 @@ static s32 sOpaqueCount;
 static u32 sOpaqueStats[2]; // Batches held, draws made
 
 /*
- * DKR_NATIVE_REMOTE (on an Old 3DS): the buckets live on the two-core renderer's backend thread. The
- * walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its vertices, matrix and
- * tables) and each flush, in order with its draws, and the backend runs the same bucket code on them, so the frame's
- * draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back faces and the
- * corners, about half of the walk's time) then runs on the system core instead of the busy game core. sRemote is set
- * at a frame's start only, with the queue drained, so one thread at a time runs the bucket code; the walk's
- * sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
+ * DKR_NATIVE_REMOTE (1 or 3; off by default since Old 3DS bench run 45): the buckets live on the two-core renderer's
+ * backend thread. The walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its
+ * vertices, matrix and tables) and each flush, in order with its draws, and the backend runs the same bucket code on
+ * them, so the frame's draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back
+ * faces and the corners, about half of the walk's time) then runs on the system core instead of the busy game core.
+ * sRemote is set at a frame's start only, with the queue drained, so one thread at a time runs the bucket code; the
+ * walk's sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
  */
 static s32 sRemote;
 static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
@@ -2399,7 +2399,11 @@ static void read_switches(void) {
     // is on by default on an Old 3DS, where it took Whale Bay's bunched early race from 1% of frames at 20 fps to none
     // (switch benches #551, #553). The New 3DS, host and PC keep the walk (0).
     sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", plat_old_3ds()) != 0;
-    sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
+    // P54 (2026-11-20, Old 3DS bench run 45 on 02b948b): the native draws' vertex maths back on the walk (0) on an Old
+    // 3DS too. With the game core no longer the limit, it moved ~7 ms a frame off the renderer's core for ~3 ms on the
+    // game's (Whale Bay 21.4 / 17.5 ms), raised the ceiling ~6 fps and doubled its 1% low, at 30 fps. 3 (the old Old
+    // 3DS default, v28) and 1 stay for the bench and rollback.
+    sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", 0);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS

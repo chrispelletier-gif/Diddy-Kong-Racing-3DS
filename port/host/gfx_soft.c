@@ -845,6 +845,10 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
 void gfxb_walk_frame_start(void) {
 }
 
+void gfxb_walk_coverage(unsigned int counts[4]) {
+    counts[0] = counts[1] = counts[2] = counts[3] = 0;
+}
+
 int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                            const unsigned short *indices, int numTriangles) {
     (void) state;

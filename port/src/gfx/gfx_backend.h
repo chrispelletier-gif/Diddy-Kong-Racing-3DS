@@ -214,6 +214,9 @@ void gfxb_clear_depth(const short rect[4]);
  * start, after its start record; gfxb_walk_draw_indexed returns 0 when the draw is to be queued as before.
  */
 void gfxb_walk_frame_start(void);
+/* Its coverage so far, for the bench results: frames walked, draws the walk made, draws it left to the backend and
+ * draws left out for room (counts[0..3]); all zeros where the walk never makes vertices. */
+void gfxb_walk_coverage(unsigned int counts[4]) __attribute__((cold));
 int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                            const unsigned short *indices, int numTriangles);
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
