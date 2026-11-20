@@ -73,7 +73,7 @@ static const char *kOps[] = {"NDRAW",     "NDRAW_DYNAMIC", "SPRITE",     "NRECT"
                              "VTX",       "TRI",           "TILE",       "TILESIZE",      "LOADBLOCK",  "LOADTILE",
                              "LOADTLUT",  "IMAGE_TEX",     "MTX",        "CALL",          "TEXRECT",    "FILLRECT",
                              "SLOTS_DYNAMIC", "SLOTS_BILLBOARD", "SLOTS_SPRITE", "SLOTS_DECLINED", "DROP_MATERIAL",
-                             "DROP_TEXTURE", "LIST",       "FILL"};
+                             "DROP_TEXTURE", "LIST",       "FILL",      "PARTICLE"};
 
 static unsigned int intern_site(const char *name) {
     unsigned int h = 5381, i;

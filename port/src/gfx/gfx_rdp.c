@@ -7285,6 +7285,8 @@ static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 dept
             census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NRECT, NULL);
         } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG) {
             census_add(at, depth, CENSUS_RECORD, CENSUS_OP_MTXF, NULL);
+        } else if ((w1 & 0xFFFF0000) == PORT_PART_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_PARTICLE, NULL);
         } else if ((w1 & 0xFFFF0000) == PORT_LIGHT_TAG) {
             census_add(at, depth, CENSUS_STATE, CENSUS_OP_LIGHT_TAG, NULL);
         }
@@ -7363,6 +7365,43 @@ static void stall_mark(const char *what, u32 w0, u32 w1) {
 #endif
 
 /*
+ * A sprite particle's records (P54 2b-D, DKR_NATIVE_PARTICLES, port_drawtag.h PORT_PART_TAG): what the game's
+ * commands around its sprite did, in their order. The start: the environment and primitive colours (as NOP_COLOR and
+ * NOP_PRIM), the anchor into slot 0 (as PORT_ANCHOR_TAG), the billboard matrix into index 2 (as PORT_MTXF_TAG) and
+ * billboard mode on. The end: the matrix index, billboard mode off and the colours set back where the game did.
+ */
+static NOINLINE void native_particle_begin(const Gfx *dl) {
+    sTriStateValid = FALSE;
+    unpack_rgba(dl[1].words.w0, g.env);
+    unpack_rgba(dl[1].words.w1, g.prim);
+    g.primLodFrac = 0;
+    if (sAnyPending) {
+        forget_slots(0, 1);
+    }
+    g.vertexIndex = 0;
+    load_vertices_now((const Vertex *) seg_addr(dl[0].words.w0), 1, 0, g.matrices[g.curMatrix],
+                      (g.geometryMode & G_FOG) != 0, g.billboard);
+    g.vertexIndex = 1;
+    __builtin_memcpy(g.matrices[2], seg_addr(dl[0].words.w1), sizeof(g.matrices[2]));
+    g.curMatrix = 2;
+    g.billboard = 1;
+}
+
+static inline void native_particle_end(u32 w1) {
+    g.curMatrix = (w1 >> 1) & 1;
+    g.billboard = 0;
+    if (w1 & (1 << 3)) {
+        unpack_rgba(0xFFFFFFFFu, g.prim);
+        g.primLodFrac = 0;
+        sTriStateValid = FALSE;
+    }
+    if (w1 & (1 << 4)) {
+        unpack_rgba(0xFFFFFF00u, g.env);
+        sTriStateValid = FALSE;
+    }
+}
+
+/*
  * The port's tags in a frame (a no-op whose second word is a tag): draw kinds, the native records and the words they
  * own. dl is the word after the tag, remaining the words left in the list from there. Returns the words the tag used
  * after itself. Shared by the walk (run_command_list) and the record dispatcher (nframe.c, through gfx_frame_tag).
@@ -7399,6 +7438,14 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
                           (g.geometryMode & G_FOG) != 0, g.billboard);
         g.vertexIndex = 1;
         dl++;
+    } else if ((w1 & 0xFFFF0000) == PORT_PART_TAG) {
+        // P54 2b-D (DKR_NATIVE_PARTICLES): a sprite particle's commands as two records (port_drawtag.h).
+        if (w1 & 1) {
+            native_particle_end(w1);
+        } else if (remaining >= 2) {
+            native_particle_begin(dl);
+            dl += 2;
+        }
     } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
         u32 index = w1 & 3;
         __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));

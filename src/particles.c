@@ -2408,6 +2408,25 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
     if (alpha <= 0) {
         return;
     }
+    if (particle->kind == PARTICLE_KIND_SPRITE && port_native_particles()) {
+        // P54 2b-D (DKR_NATIVE_PARTICLES): the colours below and their restores go with the billboard's anchor and
+        // matrix as two records (port_drawtag.h PORT_PART_TAG); the same draw.
+        if (alpha != 255) {
+            renderFlags = (RENDER_Z_UPDATE | RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE);
+        }
+        cam_particle_next(((u32) particle->colour.r << 24) | ((u32) particle->colour.g << 16) |
+                              ((u32) particle->colour.b << 8) | particle->colour.a,
+                          alpha != 255 ? ((u32) particle->brightness << 24) | ((u32) particle->brightness << 16) |
+                                             ((u32) particle->brightness << 8) | (u32) alpha
+                                       : 0xFFFFFFFFu,
+                          alpha != 255 || particle->brightness != 255, particle->colour.a != 0);
+        temp = particle->textureFrame;
+        particle->textureFrame >>= 8;
+        particle->textureFrame = (particle->textureFrame * 255) / (particle->sprite->numberOfFrames);
+        render_sprite_billboard(dList, mtx, vtx, (Object *) particle, particle->sprite, renderFlags);
+        particle->textureFrame = temp;
+        return;
+    }
     if (particle->kind != PARTICLE_KIND_POINT && particle->kind != PARTICLE_KIND_LINE) {
         gDPSetEnvColor((*dList)++, particle->colour.r, particle->colour.g, particle->colour.b, particle->colour.a);
         if (alpha != 255) {

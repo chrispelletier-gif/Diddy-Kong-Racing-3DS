@@ -144,6 +144,7 @@ Camera *cam_get_cameras(void);
 MtxF *get_projection_matrix_f32(void);
 Mtx *get_projection_matrix_s16(void);
 s32 cam_load_perspective(Gfx **dList, u32 index); // DKR_NATIVE_CAMERA
+void cam_particle_next(u32 env, u32 prim, s32 restorePrim, s32 restoreEnv); // DKR_NATIVE_PARTICLES
 MtxF *get_camera_matrix(void);
 f32 get_distance_to_camera(f32 x, f32 y, f32 z);
 void set_camera_shake_by_distance(f32 x, f32 y, f32 z, f32 dist, f32 magnitude);
