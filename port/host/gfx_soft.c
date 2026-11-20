@@ -841,6 +841,20 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
     gfxb_draw_triangles(state, sList, numTriangles);
 }
 
+/* DKR_WALK_VERTS is the 3DS backend's (gfx_c3d.c): here every draw is queued as before. */
+void gfxb_walk_frame_start(void) {
+}
+
+int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                           const unsigned short *indices, int numTriangles) {
+    (void) state;
+    (void) verts;
+    (void) numVerts;
+    (void) indices;
+    (void) numTriangles;
+    return 0;
+}
+
 void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;

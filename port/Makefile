@@ -176,6 +176,12 @@ else
   SYS_CFLAGS := $(ARCH) -Iinclude -Isrc
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) $(ARCH) -print-file-name=include)
   LDFLAGS   := $(ARCH) $(if $(filter asan,$(DEBUG)),$(SANITIZE_FLAGS))
+  # The backend recorder (host/backend_record.c, DKR_BACKEND_RECORD=path) sits between the frontend and the software
+  # backend: the calls it writes down are wrapped here.
+  RECORD_WRAPS := init start_frame end_frame clear_color clear_depth draw_triangles draw_indexed draw_model \
+                  draw_meshes mesh_create mesh_free texture_upload texture_free texture_share gpu_kind gpu_kind_call \
+                  gpu_kinds_frame gpu_transform
+  LDFLAGS   += $(foreach f,$(RECORD_WRAPS),-Wl,--wrap=gfxb_$(f))
   LIBS      := -lm -lpthread
   EXE       := $(BUILD_DIR)/dkr
 endif
@@ -220,6 +226,11 @@ $(foreach f,$(PORT_SYS_SRC),$(eval $(call compile_rule,$(f),$$(SYS_CFLAGS))))
 # (Keeping the maths and collision files at -O3 cost more instruction cache misses than it saved: simulated cache.)
 ifneq ($(strip $(GAME_OPT)),)
 $(foreach f,$(GAME_SRC),$(call obj,$(f))): FILE_FLAGS := -O$(GAME_OPT)
+endif
+# The backend recorder's wrapped calls (RECORD_WRAPS) must stay calls into another object: with link-time optimisation
+# the linker's --wrap misses calls the optimiser already tied to the software backend, so it is compiled without.
+ifneq ($(TARGET),3ds)
+$(foreach f,host/gfx_soft.c host/backend_record.c,$(call obj,$(f))): FILE_FLAGS := -fno-lto
 endif
 ifneq ($(strip $(HOT_FLAGS)),)
 $(foreach f,$(HOT_SRC),$(call obj,$(f))): FILE_FLAGS := $(HOT_FLAGS)

@@ -351,6 +351,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // on; this row is the Old 3DS's own textures and timing. Drop it after one clean bench.
     { "texture memo check (TEX_MEMO_CHECK 1, check, 1 lap)", { "DKR_TEX_MEMO_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
+    // P54 2b-D (DKR_NATIVE_PARTICLES): each sprite particle as two records instead of about ten (same frames on the PC,
+    // ~10% less walk time for the "effects" kind). Read the game core ms and the effects kind's walk time; watch the
+    // smoke, dust and sparks.
+    { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
     { "native switches off (old walk, 1 lap)",
       { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
       1, 0, 1, 1 },
@@ -394,6 +398,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // they worked, DKR_PMU becomes 1 by default in debug builds so every row carries the numbers.
     { "CPU counters readable, I-cache misses (PMU 1, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
     { "CPU counters readable, D-cache misses (PMU 2, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
+    // Step 2 (DKR_WALK_VERTS, gfx_c3d.c "The walk writes the vertices"): the walk (game core) tests, converts and cuts
+    // each draw's vertices, which the renderer's core did. Expect renderer_core_ms 5-8 ms less and game_core_ms as much
+    // more (must stay under ~28), flashes 0. Then one lap with the self-check: the renderer's core also makes each
+    // draw's vertices the old way and compares; the log must say "walk verts: N draws checked, 0 differ" (its fps is
+    // low: it does both).
+    { "walk writes the GPU vertices (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
+    { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
+      { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
     // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306). The GSP can run the frame's depth
     // fill alongside its first command lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear
     // drawn instead). Rows: the depth fill back on with the wait (should be clean, and the fill is cheaper), the native

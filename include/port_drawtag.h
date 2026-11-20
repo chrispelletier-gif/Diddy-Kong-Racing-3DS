@@ -138,6 +138,19 @@ extern unsigned int gPortLevelLoads;
  * the renderer makes at once instead of through the RSP's lazy loads. */
 #define PORT_ANCHOR_TAG 0x50410000 /* "PA" */
 int port_native_camera(void);
+/*
+ * A sprite particle (P54 2b-D, DKR_NATIVE_PARTICLES, particles.c and camera.c) as two records instead of about ten:
+ *   PORT_PART_TAG, then two words: w0 the anchor (one Vertex), w1 the billboard's MtxF; w0 the environment colour,
+ *   w1 the primitive colour (RGBA). The renderer sets the two colours (lod fraction 0), makes the anchor in slot 0
+ *   (PORT_ANCHOR_TAG), loads the matrix into index 2 (PORT_MTXF_TAG) and turns billboard mode on, in that order.
+ *   The sprite's own records (port_native_sprite) follow.
+ *   PORT_PART_TAG | 1 | index << 1 | restorePrim << 3 | restoreEnv << 4, no words: selects matrix index (0 or 1),
+ *   turns billboard mode off, then sets the primitive colour to white and the environment colour to (255, 255, 255,
+ *   0) where asked: the game's own commands after a particle.
+ * Same picture, same order of draws; only fewer records for the walk to read.
+ */
+#define PORT_PART_TAG 0x50500000 /* "PP" */
+int port_native_particles(void);
 /* A texture rectangle without its texture load (native draws): PORT_NRECT_TAG | material, then the game's
  * G_TEXRECT and its two G_RDPHALF words. */
 #define PORT_NRECT_TAG 0x50520000 /* "PR" */

@@ -544,6 +544,26 @@ CI also plays the same scenarios once more with the Old 3DS's texture lookup mem
 in the log. The same texture found in another cache entry (a duplicate in the cache, the same picture) is counted
 apart and only reported. The memo is off on a PC by default, so this is the only place a PC tests it.
 
+`port/tools/backend_replay.py` checks the 3DS backend (`port/3ds/gfx_c3d.c`) on the PC. With
+`DKR_BACKEND_RECORD=file` the host build writes every call its renderer makes into the backend (`gfxb_*`, with their
+vertices, states and textures; `port/host/backend_record.c`, `DKR_BACKEND_RECORD_EVERY=n` keeps every nth frame's
+draws). `port/host/c3d_replay/` builds `gfx_c3d.c` with the real citro3d and libctru's command list code for the PC
+(32-bit), libctru's system calls faked, and plays a record through it, decoding the command lists it hands to the GPU
+into the PICA200's registers. The script records the frame regression scenarios, then runs two checks for a New and
+an Old 3DS: the command words of every draw against the previous commit's backend (fails unless the commit message
+says `backend-change: expected`), and the GPU registers at every draw with only changed settings sent (the default)
+against every setting sent for every draw (`DKR_STATE_CACHE=0 DKR_FAST_STATE=0`), where any difference is a state
+cache bug. It fetches libctru, citro3d and picasso at the commits the 3DS build's devkitARM image ships:
+
+```
+python3 port/tools/backend_replay.py ci --deps /tmp/replay-deps --exe port/build/host/dkr --rom baserom.z64 \
+    --work /tmp/replay --base-port old/port
+```
+
+It doesn't see timing or ordering against the GPU (a hang from texture registers written right after a draw), stereo
+3D, or the GPU vertex maths' model and mesh draws (off by default, so not in the records). CI runs it after the frame
+regression.
+
 `port/tools/n64_compare/` checks the renderer against a real N64 instead: an accurate emulator (ares, running the
 game's own F3DDKR microcode on its emulated RSP and paraLLEl-RDP for the RDP) plays the ROM and saves chosen frames'
 display lists with the pictures it drew from them, and the port's renderer replays the same display lists, so both
@@ -552,8 +572,8 @@ sides draw exactly the same frame. See its README for how to run it and what it 
 ### CI
 
 `.github/workflows/Port.yml` runs on every push: it builds `dkr.3dsx` and the host build (both are uploaded as
-workflow artifacts), then runs the frame regression between this commit and the previous one, with its report on
-the run's summary page. It needs the `ROMURL` repository secret, a private download URL for the US 1.0 ROM (the
+workflow artifacts), then runs the frame regression and the backend replay between this commit and the previous one,
+with their reports on the run's summary page. It needs the `ROMURL` repository secret, a private download URL for the US 1.0 ROM (the
 same secret the N64 workflows use).
 
 ## Testing in Azahar

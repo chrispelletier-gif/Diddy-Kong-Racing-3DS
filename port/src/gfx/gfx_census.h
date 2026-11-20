@@ -58,6 +58,7 @@ typedef enum CensusOp {
     CENSUS_OP_DROP_TEXTURE,
     CENSUS_OP_LIST, /* R4 record dispatcher: a list call, as a LIST record */
     CENSUS_OP_FILL, /* R4 record dispatcher: a fill rectangle, as a FILL record */
+    CENSUS_OP_PARTICLE, /* P54 2b-D: a sprite particle's start or end record (PORT_PART_TAG) */
     CENSUS_OP_COUNT,
     CENSUS_OP_RAW = 0x100
 } CensusOp;
