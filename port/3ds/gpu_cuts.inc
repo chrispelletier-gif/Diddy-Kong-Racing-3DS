@@ -852,14 +852,12 @@ static void dp_describe(DrawDesc *d, const GfxDrawState *st, int tris, int path)
     d->idx = (u16) (sDpIndex - 1); // dp_draw counted it already
 }
 
-/* Backend, at a draw's start (after it is known to be drawn): in the window, the list is cut before it, so the part
- * that ends there holds the draw before (sDpPrev). */
-static inline void dp_draw(const GfxDrawState *st, int tris, int path, const GfxVertex *verts, int numVerts) {
+/* dp_draw's work in a frame timed by draw (one frame in GPU_DRAW_EVERY while the profiler records, New 3DS): out of
+ * the per-draw code (P57 G), which only tests the flag. */
+static void __attribute__((noinline, cold)) dp_draw_timed(const GfxDrawState *st, int tris, int path,
+                                                          const GfxVertex *verts, int numVerts) {
     int idx;
     FrameSlot *slot;
-    if (__builtin_expect(!sDpFrame[sRec], 1)) {
-        return;
-    }
     if (sKindFrame[sRec]) {
         sDpFrame[sRec] = 0; // Being cut by kind this frame
         return;
@@ -904,6 +902,14 @@ static inline void dp_draw(const GfxDrawState *st, int tris, int path, const Gfx
             }
             e->hasBox = 1;
         }
+    }
+}
+
+/* Backend, at a draw's start (after it is known to be drawn): in the window, the list is cut before it, so the part
+ * that ends there holds the draw before (sDpPrev). */
+static inline void dp_draw(const GfxDrawState *st, int tris, int path, const GfxVertex *verts, int numVerts) {
+    if (__builtin_expect(sDpFrame[sRec] != 0, 0)) {
+        dp_draw_timed(st, tris, path, verts, numVerts);
     }
 }
 
@@ -1082,7 +1088,9 @@ static int rect_equation(const GfxDrawState *st, const GfxVertex *v, int numVert
     return rect_colour_input(st, v, numVerts, eq->d, ch, out);
 }
 
-static int rect_as_fill(const GfxDrawState *st, const GfxVertex *v, int numVerts, const u16 *indices) {
+/* Only for the frame's first draw (gfxb_draw_indexed): out of the per-draw code (P57 G). */
+static int __attribute__((noinline, cold)) rect_as_fill(const GfxDrawState *st, const GfxVertex *v, int numVerts,
+                                                         const u16 *indices) {
     u8 c[4];
     short rect[4];
     float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
