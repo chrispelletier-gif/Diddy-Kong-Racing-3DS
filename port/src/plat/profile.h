@@ -35,6 +35,8 @@ enum ProfStage {
     PROF_SHARED_CORE, /* Game thread: wall time other threads on its core took from it while it built the frame (Old
                        * 3DS: the renderer's display list walk; DKR_PROF_SHARED_CORE). Taken out of PROF_LOGIC and
                        * PROF_SCENE, so the game core's load is still logic + scene + this. */
+    PROF_SOUND_CALLBACK, /* P56 K8: the DSP frame callback (3DS audio_ndsp.c voices_frame, on libctru's ndsp thread on
+                          * the game's core; the PC's audio_soft.c mix_frame), whole. Its only writer is that thread. */
     PROF_STAGE_COUNT
 };
 
@@ -42,6 +44,7 @@ enum ProfCounter {
     PROF_TRIANGLES,       /* Triangles handed to the backend. */
     PROF_DRAWS,           /* Draw batches handed to the backend. */
     PROF_TEXTURE_UPLOADS, /* Textures decoded (texture cache misses). */
+    PROF_SOUND_CALLBACKS, /* P56 K8: DSP frame callbacks timed (PROF_SOUND_CALLBACK). */
     PROF_COUNTER_COUNT
 };
 
@@ -109,6 +112,23 @@ void prof_part(int part, unsigned long long ns);
  * clock reads back out of the parts they time. */
 unsigned long long prof_clock_read_cost(void);
 
+/*
+ * P56 (kohjoh lessons, proposals/3ds-kohjoh-lessons-plan.md package B): the CPU's own counters and the timings beside
+ * them over a window. Per core [0] the game's core (sampled once a game frame), [1] the renderer's core when it is not
+ * the game's (once a rendered frame; 0 frames when not measured): cycles, cycles waiting for instructions (fetch
+ * stall) and PMN1 (pmuKind 1 instruction cache misses, 2 data cache read misses; 0: DKR_PMU off). The pictures
+ * replaced before they reached the screen and the longest gap between two that did (shownMeasured 0 on a PC); the
+ * clock reads (plat_time_ns calls).
+ */
+typedef struct ProfCpuStats {
+    int pmuKind;
+    unsigned int pmuFrames[2];
+    unsigned long long cycles[2], fetchStall[2], pmn1[2];
+    int shownMeasured;
+    unsigned int replaced, longestShownGapUs;
+    unsigned int clockReads;
+} ProfCpuStats;
+
 /* Statistics over a span of frames (a race, or the last second for the overlay). */
 typedef struct ProfStats {
     unsigned int gameFrames;      /* Frames the game thread produced. */
@@ -129,6 +149,7 @@ typedef struct ProfStats {
     unsigned long long idleNs;    /* Main core idle time (3DS with the idle meter, else 0). */
     unsigned long long renderIdleNs; /* The renderer's core (the same core on an Old 3DS). */
     unsigned long long backendBusyNs; /* The two-core renderer's backend busy time (gfx_split_backend_busy_ns; 0 without) */
+    ProfCpuStats cpu;             /* P56 */
 } ProfStats;
 
 /* A window of statistics: started with prof_window_start, read (any number of times) with prof_window_read. */

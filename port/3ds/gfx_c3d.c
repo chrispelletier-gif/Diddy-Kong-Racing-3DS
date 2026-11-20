@@ -17,6 +17,7 @@
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "plat/settings.h"
+#include "plat/shown.h"
 #include "shader_shbin.h"
 
 /* v28: textures in VRAM by default on the Old 3DS in the PICA_ALL build (benches #432/#436: steadier frames on
@@ -1611,14 +1612,25 @@ static void triple_present(bool hasStereo) {
     sTripleSwaps++;
 }
 
+/* P56 K7: the pictures that reached the screen (plat/shown.h), from the top screen's swaps. GSP thread; the
+ * profiler's windows are restarted from the game's. */
+static PlatShown sShown;
+
+int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs) {
+    plat_shown_read(&sShown, window, restart, sSwapReplaced, replaced, longestGapUs);
+    return 1;
+}
+
 void __real_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo);
 __attribute__((used)) void __wrap_gfxScreenSwapBuffers(gfxScreen_t scr, bool hasStereo) {
     if (scr == GFX_TOP) {
         u64 now = svcGetSystemTick();
         // Still pending: the previous picture has not reached the screen yet, and this one replaces it.
-        if (gspIsPresentPending(GSP_SCREEN_TOP)) {
+        int pending = gspIsPresentPending(GSP_SCREEN_TOP);
+        if (pending) {
             sSwapReplaced++;
         }
+        plat_shown_swap(&sShown, pending, now, SYSCLOCK_ARM11 / 1000000);
         sSwapGapUs = sLastSwapTick != 0 ? (unsigned int) ((now - sLastSwapTick) / (SYSCLOCK_ARM11 / 1000000)) : 0;
         sLastSwapTick = now;
         sSwapCount++;
@@ -3764,6 +3776,13 @@ static void walk_publish_consts(void);
 
 void gfxb_start_frame(void) {
     FrameSlot *slot;
+#if PLAT_DEBUG_TOOLS
+    // P56 K2 (DKR_PMU): the renderer's core counted once a frame, when it is not the game's (a New 3DS's renderer, or
+    // an Old 3DS's two-core renderer backend on the system core). Once a frame: a few system calls.
+    if (__builtin_expect(plat_pmu_on() != 0, 0) && svcGetProcessorID() != 0) {
+        plat_pmu_frame(PLAT_PMU_RENDER);
+    }
+#endif
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
