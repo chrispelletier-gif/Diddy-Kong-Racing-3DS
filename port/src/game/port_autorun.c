@@ -332,6 +332,11 @@ static const BenchSwitch sSwitchesNative[] = {
  * its rows went; one 1-lap row turns all five off to compare. The New 3DS keeps them (sSwitchesNative).
  */
 static const BenchSwitch sSwitchesOld3ds[] = {
+    // P56 K4 (2026-11-19): every texture memo hit checked against the full lookup (DKR_TEX_MEMO_CHECK, gfx_rdp.c
+    // tex_memo_check_answer). One lap, a check: the log's "texture memo check: N hits checked, M differ" lines should
+    // say 0 differ (a "first difference" line names the tile). The PC's CI runs the same check with the memo forced
+    // on; this row is the Old 3DS's own textures and timing. Drop it after one clean bench.
+    { "texture memo check (TEX_MEMO_CHECK 1, check, 1 lap)", { "DKR_TEX_MEMO_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
     { "native switches off (old walk, 1 lap)",
       { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },

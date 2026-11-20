@@ -344,6 +344,32 @@ jobs:
           python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
             --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression" --max-images 0
 
+      - name: Texture memo check
+        # P56 K4: the Old 3DS's texture lookup memo (off by default on a PC) checked against the full lookup at every
+        # memo hit (DKR_TEX_MEMO_CHECK, gfx_rdp.c tex_memo_check_answer), over the same scenarios. Any difference is a
+        # memo bug; no "hits checked" line means the check never ran.
+        run: |
+          DKR_TEX_MEMO=1 DKR_TEX_MEMO_CHECK=1 python3 port/tools/frame_regression.py \
+            --rom "$RUNNER_TEMP/rom/baserom.z64" --head port/build/host/dkr --out "$RUNNER_TEMP/memo-check" \
+            --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/memo-check" -name log.txt)
+          grep -h "texture memo check:" $logs | tail -n 20
+          {
+            echo "### Texture memo check"
+            echo
+            for log in $logs; do
+              echo "- $(basename "$(dirname "$(dirname "$log")")"): $(grep "hits checked" "$log" | tail -n 1 | sed 's/.*texture memo check: //')"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "texture memo check: first difference" $logs; then
+            echo "::error::The texture memo gave a different texture from the full lookup (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "texture memo check: .* hits checked" $logs; then
+            echo "::error::The texture memo check never ran (no memo hits in any scenario)."
+            exit 1
+          fi
+
       - name: Upload the report and logs
         if: always()
         uses: actions/upload-artifact@v4
