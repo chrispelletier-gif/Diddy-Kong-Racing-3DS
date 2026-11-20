@@ -40,7 +40,9 @@ typedef struct NFrameReturn {
     s32 remaining;
 } NFrameReturn;
 
-void run_native_frame(const Gfx *dl) {
+/* PLAT_HOT_GAME: the game core runs it every frame on an Old 3DS (plat.h, P57 D); out of line, so that it lies in
+ * that stretch rather than inlined into port_gfx_run_frame. */
+PLAT_HOT_GAME PLAT_NOINLINE void run_native_frame(const Gfx *dl) {
     NFrameReturn stack[GFX_LIST_DEPTH];
     s32 depth = 0;
     s32 remaining = NO_LIMIT;
