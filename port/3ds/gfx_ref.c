@@ -26,6 +26,7 @@
 #define gfxb_gpu_kind_call refb_gpu_kind_call
 #define gfxb_walk_frame_start refb_walk_frame_start
 #define gfxb_walk_draw_indexed refb_walk_draw_indexed
+#define gfxb_walk_coverage refb_walk_coverage
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>
 // None of the host renderer's own debug settings apply here.

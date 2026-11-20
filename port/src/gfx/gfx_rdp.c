@@ -1935,13 +1935,13 @@ static s32 sOpaqueCount;
 static u32 sOpaqueStats[2]; // Batches held, draws made
 
 /*
- * DKR_NATIVE_REMOTE (on an Old 3DS): the buckets live on the two-core renderer's backend thread. The
- * walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its vertices, matrix and
- * tables) and each flush, in order with its draws, and the backend runs the same bucket code on them, so the frame's
- * draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back faces and the
- * corners, about half of the walk's time) then runs on the system core instead of the busy game core. sRemote is set
- * at a frame's start only, with the queue drained, so one thread at a time runs the bucket code; the walk's
- * sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
+ * DKR_NATIVE_REMOTE (1 or 3; off by default since Old 3DS bench run 45): the buckets live on the two-core renderer's
+ * backend thread. The walk queues what it would have put in them (a CPU batch held, a native draw's inputs: its
+ * vertices, matrix and tables) and each flush, in order with its draws, and the backend runs the same bucket code on
+ * them, so the frame's draws are the same ones; a native draw's vertex maths (the transform, the screen edges, the back
+ * faces and the corners, about half of the walk's time) then runs on the system core instead of the busy game core.
+ * sRemote is set at a frame's start only, with the queue drained, so one thread at a time runs the bucket code; the
+ * walk's sOpaquePending then only says something was queued since the last flush, the buckets' own being sEngPending.
  */
 static s32 sRemote;
 static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 3 also those whose order matters
@@ -2220,11 +2220,16 @@ static inline u16 batch_vertex(GfxVertex **out) {
 
 /******************************** RSP ********************************/
 
+/* g.matrices[i] was last written at sMtxStamp[i] (a count of all the writes): model_box_inside's planes are worked out
+ * again only for another matrix. */
+static u32 sMtxStamp[4], sMtxWrites;
+
 /* Kept a loop (not unrolled into 8 copies) so that it takes a few cache lines: it runs between draws. */
 static NOINLINE HOT void load_matrix(const Mtx *mtx, s32 index) {
     const s32 *m = (const s32 *) mtx;
     float *out = &g.matrices[index][0][0];
     s32 k;
+    sMtxStamp[index] = ++sMtxWrites;
 #pragma GCC unroll 1
     for (k = 0; k < 8; k++) {
         s32 intPart = m[k];
@@ -2297,6 +2302,12 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
+static s32 sModelBox;   // DKR_MODEL_BOX (P57 C1), see model_box_inside
+#if PLAT_DEBUG_TOOLS
+static s32 sModelBoxCheck;      // DKR_MODEL_BOX_CHECK, see model_box_check
+static u32 sModelBoxStats[4];   // Draws tested, said inside, of those with a vertex past an edge, such vertices
+static void model_box_log(void);
+#endif
 static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
@@ -2399,13 +2410,23 @@ static void read_switches(void) {
     // is on by default on an Old 3DS, where it took Whale Bay's bunched early race from 1% of frames at 20 fps to none
     // (switch benches #551, #553). The New 3DS, host and PC keep the walk (0).
     sNativeRecords = plat_switch("DKR_NATIVE_RECORDS", plat_old_3ds()) != 0;
-    sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", plat_old_3ds() ? 3 : 0);
+    // P54 (2026-11-20, Old 3DS bench run 45 on 02b948b): the native draws' vertex maths back on the walk (0) on an Old
+    // 3DS too. With the game core no longer the limit, it moved ~7 ms a frame off the renderer's core for ~3 ms on the
+    // game's (Whale Bay 21.4 / 17.5 ms), raised the ceiling ~6 fps and doubled its 1% low, at 30 fps. 3 (the old Old
+    // 3DS default, v28) and 1 stay for the bench and rollback.
+    sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", 0);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
     sNativeFrame = plat_switch("DKR_NATIVE_FRAME", plat_old_3ds()) != 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
+    // P57 C1: a model or track draw whose bounding sphere is wholly on the screen skips the per-vertex screen edges
+    // and the per-triangle off-screen test (model_box_inside). Off until a switch bench row shows it wins.
+    sModelBox = plat_switch("DKR_MODEL_BOX", 0) != 0;
+#if PLAT_DEBUG_TOOLS
+    sModelBoxCheck = plat_switch("DKR_MODEL_BOX_CHECK", 0) != 0;
+#endif
 }
 
 /* The host's clipping sweep (DKR_CLIP_SWEEP) tells the level's own geometry from objects': nonzero while the
@@ -3944,6 +3965,11 @@ static void track_frame_start(void) {
         sOpaqueStats[0] = sOpaqueStats[1] = 0;
         sEngStats[0] = sEngStats[1] = 0; // Read without a lock, as the other profiler counts
     }
+#if PLAT_DEBUG_TOOLS
+    if (sFrameCount % 600 == 0 && sModelBoxStats[0] > 0) {
+        model_box_log();
+    }
+#endif
     if (sNativeTrack && sFrameCount % 600 == 0) {
         plat_log("native track: %u KB in %u meshes; batches %u GPU, %u left out, %u CPU; %u made, %u draws",
                  (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (unsigned) sTrackStats[0],
@@ -4286,7 +4312,9 @@ typedef struct NativeMesh {
     const Vertex *boxSrc; // The vertices boxMin/boxMax were taken from (the track's don't move)
     u32 boxLoads;         // gPortLevelLoads then
     s16 boxMin[3], boxMax[3];
+    float boxC[3], boxR2; // A sphere round the box (its centre, its radius squared), for model_box_inside
 } __attribute__((aligned(32))) NativeMesh;
+_Static_assert(sizeof(NativeMesh) <= 96 || sizeof(void *) > 4, "a mesh takes three cache lines");
 
 static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
 _Static_assert(NATIVE_TABLE_SIZE == 2048 && NATIVE_POOL_BYTES == 640 * 1024, "read_switches sets the limits from these");
@@ -5237,7 +5265,11 @@ static NOINLINE s32 native_rect(const Gfx *dl, u32 id) {
     return 3;
 }
 
-/* The box of a mesh's vertices, for box_off_screen. */
+/* How much model_box_inside's sphere is grown past the box's corners (a radius factor): a racer's pieces are bent by
+ * its animation, and the box is made from one pose. Too small only costs time: see model_box_inside. */
+#define MODEL_BOX_GROW 1.25f
+
+/* The box of a mesh's vertices, for box_off_screen (and its sphere, for model_box_inside). */
 static COLD void native_mesh_box(NativeMesh *mesh, const Vertex *vtx, s32 numVerts) {
     s32 i, k;
     for (k = 0; k < 3; k++) {
@@ -5253,6 +5285,17 @@ static COLD void native_mesh_box(NativeMesh *mesh, const Vertex *vtx, s32 numVer
     }
     mesh->boxSrc = vtx;
     mesh->boxLoads = gPortLevelLoads;
+    {
+        // The sphere through the box's corners, grown by MODEL_BOX_GROW: a model's vertices are its first drawer's
+        // animation pose (model_box_inside).
+        float r2 = 0.0f;
+        for (k = 0; k < 3; k++) {
+            float half = ((float) mesh->boxMax[k] - (float) mesh->boxMin[k]) * 0.5f;
+            mesh->boxC[k] = ((float) mesh->boxMax[k] + (float) mesh->boxMin[k]) * 0.5f;
+            r2 += half * half;
+        }
+        mesh->boxR2 = r2 * (MODEL_BOX_GROW * MODEL_BOX_GROW) + 4.0f;
+    }
 }
 
 /* DKR_BOX_CHECK=1 (PC): a remembered track box is checked against its vertices each frame. */
@@ -5284,6 +5327,91 @@ static s32 box_off_screen(const s16 *bmin, const s16 *bmax, float (*m)[4]) {
     }
     return all != 0;
 }
+
+/*
+ * P57 C1 (DKR_MODEL_BOX): TRUE when the mesh's sphere (boxC, boxR2), through matrix index, lies wholly inside every
+ * edge vertex_outcode tests, so every vertex's edges would be 0 and native_record skips them and the per-triangle
+ * off-screen test. vertex_outcode's tests are linear in the vertex: w - x' >= 0 is p.a + b >= 0 for the plane (a, b)
+ * made from the matrix's columns and the viewport, and the sphere is inside it when its centre's p.a + b is at least
+ * radius * |a|. The planes are made once per matrix (sMtxStamp) and viewport.
+ * A wrong TRUE (a vertex past an edge: a racer's pose outside its box, rounding at an edge) changes no picture: the
+ * triangles the off-screen test would have dropped draw no pixel, they only cost the GPU's clipping.
+ * DKR_MODEL_BOX_CHECK counts them.
+ */
+static struct {
+    s32 index;   // The matrix the planes are for; -1: none
+    u32 stamp;   // Its sMtxStamp then
+    Viewport vp; // And the viewport
+    float p[5][5]; // Each edge's a (3), b, |a|^2
+} sBoxPlanes = {-1};
+
+static NOINLINE void model_box_planes(s32 index, const Viewport *vp) {
+    float(*m)[4] = g.matrices[index];
+    s32 i, k;
+    for (i = 0; i < 5; i++) {
+        float n2 = 0.0f;
+        for (k = 0; k < 4; k++) {
+            // Row k of the matrix holds coordinate k's (the translation's for k = 3) share of x, y, z and w.
+            float x = m[k][0] * vp->scaleX + m[k][3] * vp->transX, y = m[k][1] * vp->scaleY + m[k][3] * vp->transY,
+                  w = m[k][3], c;
+            switch (i) {
+                case 0: c = w - x; break;
+                case 1: c = w + x; break;
+                case 2: c = w - y; break;
+                case 3: c = w + y; break;
+                default: c = w - (k == 3 ? 1e-3f : 0.0f); break;
+            }
+            sBoxPlanes.p[i][k] = c;
+            if (k < 3) {
+                n2 += c * c;
+            }
+        }
+        sBoxPlanes.p[i][4] = n2;
+    }
+    sBoxPlanes.index = index;
+    sBoxPlanes.stamp = sMtxStamp[index];
+    sBoxPlanes.vp = *vp;
+}
+
+static inline s32 model_box_inside(const NativeMesh *mesh, s32 index, const Viewport *vp) {
+    float cx = mesh->boxC[0], cy = mesh->boxC[1], cz = mesh->boxC[2], r2 = mesh->boxR2;
+    s32 i;
+    if (sBoxPlanes.index != index || sBoxPlanes.stamp != sMtxStamp[index] || sBoxPlanes.vp.scaleX != vp->scaleX ||
+        sBoxPlanes.vp.transX != vp->transX || sBoxPlanes.vp.scaleY != vp->scaleY ||
+        sBoxPlanes.vp.transY != vp->transY) {
+        model_box_planes(index, vp);
+    }
+    for (i = 0; i < 5; i++) {
+        const float *p = sBoxPlanes.p[i];
+        float d = cx * p[0] + cy * p[1] + cz * p[2] + p[3];
+        if (!(d > 0.0f) || d * d <= r2 * p[4]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+#if PLAT_DEBUG_TOOLS
+/* DKR_MODEL_BOX_CHECK=1 (test builds): a draw model_box_inside put wholly on the screen has its vertices' edges worked
+ * out anyway; any vertex past an edge is counted (logged every 600 frames as "model box: ..."). */
+static COLD NOINLINE void model_box_check(s32 total, const Viewport *vp) {
+    s32 i, wrong = 0;
+    for (i = 0; i < total; i++) {
+        wrong += vertex_outcode(&sNativeVerts[i], vp) != 0;
+    }
+    if (wrong > 0) {
+        sModelBoxStats[2]++;
+        sModelBoxStats[3] += (u32) wrong;
+    }
+}
+
+static COLD NOINLINE void model_box_log(void) {
+    plat_log("model box: %u draws tested, %u inside%s, %u wrong (%u vertices past an edge)", (unsigned) sModelBoxStats[0],
+             (unsigned) sModelBoxStats[1], sModelBoxCheck ? ", checked" : "", (unsigned) sModelBoxStats[2],
+             (unsigned) sModelBoxStats[3]);
+    __builtin_memset(sModelBoxStats, 0, sizeof(sModelBoxStats));
+}
+#endif
 
 /* The batch recorded after the tag at dl[-1]; returns the words of data used. */
 /* Whether a batch made anew each frame can take the native path: not when a matrix it loads
@@ -5821,6 +5949,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     u8 batchedKey = 0xFF, frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     u32 generation, stamp;
     float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+    s32 inside = FALSE; // Every vertex is inside every screen edge (DKR_MODEL_BOX): sNativeOut is not filled in
 
     if (remaining < 2) {
         return 0;
@@ -6048,7 +6177,29 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sNDrawStats[0]++;
 
     viewport_init(&vp);
-    {
+    if (sModelBox && numLoads == 1 && !dynamic && !g.billboard) {
+        // P57 C1: the mesh's sphere (made once, from the vertices first drawn with it; a track batch's again when its
+        // vertices move, as box_off_screen's) is wholly on the screen: no vertex needs its edges.
+        if (UNLIKELY(mesh->boxSrc == NULL || mesh->boxLoads != gPortLevelLoads ||
+                     (sDrawKind == PORT_DRAW_TRACK && mesh->boxSrc != vtx))) {
+            native_mesh_box(mesh, vtx, total);
+        }
+        inside = model_box_inside(mesh, loads[0].matrix, &vp);
+#if PLAT_DEBUG_TOOLS
+        sModelBoxStats[0]++;
+        sModelBoxStats[1] += (u32) inside;
+        if (UNLIKELY(sModelBoxCheck) && inside) {
+            model_box_check(total, &vp);
+        }
+#endif
+    }
+    if (inside) {
+        for (i = 0; i < total; i++) {
+            const RspVertex *v = &sNativeVerts[i];
+            sNativeSx[i] = v->x * vp.scaleX + v->w * vp.transX;
+            sNativeSy[i] = v->y * vp.scaleY + v->w * vp.transY;
+        }
+    } else {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
         // again (the same sums, so the same values). A batch wholly past one edge is done here.
         u32 all = 0x1F;
@@ -6129,8 +6280,8 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
         u16 *out;
-        if ((sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
-                           sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
+        if (!inside && (sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
+                        sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
             sWalkRejectedTris++;
             continue;
         }
@@ -7518,6 +7669,7 @@ static NOINLINE void native_particle_begin(const Gfx *dl) {
                       (g.geometryMode & G_FOG) != 0, g.billboard);
     g.vertexIndex = 1;
     __builtin_memcpy(g.matrices[2], seg_addr(dl[0].words.w1), sizeof(g.matrices[2]));
+    sMtxStamp[2] = ++sMtxWrites;
     g.curMatrix = 2;
     g.billboard = 1;
 }
@@ -7584,6 +7736,7 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
     } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
         u32 index = w1 & 3;
         __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
+        sMtxStamp[index] = ++sMtxWrites;
         g.curMatrix = index;
         dl++;
     } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
