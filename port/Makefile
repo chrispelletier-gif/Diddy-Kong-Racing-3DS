@@ -79,6 +79,10 @@ endif
 # RELEASE=1: the menus show only what players need; the tools stay compiled in (roadmap P14) but out of reach.
 RELEASE_DEFINES := $(if $(filter 1,$(RELEASE)),-DPORT_RELEASE=1)
 GAME_DEFINES += $(RELEASE_DEFINES)
+# P57 D: HOT_LAYOUT=0 lays the game core's per-draw code out among the backend's again (plat.h PLAT_HOT_GAME), the
+# layout before P57, so a build of each can be benched against the other. Behaviour is the same either way.
+HOT_LAYOUT ?= 1
+GAME_DEFINES += -DDKR_HOT_LAYOUT=$(HOT_LAYOUT)
 
 GAME_INCLUDES := -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/include/libc -I$(ROOT)/include/PR -I$(ROOT)/include/sys \
                  -I$(ROOT)/src -I$(ROOT)/libultra -I$(ROOT)/libultra/src/gu -I$(ROOT)/libultra/src/libc \
