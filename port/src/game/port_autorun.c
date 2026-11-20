@@ -324,6 +324,19 @@ static const BenchSwitch sSwitchesNative[] = {
     // (DKR_LOAD_PREWARM, default on), not on the first three frames after it, where the race start's iris opened in
     // jerks. The usual races do it; this row races one lap the old way, to compare the results' race start columns.
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
+    // T1, gate G-T (2026-11-14, "Fix track GPU maths and tunnel dropouts", PR #526): the vanishing tunnel walls (#234,
+    // #306). libctru hands the GSP the frame's memory fills (colour + depth) and its first command lists together, so a
+    // fill can still be clearing the depth buffer while the GPU draws (gfx_c3d.c fill_wait). DKR_FILL_WAIT=1 lets the
+    // fills finish first. Rows: the native track (NR4, GPU vertex maths) as it was (expect the tunnel dropouts), with
+    // the wait (should be clean), and the wait alone (its cost). Watch Jungle Falls' tunnel.
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    { "native track, fills finished before drawing", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
+    { "fills finished before drawing", { "DKR_FILL_WAIT", NULL, NULL }, 0, 1, 1, 0 },
+    // Core balance plan 2b-B (2026-11-17): native kart and object draws on the GPU's vertex maths (DKR_NATIVE_GPU,
+    // see the Old 3DS list), with the track too and the fills waited for.
+    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
+    { "track, karts and objects on the GPU, fills finished before drawing",
+      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -393,6 +406,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "walk writes the GPU vertices (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
     { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
       { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
+    // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306). The GSP can run the frame's depth
+    // fill alongside its first command lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear
+    // drawn instead). Rows: the depth fill back on with the wait (should be clean, and the fill is cheaper), the native
+    // track (NR4, GPU vertex maths) as it was, and the native track with the fill and the wait. Jungle Falls is in the
+    // list for its tunnel; watch the tunnel and the flashes column.
+    { "depth clear as a memory fill, finished before drawing", { "DKR_DEPTH_FILL", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
+    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
+    { "native track, depth fill finished before drawing",
+      { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
+    // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
+    // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
+    // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
+    // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
+    // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
+    { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
+    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
+    { "track, karts and objects on the GPU, depth fill finished before drawing",
+      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -785,9 +816,11 @@ static void build_short_list(void) {
     static const s8 sBenchTracks[] = { 29, 10, 31 };        // Jungle Falls, Crescent Island, Haunted Woods
     // The New 3DS switch bench: the tracks where 800 pixels and 4x anti-aliasing fall below 60 most (#289, #291).
     // Haunted Woods and Crescent Island for the head flicker, Jungle Falls for its tunnel with the native track (NR4).
+    // Whale Bay added for the native track's bench (T1, 2026-11-14).
     static const s8 sSwitchTracksNew3ds[] = { ASSET_LEVEL_HAUNTEDWOODS, ASSET_LEVEL_CRESCENTISLAND,
-                                              ASSET_LEVEL_JUNGLEFALLS };
-    static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13 }; // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst)
+                                              ASSET_LEVEL_JUNGLEFALLS, 8 };
+    // Whale Bay, Windmill Plains, EverFrost Peak (#326's worst); Jungle Falls for its tunnel (T1, 2026-11-14).
+    static const s8 sSwitchTracksOld3ds[] = { 8, 20, 13, 29 };
     static const s8 sQuickTracks[] = { 31, 29, 10, 8, 13 }; // Haunted Woods, Jungle Falls, Crescent Island,
                                                             // Whale Bay, EverFrost Peak
     static const s8 sBossTracks[] = {
