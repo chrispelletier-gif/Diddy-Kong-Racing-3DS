@@ -379,6 +379,38 @@ jobs:
             exit 1
           fi
 
+      # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
+      # records in the frame regression scenarios. Fails when this commit changes the backend's command words
+      # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register
+      # different from sending every setting for every draw. See port/tools/backend_replay.py.
+      - name: Cache the backend replay's libctru, citro3d and picasso
+        if: ${{ !cancelled() }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/replay-deps
+          key: replay-deps-${{ hashFiles('port/tools/backend_replay.py') }}
+
+      - name: Backend replay
+        if: ${{ !cancelled() }}
+        run: |
+          base=""
+          if [ -d "$RUNNER_TEMP/base/port/3ds" ]; then base="--base-port $RUNNER_TEMP/base/port"; fi
+          python3 port/tools/backend_replay.py ci --deps "$RUNNER_TEMP/replay-deps" --exe port/build/host/dkr \
+            --rom "$RUNNER_TEMP/rom/baserom.z64" --work "$RUNNER_TEMP/replay" $base
+
+      - name: Upload the backend replay's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-replay
+          path: |
+            ${{ runner.temp }}/replay/out/report.md
+            ${{ runner.temp }}/replay/out/words-diff.txt
+            ${{ runner.temp }}/replay/out/state-diff.txt
+            ${{ runner.temp }}/replay/out/walk-diff.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload the report and logs
         if: always()
         uses: actions/upload-artifact@v4
