@@ -458,6 +458,15 @@ static void split_noop(void *p) {
     (void) p;
 }
 
+/* P57 A1: drains (each a cross-core wait for the backend) and their wait, counted for the stall finder. */
+static unsigned int sDrains;
+static unsigned long long sDrainNs;
+
+void gfx_split_drain_counts(unsigned int *drains, unsigned long long *ns) {
+    *drains = sDrains;
+    *ns = sDrainNs;
+}
+
 void gfx_split_drain(void) {
     if (sActive && sCloseFn != NULL) {
         // A record that isn't sKeepFn's, so a batch the backend holds open is drawn before the queue counts as empty.
@@ -465,8 +474,11 @@ void gfx_split_drain(void) {
         c->fn = split_noop;
         commit(c);
     }
+    sDrains++;
     if (sStarted && sHead != sTail) {
+        unsigned long long start = plat_time_ns();
         wait_for_room(SPLIT_RING_BYTES);
+        sDrainNs += plat_time_ns() - start;
     }
 }
 

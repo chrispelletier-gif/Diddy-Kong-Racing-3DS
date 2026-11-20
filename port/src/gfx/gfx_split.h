@@ -14,6 +14,8 @@ int gfx_split_frame_start(int direct, int holdCores);
 void gfx_split_frame_end(void);
 int gfx_split_active(void);
 void gfx_split_drain(void);
+/* Drains so far and their total wait (P57 A1, the stall finder). */
+void gfx_split_drain_counts(unsigned int *drains, unsigned long long *ns);
 void gfx_split_kick(void);
 void gfx_split_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gfx_split_clear_depth(const short rect[4]);

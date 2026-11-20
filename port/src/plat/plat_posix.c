@@ -526,6 +526,11 @@ unsigned int plat_saves_failed(void) {
 void plat_saves_drain(void) {
 }
 
+void plat_log_waits(unsigned int *count, unsigned long long *ns) {
+    *count = 0;
+    *ns = 0;
+}
+
 int plat_log_recent(char *out, int size) {
     if (size > 0) {
         out[0] = '\0';
