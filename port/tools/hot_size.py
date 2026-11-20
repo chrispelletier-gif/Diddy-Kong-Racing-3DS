@@ -23,8 +23,12 @@ import re
 import subprocess
 import sys
 
-# Budgets in bytes, from the CI debug build of PR #565 (master f07de6f + this check). A total may exceed its budget by up to SLACK bytes.
-BUDGETS = {"hot_span": 55516, "walk_set": 32052, "backend_set": 18112}
+# Budgets in bytes, from the CI debug build of PR #565 (master f07de6f + this check), then PR #563 (P54 step 2): its
+# backend_set adds walk_draw_ready (the backend's draw of the walk's finished vertices: with DKR_WALK_VERTS on it is
+# used instead of gfxb_draw_indexed's lean path, so a frame's draws run one or the other, not both) and the cutting
+# shared with the walk (clip_cut_k, clip_triangle_band, which were clip_cut_lean's and clip_triangle's code before).
+# A total may exceed its budget by up to SLACK bytes.
+BUDGETS = {"hot_span": 55596, "walk_set": 32052, "backend_set": 23300}
 SLACK = 1024
 
 # A name ending in "?" is optional: GCC may inline it, or it only exists once a PR that adds it is merged (P54 step 2,
