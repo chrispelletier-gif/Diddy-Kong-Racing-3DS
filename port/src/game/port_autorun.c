@@ -370,6 +370,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, depth fill finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P57 C (2026-11-20, proposals/3ds-old3ds-perf-next-plan.md): racer and track draws, now that their vertex maths is
+    // on the walk (game core, the limit). DKR_MODEL_BOX: a draw whose bounding sphere is wholly on the screen skips the
+    // per-vertex screen edges and the per-triangle off-screen test (PC: 57-67% of a Whale Bay race's draws, frames
+    // identical). Read game_core_ms and the racers' and track's walk ms in the draw mix. Then one lap with the
+    // self-check: the log's "model box: ... N wrong" lines should say 0 wrong (a wrong one costs only GPU time).
+    // C3: back faces left to the GPU (DKR_CPU_CULL 0): the walk stops testing them; keep it only if the game core falls
+    // and the renderer core stays below it.
+    { "model draws on screen skip the edge tests (MODEL_BOX 1, P57 C1)", { "DKR_MODEL_BOX", NULL, NULL }, 0, 1, 1, 0 },
+    { "model box self-check (1 lap, log: 0 wrong)", { "DKR_MODEL_BOX", "DKR_MODEL_BOX_CHECK", NULL }, 0, 1, 1, 1 },
+    { "back faces culled by the GPU, not the walk (CPU_CULL 0, P57 C3)", { "DKR_CPU_CULL", NULL, NULL }, 1, 0, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
