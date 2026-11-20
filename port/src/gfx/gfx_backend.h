@@ -208,6 +208,14 @@ void gfxb_start_frame(void);
 void gfxb_end_frame(void);
 void gfxb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gfxb_clear_depth(const short rect[4]);
+/*
+ * DKR_WALK_VERTS (P54 step 2; the 3DS backend, a no-op elsewhere): with the two-core renderer, the walk's thread makes
+ * a draw's GPU vertices itself and queues them (gfx_split.c). gfxb_walk_frame_start is called at each queued frame's
+ * start, after its start record; gfxb_walk_draw_indexed returns 0 when the draw is to be queued as before.
+ */
+void gfxb_walk_frame_start(void);
+int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                           const unsigned short *indices, int numTriangles);
 void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 /*
  * The same with the triangles' corners as indices into verts, three a triangle, so that a vertex several triangles

@@ -32,6 +32,7 @@ void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *para
 void gfx_split_mesh_free(void *mesh);
 void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes);
 void gfx_split_call_commit(void *payload);
+void gfx_split_call_commit_shrink(void *payload, unsigned int bytes);
 /* closeFn is run on the backend thread before any record but a call of keepFn (see gfx_split.c). */
 void gfx_split_set_hooks(void (*closeFn)(void), void (*keepFn)(void *));
 

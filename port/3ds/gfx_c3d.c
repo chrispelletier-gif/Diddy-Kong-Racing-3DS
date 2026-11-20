@@ -181,6 +181,21 @@ static int sWideUnsupported;    // An original 2DS, which can't show 800 pixels
  * the two eyes, so what is sEyeConv away from the camera stays at the depth of the screen. Flat draws (HUD, text) get
  * w = sEyeConv * sHudW. The player's tuning (roadmap G5a-G5e, "stereo tuning" below) sets all three each frame. */
 static float sEyeSep, sEyeConv = 130.0f, sHudW = 1.0f;
+
+/*
+ * DKR_WALK_VERTS (P54 step 2, see "The walk writes the vertices" below): the frame settings that converting and
+ * cutting a draw's vertices read. The backend publishes its own at each frame's start (walk_publish_consts); the walk
+ * takes a copy at its frame's start and converts with it, and the backend checks that copy against its own when it
+ * comes to that frame. Every member is 4 bytes, so two copies compare with memcmp.
+ */
+typedef struct VertConsts {
+    float bandX, bandY; // The guard band (sBandX, sBandY) of the main render target (see walk_publish_consts)
+    float scale3D;      // sScale3D
+    float conv;         // sEyeConv * sHudW: where flat draws sit in 3D
+    int stereo, wide;   // sStereo, sWide
+    int fastClip;       // sFastClip
+    int usable;         // The lean draw would take the frame's draws (see walk_publish_consts)
+} VertConsts;
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
 static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
 static int sOnceFrame;       // This frame is
@@ -492,13 +507,19 @@ static inline void to_screen(const GfxVertex *v, float *pos) {
 /* The same for a flat draw: its 4:3 shape kept on a wide screen (gfx_flat_x), and in stereo its w made sEyeConv, so
  * that it sits at the depth of the screen, or nearer or farther by the HUD depth setting (scaling the whole position
  * leaves where it lands unchanged). */
-static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
+/* stereo, conv (sEyeConv * sHudW) and wide are the frame's sStereo, sEyeConv * sHudW and sWide, passed in so that the
+ * walk (DKR_WALK_VERTS, which has its own copies of them, VertConsts) converts with the very same code. */
+static inline void to_screen_flat_k(const GfxVertex *v, float *pos, int flat, int stereo, float conv, int wide) {
     float z = 0.5f * (v->z - v->w);
-    float f = (sStereo && v->w > 0.0f) ? sEyeConv * sHudW / v->w : 1.0f;
+    float f = (stereo && v->w > 0.0f) ? conv / v->w : 1.0f;
     pos[0] = v->y * f;
-    pos[1] = -(sWide ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x * NARROW) * f;
+    pos[1] = -(wide ? gfx_flat_x(v->x, v->w, NARROW, flat) : v->x * NARROW) * f;
     pos[2] = (z < 0.0f ? z : 0.0f) * f;
     pos[3] = v->w * f;
+}
+
+static inline void to_screen_flat(const GfxVertex *v, float *pos, int flat) {
+    to_screen_flat_k(v, pos, flat, sStereo, sEyeConv * sHudW, sWide);
 }
 
 static inline void place(const GfxVertex *v, float *pos, int flat) {
@@ -3751,6 +3772,8 @@ static void read_switches(void) {
              plat_switch("DKR_SKY_LAST", 0) ? "drawn last" : "drawn first");
 }
 
+static void walk_publish_consts(void);
+
 void gfxb_start_frame(void) {
     FrameSlot *slot;
 #if PLAT_DEBUG_TOOLS
@@ -3839,6 +3862,7 @@ void gfxb_start_frame(void) {
         gfxb_clear_depth(sFullScreen);
     }
     sFrameStarted = 1;
+    walk_publish_consts(); // DKR_WALK_VERTS: this frame's settings, for the walk
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -5540,12 +5564,12 @@ static inline int outside_band(const GfxVertex *v) {
     return outside_band_of(v, sBandX, sBandY);
 }
 
-static float clip_distance(const GfxVertex *v, int plane) {
+static inline float clip_distance(const GfxVertex *v, int plane, float bandX, float bandY) {
     switch (plane) {
-        case 0: return sBandX * v->w - v->x;
-        case 1: return sBandX * v->w + v->x;
-        case 2: return sBandY * v->w - v->y;
-        default: return sBandY * v->w + v->y;
+        case 0: return bandX * v->w - v->x;
+        case 1: return bandX * v->w + v->x;
+        case 2: return bandY * v->w - v->y;
+        default: return bandY * v->w + v->y;
     }
 }
 
@@ -5599,12 +5623,13 @@ int plat_3ds_guard_band_setting(void) {
 }
 
 /*
- * Cuts one triangle (its corners a, b, c) to the guard band and writes the fan of the polygon that is left (at most 7
- * corners, so 5 triangles) to out, each triangle of the fan with its own three corners, as the triangle list before
- * indexing had. Returns how many corners were written (a multiple of 3, at most 15).
+ * Cuts one triangle (its corners a, b, c) to the guard band (bandX, bandY: sBandX and sBandY, or the walk's copies
+ * with DKR_WALK_VERTS) and writes the fan of the polygon that is left (at most 7 corners, so 5 triangles) to out,
+ * each triangle of the fan with its own three corners, as the triangle list before indexing had. Returns how many
+ * corners were written (a multiple of 3, at most 15).
  */
-static int __attribute__((noinline)) clip_triangle(const GfxVertex *a, const GfxVertex *b, const GfxVertex *c,
-                                                   GfxVertex *out) {
+static int __attribute__((noinline)) clip_triangle_band(const GfxVertex *a, const GfxVertex *b, const GfxVertex *c,
+                                                        GfxVertex *out, float bandX, float bandY) {
     GfxVertex poly[2][16];
     int j, k, n, m = 0, plane;
     poly[0][0] = *a;
@@ -5617,7 +5642,7 @@ static int __attribute__((noinline)) clip_triangle(const GfxVertex *a, const Gfx
         int cnt = 0;
         for (j = 0; j < n; j++) {
             const GfxVertex *p = &pin[j], *q = &pin[(j + 1) % n];
-            float dp = clip_distance(p, plane), dq = clip_distance(q, plane);
+            float dp = clip_distance(p, plane, bandX, bandY), dq = clip_distance(q, plane, bandX, bandY);
             if (dp >= 0.0f) {
                 pout[cnt++] = *p;
             }
@@ -5638,6 +5663,10 @@ static int __attribute__((noinline)) clip_triangle(const GfxVertex *a, const Gfx
         m += 3;
     }
     return m;
+}
+
+static inline int clip_triangle(const GfxVertex *a, const GfxVertex *b, const GfxVertex *c, GfxVertex *out) {
+    return clip_triangle_band(a, b, c, out, sBandX, sBandY);
 }
 
 /*
@@ -5803,17 +5832,11 @@ static inline int indexed_enabled(void) {
     return sIndexed;
 }
 
-/* Converts one vertex to the GPU's short format at out (or the long one, with the second texture's coordinates
- * after it). Texture coordinates are scaled for padded textures, and t is flipped (the GPU's t = 0 is the last row).
- * scale3D is sScale3D, passed in so that a loop can keep it in a register (see test_and_write_vertices). */
-static inline void convert_vertex(const GfxVertex *v, u8 *out, int fmt, int flat, float scale3D, float su0,
-                                  float sv0, float su1, float sv1) {
+/* A converted vertex's texture coordinates and colour: scaled for padded textures, and t flipped (the GPU's t = 0 is
+ * the last row). */
+static inline void convert_vertex_rest(const GfxVertex *v, u8 *out, int fmt, float su0, float sv0, float su1,
+                                       float sv1) {
     C3DVertex *o = (C3DVertex *) out;
-    if (flat) {
-        to_screen_flat(v, o->pos, flat);
-    } else {
-        to_screen_scaled(v, o->pos, scale3D);
-    }
     o->tc0[0] = v->u0 * su0;
     o->tc0[1] = 1.0f - v->v0 * sv0;
     memcpy(o->color, &v->r, 4);
@@ -5822,6 +5845,31 @@ static inline void convert_vertex(const GfxVertex *v, u8 *out, int fmt, int flat
         o2->tc1[0] = v->u1 * su1;
         o2->tc1[1] = 1.0f - v->v1 * sv1;
     }
+}
+
+/* Converts one vertex to the GPU's short format at out (or the long one, with the second texture's coordinates
+ * after it). scale3D is sScale3D, passed in so that a loop can keep it in a register (see test_and_write_vertices). */
+static inline void convert_vertex(const GfxVertex *v, u8 *out, int fmt, int flat, float scale3D, float su0,
+                                  float sv0, float su1, float sv1) {
+    C3DVertex *o = (C3DVertex *) out;
+    if (flat) {
+        to_screen_flat(v, o->pos, flat);
+    } else {
+        to_screen_scaled(v, o->pos, scale3D);
+    }
+    convert_vertex_rest(v, out, fmt, su0, sv0, su1, sv1);
+}
+
+/* The same with the flat path's frame settings passed in (the walk's copies of them, DKR_WALK_VERTS). */
+static inline void convert_vertex_k(const GfxVertex *v, u8 *out, int fmt, int flat, float scale3D, int stereo,
+                                    float conv, int wide, float su0, float sv0, float su1, float sv1) {
+    C3DVertex *o = (C3DVertex *) out;
+    if (flat) {
+        to_screen_flat_k(v, o->pos, flat, stereo, conv, wide);
+    } else {
+        to_screen_scaled(v, o->pos, scale3D);
+    }
+    convert_vertex_rest(v, out, fmt, su0, sv0, su1, sv1);
 }
 
 /* The 48-byte vertices of DKR_VERTEX_FORMAT=48, kept out of the usual path. */
@@ -6030,33 +6078,52 @@ static u16 sLeanIndices[GFX_MAX_BATCH_TRIANGLES * 15];   // The indices of a dra
  * one side are dropped (DKR_FAST_CLIP) and the rest are cut, their fans' corners converted after the draw's own
  * vertices (used of them so far at out). Returns the vertex count; *count gets the index count.
  */
-static int __attribute__((noinline)) clip_cut_lean(const GfxVertex *verts, const u16 *idx, int numTriangles, u8 *out,
-                                                   int stride, int fmt, int flat, float su0, float sv0, float su1,
-                                                   float sv1, int used, int *count) {
+static int __attribute__((noinline)) clip_cut_k(const VertConsts *kc, const u8 *outside, u16 *outIdx,
+                                                const GfxVertex *verts, const u16 *idx, int numTriangles, u8 *out,
+                                                int stride, int fmt, int flat, float su0, float sv0, float su1,
+                                                float sv1, int used, int *count) {
     int i, k, n, usedIdx = 0, indexCount = numTriangles * 3;
     for (i = 0; i < indexCount; i += 3) {
-        int a = sLeanOutside[idx[i]], b = sLeanOutside[idx[i + 1]], c = sLeanOutside[idx[i + 2]];
+        int a = outside[idx[i]], b = outside[idx[i + 1]], c = outside[idx[i + 2]];
         if (!(a | b | c)) {
-            sLeanIndices[usedIdx++] = idx[i];
-            sLeanIndices[usedIdx++] = idx[i + 1];
-            sLeanIndices[usedIdx++] = idx[i + 2];
+            outIdx[usedIdx++] = idx[i];
+            outIdx[usedIdx++] = idx[i + 1];
+            outIdx[usedIdx++] = idx[i + 2];
             continue;
         }
-        if (sFastClip && (a & b & c & OUTSIDE_PLANES)) {
+        if (kc->fastClip && (a & b & c & OUTSIDE_PLANES)) {
             continue; // Wholly beyond one side: the clipper would leave nothing.
         }
         {
             GfxVertex fan[15];
-            n = clip_triangle(&verts[idx[i]], &verts[idx[i + 1]], &verts[idx[i + 2]], fan);
+            n = clip_triangle_band(&verts[idx[i]], &verts[idx[i + 1]], &verts[idx[i + 2]], fan, kc->bandX, kc->bandY);
             for (k = 0; k < n; k++) {
-                convert_vertex(&fan[k], out + (used + k) * stride, fmt, flat, sScale3D, su0, sv0, su1, sv1);
-                sLeanIndices[usedIdx++] = (u16) (used + k);
+                convert_vertex_k(&fan[k], out + (used + k) * stride, fmt, flat, kc->scale3D, kc->stereo, kc->conv,
+                                 kc->wide, su0, sv0, su1, sv1);
+                outIdx[usedIdx++] = (u16) (used + k);
             }
             used += n;
         }
     }
     *count = usedIdx;
     return used;
+}
+
+/* The cutting with the frame's own settings, into sLeanIndices (the walk has its own, DKR_WALK_VERTS). Out of line, as
+ * it was before the walk shared it: gfxb_draw_indexed's per-draw code stays as short. */
+static int __attribute__((noinline)) clip_cut_lean(const GfxVertex *verts, const u16 *idx, int numTriangles, u8 *out, int stride, int fmt,
+                         int flat, float su0, float sv0, float su1, float sv1, int used, int *count) {
+    VertConsts kc;
+    kc.bandX = sBandX;
+    kc.bandY = sBandY;
+    kc.scale3D = sScale3D;
+    kc.conv = sEyeConv * sHudW;
+    kc.stereo = sStereo;
+    kc.wide = sWide;
+    kc.fastClip = sFastClip;
+    kc.usable = 1;
+    return clip_cut_k(&kc, sLeanOutside, sLeanIndices, verts, idx, numTriangles, out, stride, fmt, flat, su0, sv0, su1,
+                      sv1, used, count);
 }
 
 /*
@@ -6099,17 +6166,80 @@ static int __attribute__((noinline, cold)) restart_vertex_buffer(int fmt, const 
     return vertex;
 }
 
+/*
+ * The lean draw's last part, once its vertices are at out (where use_vertex_format will start them) and its indices
+ * (count of them, relative to the first vertex) are known: the settings, the indices and the draw. Also the end of a
+ * draw whose vertices the walk wrote (DKR_WALK_VERTS, walk_draw_ready), so the two cannot drift apart; inlined into
+ * each, so the lean draw's code is what it was.
+ */
+static inline __attribute__((always_inline)) void lean_draw_tail(const GfxDrawState *state, u8 *out, int fmt,
+                                                                 int stride, int written, const u16 *indices,
+                                                                 int count, int numTriangles, float su0, float sv0,
+                                                                 float su1, float sv1, int timed,
+                                                                 unsigned long long t0, unsigned long long t1) {
+    HangDraw *hangDraw;
+    int first, vertex, i, twiceReads = 0;
+    unsigned long long t2 = 0;
+    u16 *ibo;
+    hangDraw = hang_draw_start(state, numTriangles);
+    first = drain_before_draw(state, numTriangles);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+        if (timed) {
+            draw_reading(tw, DRAW_PART_TWICE, 1);
+            twiceReads = 2;
+        }
+    }
+    // With GPU vertex maths on, the one shader also draws the CPU path: after a model draw its
+    // uniforms must be set back to the identity, exactly as the full draw above does.
+    set_cpu_uniforms();
+    unif_write_twice();
+    if (timed) {
+        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
+    }
+    vertex = use_vertex_format(fmt);
+    if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
+        vertex = restart_vertex_buffer(fmt, out, written * stride);
+    }
+    ibo_align();
+    ibo = sIbo + sIboUsed;
+    for (i = 0; i < count; i++) {
+        ibo[i] = (u16) (vertex + indices[i]);
+    }
+    sIboUsed += count;
+    if (timed) {
+        draw_reading(t2, DRAW_PART_WRITE, 1);
+    }
+    // (As draw_prims: a stereo frame made once draws each eye by running the whole frame again.)
+    if (sStereo && !sOnceFrame) {
+        draw_prims_stereo(vertex, count, ibo);
+    } else {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, ibo);
+    }
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += written * stride;
+    sFrameTriangles += numTriangles;
+    if (timed) {
+        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
+    }
+}
+
 PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts, const u16 *indices,
                        int numTriangles) {
-    HangDraw *hangDraw;
     float su0, sv0, su1, sv1;
-    int first, vertex, count, fmt, stride, flat, start, written, any, i;
+    int count, fmt, stride, flat, start, written, any;
     u8 *out;
-    u16 *ibo;
     // Timed in parts while the profiler is on and DKR_DRAW_PARTS says so (draw_part). Here the vertex pass, band test
     // and cutting included, is counted as writing the vertices (PROF_PART_WRITE), and PROF_PART_CLIP stays empty.
-    int timed, twiceReads = 0;
-    unsigned long long t0 = 0, t1 = 0, t2 = 0;
+    int timed;
+    unsigned long long t0 = 0, t1 = 0;
 
     if (skip_invisible(state)) {
         return;
@@ -6173,54 +6303,7 @@ PLAT_HOT void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *vert
     if (__builtin_expect(sFrameCount == sLogFrame, 0)) {
         log_draw(state, verts, numVerts, written, indices, numTriangles);
     }
-    hangDraw = hang_draw_start(state, numTriangles);
-    first = drain_before_draw(state, numTriangles);
-    if (first) {
-        forget_gpu_state();
-    }
-    set_all_state(state, &su0, &sv0, &su1, &sv1);
-    if (first) {
-        unsigned long long tw = timed ? draw_reading(0, -1, 0) : 0;
-        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
-        if (timed) {
-            draw_reading(tw, DRAW_PART_TWICE, 1);
-            twiceReads = 2;
-        }
-    }
-    // With GPU vertex maths on, the one shader also draws the CPU path: after a model draw its
-    // uniforms must be set back to the identity, exactly as the full draw above does.
-    set_cpu_uniforms();
-    unif_write_twice();
-    if (timed) {
-        t2 = draw_reading(t1, DRAW_PART_STATE, 1 + twiceReads);
-    }
-    vertex = use_vertex_format(fmt);
-    if (__builtin_expect(vertex + written > 0xFFFF, 0)) {
-        vertex = restart_vertex_buffer(fmt, out, written * stride);
-    }
-    ibo_align();
-    ibo = sIbo + sIboUsed;
-    for (i = 0; i < count; i++) {
-        ibo[i] = (u16) (vertex + indices[i]);
-    }
-    sIboUsed += count;
-    if (timed) {
-        draw_reading(t2, DRAW_PART_WRITE, 1);
-    }
-    // (As draw_prims: a stereo frame made once draws each eye by running the whole frame again.)
-    if (sStereo && !sOnceFrame) {
-        draw_prims_stereo(vertex, count, ibo);
-    } else {
-        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, ibo);
-    }
-    if (hangDraw != NULL) {
-        hangDraw->cmdEnd = cmd_position();
-    }
-    sVboUsed += written * stride;
-    sFrameTriangles += numTriangles;
-    if (timed) {
-        draw_readings_end(t0, 4 + twiceReads, 5 + twiceReads);
-    }
+    lean_draw_tail(state, out, fmt, stride, written, indices, count, numTriangles, su0, sv0, su1, sv1, timed, t0, t1);
 }
 
 /* A triangle list: each corner its own vertex. */
@@ -6236,6 +6319,537 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
     }
     gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
+}
+
+/*
+ * The walk writes the vertices (DKR_WALK_VERTS, roadmap P54 step 2; off by default until an Old 3DS bench has raced
+ * it). With the two-core renderer the walk (the game's core) queued each draw's GfxVertex data, and the backend (the
+ * other core, the one that limits an Old 3DS) tested it against the guard band, converted it to the GPU's format,
+ * cut the triangles crossing the band and rebased the indices. With this switch the walk does the testing, converting
+ * and cutting itself (gfxb_walk_draw_indexed, on the walk's thread) and queues the finished vertices and indices; the
+ * backend copies them into the frame's vertex buffer and draws (walk_draw_ready), with the lean draw's own last part
+ * (lean_draw_tail). The vertex buffer and index buffer come out the same bytes as the lean draw's.
+ *
+ * What the conversion reads from the frame (the band, the 3D scale, 3D and widescreen, where flat draws sit in 3D,
+ * DKR_FAST_CLIP) is a VertConsts: the backend publishes its own at each frame's start, and the walk, up to two frames
+ * ahead, takes the latest at its own frame's start and sends that copy first (walk_frame_consts). The backend
+ * compares it with its own for that frame: they differ only for a frame or two after a setting changes (widescreen,
+ * 3D, anti-aliasing, edge trimming), and those frames are drawn with the walk's (counted, and logged). The band is
+ * the main render target's even while adaptive anti-aliasing draws on the smaller one, whose band is wider, so the
+ * walk's cuts always stay within what either target's rasterizer takes.
+ *
+ * The texture coordinate scales (a padded texture's) are worked out from the GfxTexture as its upload does
+ * (walk_tex_scales), since the walk may be ahead of the upload. A texture whose upload failed is drawn with scale 1
+ * by the backend: the walk can't know that, so such a draw's texture coordinates differ, on a texture that draws
+ * white anyway.
+ *
+ * The walk leaves a draw to the backend as before (returns 0) when the lean draw wouldn't take it (48-byte vertices,
+ * DKR_INDEXED=0, edge trimming off, 3D with auto convergence, which notes each draw's nearest vertex), when it is too
+ * big for a batch or the queue, while DKR_LOG_DRAWS is set (the log needs the vertices), and for the two-triangle
+ * untextured flat draws that the frame's first draw may turn into a memory fill (rect_as_fill). The GPU-draw
+ * profiler (DKR_GPU_DRAWS, New 3DS) gets no vertex box for the walk's draws.
+ *
+ * DKR_WALK_VERTS_CHECK (test builds): the walk also queues the original vertices and indices, and the backend makes
+ * the lean draw's vertices from them as before and compares (walk_check): "walk verts: N draws checked, M differ".
+ */
+typedef struct WalkFrame {
+    VertConsts k;
+    int check; // DKR_WALK_VERTS_CHECK: the draws carry their GfxVertex data too
+    int pad;
+} WalkFrame;
+
+/* A draw the walk made: the record's bytes are this, then (check frames) numVerts GfxVertex and 3 * numTriangles
+ * indices as the walk had them (checkBytes in all), then idxBytes of indices relative to the first vertex (count of
+ * them, already cut), then written vertices in format fmt. */
+typedef struct WalkReady {
+    GfxDrawState state;
+    int fmt, numVerts, numTriangles; // numVerts and numTriangles: before cutting
+    int written, count;
+    int checkBytes, idxBytes;
+    int pad;
+} WalkReady;
+#define WALK_READY_BYTES ((sizeof(WalkReady) + 7u) & ~7u)
+
+static volatile unsigned int sWalkConstsSeq; // Odd while the backend writes sWalkConstsPub; 0 until first written
+static VertConsts sWalkConstsPub;            // The backend's frame settings, for the walk
+static VertConsts sBackConsts;               // The same, the backend's own copy for this frame
+// Walk thread:
+static VertConsts sWalkK;                    // The walk's copy for the frame it is walking
+static int sWalkOn, sWalkCheck;              // Its draws are made here this frame; with the check
+static u8 sWalkOutside[GFX_MAX_BATCH_VERTICES];
+static unsigned int sWalkLeft;               // Draws it left to the backend (for the log; read there unlocked)
+// Backend thread:
+static int sWalkFrameCheck;                  // This frame's draws carry their GfxVertex data
+static VertConsts sWalkFrameK;               // The walk's settings this frame's draws were made with
+static int sWalkWideFrame;                   // DKR_WALK_SAFE_BAND: their band is wider than the frame's (walk_recut)
+static unsigned int sWalkWideFrames, sWalkRecut; // Frames and draws cut again so (for the log)
+static unsigned int sWalkDrawn, sWalkStale, sWalkFrames, sWalkChecked, sWalkDiffer, sWalkNoRoom;
+#ifndef PORT_RELEASE
+static u8 *sWalkCheckBuf; // walk_check's own vertices
+static int sWalkCheckCap;
+#endif
+
+/* Backend, at each frame's start (gfxb_start_frame): its frame settings, for the walk. */
+static void walk_publish_consts(void) {
+    VertConsts k;
+    const C3D_RenderTarget *main = sLowActive && sMainTarget != NULL ? sMainTarget : sTarget;
+    if (main == NULL) {
+        return;
+    }
+    k.bandX = band_for(main->frameBuf.height);
+    k.bandY = band_for(main->frameBuf.width);
+    k.scale3D = sScale3D;
+    k.conv = sEyeConv * sHudW;
+    k.stereo = sStereo;
+    k.wide = sWide;
+    k.fastClip = sFastClip;
+    k.usable = sDrawLean && !sVfmtOld && indexed_enabled() && sGuardBandFrame && !(sStereo && sTuning[STEREO_AUTO]);
+    sBackConsts = k;
+    if (memcmp(&k, &sWalkConstsPub, sizeof(k)) == 0 && sWalkConstsSeq != 0) {
+        return;
+    }
+    sWalkConstsSeq++;
+    __sync_synchronize();
+    sWalkConstsPub = k;
+    __sync_synchronize();
+    sWalkConstsSeq++;
+}
+
+/* Walk: the backend's latest frame settings; FALSE before it has drawn a frame. */
+static int walk_take_consts(VertConsts *k) {
+    unsigned int seq;
+    do {
+        seq = sWalkConstsSeq;
+        __sync_synchronize();
+        *k = sWalkConstsPub;
+        __sync_synchronize();
+    } while ((seq & 1) || seq != sWalkConstsSeq);
+    return seq != 0;
+}
+
+/* Backend: the walk's settings for the frame now being made (queued right after its start). */
+static void walk_frame_consts(void *payload) {
+    const WalkFrame *f = payload;
+    sWalkFrameCheck = f->check;
+    sWalkFrames++;
+    sWalkFrameK = f->k;
+    // DKR_WALK_SAFE_BAND (default 1): the walk is up to two frames ahead, so for a frame or two after the render
+    // target grows (widescreen or anti-aliasing turned on: 400 -> 800 pixels across) its draws were cut to the old,
+    // wider band, and corners past ~1000 pixels would make the PICA drop their triangles (#147). Those frames' draws
+    // are cut again here to the frame's own band (walk_recut).
+    sWalkWideFrame = (f->k.bandX > sBackConsts.bandX || f->k.bandY > sBackConsts.bandY) &&
+                     plat_switch("DKR_WALK_SAFE_BAND", 1) != 0;
+    sWalkWideFrames += sWalkWideFrame;
+    if (memcmp(&f->k, &sBackConsts, sizeof(VertConsts)) != 0) {
+        if (sWalkStale++ < 5) {
+            plat_log("walk verts: frame %d made with the walk's settings of an earlier frame (band %.2f/%.2f, "
+                     "scale %.2f, 3D %d, wide %d; the frame's %.2f/%.2f, %.2f, %d, %d)",
+                     sFrameCount, f->k.bandX, f->k.bandY, f->k.scale3D, f->k.stereo, f->k.wide, sBackConsts.bandX,
+                     sBackConsts.bandY, sBackConsts.scale3D, sBackConsts.stereo, sBackConsts.wide);
+        }
+    }
+    if (sWalkFrames % 1800 == 1 || (sWalkFrameCheck && sWalkFrames % 300 == 0)) {
+        plat_log("walk verts: %u frames, %u draws made by the walk (%u left to this core as before), %u left out "
+                 "for room, %u frames with older settings (%u with a wider band: %u draws cut again)",
+                 sWalkFrames, sWalkDrawn, sWalkLeft, sWalkNoRoom, sWalkStale, sWalkWideFrames, sWalkRecut);
+        if (sWalkFrameCheck) {
+            plat_log("walk verts: %u draws checked, %u differ", sWalkChecked, sWalkDiffer);
+        }
+    }
+}
+
+/* For the PC's backend replay (port/host/c3d_replay, REPLAY_WALK): draws the walk made, and the self-check's counts. */
+void gfxb_walk_stats(unsigned int *drawn, unsigned int *checked, unsigned int *differ) {
+    *drawn = sWalkDrawn;
+    *checked = sWalkChecked;
+    *differ = sWalkDiffer;
+}
+
+/* A texture's coordinate scales as gfxb_texture_upload sets them, from the GfxTexture alone (see above). */
+static inline void walk_tex_scales(const GfxTexture *tex, float *scaleU, float *scaleV) {
+    unsigned int w, h, pw, ph;
+    int resample;
+    if (tex == NULL) {
+        *scaleU = 1.0f;
+        *scaleV = 1.0f;
+        return;
+    }
+    w = tex->width;
+    h = tex->height;
+    pw = next_pot(w);
+    ph = next_pot(h);
+    resample = (tex->wrapS != GFX_WRAP_CLAMP && pw != w) || (tex->wrapT != GFX_WRAP_CLAMP && ph != h);
+    *scaleU = resample ? 1.0f : (float) w / pw;
+    *scaleV = resample ? 1.0f : (float) h / ph;
+}
+
+/* Walk thread, at each queued frame's start (gfx_split_frame_start, after its start record). */
+void gfxb_walk_frame_start(void) {
+    static int sEpoch = -1, sSetting, sCheckSetting, sLogDraws;
+    WalkFrame *f;
+    VertConsts k;
+    sWalkOn = 0;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sSetting = plat_switch("DKR_WALK_VERTS", 0) != 0;
+#ifdef PORT_RELEASE
+        sCheckSetting = 0;
+#else
+        sCheckSetting = plat_switch("DKR_WALK_VERTS_CHECK", 0) != 0;
+#endif
+        sLogDraws = plat_getenv("DKR_LOG_DRAWS") != NULL;
+    }
+    if (!sSetting || sLogDraws || !walk_take_consts(&k) || !k.usable) {
+        return;
+    }
+    f = gfx_split_call_reserve(walk_frame_consts, sizeof(WalkFrame));
+    if (f == NULL) {
+        return;
+    }
+    f->k = k;
+    f->check = sCheckSetting;
+    f->pad = 0;
+    gfx_split_call_commit(f);
+    sWalkK = k;
+    sWalkCheck = sCheckSetting;
+    sWalkOn = 1;
+}
+
+/* Backend: a draw the walk made (see above). */
+static void walk_draw_ready(void *payload);
+
+/* Walk thread (gfx_split_draw_indexed): makes the draw's vertices and queues them; 0 = queue it as before. */
+int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                           const unsigned short *indices, int numTriangles) {
+    const VertConsts *kc = &sWalkK;
+    WalkReady *r;
+    float su0, sv0, su1, sv1;
+    const float bandX = kc->bandX, bandY = kc->bandY;
+    int fmt, stride, flat, any = 0, i, maxVerts, maxIdx, written, count;
+    unsigned int checkBytes, idxBytes;
+    u8 *base, *out;
+    u16 *idxOut;
+    if (!sWalkOn) {
+        return 0;
+    }
+    if (numTriangles <= 0 || numVerts <= 0 || numVerts > GFX_MAX_BATCH_VERTICES ||
+        numTriangles > GFX_MAX_BATCH_TRIANGLES ||
+        (numTriangles == 2 && state->flat && state->textures[0] == NULL)) { // rect_as_fill may take it
+        sWalkLeft++;
+        return 0;
+    }
+    fmt = state->textures[1] != NULL ? VFMT_LONG : VFMT_SHORT;
+    stride = sVfmtStride[fmt];
+    flat = gfx_flat_mode(state);
+    for (i = 0; i < numVerts; i++) {
+        int b = outside_band_of(&verts[i], bandX, bandY);
+        sWalkOutside[i] = (u8) b;
+        any |= b;
+    }
+    // Room for the most that cutting can add: 15 corners (and indices) for each triangle that is cut.
+    maxVerts = numVerts;
+    maxIdx = numTriangles * 3;
+    if (any) {
+        for (i = 0; i < numTriangles * 3; i += 3) {
+            int a = sWalkOutside[indices[i]], b = sWalkOutside[indices[i + 1]], c = sWalkOutside[indices[i + 2]];
+            if ((a | b | c) && !(kc->fastClip && (a & b & c & OUTSIDE_PLANES))) {
+                maxVerts += 15;
+                maxIdx += 12;
+            }
+        }
+    }
+    checkBytes = sWalkCheck ? (numVerts * sizeof(GfxVertex) + numTriangles * 3u * sizeof(u16) + 7u) & ~7u : 0;
+    idxBytes = (maxIdx * sizeof(u16) + 7u) & ~7u;
+    r = gfx_split_call_reserve(walk_draw_ready, WALK_READY_BYTES + checkBytes + idxBytes + maxVerts * stride);
+    if (r == NULL) {
+        sWalkLeft++;
+        return 0;
+    }
+    base = (u8 *) r + WALK_READY_BYTES;
+    if (checkBytes != 0) {
+        memcpy(base, verts, numVerts * sizeof(GfxVertex));
+        memcpy(base + numVerts * sizeof(GfxVertex), indices, numTriangles * 3 * sizeof(u16));
+    }
+    idxOut = (u16 *) (base + checkBytes);
+    out = base + checkBytes + idxBytes;
+    walk_tex_scales(state->textures[0], &su0, &sv0);
+    walk_tex_scales(state->textures[1], &su1, &sv1);
+    for (i = 0; i < numVerts; i++) {
+        convert_vertex_k(&verts[i], out + i * stride, fmt, flat, kc->scale3D, kc->stereo, kc->conv, kc->wide, su0, sv0,
+                         su1, sv1);
+    }
+    written = numVerts;
+    count = numTriangles * 3;
+    if (any) {
+        written = clip_cut_k(kc, sWalkOutside, idxOut, verts, indices, numTriangles, out, stride, fmt, flat, su0, sv0,
+                             su1, sv1, numVerts, &count);
+    } else {
+        memcpy(idxOut, indices, count * sizeof(u16));
+    }
+    r->state = *state;
+    r->fmt = fmt;
+    r->numVerts = numVerts;
+    r->numTriangles = numTriangles;
+    r->written = written;
+    r->count = count;
+    r->checkBytes = (int) checkBytes;
+    r->idxBytes = (int) idxBytes;
+    r->pad = 0;
+    gfx_split_call_commit_shrink(r, WALK_READY_BYTES + checkBytes + idxBytes + written * stride);
+    return 1;
+}
+
+#ifndef PORT_RELEASE
+/* DKR_WALK_VERTS_CHECK: makes the draw's vertices and indices from its GfxVertex data as the lean draw does, with
+ * this frame's own settings and the textures' uploaded scales, and compares them with the walk's. */
+static void __attribute__((noinline, cold)) walk_check(const WalkReady *r, const u8 *walkVerts, const u16 *walkIdx) {
+    const u8 *base = (const u8 *) r + WALK_READY_BYTES;
+    const GfxVertex *verts = (const GfxVertex *) base;
+    const u16 *idx = (const u16 *) (base + r->numVerts * sizeof(GfxVertex));
+    const u16 *ind = idx;
+    int stride = sVfmtStride[r->fmt], flat = gfx_flat_mode(&r->state), written = r->numVerts, any, k;
+    int count = r->numTriangles * 3, numTriangles = r->numTriangles;
+    float su0, sv0, su1, sv1;
+    const char *what = NULL;
+    if (r->checkBytes == 0) {
+        return;
+    }
+    if (!grow((void **) &sWalkCheckBuf, &sWalkCheckCap, (r->numVerts + numTriangles * 15) * stride, 1)) {
+        return;
+    }
+    texture_scales(r->state.textures[0], &su0, &sv0);
+    texture_scales(r->state.textures[1], &su1, &sv1);
+    if (sWalkFrameK.bandX == sBandX && sWalkFrameK.bandY == sBandY) {
+        any = test_and_write_vertices(verts, sWalkCheckBuf, sLeanOutside, r->numVerts, stride, r->fmt, flat, su0, sv0,
+                                      su1, sv1);
+        if (any) {
+            written = clip_cut_lean(verts, idx, numTriangles, sWalkCheckBuf, stride, r->fmt, flat, su0, sv0, su1, sv1,
+                                    r->numVerts, &count);
+            ind = sLeanIndices;
+        }
+    } else {
+        // The walk cut to another band than this target's: the main target's while adaptive anti-aliasing draws on
+        // the smaller one (or the band of an earlier frame, see walk_frame_consts). The lean draw's own code with
+        // that band, so the check compares the conversion and cutting, not the choice of band.
+        VertConsts kc = sBackConsts;
+        int i;
+        kc.bandX = sWalkFrameK.bandX;
+        kc.bandY = sWalkFrameK.bandY;
+        for (i = 0, any = 0; i < r->numVerts; i++) {
+            sLeanOutside[i] = (u8) outside_band_of(&verts[i], kc.bandX, kc.bandY);
+            any |= sLeanOutside[i];
+            convert_vertex(&verts[i], sWalkCheckBuf + i * stride, r->fmt, flat, sScale3D, su0, sv0, su1, sv1);
+        }
+        if (any) {
+            written = clip_cut_k(&kc, sLeanOutside, sLeanIndices, verts, idx, numTriangles, sWalkCheckBuf, stride,
+                                 r->fmt, flat, su0, sv0, su1, sv1, r->numVerts, &count);
+            ind = sLeanIndices;
+        }
+    }
+    sWalkChecked++;
+    if (written != r->written) {
+        what = "vertex count";
+    } else if (count != r->count) {
+        what = "index count";
+    } else if (memcmp(sWalkCheckBuf, walkVerts, written * stride) != 0) {
+        what = "vertices";
+    } else if (memcmp(ind, walkIdx, count * sizeof(u16)) != 0) {
+        what = "indices";
+    }
+    if (what == NULL) {
+        return;
+    }
+    sWalkDiffer++;
+    if (sWalkDiffer <= 5) {
+        k = 0;
+        if (written == r->written) {
+            while (k < written * stride && sWalkCheckBuf[k] == walkVerts[k]) {
+                k++;
+            }
+        }
+        plat_log("walk verts: frame %d, kind %d: the walk's %s differ (%d/%d vertices, %d/%d indices, %d triangles, "
+                 "flat %d, tex %ux%u, first differing vertex byte %d)",
+                 sFrameCount, sKindCur, what, r->written, written, r->count, count, numTriangles, flat,
+                 r->state.textures[0] != NULL ? r->state.textures[0]->width : 0,
+                 r->state.textures[0] != NULL ? r->state.textures[0]->height : 0, k);
+    }
+}
+#endif
+
+/*
+ * DKR_WALK_SAFE_BAND: a draw the walk cut to a wider band than this frame's (see walk_frame_consts) is cut again,
+ * here, to the frame's band, from its converted vertices: the conversion of a 3D draw is linear in x, y and w
+ * (to_screen_scaled: pos = (y, -x * scale3D, z, w)), so the band test works on them, and the new corners'
+ * coordinates and colours are interpolated as the clipper would have made them (depth is clamped at 0 by the
+ * conversion, so a new corner's depth can differ slightly; for a frame or two). New corners go after the draw's
+ * vertices at out (room for count * 5 more is checked by the caller); the indices go to sRecutIdx. Returns the vertex
+ * count, *count the index count. Flat draws are left as they are (their x is reshaped by gfx_flat_x).
+ */
+#define RECUT_MAX_INDICES (GFX_MAX_BATCH_TRIANGLES * 15 * 5)
+static u16 sRecutIdx[RECUT_MAX_INDICES];
+static u8 sRecutOutside[GFX_MAX_BATCH_VERTICES + GFX_MAX_BATCH_TRIANGLES * 15];
+
+static inline float recut_distance(const C3DVertex *v, int plane, float bandX, float bandY, float invScale) {
+    float x = -v->pos[1] * invScale, y = v->pos[0], w = v->pos[3];
+    switch (plane) {
+        case 0: return bandX * w - x;
+        case 1: return bandX * w + x;
+        case 2: return bandY * w - y;
+        default: return bandY * w + y;
+    }
+}
+
+static void recut_lerp(u8 *out, const u8 *a, const u8 *b, float t, int fmt) {
+    C3DVertex *o = (C3DVertex *) out;
+    const C3DVertex *p = (const C3DVertex *) a, *q = (const C3DVertex *) b;
+    int i;
+    for (i = 0; i < 4; i++) {
+        o->pos[i] = p->pos[i] + (q->pos[i] - p->pos[i]) * t;
+        o->color[i] = (u8) ((float) p->color[i] + ((float) q->color[i] - (float) p->color[i]) * t + 0.5f);
+    }
+    o->tc0[0] = p->tc0[0] + (q->tc0[0] - p->tc0[0]) * t;
+    o->tc0[1] = p->tc0[1] + (q->tc0[1] - p->tc0[1]) * t;
+    if (fmt == VFMT_LONG) {
+        C3DVertex2 *o2 = (C3DVertex2 *) out;
+        const C3DVertex2 *p2 = (const C3DVertex2 *) a, *q2 = (const C3DVertex2 *) b;
+        o2->tc1[0] = p2->tc1[0] + (q2->tc1[0] - p2->tc1[0]) * t;
+        o2->tc1[1] = p2->tc1[1] + (q2->tc1[1] - p2->tc1[1]) * t;
+    }
+}
+
+static int __attribute__((noinline, cold)) walk_recut(u8 *out, int fmt, int stride, int written, const u16 *idx,
+                                                      int *count) {
+    const float bandX = sBackConsts.bandX, bandY = sBackConsts.bandY;
+    const float invScale = sWalkFrameK.scale3D != 0.0f ? 1.0f / sWalkFrameK.scale3D : 1.0f;
+    int i, k, j, plane, any = 0, used = written, n = 0, indexCount = *count;
+    for (i = 0; i < written; i++) {
+        const C3DVertex *v = (const C3DVertex *) (out + i * stride);
+        int b = 0;
+        for (plane = 0; plane < 4; plane++) {
+            b |= (recut_distance(v, plane, bandX, bandY, invScale) < 0.0f) << plane;
+        }
+        sRecutOutside[i] = (u8) b;
+        any |= b;
+    }
+    if (!any) {
+        return -1; // Nothing past the frame's band: drawn as the walk made it
+    }
+    sWalkRecut++;
+    for (i = 0; i < indexCount; i += 3) {
+        int a = sRecutOutside[idx[i]], b = sRecutOutside[idx[i + 1]], c = sRecutOutside[idx[i + 2]];
+        u8 poly[2][16][sizeof(C3DVertex2)];
+        int m, cnt;
+        if (!(a | b | c)) {
+            sRecutIdx[n++] = idx[i];
+            sRecutIdx[n++] = idx[i + 1];
+            sRecutIdx[n++] = idx[i + 2];
+            continue;
+        }
+        if (a & b & c) {
+            continue; // Wholly beyond one side: nothing is left
+        }
+        for (k = 0; k < 3; k++) {
+            memcpy(poly[0][k], out + idx[i + k] * stride, stride);
+        }
+        m = 3;
+        for (plane = 0; plane < 4 && m > 0; plane++) {
+            u8(*pin)[sizeof(C3DVertex2)] = poly[plane & 1];
+            u8(*pout)[sizeof(C3DVertex2)] = poly[(plane & 1) ^ 1];
+            cnt = 0;
+            for (j = 0; j < m; j++) {
+                const u8 *p = pin[j], *q = pin[(j + 1) % m];
+                float dp = recut_distance((const C3DVertex *) p, plane, bandX, bandY, invScale);
+                float dq = recut_distance((const C3DVertex *) q, plane, bandX, bandY, invScale);
+                if (dp >= 0.0f) {
+                    memcpy(pout[cnt++], p, stride);
+                }
+                if ((dp >= 0.0f) != (dq >= 0.0f)) {
+                    recut_lerp(pout[cnt++], p, q, dp / (dp - dq), fmt);
+                }
+            }
+            m = cnt;
+        }
+        // The polygon left (at most 7 corners) as a fan of triangles, each with its own corners, as clip_triangle.
+        for (k = 1; k + 1 < m; k++) {
+            if (n + 3 > RECUT_MAX_INDICES) {
+                break;
+            }
+            memcpy(out + used * stride, poly[0][0], stride);
+            memcpy(out + (used + 1) * stride, poly[0][k], stride);
+            memcpy(out + (used + 2) * stride, poly[0][k + 1], stride);
+            sRecutIdx[n++] = (u16) used;
+            sRecutIdx[n++] = (u16) (used + 1);
+            sRecutIdx[n++] = (u16) (used + 2);
+            used += 3;
+        }
+    }
+    *count = n;
+    return used;
+}
+
+static void walk_draw_ready(void *payload) {
+    const WalkReady *r = payload;
+    const GfxDrawState *state = &r->state;
+    const u8 *base = (const u8 *) r + WALK_READY_BYTES;
+    const u16 *indices = (const u16 *) (base + r->checkBytes);
+    const u8 *verts = base + r->checkBytes + r->idxBytes;
+    float su0, sv0, su1, sv1;
+    int fmt = r->fmt, stride = sVfmtStride[fmt], written = r->written, count = r->count, start, timed;
+    unsigned long long t0 = 0, t1 = 0;
+    u8 *out;
+
+    if (skip_invisible(state)) {
+        return;
+    }
+    dp_draw(state, r->numTriangles, 0, NULL, 0);
+#ifndef PORT_RELEASE
+    if (__builtin_expect(sWalkFrameCheck, 0)) {
+        walk_check(r, verts, indices);
+    }
+#endif
+    if (count == 0) {
+        return; // Every triangle beyond the band: nothing to draw, and no GPU state touched (as the lean draw)
+    }
+    if (sVboUsed + 15 + written * stride > VBO_BYTES || sIboUsed + count > (IBO_BYTES / (int) sizeof(u16) - 8) ||
+        gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        // Out of room, as the full draw finds it: the rest of the frame's triangles are left out.
+        sWalkNoRoom++;
+        log_draw_left_out(written * stride, count, 1);
+        return;
+    }
+    timed = sDrawParts && prof_enabled();
+    if (timed) {
+        t0 = draw_reading(0, -1, 0);
+    }
+    // Where use_vertex_format will start the vertices: the same format carries on, a new one starts 16-byte aligned.
+    start = fmt != sVfmtBound ? (sVboUsed + 15) & ~15 : sVboUsed;
+    out = sVbo + start;
+    memcpy(out, verts, written * stride);
+    if (__builtin_expect(sWalkWideFrame, 0) && !gfx_flat_mode(state) &&
+        sVboUsed + 15 + (written + count * 5) * stride <= VBO_BYTES && written + count * 5 <= 0xFFFF &&
+        written <= (int) sizeof(sRecutOutside)) {
+        int recut = count, used = walk_recut(out, fmt, stride, written, indices, &recut);
+        if (used >= 0) {
+            if (recut == 0) {
+                return; // Every triangle beyond the frame's band
+            }
+            if (sIboUsed + recut > (IBO_BYTES / (int) sizeof(u16) - 8)) {
+                sWalkNoRoom++;
+                log_draw_left_out(used * stride, recut, 1);
+                return;
+            }
+            written = used;
+            count = recut;
+            indices = sRecutIdx;
+        }
+    }
+    if (timed) {
+        t1 = draw_reading(t0, DRAW_PART_WRITE, 1);
+    }
+    texture_scales(state->textures[0], &su0, &sv0);
+    texture_scales(state->textures[1], &su1, &sv1);
+    sWalkDrawn++;
+    lean_draw_tail(state, out, fmt, stride, written, indices, count, count / 3, su0, sv0, su1, sv1, timed, t0, t1);
 }
 
 /*

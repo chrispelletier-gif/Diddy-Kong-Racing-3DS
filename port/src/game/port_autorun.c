@@ -381,6 +381,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // they worked, DKR_PMU becomes 1 by default in debug builds so every row carries the numbers.
     { "CPU counters readable, I-cache misses (PMU 1, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
     { "CPU counters readable, D-cache misses (PMU 2, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
+    // Step 2 (DKR_WALK_VERTS, gfx_c3d.c "The walk writes the vertices"): the walk (game core) tests, converts and cuts
+    // each draw's vertices, which the renderer's core did. Expect renderer_core_ms 5-8 ms less and game_core_ms as much
+    // more (must stay under ~28), flashes 0. Then one lap with the self-check: the renderer's core also makes each
+    // draw's vertices the old way and compares; the log must say "walk verts: N draws checked, 0 differ" (its fps is
+    // low: it does both).
+    { "walk writes the GPU vertices (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
+    { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
+      { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
