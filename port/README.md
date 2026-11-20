@@ -376,6 +376,18 @@ the first line left out when a test run's status needs the room. In the draw mix
 `renderer walk on this core`, so `menus/other` is the game's own work. `DKR_PROF_CORES=0` gives the view before
 (`game CPU` / `renderer CPU`, the walk counted with the scene in the graph and with the kind in the draw mix).
 
+CPU counters and the timings beside them (roadmap P56, 2026-11-19). `DKR_PMU=1` in `env.txt` (debug builds, off by
+default) reads the ARM11's own performance counters once a frame on the game's core and, when it is another core, on
+the renderer's (`port/3ds/pmu_3ds.c`): cycles, the cycles the core waited for instructions (the fetch stall, which
+an instruction cache that is too small for the hot code shows as) and instruction cache misses; `DKR_PMU=2` counts
+data cache read misses instead of the instruction cache's. The counters belong to a core, not a thread, so the
+numbers are everything that ran on that core. A CPU line after the `spare ms` line (and given way before it) shows
+`stall game% / renderer%` when they are on, the DSP sound callback's ms a frame (`sound cb`, the
+`audio_ndsp.c` callback on the game's core) and the clock reads a frame (`clocks`, `plat_time_ns` calls: each is a
+system call on an Old 3DS). Each race's results line ends with them (`,pmu,...,shown,...,sndcb,...,clk,...`, see
+`pmu_cells` in `port_autorun.c`), along with the pictures replaced before they reached the screen and the longest gap
+between two that did (`port/src/plat/shown.h`). The switch bench's table has the fetch stall and the replaced count.
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the
@@ -525,6 +537,12 @@ It plays a few scripted scenarios (the intro and title, a spread of levels throu
 from the complete save) on both builds, and writes `report.md` and side by side images (base, head, difference) of
 every frame that differs. CI runs it on every push with `--max-images 0` and uploads only the report and logs (the
 repository is public, so no game frames), and publishes the 3DS build only once it passes.
+
+CI also plays the same scenarios once more with the Old 3DS's texture lookup memo forced on and checked
+(`DKR_TEX_MEMO=1 DKR_TEX_MEMO_CHECK=1`, roadmap P56): at every memo hit the full lookup runs too
+(`tex_memo_check_answer` in `gfx_rdp.c`), and a different texture is a memo bug, which fails the run with the tile
+in the log. The same texture found in another cache entry (a duplicate in the cache, the same picture) is counted
+apart and only reported. The memo is off on a PC by default, so this is the only place a PC tests it.
 
 `port/tools/backend_replay.py` checks the 3DS backend (`port/3ds/gfx_c3d.c`) on the PC. With
 `DKR_BACKEND_RECORD=file` the host build writes every call its renderer makes into the backend (`gfxb_*`, with their

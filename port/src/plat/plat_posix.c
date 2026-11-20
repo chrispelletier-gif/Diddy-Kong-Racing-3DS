@@ -319,14 +319,49 @@ void *plat_get_current_os_thread(void) {
     return sCurrentOsThread;
 }
 
-unsigned long long plat_time_ns(void) {
+static unsigned long long monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (unsigned long long) ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+unsigned long long plat_time_ns(void) {
+#if PLAT_DEBUG_TOOLS
+    plat_count_clock_read(); // P56 K9: counted as on the 3DS (plat_ticks is not)
+#endif
+    return monotonic_ns();
+}
+
 unsigned long long plat_ticks(void) {
-    return plat_time_ns();
+    return monotonic_ns();
+}
+
+/* P56: no CPU counters (K2) or picture swaps (K7) to read on a PC. */
+int plat_pmu_on(void) {
+    return 0;
+}
+void plat_pmu_thread_start(void) {
+}
+void plat_pmu_sample(PlatPmuSample *s) {
+    s->cycles = s->pmn0 = s->pmn1 = 0;
+    s->kind = 0;
+}
+void plat_pmu_frame(int slot) {
+    (void) slot;
+}
+void plat_pmu_totals(int slot, PlatPmuSample *sum, unsigned int *frames) {
+    (void) slot;
+    sum->cycles = sum->pmn0 = sum->pmn1 = 0;
+    sum->kind = 0;
+    *frames = 0;
+}
+void plat_pmu_exit(void) {
+}
+int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs) {
+    (void) window;
+    (void) restart;
+    *replaced = *longestGapUs = 0;
+    return 0;
 }
 
 unsigned long long plat_ticks_per_second(void) {

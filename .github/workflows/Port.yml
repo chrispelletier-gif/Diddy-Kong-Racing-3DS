@@ -95,6 +95,15 @@ jobs:
       - name: Build dkr.3dsx
         run: make -C port TARGET=3ds ${{ matrix.make-flags }} -j"$(nproc)"
 
+      # Old 3DS instruction cache budget (P56): fails the debug build when the hot renderer code grows past its budget
+      # or memcpy calls itself / memmove / memset; the player's build only prints the numbers.
+      - name: Hot code size and memcpy check
+        run: |
+          command -v python3 >/dev/null || { apt-get update && apt-get install -y python3; }
+          bin="${DEVKITARM:-/opt/devkitpro/devkitARM}/bin"
+          python3 port/tools/hot_size.py ${{ matrix.out }}/dkr.elf --nm "$bin/arm-none-eabi-nm" \
+            --objdump "$bin/arm-none-eabi-objdump" ${{ matrix.variant == 'release' && '--report-only' || '' }}
+
       # makerom and bannertool are not in devkitPro; fetch pinned releases and check them before use.
       - name: Install makerom and bannertool
         run: |
@@ -299,6 +308,14 @@ jobs:
       - name: Profiler pages fit the terminal font
         # every page of the bottom screen's profiler, with the longest bench row, fits 47 columns by 14 lines
         run: DKR_PROF_TERM_CHECK=1 port/build/host/dkr
+      - name: Switch bench overrides all reach the game
+        # every switch bench race of both consoles' lists sets its switches without overflowing the override table
+        run: |
+          DKR_BENCH_OVERRIDE_CHECK=1 port/build/host/dkr
+          DKR_BENCH_OVERRIDE_CHECK=1 DKR_HOST_OLD3DS=1 port/build/host/dkr
+      - name: Pictures shown logic
+        # P56 K7: the replaced pictures and the longest gap between shown ones (port/src/plat/shown.h)
+        run: gcc -Iport/src -o "$RUNNER_TEMP/shown_test" port/tools/shown_test.c && "$RUNNER_TEMP/shown_test"
 
       - name: Upload the host build
         uses: actions/upload-artifact@v4
@@ -335,6 +352,32 @@ jobs:
         run: |
           python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
             --head port/build/host/dkr ${BASE_EXE:+--base "$BASE_EXE"} --out "$RUNNER_TEMP/regression" --max-images 0
+
+      - name: Texture memo check
+        # P56 K4: the Old 3DS's texture lookup memo (off by default on a PC) checked against the full lookup at every
+        # memo hit (DKR_TEX_MEMO_CHECK, gfx_rdp.c tex_memo_check_answer), over the same scenarios. Any difference is a
+        # memo bug; no "hits checked" line means the check never ran.
+        run: |
+          DKR_TEX_MEMO=1 DKR_TEX_MEMO_CHECK=1 python3 port/tools/frame_regression.py \
+            --rom "$RUNNER_TEMP/rom/baserom.z64" --head port/build/host/dkr --out "$RUNNER_TEMP/memo-check" \
+            --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/memo-check" -name log.txt)
+          grep -h "texture memo check:" $logs | tail -n 20
+          {
+            echo "### Texture memo check"
+            echo
+            for log in $logs; do
+              echo "- $(basename "$(dirname "$(dirname "$log")")"): $(grep "hits checked" "$log" | tail -n 1 | sed 's/.*texture memo check: //')"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "texture memo check: first difference" $logs; then
+            echo "::error::The texture memo gave a different texture from the full lookup (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "texture memo check: .* hits checked" $logs; then
+            echo "::error::The texture memo check never ran (no memo hits in any scenario)."
+            exit 1
+          fi
 
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
