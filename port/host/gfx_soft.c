@@ -645,6 +645,7 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
             }
             if (sFragStats > 0) {
                 sFragRaster[sFragKind]++;
+                sFragTrackMask[y * W + x] |= sFragKind == 1; // PORT_DRAW_TRACK (occl_count.c's check)
                 sDrawRaster++;
                 sFragBlend[sFragKind] += st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD;
                 sFragNoDepth[sFragKind] += !st->depthTest;

@@ -1873,6 +1873,10 @@ void set_anti_aliasing(s32 setting) {
 #ifdef TARGET_PORT
 static s32 sPortSegmentsAllowed;
 #endif
+#ifdef PORT_OCCL_COUNT
+extern MtxF gViewProjMatrixF;
+void port_occl_frame(const float *viewProj, int cameraSegment, const void *level, int levelId);
+#endif
 
 void render_level_geometry_and_objects(void) {
     s32 objCount;
@@ -1914,6 +1918,11 @@ void render_level_geometry_and_objects(void) {
                      objCount - sp160);
 #endif
 
+#ifdef PORT_OCCL_COUNT
+    // DKR_OCCL_COUNT (host only, port/host/occl_count.c): counts the track batches hidden behind the track.
+    port_occl_frame(&gViewProjMatrixF[0][0], gSceneActiveCamera->cameraSegmentID, gCurrentLevelModel,
+                    get_settings()->courseId);
+#endif
     for (i = 1; i <= gCurrentLevelModel->numberOfSegments; i++) {
         objectsVisible[i] = FALSE; // why not a bzero?
     }
@@ -2089,6 +2098,10 @@ void render_level_geometry_and_objects(void) {
  */
 extern s16 gForceFlags;
 extern TextureHeader *gCurrentTextureHeader;
+#ifdef PORT_OCCL_COUNT
+void port_occl_batch(int segment, int batch, const void *verts, int numVerts, const void *tris, int numTris,
+                     int occluder);
+#endif
 void render_level_segment(s32 segmentId, s32 nonOpaque) {
     LevelModelSegment *segment;
     s32 i;
@@ -2170,6 +2183,15 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             vertices = (s32) &segment->vertices[batchInfo->verticesOffset];
         } while (0);
         triangles = (s32) &segment->triangles[batchInfo->facesOffset];
+#ifdef PORT_OCCL_COUNT
+        // A batch drawn this frame (bit 1: in the opaque pass); only opaque ones without cut-outs, decals or vertex
+        // alpha can hide others (bit 0).
+        port_occl_batch(segmentId, i, (const void *) vertices, numberVertices, (const void *) triangles, numberTriangles,
+                        (nonOpaque ? 0 : 2) |
+                            (!nonOpaque && !((batchFlags | textureFlags) &
+                                             (RENDER_CUTOUT | RENDER_DECAL | RENDER_SEMI_TRANSPARENT |
+                                              RENDER_VTX_ALPHA | RENDER_WATER))));
+#endif
         texOffset = batchInfo->texOffset << 14;
         levelHeaderIndex = (batchFlags >> 28) & 7;
         if (levelHeaderIndex != (batchInfo->verticesOffset * 0)) {

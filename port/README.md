@@ -164,6 +164,7 @@ environment variables:
 | `DKR_DUMP_EVERY`    | Write every Nth frame to `DKR_DUMP_DIR/frame_NNNNN.png`. |
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
 | `DKR_WALK_CENSUS=1` | Counts the display list walk's commands per frame by kind and class (records, state, vertex-slot draws, texture ops, matrices, list calls, raw N64). On the host also writes `census.csv` with the game's `file:line` for each; `port/tools/census_run.py` plays the scenarios in `port/host/scenarios/` and `port/tools/census_report.py` turns the CSV into the to-do lists for the native-renderer stages. On the 3DS it adds a `census` line to the profiler log. |
+| `DKR_OCCL_COUNT=1`  | Counts, per frame, the track batches the game draws that show no pixel or are hidden behind the track's own opaque batches, and per camera segment the ones never seen over the run (`occl count` log lines; P64 candidate 2, `host/occl_count.c`). `DKR_OCCL_COUNT_CHECK=1` with `DKR_FRAG_STATS=1` compares its pixels with the renderer's (`occl check` lines); `DKR_OCCL_BREAK=1` breaks it on purpose. |
 | `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). |
 | `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
