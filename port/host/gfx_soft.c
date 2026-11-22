@@ -859,6 +859,21 @@ int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, in
     return 0;
 }
 
+/* Sprite points (P60 D) are the 3DS backend's: here the frontend expands them into indexed draws. */
+int gfxb_sprite_points(void) {
+    return 0;
+}
+
+void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints) {
+    static GfxVertex sVerts[GFX_MAX_SPRITE_POINTS * 4];
+    static unsigned short sIdx[GFX_MAX_SPRITE_POINTS * 6];
+    if (numPoints > GFX_MAX_SPRITE_POINTS) {
+        numPoints = GFX_MAX_SPRITE_POINTS;
+    }
+    gfx_sprite_expand(pts, numPoints, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numPoints * 4, sIdx, numPoints * 2);
+}
+
 void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;

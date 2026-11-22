@@ -22,6 +22,9 @@ void gfx_split_clear_depth(const short rect[4]);
 void gfx_split_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                             const unsigned short *indices, int numTriangles);
+/* Sprite points (P60 D, gfx_backend.h GfxSpritePoint): to the backend's gfxb_draw_sprites, or expanded into an indexed
+ * draw where the backend doesn't take them. */
+void gfx_split_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints);
 void gfx_split_texture_upload(GfxTexture *tex);
 void gfx_split_texture_share(GfxTexture *dst, const GfxTexture *src);
 void gfx_split_texture_free(GfxTexture *tex);

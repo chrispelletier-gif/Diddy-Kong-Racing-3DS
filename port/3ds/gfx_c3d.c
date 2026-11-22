@@ -87,9 +87,18 @@ typedef struct C3DVertexOld { // VFMT_OLD
 } C3DVertexOld;
 /* VFMT_MODEL is the game's own vertices for GPU vertex maths (P30, GfxModelVertex): s16 position and texture
  * coordinates and byte colours, 16 bytes; the second coordinates come from the fixed attribute. */
-enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_COUNT };
+/* VFMT_SPRITE is a sprite point for the geometry shader (P60 D, SpriteGpuPoint below): seven attributes, v0 to v6. */
+typedef struct SpriteGpuPoint {
+    float p[4], e1[4], e2[4]; // In the 3DS screen's clip space (to_screen's, z not yet pinned)
+    float tc[4];              // p's texture coordinates, then e1's
+    float tc2[4];             // e2's, then 0, 0
+    u8 color[4];              // The colour, with p's alpha
+    u8 alpha[4];              // q's, r's and d's alpha, then 0
+} SpriteGpuPoint;
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_SPRITE, VFMT_COUNT };
 static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld),
-                                             sizeof(GfxModelVertex) };
+                                             sizeof(GfxModelVertex), sizeof(SpriteGpuPoint) };
+_Static_assert(sizeof(SpriteGpuPoint) == 88, "the sprite point format's attributes must add up to its stride");
 _Static_assert(sizeof(GfxModelVertex) == 16, "the model vertex format's attributes must add up to its stride");
 static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
 static int sVfmtOld;       // DKR_VERTEX_FORMAT=48
@@ -568,6 +577,15 @@ PLAT_COLD static void init_vertex_formats(void) {
     for (i = 0; i < VFMT_COUNT; i++) {
         attr = &sVfmtAttr[i];
         AttrInfo_Init(attr);
+        if (i == VFMT_SPRITE) {
+            int k;
+            for (k = 0; k < 5; k++) {
+                AttrInfo_AddLoader(attr, k, GPU_FLOAT, 4);
+            }
+            AttrInfo_AddLoader(attr, 5, GPU_UNSIGNED_BYTE, 4);
+            AttrInfo_AddLoader(attr, 6, GPU_UNSIGNED_BYTE, 4);
+            continue;
+        }
         if (i == VFMT_MODEL) {
             AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
             AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);
@@ -611,8 +629,9 @@ static void __attribute__((noinline)) bind_vertex_format(int fmt) {
         sVfmtAttrSet = fmt;
     }
     BufInfo_Init(buf);
-    BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt], fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
-                fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+    BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt],
+                fmt == VFMT_SPRITE ? 7 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
+                fmt == VFMT_SPRITE ? 0x6543210 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
     sBufMesh = NULL;
     if (sVfmtBound >= 0) {
         sVfmtSwitches++;
@@ -647,6 +666,9 @@ static void write_eye(float mul, float add);
 static void hand_over_draw_parts(void);
 static void init_transform(void);
 static void transform_frame_drawn(int frame);
+static void sprite_gs_init(void);
+static void sprite_gs_frame_drawn(int frame);
+static void sprite_gs_log(void);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
@@ -1509,6 +1531,7 @@ void gfxb_init(void) {
     C3D_BindProgram(&sProgram);
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
     init_transform();
+    sprite_gs_init();
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -3420,6 +3443,7 @@ static void wait_for_gpu(int measure) {
     }
     if (sOnGpu >= 0) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
+        sprite_gs_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
     timeline_take(sOnGpu); // gpu_cuts.inc
@@ -4200,6 +4224,9 @@ void gfxb_end_frame(void) {
             plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits, %d KB of "
                      "vertices, %d format changes", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL,
                      usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits, sVboUsed / 1024, sVfmtSwitches);
+        }
+        if (sFrameCount % 600 == 1) {
+            sprite_gs_log();
         }
         {
             static u32 sLoggedVramBytes;
@@ -6555,6 +6582,219 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
     }
     gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
+}
+
+/******************************** Sprite points (P60 D) ********************************/
+
+/*
+ * Roadmap P60 D (DKR_SPRITE_GS, default off): the walk hands sprite tiles of the 3D world over as points
+ * (gfx_backend.h GfxSpritePoint), not as four vertices and two triangles, which saves the game's core the corners'
+ * bookkeeping and most of the bytes queued for this one. With DKR_SPRITE_GS=1 this backend makes the four vertices
+ * itself (gfx_sprite_expand) and draws them as any other draw; with 2 the GPU's geometry shader makes them
+ * (sprite.v.pica passes the point through, sprite.g.pica emits the two triangles): one 88-byte point written per tile
+ * instead of four converted vertices and six indices. Where the geometry shader can't take a batch (3D, GPU vertex
+ * maths on, the 48-byte vertex format, a corner past the guard band, no room) it is drawn the first way.
+ *
+ * The PICA's geometry shader has never run in this port on real hardware, and its first vertex shader hung a New 3DS
+ * that emulators ran (see the GPU vertex maths section). So it is watched the same way: sprite_gs.txt says "testing"
+ * from the first frame drawn with it until 30 frames have been drawn, then "passed"; a start that finds "testing"
+ * writes "hung" and leaves it off (the points still drawn the first way) until SPRITE_GS_TEST_VERSION changes.
+ *
+ * Switching to the geometry program and back costs a program setting (both programs' code is one 109-word blob, under
+ * the 512 words at which citro3d would send the code again). The vertex units' uniform registers: sprite.v.pica has
+ * none, but the fourth unit runs the geometry shader with its own constants meanwhile, so the eye uniform is written
+ * again once the main program is back.
+ */
+#define SPRITE_GS_TEST_VERSION 1
+#define SPRITE_GS_TEST_FRAMES 30
+
+static shaderProgram_s sProgramS;
+static int sSpriteGsUsable;    // sprite.v.pica and sprite.g.pica were found and set up
+static int sSpriteGsHung;      // It hung the GPU in an earlier run (sprite_gs.txt)
+static int sSpriteGsTestFrame = -1; // The first frame drawn with it this run, until it is known to work
+static int sSpriteGsEpoch = -1, sSpriteGsMode;
+static unsigned long sSpriteGsStats[4]; // Batches by the geometry shader, points, batches drawn the first way, why not
+
+static void sprite_gs_marker_write(const char *what) {
+    char path[256], text[32];
+    snprintf(path, sizeof(path), "%s/sprite_gs.txt", plat_data_dir());
+    snprintf(text, sizeof(text), "%s %d\n", what, SPRITE_GS_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+static PLAT_COLD void sprite_gs_init(void) {
+    char path[256], text[32];
+    int got;
+    shaderProgramInit(&sProgramS);
+    sSpriteGsUsable = sShaderDvlb->numDVLE >= 4 && shaderProgramSetVsh(&sProgramS, &sShaderDvlb->DVLE[2]) == 0 &&
+                      shaderProgramSetGsh(&sProgramS, &sShaderDvlb->DVLE[3], 7) == 0;
+    snprintf(path, sizeof(path), "%s/sprite_gs.txt", plat_data_dir());
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+        if ((strncmp(text, "testing ", 8) == 0 && atoi(text + 8) == SPRITE_GS_TEST_VERSION) ||
+            (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == SPRITE_GS_TEST_VERSION)) {
+            sSpriteGsHung = 1;
+            sprite_gs_marker_write("hung");
+        }
+    }
+    plat_log("sprite geometry shader: %s%s", sSpriteGsUsable ? "found" : "NOT usable",
+             sSpriteGsHung ? ", left off: the GPU hung with it in an earlier run (sprite_gs.txt)" : "");
+}
+
+static void sprite_gs_frame_drawn(int frame) {
+    if (sSpriteGsTestFrame >= 0 && frame >= sSpriteGsTestFrame + SPRITE_GS_TEST_FRAMES) {
+        sSpriteGsTestFrame = -2;
+        sprite_gs_marker_write("passed");
+        plat_log("sprite geometry shader: %d frames drawn, it works on this console", SPRITE_GS_TEST_FRAMES);
+    }
+}
+
+int gfxb_sprite_points(void) {
+    return 1;
+}
+
+/* A point's position, or an edge's (offset false: no w term in z, as the sum of the corners' own), in the 3DS screen's
+ * clip space, as to_screen_scaled does it but for pinning z (the geometry shader pins each corner's). */
+static inline void sprite_gpu_pos(float *out, const float *in, float scale3D) {
+    out[0] = in[1];
+    out[1] = -in[0] * scale3D;
+    out[2] = 0.5f * (in[2] - in[3]);
+    out[3] = in[3];
+}
+
+/* Whether every corner of the points lies inside the guard band (the CPU's cutting would leave them as they are). */
+static int sprite_points_in_band(const GfxSpritePoint *pts, int n) {
+    const float bandX = sBandX, bandY = sBandY;
+    int i, k;
+    for (i = 0; i < n; i++) {
+        const GfxSpritePoint *s = &pts[i];
+        for (k = 0; k < 4; k++) {
+            GfxVertex v;
+            v.x = s->p[0] + ((k & 1) ? s->e1[0] : 0.0f) + ((k & 2) ? s->e2[0] : 0.0f);
+            v.y = s->p[1] + ((k & 1) ? s->e1[1] : 0.0f) + ((k & 2) ? s->e2[1] : 0.0f);
+            v.w = s->p[3] + ((k & 1) ? s->e1[3] : 0.0f) + ((k & 2) ? s->e2[3] : 0.0f);
+            if (outside_band_of(&v, bandX, bandY)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* The batch drawn by the geometry shader; 0: it can't be (nothing done). */
+static int __attribute__((noinline)) draw_sprites_gs(const GfxDrawState *state, const GfxSpritePoint *pts, int n) {
+    HangDraw *hangDraw;
+    float su0, sv0, su1, sv1;
+    const float scale3D = sScale3D;
+    int first, vertex, i, why = 0;
+    SpriteGpuPoint *o;
+    if (sStereo) {
+        why = 1;
+    } else if (sTransformOn || sVfmtOld) {
+        why = 2;
+    } else if (sGuardBandFrame && !sprite_points_in_band(pts, n)) {
+        why = 3;
+    } else if (sVboUsed + 15 + n * (int) sizeof(SpriteGpuPoint) > VBO_BYTES ||
+               gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        why = 4;
+    }
+    if (why) {
+        sSpriteGsStats[3] |= 1u << why;
+        return 0;
+    }
+    dp_draw(state, n * 2, 0, NULL, 0);
+    texture_scales(state->textures[0], &su0, &sv0);
+    su1 = sv1 = 1.0f;
+    hangDraw = hang_draw_start(state, n * 2);
+    first = drain_before_draw(state, n * 2);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+    }
+    C3D_BindProgram(&sProgramS);
+    if (sVfmtBound != VFMT_SPRITE) {
+        bind_vertex_format(VFMT_SPRITE);
+    }
+    vertex = (sVboUsed - sVfmtBase) / (int) sizeof(SpriteGpuPoint);
+    o = (SpriteGpuPoint *) (sVbo + sVboUsed);
+    for (i = 0; i < n; i++) {
+        const GfxSpritePoint *s = &pts[i];
+        sprite_gpu_pos(o[i].p, s->p, scale3D);
+        sprite_gpu_pos(o[i].e1, s->e1, scale3D);
+        sprite_gpu_pos(o[i].e2, s->e2, scale3D);
+        o[i].tc[0] = s->uv[0] * su0;
+        o[i].tc[1] = 1.0f - s->uv[1] * sv0;
+        o[i].tc[2] = s->uv[2] * su0;
+        o[i].tc[3] = -s->uv[3] * sv0;
+        o[i].tc2[0] = s->uv[4] * su0;
+        o[i].tc2[1] = -s->uv[5] * sv0;
+        o[i].tc2[2] = 0.0f;
+        o[i].tc2[3] = 0.0f;
+        memcpy(o[i].color, s->rgba, 4);
+        memcpy(o[i].alpha, s->alpha, 4);
+    }
+    C3D_DrawArrays(GPU_GEOMETRY_PRIM, vertex, n);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += n * (int) sizeof(SpriteGpuPoint);
+    sFrameTriangles += n * 2;
+    // Back to the main program, set on the GPU now (the fourth vertex unit runs vertex shaders again from here), and
+    // its eye uniform written again (3D is never on here, so it is (0, 0)).
+    C3D_BindProgram(&sProgram);
+    C3Di_UpdateContext();
+    write_eye(0.0f, 0.0f);
+    sSpriteGsStats[0]++;
+    sSpriteGsStats[1] += (unsigned long) n;
+    if (sSpriteGsTestFrame == -1) {
+        sSpriteGsTestFrame = sFrameCount;
+        sprite_gs_marker_write("testing");
+    }
+    return 1;
+}
+
+/* A batch of sprite points (the walk's flush_point_batch). */
+void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints) {
+    static GfxVertex sVerts[GFX_MAX_SPRITE_POINTS * 4];
+    static u16 sIdx[GFX_MAX_SPRITE_POINTS * 6];
+    if (numPoints <= 0) {
+        return;
+    }
+    if (numPoints > GFX_MAX_SPRITE_POINTS) {
+        numPoints = GFX_MAX_SPRITE_POINTS;
+    }
+    if (sSpriteGsEpoch != gPlatSwitchEpoch) {
+        sSpriteGsEpoch = gPlatSwitchEpoch;
+        sSpriteGsMode = plat_switch("DKR_SPRITE_GS", 0);
+    }
+    if (sSpriteGsMode == 2 && sSpriteGsUsable && !sSpriteGsHung) {
+        if (skip_invisible(state)) {
+            return;
+        }
+        if (draw_sprites_gs(state, pts, numPoints)) {
+            return;
+        }
+    }
+    sSpriteGsStats[2]++;
+    gfx_sprite_expand(pts, numPoints, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numPoints * 4, sIdx, numPoints * 2);
+}
+
+/* The profiler's log line (every 600 frames, from gfxb_end_frame's logs). */
+static PLAT_COLD void sprite_gs_log(void) {
+    if (sSpriteGsStats[0] + sSpriteGsStats[2] == 0) {
+        return;
+    }
+    plat_log("sprite points: %lu batches (%lu points) by the geometry shader, %lu by the CPU (not GS:%s%s%s%s%s)",
+             sSpriteGsStats[0], sSpriteGsStats[1], sSpriteGsStats[2],
+             sSpriteGsMode != 2 ? " mode" : "", (sSpriteGsStats[3] & 2) ? " 3D" : "",
+             (sSpriteGsStats[3] & 4) ? " GPU maths/format" : "", (sSpriteGsStats[3] & 8) ? " band" : "",
+             (sSpriteGsStats[3] & 16) ? " room" : "");
+    memset(sSpriteGsStats, 0, sizeof(sSpriteGsStats));
 }
 
 /*

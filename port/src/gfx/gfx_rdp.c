@@ -166,6 +166,15 @@ static u16 sBatchIndices[MAX_BATCH_TRIANGLES * 3];
 static s32 sBatchCount;    // Triangles
 static s32 sBatchVertices; // Vertices used
 static GfxDrawState sBatchState;
+/* P60 D (DKR_SPRITE_GS, sprite_point_try): while set, the batch holds sprite points in sPtBatch instead of triangles,
+ * two triangles and four vertices counted for each, so that the batch's room and emptiness tests stay the same. */
+static GfxSpritePoint sPtBatch[GFX_MAX_SPRITE_POINTS];
+static s32 sBatchPoints;
+static s32 sSpriteGs;      // DKR_SPRITE_GS: 0 off, 1 or 2 on (the backend reads which, see gfx_c3d.c)
+static s32 sSpriteGsCheck; // DKR_SPRITE_GS_CHECK (sprite_point_check)
+/* Points made, sprite tiles left as triangles, draws, corners checked, corners differing, then the tiles left as
+ * triangles by reason: opaque (the sorter's), flat, any other */
+static unsigned long sSprStats[8];
 /* The batch of model triangles (GPU vertex maths, P30), see sModelVerts, and the batch of mesh parts (P31, P34),
  * see mesh_part, which share the state and parameters: only one of the three batches holds triangles at a time. */
 static s32 sModelCount;
@@ -2126,6 +2135,18 @@ static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
 #define ENG_PENDING (*(sRemote ? &sEngPending : &sOpaquePending))
 
+/* P60 D: opaque sprite points (sprite_point_try) held by state the same way, while the buckets are the walk's
+ * (DKR_NATIVE_REMOTE 0); drawn with the triangle buckets. */
+#define OPAQUE_PT_BUCKETS 4
+#define OPAQUE_PT_POINTS 64
+typedef struct OpaquePtBucket {
+    GfxDrawState state;
+    s32 numPoints;
+    GfxSpritePoint pts[OPAQUE_PT_POINTS];
+} OpaquePtBucket;
+static OpaquePtBucket sOpaquePt[OPAQUE_PT_BUCKETS];
+static s32 sOpaquePtCount;
+
 static void opaque_draw(OpaqueBucket *b) {
     if (b->numTris == 0) {
         return;
@@ -2154,6 +2175,15 @@ static HOT void opaque_flush_now(void) {
         opaque_draw(&sOpaque[i]);
     }
     sOpaqueCount = 0;
+    if (!sRemote) {
+        for (i = 0; i < sOpaquePtCount; i++) {
+            OpaquePtBucket *b = &sOpaquePt[i];
+            gfx_split_draw_sprites(&b->state, b->pts, b->numPoints);
+            prof_count(PROF_DRAWS, 1);
+            sOpaqueStats[1]++;
+        }
+        sOpaquePtCount = 0;
+    }
     if (!sRemote) {
         walk_switch(part);
         walk_step(ws);
@@ -2312,9 +2342,30 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
     return b;
 }
 
+/* The batch of sprite points (sprite_point_try): one backend call, in the same place in the order of draws. */
+static NOINLINE void flush_point_batch(void) {
+    u32 part = walk_switch(WALK_DRAWS);
+    OPAQUE_FLUSH();
+    gfx_split_draw_sprites(&sBatchState, sPtBatch, sBatchCount / 2);
+    prof_count(PROF_TRIANGLES, sBatchCount);
+    prof_count(PROF_DRAWS, 1);
+    sMix.kinds[sDrawKind].draws++;
+    sMix.kinds[sDrawKind].tris += sBatchCount;
+    sSprStats[2]++;
+    walk_switch(part);
+    sBatchCount = 0;
+    sBatchVertices = 0;
+    sBatchPoints = FALSE;
+    sBatchGeneration++;
+}
+
 static NOINLINE HOT void flush_cpu_batch(void) {
     if (sBatchCount > 0) {
         u32 part;
+        if (sBatchPoints) {
+            flush_point_batch();
+            return;
+        }
         if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
             atlas_upload(sBatchState.textures[0]);
         }
@@ -2370,6 +2421,9 @@ static inline s32 batch_has_room(void) {
 /* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
  * another state. */
 static HOT void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
+    if (UNLIKELY(sBatchPoints)) {
+        flush_batch(); // Triangles never join a batch of sprite points
+    }
     if (sModelCount > 0 || sMeshPartCount > 0) {
         flush_mesh_batch();
         flush_model_batch();
@@ -2618,6 +2672,12 @@ static COLD void read_switches_now(void) {
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
     sNativeFrame = plat_switch("DKR_NATIVE_FRAME", plat_old_3ds()) != 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
+    // P60 D: sprite tiles as points, the GPU's geometry shader making their corners (1: the backend's CPU makes them,
+    // 2: the geometry shader where it can). Off by default until an Old 3DS bench has raced it.
+    sSpriteGs = plat_switch("DKR_SPRITE_GS", 0);
+#if PLAT_DEBUG_TOOLS
+    sSpriteGsCheck = plat_switch("DKR_SPRITE_GS_CHECK", 0) != 0;
+#endif
 }
 
 static inline void read_switches(void) {
@@ -4159,6 +4219,16 @@ static COLD void frame_logs_600(void) {
                  (unsigned) sTrackStats[4]);
         __builtin_memset(sTrackStats, 0, sizeof(sTrackStats));
     }
+    if (sSpriteGs) {
+        plat_log("sprite points (DKR_SPRITE_GS %d): %lu points in %lu draws, %lu sprite tiles left as triangles (%lu "
+                 "opaque, %lu flat, %lu other)", (int) sSpriteGs, sSprStats[0], sSprStats[2], sSprStats[1],
+                 sSprStats[5], sSprStats[6], sSprStats[7]);
+        if (sSpriteGsCheck) {
+            plat_log("sprite points check: %lu corners compared, %lu differ%s", sSprStats[3], sSprStats[4],
+                     sSprStats[4] ? " (DIFFER)" : "");
+        }
+        __builtin_memset(sSprStats, 0, sizeof(sSprStats));
+    }
     if (sNativeGpuSwitch) {
         plat_log("native GPU maths: %u draws by the GPU, %u left out, %u left to the CPU (GPU maths %s)",
                  (unsigned) sNGpuStats[0], (unsigned) sNGpuStats[1], (unsigned) sNGpuStats[2],
@@ -5363,6 +5433,257 @@ static NOINLINE void native_record_free(NMat *mat, const Vertex *vtx, s32 numVer
     sTriStateValid = FALSE;
 }
 
+/*
+ * P60 D (DKR_SPRITE_GS, roadmap P60, default off): a sprite tile of the 3D world as one point (gfx_backend.h
+ * GfxSpritePoint) instead of two triangles. Its four corners are a billboard's offsets from its anchor, under a matrix
+ * without perspective and the viewport, all of them affine, so they form a parallelogram: the point holds one corner,
+ * the two edges from it, the same for the texture coordinates, and the colour (one, but for the alpha, which with fog
+ * on is each corner's fog factor). The walk then skips the corners' shared-vertex table, the per-triangle checks, the
+ * six indices and three quarters of the bytes queued for the other core; the backend makes the corners itself, with
+ * the GPU's geometry shader where it can (gfx_c3d.c). The GPU culls and clips them as the walk's own tests would
+ * have: the same picture, up to rounding. Anything else (flat sprites, two textures, a tile whose corners don't close
+ * the parallelogram, opaque batches the sorter takes, the reference renderer's and traced frames) is drawn as before.
+ */
+static inline TexCoords tri_uv(const Triangle *t, s32 k) {
+    return k == 0 ? t->uv0 : k == 1 ? t->uv1 : t->uv2;
+}
+
+/* The texture axes draw_triangles_impl would use for this draw's first texture. */
+static inline void sprite_axes(const GfxDrawState *state, TexAxis *u0, TexAxis *v0) {
+    if (sPresetAxes != NULL) {
+        *u0 = sPresetAxes[0];
+        *v0 = sPresetAxes[1];
+    } else {
+        const GfxTexture *tex = state->textures[0];
+        float shift = texel_centre_shift(tex);
+        tex_axis_init(u0, g.tiles[0].shifts, g.tiles[0].uls, tex->width, shift);
+        tex_axis_init(v0, g.tiles[0].shiftt, g.tiles[0].ult, tex->height, shift);
+    }
+}
+
+/* A corner as draw_triangles_impl would have made it (the viewport folded in, fog in the alpha). */
+static inline void sprite_corner(GfxVertex *v, const RspVertex *in, const Viewport *vp, s32 fog, const TexAxis *u0,
+                                 const TexAxis *v0, TexCoords uv) {
+    u32 rgba = in->rgba;
+    v->x = in->x * vp->scaleX + in->w * vp->transX;
+    v->y = in->y * vp->scaleY + in->w * vp->transY;
+    v->z = in->z;
+    v->w = in->w;
+    if (fog) {
+        rgba = (rgba & 0x00FFFFFFu) | (in->fogFlat << 24);
+    }
+    __builtin_memcpy(&v->r, &rgba, 4);
+    v->u0 = tex_axis_coord(u0, uv.u);
+    v->v0 = tex_axis_coord(v0, uv.v);
+    v->u1 = v->v1 = 0.0f;
+}
+
+static inline s32 sprite_close(float a, float b, float scale) {
+    float d = a - b;
+    return (d < 0.0f ? -d : d) <= scale;
+}
+
+#if PLAT_DEBUG_TOOLS
+/* DKR_SPRITE_GS_CHECK: the point's corners as the backend makes them (gfx_sprite_expand) against the four
+ * draw_triangles_impl would have made from the vertices, and the triangles against the game's. Counted in the log. */
+static NOINLINE COLD void sprite_point_check(const GfxSpritePoint *pt, const GfxVertex ref[4], const u8 corner[4],
+                                             const Triangle *tris) {
+    GfxVertex got[4];
+    u16 idx[6];
+    s32 k, bad = 0;
+    gfx_sprite_expand(pt, 1, got, idx);
+    for (k = 0; k < 4; k++) {
+        const GfxVertex *a = &got[k], *b = &ref[k];
+        float ps = 1e-4f * ((b->w < 0.0f ? -b->w : b->w) + (b->x < 0.0f ? -b->x : b->x) +
+                            (b->y < 0.0f ? -b->y : b->y) + 1.0f);
+        float ts = 1e-4f * ((b->u0 < 0.0f ? -b->u0 : b->u0) + (b->v0 < 0.0f ? -b->v0 : b->v0) + 1.0f);
+        if (!sprite_close(a->x, b->x, ps) || !sprite_close(a->y, b->y, ps) || !sprite_close(a->z, b->z, ps) ||
+            !sprite_close(a->w, b->w, ps) || !sprite_close(a->u0, b->u0, ts) || !sprite_close(a->v0, b->v0, ts) ||
+            a->r != b->r || a->g != b->g || a->b != b->b || a->a != b->a) {
+            bad++;
+        }
+    }
+    // The triangles: (p, q, r) and (d, r, q) as indices 0-3 must be the game's two, in its winding.
+    for (k = 0; k < 6; k++) {
+        const Triangle *t = &tris[k / 3];
+        s32 j, found = 0;
+        for (j = 0; j < 3; j++) {
+            // The game's triangle, rotated to start where ours does, must match corner for corner.
+            if (t->verticesArray[1 + j] == corner[idx[(k / 3) * 3]] &&
+                t->verticesArray[1 + (j + 1) % 3] == corner[idx[(k / 3) * 3 + 1]] &&
+                t->verticesArray[1 + (j + 2) % 3] == corner[idx[(k / 3) * 3 + 2]]) {
+                found = 1;
+            }
+        }
+        if (!found) {
+            bad++;
+            break;
+        }
+    }
+    sSprStats[3] += 4;
+    sSprStats[4] += (unsigned long) bad;
+}
+#endif
+
+/* Draws (or drops, off the screen) the tile as a point; FALSE leaves it to draw_record_triangles. V: its vertices.
+ * The corners' own flat bytes are tested, not the load's flat bits (a billboard's matrix has no perspective, so its
+ * loads always count as maybe flat, while place_billboard leaves its 3D world corners not flat). */
+static NOINLINE s32 sprite_point_try(const RspVertex *V, const Triangle *tris, s32 count, s32 textured) {
+    const Triangle *t0 = &tris[0], *t1 = &tris[1];
+    const u8 *a = &t0->verticesArray[1], *b = &t1->verticesArray[1];
+    const RspVertex *P, *Q, *R, *D;
+    GfxDrawState state;
+    GfxSpritePoint *pt;
+    GfxVertex c[4];
+    TexAxis u0, v0;
+    Viewport vp;
+    TexCoords uvP, uvQ, uvR, uvD;
+    u8 corner[4];
+    s32 i, j, fog, opaque;
+    float ps, ts;
+    if (count != 2 || !textured || REF_ACTIVE() || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame) ||
+        ((t0->flags ^ t1->flags) & BACKFACE_DRAW) != 0) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    state = sTriState;
+    opaque = sOpaqueSortSwitch && opaque_sortable(&state);
+    if (opaque && sRemote) {
+        sSprStats[5]++; // Opaque, with the sorter's buckets on the other core (DKR_NATIVE_REMOTE)
+        return FALSE;
+    }
+    if (state.textures[0] == NULL || state.textures[1] != NULL || (sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1))) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    // p: the corner of the first triangle the second doesn't use; q and r follow it in the first's winding, and the
+    // second must be (d, r, q), turned any way.
+    for (i = 0; i < 3; i++) {
+        if (a[i] != b[0] && a[i] != b[1] && a[i] != b[2]) {
+            break;
+        }
+    }
+    if (i == 3) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    corner[0] = a[i];
+    corner[1] = a[(i + 1) % 3];
+    corner[2] = a[(i + 2) % 3];
+    for (j = 0; j < 3; j++) {
+        if (b[j] != corner[1] && b[j] != corner[2]) {
+            break;
+        }
+    }
+    if (j == 3 || b[(j + 1) % 3] != corner[2] || b[(j + 2) % 3] != corner[1]) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    corner[3] = b[j];
+    if (corner[0] >= MAX_VERTICES || corner[1] >= MAX_VERTICES || corner[2] >= MAX_VERTICES ||
+        corner[3] >= MAX_VERTICES) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    // Each corner's texture coordinates must be the same in both triangles that use it.
+    uvP = tri_uv(t0, i);
+    uvQ = tri_uv(t0, (i + 1) % 3);
+    uvR = tri_uv(t0, (i + 2) % 3);
+    uvD = tri_uv(t1, j);
+    if (tri_uv(t1, (j + 1) % 3).texCoords != uvR.texCoords || tri_uv(t1, (j + 2) % 3).texCoords != uvQ.texCoords) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    P = &V[corner[0]], Q = &V[corner[1]], R = &V[corner[2]], D = &V[corner[3]];
+    if (P->flat | Q->flat | R->flat | D->flat) {
+        sSprStats[6]++; // Flat on the screen (the HUD's, a menu's): drawn as before
+        return FALSE;
+    }
+    if (((P->rgba ^ Q->rgba) | (P->rgba ^ R->rgba) | (P->rgba ^ D->rgba)) & 0x00FFFFFFu) {
+        sSprStats[7]++;
+        return FALSE; // Colours that differ (but for the alpha)
+    }
+    viewport_init(&vp);
+    if ((vertex_outcode(P, &vp) & vertex_outcode(Q, &vp) & vertex_outcode(R, &vp) & vertex_outcode(D, &vp)) != 0) {
+        sSprStats[0]++;
+        sWalkRejectedTris += 2;
+        return TRUE; // All four past the same edge: nothing to draw
+    }
+    fog = (g.geometryMode & G_FOG) != 0;
+    sprite_axes(&state, &u0, &v0);
+    sprite_corner(&c[0], P, &vp, fog, &u0, &v0, uvP);
+    sprite_corner(&c[1], Q, &vp, fog, &u0, &v0, uvQ);
+    sprite_corner(&c[2], R, &vp, fog, &u0, &v0, uvR);
+    sprite_corner(&c[3], D, &vp, fog, &u0, &v0, uvD);
+    // d must close the parallelogram (to a ten-thousandth of the corner's size, a hundredth of a pixel).
+    ps = 1e-4f * ((c[3].w < 0.0f ? -c[3].w : c[3].w) + (c[3].x < 0.0f ? -c[3].x : c[3].x) +
+                  (c[3].y < 0.0f ? -c[3].y : c[3].y) + 1.0f);
+    ts = 1e-4f * ((c[3].u0 < 0.0f ? -c[3].u0 : c[3].u0) + (c[3].v0 < 0.0f ? -c[3].v0 : c[3].v0) + 1.0f);
+    if (!sprite_close(c[1].x + c[2].x - c[0].x, c[3].x, ps) || !sprite_close(c[1].y + c[2].y - c[0].y, c[3].y, ps) ||
+        !sprite_close(c[1].z + c[2].z - c[0].z, c[3].z, ps) || !sprite_close(c[1].w + c[2].w - c[0].w, c[3].w, ps) ||
+        !sprite_close(c[1].u0 + c[2].u0 - c[0].u0, c[3].u0, ts) ||
+        !sprite_close(c[1].v0 + c[2].v0 - c[0].v0, c[3].v0, ts)) {
+        sSprStats[7]++;
+        return FALSE;
+    }
+    state.cullMode = (t0->flags & BACKFACE_DRAW) ? 0 : (g.vpScale[0] < 0.0f ? 2 : 1);
+    state.flat = 0;
+    if (opaque) {
+        // Held by state with the opaque buckets (as opaque_hold would have held the triangles), in any order.
+        OpaquePtBucket *bk = NULL;
+        for (i = 0; i < sOpaquePtCount; i++) {
+            if (sOpaquePt[i].state.textures[0] == state.textures[0] && draw_states_equal(&sOpaquePt[i].state, &state)) {
+                bk = &sOpaquePt[i];
+                break;
+            }
+        }
+        if (bk == NULL || bk->numPoints == OPAQUE_PT_POINTS) {
+            if (bk == NULL && sOpaquePtCount == OPAQUE_PT_BUCKETS) {
+                opaque_flush_now();
+            }
+            if (bk == NULL) {
+                bk = &sOpaquePt[sOpaquePtCount++];
+                bk->state = state;
+            } else {
+                gfx_split_draw_sprites(&bk->state, bk->pts, bk->numPoints); // A full bucket: drawn now
+                prof_count(PROF_DRAWS, 1);
+                sOpaqueStats[1]++;
+            }
+            bk->numPoints = 0;
+        }
+        pt = &bk->pts[bk->numPoints++];
+        sOpaquePending = TRUE;
+        sOpaqueStats[0]++;
+    } else {
+        if (!sBatchPoints || sBatchCount + 2 > MAX_BATCH_TRIANGLES || !draw_states_equal(&state, &sBatchState)) {
+            if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+                flush_batch();
+            }
+            sBatchState = state;
+            sBatchPoints = TRUE;
+        }
+        pt = &sPtBatch[sBatchCount / 2];
+        sBatchCount += 2;
+        sBatchVertices += 4;
+    }
+    pt->p[0] = c[0].x, pt->p[1] = c[0].y, pt->p[2] = c[0].z, pt->p[3] = c[0].w;
+    pt->e1[0] = c[1].x - c[0].x, pt->e1[1] = c[1].y - c[0].y, pt->e1[2] = c[1].z - c[0].z, pt->e1[3] = c[1].w - c[0].w;
+    pt->e2[0] = c[2].x - c[0].x, pt->e2[1] = c[2].y - c[0].y, pt->e2[2] = c[2].z - c[0].z, pt->e2[3] = c[2].w - c[0].w;
+    pt->uv[0] = c[0].u0, pt->uv[1] = c[0].v0;
+    pt->uv[2] = c[1].u0 - c[0].u0, pt->uv[3] = c[1].v0 - c[0].v0;
+    pt->uv[4] = c[2].u0 - c[0].u0, pt->uv[5] = c[2].v0 - c[0].v0;
+    __builtin_memcpy(pt->rgba, &c[0].r, 4);
+    pt->alpha[0] = c[1].a, pt->alpha[1] = c[2].a, pt->alpha[2] = c[3].a, pt->alpha[3] = 0;
+    sObjTris[sDrawObj] += 2;
+    sSprStats[0]++;
+#if PLAT_DEBUG_TOOLS
+    if (UNLIKELY(sSpriteGsCheck)) {
+        sprite_point_check(pt, c, corner, tris);
+    }
+#endif
+    return TRUE;
+}
+
 /* A sprite tile: the vertices it loads go where the frame's appending load would have put them, and the tiles after
  * it that load none (four of five) use them again. Returns FALSE (nothing done) for a tile that loads none with no
  * load of this frame's kept. */
@@ -5402,7 +5723,12 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
-    draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    if (!sSpriteGs) {
+        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    } else if (!sprite_point_try(sSprVerts, tris, count, textured)) {
+        sSprStats[1]++;
+        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    }
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
