@@ -450,6 +450,41 @@ jobs:
             exit 1
           fi
 
+      - name: Split lines check
+        # P66: DKR_SPLIT_LINES hands the split ring's head and tail over in batches, so the same build must draw
+        # identical frames with its self-check on (DKR_SPLIT_LINES_CHECK=1: the backend compares every frame's records
+        # with the walk's) and the Old 3DS defaults, and report 0 differ. Modes 2 and 3 are the check broken on purpose
+        # (rule K6: a draw record lost; a frame's end not handed over) and must report it.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_SPLIT_LINES_CHECK=1 \
+            --out "$RUNNER_TEMP/split-lines" --max-images 0 --no-repeat-check --fail-on-diff
+          for m in 2 3; do
+            DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+              --head port/build/host/dkr --head-env DKR_SPLIT_LINES_CHECK=$m --only levels \
+              --out "$RUNNER_TEMP/split-lines-broken$m" --max-images 0 --no-repeat-check
+          done
+          logs=$(find "$RUNNER_TEMP/split-lines/runs" -path "*/head/log.txt")
+          lost=$(find "$RUNNER_TEMP/split-lines-broken2/runs" -path "*/head/log.txt")
+          late=$(find "$RUNNER_TEMP/split-lines-broken3/runs" -path "*/head/log.txt")
+          grep -h "split lines:" $logs $lost $late | tail -n 8
+          if grep -q "split lines: first difference" $logs; then
+            echo "::error::The split ring lost, tore or delayed a record with DKR_SPLIT_LINES (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "split lines: [1-9][0-9]* frames compared, 0 differ, 0 frame ends" $logs; then
+            echo "::error::The split lines check never compared a frame (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "split lines: first difference .*(1 frames differ" $lost; then
+            echo "::error::The split lines check broken on purpose (DKR_SPLIT_LINES_CHECK=2, a lost record) reported nothing."
+            exit 1
+          fi
+          if ! grep -q "split lines: first difference .* 1 frame ends not handed over" $late; then
+            echo "::error::The split lines check broken on purpose (DKR_SPLIT_LINES_CHECK=3, a frame end kept) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register
