@@ -228,8 +228,14 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_FOG=1`
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
 - `DKR_FOG_SKIP=1` (roadmap P60 C: the walk works out a fogged vertex's fog factor, a divide each, only where the
-  draw's combiner reads the shade alpha; the GPU fogs per pixel, so frames are the same. Off with `DKR_VERTEX_FOG=1`.
+  draw's combiner reads the shade alpha; the GPU fogs per pixel, so frames are the same. On by default on an Old 3DS
+  (bench run 50), `DKR_FOG_SKIP=0` for the old way. Off with `DKR_VERTEX_FOG=1`.
   Logs `fog skip: N fog factors left out` every 600 frames)
+- Old 3DS defaults from bench run 50 (2026-11-22), each `=0` for the old way: `DKR_RAW_REGS` (each draw's GPU
+  settings, uniforms and draw command as raw register words made once per draw state; off in stereo 3D;
+  `DKR_RAW_REGS_CHECK=1` compares every reuse with citro3d), `DKR_NATIVE_GPU` (1: the karts' vertex maths on the GPU;
+  2 adds the objects) and `DKR_VERTEX_ASM` (the native draws' vertex passes as one VFP loop; `DKR_VERTEX_ASM_CHECK=1`
+  compares it with the C). The checks count in the test run results' chk cells.
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)

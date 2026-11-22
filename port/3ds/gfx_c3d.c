@@ -3893,7 +3893,8 @@ static void read_switches(void) {
     // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
     // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
-                       plat_switch("DKR_NATIVE_TRACK", 0) != 0 || plat_switch("DKR_NATIVE_GPU", 0) != 0;
+                       plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
+                       plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     raw_read_switches(); // DKR_RAW_REGS, DKR_RAW_REGS_CHECK
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;

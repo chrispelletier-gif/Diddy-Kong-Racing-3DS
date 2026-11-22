@@ -970,7 +970,7 @@ float gfxb_cpu_cull_margin(void) {
 
 int gfxb_gpu_transform(void) {
     return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
-           plat_switch("DKR_NATIVE_GPU", 0) != 0;
+           plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0; // as gfx_rdp.c's sNativeGpuSwitch
 }
 
 /* No guard band to keep to here; DKR_HOST_BAND (a band in screen widths, e.g. 1.5) makes one up the way the 3DS's

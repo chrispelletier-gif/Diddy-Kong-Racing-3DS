@@ -320,50 +320,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // prewarm, SD writes and frees, NATIVE_REMOTE 3, STATE_CACHE 2, REWRITE 0, both WALK_VERTS rows and the three
     // NATIVE_GPU rows were settled or neutral, so their rows went (their switches untouched; port/docs/bench-history.md
     // keeps the earlier results). Run 45 had already settled the memo check, the old walk and the atlas.
-    // P61 M (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): hardware truth for the game core's hot code.
-    // These replace the plain PMU 1 / PMU 2 rows (P57 B). Each measures, one lap: the CPU counters per game core
-    // section (log and autorun_cores.txt: "game core sections (PMU n, ...)": M cycles / fetch stall share / k misses
-    // a frame for top (the walk is inside it), logic, objects...) and the walk's steps (DKR_WALK_STEPS, any non-zero
-    // value: "walk steps (ms a frame, racers / track / objects / all)", one frame in 16). PMU 1: I-cache misses;
-    // PMU 2: D-cache read misses.
+    // Run 50 (62ac36e, 2026-11-22, proposals/3ds-switch-bench-62ac36e-o3ds-results.md): raw register words with the
+    // karts' vertex maths on the GPU (DKR_RAW_REGS + DKR_NATIVE_GPU 1: game core -4.3 ms, renderer core -3.6 ms), the
+    // fused VFP vertex loop (DKR_VERTEX_ASM, game -0.5 ms) and fog factors only where read (DKR_FOG_SKIP, game -0.7 ms)
+    // are the Old 3DS defaults now, and the P61 W cuts stay on (old way +0.2 ms). Their rows went, with the settled
+    // ones: VFP RunFast (already on), PMU 3/4, the vertex loop and material-once self-checks, the depth fill and
+    // native track rows (kept off), two of the three page flip rows, NATIVE_GPU alone and raw with objects on the GPU.
+    // None of the four winners were raced together in run 50, so this bench confirms them: the usual races (new
+    // defaults) against the previous defaults on every track.
+    { "previous defaults (raw words, karts on the GPU, vertex loop, fog skip off)",
+      { "DKR_RAW_REGS", "DKR_NATIVE_GPU", "DKR_VERTEX_ASM", "DKR_FOG_SKIP", NULL }, -1, 0, 0, 0 },
+    // P61 M (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): hardware truth for the game core's hot code,
+    // kept until P61 has its before/after. Each measures, one lap: the CPU counters per game core section (log and
+    // autorun_cores.txt: "game core sections (PMU n, ...)": M cycles / fetch stall share / k misses a frame for top
+    // (the walk is inside it), logic, objects...) and the walk's steps (DKR_WALK_STEPS, any non-zero value: "walk
+    // steps (ms a frame, racers / track / objects / all)", one frame in 16). PMU 1: I-cache misses; PMU 2: D-cache
+    // read misses.
     { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
-    // P61 M3: the karts' vertex maths on the GPU (NATIVE_GPU 1: game core -3.7 ms in run 48, but the backend's
-    // "model/mesh" 4.9-12.7 ms a frame), raced again only for the backend's model draws split into their parts:
-    // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
-    // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
-    { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
-    // P60 B (DKR_VERTEX_ASM, gfx_vertex_asm.h): the native draws' vertex passes (transform, colour and fog, screen edges)
-    // as one hand-scheduled VFP loop instead of three passes over memory; bit-identical (qemu-arm test, and the check
-    // row). Read the game core ms (estimate -0.7 to -1.2 ms). The check row's log must say "vertex asm: N vertices
-    // checked, 0 words differ"; the broken row (rule K6: the check's C leaves the fog out on purpose) must say words
-    // differ, with "vertex asm: a load of ... differs" lines.
-    { "fused VFP vertex loop (P60 B)", { "DKR_VERTEX_ASM", NULL, NULL }, 0, 1, 0, 0 },
-    { "fused VFP vertex loop, self-check (1 lap, log: 0 words differ)",
-      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 1, 1, 1 },
-    { "fused VFP vertex loop, self-check broken on purpose (1 lap, log: words differ)",
-      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 2, 1, 1 },
-    // P60 A1 (proposals/3ds-native-arm-pica-candidates.md): what the D-cache misses cost. PMU 3: the cycles stalled on a
-    // data hazard and the instructions executed (cycles per instruction; the summary line and log say it); PMU 4: the
-    // cycles the load/store unit was full and the D-cache write misses. Over ~15% data stall on the game core: data
-    // layout first; cycles per instruction near 1-1.3 outside the fetch stall: instruction-bound (the asm vertex pass).
-    { "CPU counters, data stalls + CPI (PMU 3, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 3, 1, 1 },
-    { "CPU counters, LSU full + write misses (PMU 4, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 4, 1, 1 },
-    // P60 A2: the VFP in RunFast mode (flush-to-zero, default NaN, no traps) on the game thread, the walk and the
-    // backend. log.txt's "VFP mode" lines say how the kernel starts them: if all three say "RunFast yes", this row
-    // changes nothing and goes. Otherwise read the game core ms (denormals and NaNs trap to slow kernel code).
-    { "VFP RunFast mode (flush-to-zero, default NaN)", { "DKR_VFP_RUNFAST", NULL, NULL }, 0, 1, 0, 0 },
-    // P60 C: the walk's per-vertex fog factor (a divide each) only where the draw's combiner reads it (~95% of fogged
-    // vertices left out in the host scenarios, frames identical). Estimate -0.1 to -0.3 ms of game core.
-    { "fog factors only where read (P60 C)", { "DKR_FOG_SKIP", NULL, NULL }, 0, 1, 0, 0 },
-    // P61 W (2026-11-22): the walk's exact data cuts, on by default (W1 the triangle loop reads the 1-byte back-face
-    // table, W2 a material's textures checked once a frame, W3 the vertex and triangle loops prefetch ahead), raced
-    // the old way together. Keep the defaults if this row's game core and walk ms are higher or equal. Then one lap
-    // of W2's self-check: each skipped material check is made the old way too; the results' checks_wrong must be 0
-    // (log: "material once check: N skipped, 0 would have dropped").
-    { "walk data cuts, old way (W1-W3 off)", { "DKR_WALK_BACKFACE", "DKR_NMAT_ONCE", "DKR_WALK_PLD", NULL }, -1, 0,
-      0, 0 },
-    { "material once self-check (1 lap)", { "DKR_NMAT_ONCE_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -371,48 +345,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306), kept while the Jungle Falls tunnel
-    // still needs checking (coordinator 2026-11-22). The GSP can run the frame's depth fill alongside its first command
-    // lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear drawn instead). Rows: the depth
-    // fill back on with the wait (should be clean, and the fill is cheaper), the native track (NR4, GPU vertex maths)
-    // as it was, and the native track with the fill and the wait. Jungle Falls is in the list for its tunnel; watch the
-    // tunnel and the flashes column.
-    { "depth clear as a memory fill, finished before drawing", { "DKR_DEPTH_FILL", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
-    { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
-    { "native track, depth fill finished before drawing",
-      { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
     // P59 D (2026-11-22, proposals/3ds-profiler-tabs-gpu-hang-plan.md): GPU hang #576 came within a frame of the
-    // profiler's readout redraw, with the owner flipping its pages. These bug-check rows show the readout and turn its
-    // page every 3 frames (DKR_PROF_PAGE_FLIP), in races and on the results and menus between them: with the cached
-    // panels (P59 A), with the panels drawn the old way, and with the screen thread on the game core. A hang in any
-    // writes gpu_hang.txt with its "GPU and system state" section (P59 C). The results' scr columns give the game's
-    // waits for the screen's lock and the bottom screen's ms per area drawn: compare the first two rows' for the lag
-    // fix. NAME=value entries are set to that value in the row's race (and left to the console's default otherwise).
+    // profiler's readout redraw, with the owner flipping its pages. This bug-check row shows the readout and turns its
+    // page every 3 frames (DKR_PROF_PAGE_FLIP), in races and on the results and menus between them (no hang in run
+    // 50's 12 stress races; kept as a hang guard). A hang writes gpu_hang.txt with its "GPU and system state" section
+    // (P59 C).
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
-    { "page flip stress, panels the old way (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_PANEL_CACHE=0", NULL }, 0, 3, 1, 1 },
-    { "page flip stress, screen on the game core (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_SYSCORE=0", NULL }, 0, 3, 1,
-      1 },
-    // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
-    // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
-    // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
-    // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
-    // more draws). PC frames: rounding only.
-    { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
-    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
-    { "track, karts and objects on the GPU, depth fill finished before drawing",
-      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
-    // P55 S3 / P60 F (2026-11-22, gpu_raw.inc): each draw's GPU settings as one block of register words made once per
-    // draw state, its uniforms and the draw command as words too, instead of citro3d's setters, settings writer and
-    // draw call. The backend replay finds the same GPU registers at every draw. Read renderer_core_ms (the limit with
-    // NATIVE_GPU on), then the two NATIVE_GPU rows on top of it against the two without above (run 48: game core
-    // -3.7 ms with karts on the GPU, but the backend's model draws cost 4.9-12.7 ms). The 1-lap self-check row also
-    // makes each reused block through citro3d and compares: the log's "raw GPU words: ..." lines must end "0 differ".
-    // Any value but 0 turns DKR_RAW_REGS on, so a row can share the test value with DKR_NATIVE_GPU.
-    { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
-    { "raw register words, karts' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL }, 0, 1, 1, 0 },
-    { "raw register words, karts' and objects' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL },
-      0, 2, 1, 0 },
-    { "raw register words, self-check (1 lap, log: 0 differ)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
+    // P55 S3 / P60 F (gpu_raw.inc): the raw register words' self-check, one lap on top of the new defaults: each reused
+    // block is made again through citro3d and compared. The results' checks columns (chk) must say 0 wrong, and the
+    // log's "raw GPU words: ..." lines end "0 differ".
+    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
       1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
