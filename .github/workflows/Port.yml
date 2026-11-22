@@ -325,9 +325,10 @@ jobs:
             -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector -Wall \
             -nostdlib -static -Wl,-Ttext-segment=0x400000 -Iport/src/gfx -o "$RUNNER_TEMP/vertex_asm_test" port/tools/vertex_asm_test.c -lgcc
           qemu-arm -cpu arm11mpcore "$RUNNER_TEMP/vertex_asm_test"
-          if VERTEX_ASM_BREAK=1 qemu-arm -cpu arm11mpcore "$RUNNER_TEMP/vertex_asm_test" | tail -1; then
-            echo "the broken test passed"; exit 1
+          if VERTEX_ASM_BREAK=1 qemu-arm -cpu arm11mpcore "$RUNNER_TEMP/vertex_asm_test" > "$RUNNER_TEMP/vertex_asm_break.txt"; then
+            cat "$RUNNER_TEMP/vertex_asm_break.txt"; echo "the broken test passed"; exit 1
           fi
+          tail -1 "$RUNNER_TEMP/vertex_asm_break.txt"
 
       - name: Upload the host build
         uses: actions/upload-artifact@v4
