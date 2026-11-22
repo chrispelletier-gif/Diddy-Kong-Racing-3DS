@@ -1,0 +1,10 @@
+; GS hang ladder (P65 rank 4, gfx_c3d.c gs_ladder): the vertex shader of the ladder's geometry program. A point is one
+; vertex; only its position (v0) is passed on, as one generic register, to gsl_p.g.pica (stride 1).
+
+.out gslp0 dummy o0
+
+.entry gslp_vmain
+.proc gslp_vmain
+	mov gslp0, v0
+	end
+.end

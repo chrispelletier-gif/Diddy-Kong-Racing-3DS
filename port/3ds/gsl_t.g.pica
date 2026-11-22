@@ -1,0 +1,46 @@
+; GS hang ladder (P65 rank 4, gfx_c3d.c gs_ladder): a pass-through geometry shader for triangle lists. In point mode
+; with a stride of 12 (gs_ladder sets it), one run receives a triangle's three vertices of gsl_t.v.pica's four
+; registers each (v0-v3, v4-v7, v8-v11) and emits them unchanged as one triangle. Every output written whole for each
+; vertex, no branches; inputs copied to temporaries first.
+.gsh point c0
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.entry gslt_gmain
+.proc gslt_gmain
+	mov r0, v0
+	mov r1, v1
+	mov r2, v2
+	mov r3, v3
+	setemit 0
+	call gslt_put
+	emit
+
+	mov r0, v4
+	mov r1, v5
+	mov r2, v6
+	mov r3, v7
+	setemit 1
+	call gslt_put
+	emit
+
+	mov r0, v8
+	mov r1, v9
+	mov r2, v10
+	mov r3, v11
+	setemit 2, prim
+	call gslt_put
+	emit
+
+	end
+.end
+
+.proc gslt_put
+	mov outpos, r0
+	mov outtc0, r1
+	mov outtc1, r2
+	mov outclr, r3
+.end

@@ -370,6 +370,19 @@ voices instead of 40 (the driver steals the quietest, as it did when the N64 ran
 use linear interpolation. The CPU mixer stays as a Settings > Sound fallback. The host build has a software
 stand-in for the channels (`host/audio_soft.c`), so `DKR_DUMP_AUDIO` records the same engine on a PC.
 
+### GS hang ladder (debug build only)
+
+`DKR_GS_LADDER=1` in `env.txt` (P65 rank 4) runs, before the game starts, six steps of 30 frames each that find what
+makes the PICA geometry shader freeze a console (the sprite geometry shader froze an Old 3DS in bench run 50): (1) the
+geometry shader's program alone, (2) a geometry shader draw then ordinary draws, (3) ordinary draws then a geometry
+shader draw, (4) 20 program switches a frame, (5) ordinary draws through a pass-through geometry shader (a control),
+(6) 20 switches with that pass-through on the ordinary program too (citro3d issue #56's workaround). Each step writes
+`gs_ladder_N.txt` (`testing`, then `passed`) before it draws, so after a freeze, power the console off and start it
+again: the step that froze is recorded as hung and the ladder goes on with the next one. A GPU stall the console
+survives is written `gpu-hung`. The answers are on the bottom screen for a moment, in the log (`GS ladder: 1 passed,
+...`) and in `gs_ladder.txt`. Steps already answered are not run again; `DKR_GS_LADDER=2` runs them all again. Remove
+the line from `env.txt` when done.
+
 ## Profiler (debug build only)
 
 Turn Profiler on in the Settings menu to show the profiler on the bottom screen, updated every second (it appears
@@ -429,7 +442,13 @@ one frame in 16 while the profiler is on: inside each native record its entry an
 the track's box test, the vertex transform, the colour/fog loop, the screen edges, state and axes, the triangle loop
 and its bucket finds and draws, and records that leave by another road; outside them the sprite records, the state
 commands, the split ring's copy, the opaque flush and the rest. The log line `walk steps (ms a frame, racers / track
-/ objects / all)` and the all-kinds part of `autorun_cores.txt` give them, less the clock reads' own cost. On the
+/ objects / all)` and the all-kinds part of `autorun_cores.txt` give them, less the clock reads' own cost. Since P65 the
+sprite records are split into their set-up, `sprite corners` and `sprite tris`, and billboard records' corners and
+triangles are timed apart from the other roads (`billboard corners`, `billboard tris`); a line past the log's length
+goes on in `walk steps (more):` lines. `DKR_KART_COUNTS=1` (P65 rank 2) logs every 600 frames `kart batches (a frame,
+...)`: the native kart batches by road (one vertex load, two, made anew each frame, billboard, no tables), their
+corners, vertices and triangles, and the share of vertices that moved since that vertex buffer was last drawn (what
+animation rewrites). On the
 backend mix's timed frames (`DKR_BACKEND_MIX`) the backend's model and mesh draws (GPU vertex maths: `DKR_NATIVE_GPU`,
 the native track) are also split into their parts (`backend model/mesh draws: N a frame, drain, state, settings
 twice, uniforms, copies, indices, draw, other`), after the `backend records` line.

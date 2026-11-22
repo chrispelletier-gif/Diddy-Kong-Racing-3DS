@@ -328,6 +328,13 @@ jobs:
       - name: Pictures shown logic
         # P56 K7: the replaced pictures and the longest gap between shown ones (port/src/plat/shown.h)
         run: gcc -Iport/src -o "$RUNNER_TEMP/shown_test" port/tools/shown_test.c && "$RUNNER_TEMP/shown_test"
+      - name: GS hang ladder markers
+        # P65 rank 4: what each step's marker file makes the next start do (port/3ds/gs_ladder.h); then broken on
+        # purpose (rule K6: the "testing" comparison dropped, so a console lock would go unrecorded), which must fail.
+        run: |
+          gcc -Wall -Iport/3ds -o "$RUNNER_TEMP/gs_ladder_test" port/tools/gs_ladder_test.c && "$RUNNER_TEMP/gs_ladder_test"
+          gcc -Wall -DGS_LADDER_BREAK -Iport/3ds -o "$RUNNER_TEMP/gs_ladder_break" port/tools/gs_ladder_test.c
+          if "$RUNNER_TEMP/gs_ladder_break"; then echo "the broken test passed"; exit 1; fi
       - name: Fused VFP vertex loop matches the C
         # P60 B: gfx_vertex_asm (DKR_VERTEX_ASM) against native_record's C passes on random vertices in an ARM11, with
         # the 3DS hot files' flags; then broken on purpose (rule K6: the C leaves the fog out), which must fail. Linked at

@@ -309,18 +309,21 @@ enum {
     WS_STATE,     // (7) State, axes, opaque_direct_ok
     WS_TRIS,      // (8) The triangle loop
     WS_BUCKET,    // (9) Inside it: bucket finds and draws, batch starts
-    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free) bar their corners:
-    WS_SPRITE_CORNERS, // (10b) P64 candidate 4: a sprite record's corners made (vertex maths, billboard placement) and
-                       // drawn (draw_record_triangles / draw_dkr_triangles), what a vertex shader table would replace
+    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free): set-up, state and axes
+    WS_SPR_CORNERS, // (10a, P65) Inside them: the tile's corners (transform and billboard placement)
+    WS_SPR_TRIS,  // (10b, P65) Inside them: its triangles into the batch (and the batch flushes they start)
     WS_OPS,       // (11) native_op and the other state commands
     WS_COPY,      // (12) gfx_split_draw_indexed's copy into the split ring
     WS_FLUSH,     // (13) opaque_flush_now
     WS_PATHS,     // Records that leave by another road: through the slots, the GPU's maths, the backend's maths
+    WS_BB_CORNERS, // (P65) Billboard records' corners (native_record_slots / _free with g.billboard), out of "paths"
+    WS_BB_TRIS,   // (P65) Their triangles into the batch
     WS_COUNT
 };
 static const char *const sWalkStepNames[WS_COUNT] = {
     "rest", "entry", "find", "box", "transform", "colour/fog", "edges", "state", "triangles", "buckets",
-    "sprites", "sprite corners", "state commands", "split copy", "opaque flush", "other paths",
+    "sprites", "sprite corners", "sprite tris", "state commands", "split copy", "opaque flush", "other paths",
+    "billboard corners", "billboard tris",
 };
 static u8 sDrawKind; // The kind being drawn (the draw mix, below)
 static s32 sWalkStepsSwitch; // DKR_WALK_STEPS (read_switches)
@@ -351,6 +354,22 @@ static inline u32 walk_step(u32 step) {
         return 0;
     }
     return walk_step_timed(step);
+}
+
+/* P65: a billboard record's corners or triangles (native_record_slots / native_record_free), timed apart from "other
+ * paths" only for billboards (the records a vertex shader could expand, plan rank 1). Returns the step to go back to
+ * plus one, 0 when nothing was switched (untimed, or not a billboard). */
+static inline u32 walk_bb_step(u32 step) {
+    if (!PLAT_DEBUG_TOOLS || !UNLIKELY(sWalkStepsOn) || !g.billboard) {
+        return 0;
+    }
+    return walk_step_timed(step) + 1;
+}
+
+static inline void walk_bb_back(u32 back) {
+    if (back != 0) {
+        walk_step_timed(back - 1);
+    }
 }
 
 static COLD void walk_steps_begin(void) {
@@ -2677,6 +2696,8 @@ static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped s
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
 static s32 sNativeGpuSwitch;   // DKR_NATIVE_GPU (core balance 2b-B): native kart (1) and object (2) draws, GPU maths
 static u32 sNGpuStats[3];      // native_gpu_draw's draws by the GPU, left out, left to the CPU
+static s32 sKartCounts;        // DKR_KART_COUNTS (P65 rank 2): the native kart batches counted (kart_count)
+static void kart_counts_log(void);
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 // DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
 // rest are transformed here as without it (a bench row put the racers' or the track's maths alone on the GPU, as a
@@ -2765,6 +2786,7 @@ static COLD void read_switches_now(void) {
     // that cost the walk a few milliseconds a frame.
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
     sWalkStepsSwitch = plat_switch("DKR_WALK_STEPS", 0) != 0;
+    sKartCounts = plat_switch("DKR_KART_COUNTS", 0) != 0; // P65 rank 2's measurement (kart_count)
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
@@ -4356,6 +4378,9 @@ static COLD void frame_logs_600(void) {
                  sGpuTransform ? "on" : "off");
         __builtin_memset(sNGpuStats, 0, sizeof(sNGpuStats));
     }
+    if (UNLIKELY(sKartCounts)) {
+        kart_counts_log();
+    }
 }
 
 /* The debug switches read from the environment, once (DKR_OPCOUNT, DKR_WALK_CENSUS). */
@@ -5521,7 +5546,7 @@ static s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 numVerts, const 
 static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start,
                                          const Triangle *tris, s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
-    u32 geometry = g.geometryMode;
+    u32 geometry = g.geometryMode, bb;
     if (sNativeRecords) {
         native_record_free(mat, vtx, numVerts, start, tris, count, textured);
         return;
@@ -5529,6 +5554,7 @@ static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVe
     g.tiles[0] = mat->tiles[0];
     g.tiles[1] = mat->tiles[1];
     g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    bb = walk_bb_step(WS_BB_CORNERS);
     if (start == numVerts) {
         load_vertices_now(vtx, numVerts, 0, g.matrices[g.curMatrix], mat->fog, g.billboard);
     } else {
@@ -5538,10 +5564,13 @@ static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVe
         load_vertices_now(vtx + start, numVerts - start, start, g.matrices[2], mat->fog, FALSE);
         g.curMatrix = 1;
     }
+    walk_bb_back(bb);
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    bb = walk_bb_step(WS_BB_TRIS);
     draw_dkr_triangles(tris, count, textured);
+    walk_bb_back(bb);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -5555,7 +5584,7 @@ static NOINLINE void native_record_slots(NMat *mat, const Vertex *vtx, s32 numVe
 static NOINLINE HOT void native_record_append(NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris,
                                           s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
-    u32 geometry = g.geometryMode;
+    u32 geometry = g.geometryMode, ws;
     if (sNativeRecords && native_sprite_free(mat, vtx, numVerts, tris, count, textured)) {
         return;
     }
@@ -5573,16 +5602,16 @@ static NOINLINE HOT void native_record_append(NMat *mat, const Vertex *vtx, s32 
             }
             forget_slots(dest, dest + numVerts);
         }
-        walk_step(WS_SPRITE_CORNERS);
+        ws = walk_step(WS_SPR_CORNERS);
         load_vertices_now(vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard);
-        walk_step(WS_SPRITES);
+        walk_step(ws);
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
-    walk_step(WS_SPRITE_CORNERS);
+    ws = walk_step(WS_SPR_TRIS);
     draw_dkr_triangles(tris, count, textured);
-    walk_step(WS_SPRITES);
+    walk_step(ws);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -5607,10 +5636,11 @@ static s32 sSprValid;
 static NOINLINE void native_record_free(NMat *mat, const Vertex *vtx, s32 numVerts, s32 start, const Triangle *tris,
                                         s32 count, s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
-    u32 geometry = g.geometryMode, flatBits = 0, f;
+    u32 geometry = g.geometryMode, flatBits = 0, f, bb;
     g.tiles[0] = mat->tiles[0];
     g.tiles[1] = mat->tiles[1];
     g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+    bb = walk_bb_step(WS_BB_CORNERS);
     if (start == numVerts) {
         load_vertices_core(sRecVerts, &g.verts[0], vtx, numVerts, 0, g.matrices[g.curMatrix], mat->fog, g.billboard,
                            &f);
@@ -5626,10 +5656,13 @@ static NOINLINE void native_record_free(NMat *mat, const Vertex *vtx, s32 numVer
         flatBits |= f;
         g.curMatrix = 1;
     }
+    walk_bb_back(bb);
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    bb = walk_bb_step(WS_BB_TRIS);
     draw_record_triangles(sRecVerts, (s32) flatBits, tris, count, textured);
+    walk_bb_back(bb);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -5644,7 +5677,7 @@ static NOINLINE void native_record_free(NMat *mat, const Vertex *vtx, s32 numVer
 static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 numVerts, const Triangle *tris, s32 count,
                                        s32 textured) {
     Tile t0 = g.tiles[0], t1 = g.tiles[1];
-    u32 geometry = g.geometryMode;
+    u32 geometry = g.geometryMode, ws;
     if (numVerts > 0) {
         s32 dest = g.billboard ? 1 : g.vertexIndex, i;
         u32 f, flatBits = 0;
@@ -5662,10 +5695,10 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
         g.tiles[0] = mat->tiles[0];
         g.tiles[1] = mat->tiles[1];
         g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
-        walk_step(WS_SPRITE_CORNERS);
+        ws = walk_step(WS_SPR_CORNERS); // P65 rank 1's measurement: the corners a vertex shader could make
         load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
                            &f);
-        walk_step(WS_SPRITES);
+        walk_step(ws);
         sSprFlat = flatBits | f;
         sSprFrame = (u32) sFrameCount;
         sSprValid = TRUE;
@@ -5679,9 +5712,9 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
-    walk_step(WS_SPRITE_CORNERS);
+    ws = walk_step(WS_SPR_TRIS);
     draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
-    walk_step(WS_SPRITES);
+    walk_step(ws);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -6424,6 +6457,109 @@ static NOINLINE HOT u32 native_vertices_asm(const Vertex *src, s32 c, s32 dest, 
 }
 #endif
 
+/*
+ * P65 rank 2's first experiment (DKR_KART_COUNTS, default 0; proposals/3ds-custom-shader-plan.md): what GPU-resident
+ * kart meshes with a matrix palette would take off the game core. Every native kart (racers kind) batch is counted by
+ * the road it would take: one vertex load and the native tables (what native_gpu_draw takes today, whose corners it
+ * repacks into model vertices every frame), more than one load (two matrices: always the CPU path today), made anew
+ * each frame (dynamic), a billboard, or no tables. For the one-load and two-load batches it also counts the corners
+ * (one GfxModelVertex each in native_gpu_draw) and how many of the game's vertices changed since that vertex buffer was
+ * last drawn: the model-space positions only change when obj_animate (or the game) rewrites them, so that is the share
+ * a GPU-resident mesh would still have to send each frame. Logged with the renderer's other counts every 600 frames:
+ * "kart batches: ..." (per frame). The count costs the walk a hash per batch and a copy of its positions, so it is
+ * for host runs and 1-lap bench rows only; with the switch off it is one load and a branch per native record.
+ */
+enum { KC_ONE_LOAD, KC_TWO_LOADS, KC_DYNAMIC, KC_BILLBOARD, KC_NO_TABLES, KC_ROADS };
+#define KC_SEEN 1024 // Vertex buffers remembered (positions of their last draw)
+typedef struct KartSeen {
+    const Vertex *vtx;
+    u16 n;
+    s16 pos[MAX_VERTICES][3];
+} KartSeen;
+static KartSeen *sKartSeen;
+static u32 sKcBatches[KC_ROADS], sKcCorners[2], sKcVerts[2], sKcChanged[2], sKcNew[2], sKcTris[2];
+static u32 sKcFrames, sKcLastFrame, sKcTableFull;
+
+static NOINLINE COLD void kart_count(u32 road, const Vertex *vtx, s32 total, s32 count, const NativeMesh *mesh) {
+    if (sKcLastFrame != (u32) sFrameCount) {
+        sKcLastFrame = (u32) sFrameCount;
+        sKcFrames++;
+    }
+    sKcBatches[road]++;
+    if (road > KC_TWO_LOADS || vtx == NULL || total <= 0 || total > MAX_VERTICES) {
+        return;
+    }
+    sKcCorners[road] += mesh != NULL ? mesh->numCorners : 0;
+    sKcTris[road] += (u32) count;
+    sKcVerts[road] += (u32) total;
+    if (sKartSeen == NULL) {
+        sKartSeen = (KartSeen *) plat_malloc(sizeof(KartSeen) * KC_SEEN);
+        if (sKartSeen == NULL) {
+            return;
+        }
+        __builtin_memset(sKartSeen, 0, sizeof(KartSeen) * KC_SEEN);
+    }
+    {
+        u32 h = (u32) (((uintptr_t) vtx >> 3) * 2654435761u) % KC_SEEN, probe;
+        KartSeen *e = NULL;
+        s32 i, changed = 0;
+        for (probe = 0; probe < 16; probe++) {
+            KartSeen *c = &sKartSeen[(h + probe) % KC_SEEN];
+            if (c->vtx == vtx || c->vtx == NULL) {
+                e = c;
+                break;
+            }
+        }
+        if (e == NULL) {
+            sKcTableFull++;
+            return;
+        }
+        if (e->vtx != vtx || e->n != (u16) total) {
+            sKcNew[road] += (u32) total; // First seen (or its size changed): no frame before to compare with
+        } else {
+            for (i = 0; i < total; i++) {
+                changed += e->pos[i][0] != vtx[i].x || e->pos[i][1] != vtx[i].y || e->pos[i][2] != vtx[i].z;
+            }
+            sKcChanged[road] += (u32) changed;
+        }
+        e->vtx = vtx;
+        e->n = (u16) total;
+        for (i = 0; i < total; i++) {
+            e->pos[i][0] = vtx[i].x;
+            e->pos[i][1] = vtx[i].y;
+            e->pos[i][2] = vtx[i].z;
+        }
+    }
+}
+
+/* The counts a frame, every 600 frames (frame_logs_600). A level load empties the buffers' memory. */
+static COLD void kart_counts_log(void) {
+    static u32 sLevel = 0xFFFFFFFFu;
+    double f = sKcFrames ? (double) sKcFrames : 1.0;
+    u32 seen0 = sKcVerts[0] - sKcNew[0], seen1 = sKcVerts[1] - sKcNew[1];
+    if (sLevel != gPortLevelLoads && sKartSeen != NULL) {
+        __builtin_memset(sKartSeen, 0, sizeof(KartSeen) * KC_SEEN);
+    }
+    sLevel = gPortLevelLoads;
+    if (sKcFrames > 0) {
+        plat_log("kart batches (a frame, %lu frames): one load %.1f (%.0f corners, %.0f vertices, %.0f tris, %.1f%% of "
+                 "vertices moved since their last draw), two loads %.1f (%.0f corners, %.0f vertices, %.1f%% moved), "
+                 "dynamic %.1f, billboard %.1f, no tables %.1f%s",
+                 (unsigned long) sKcFrames, sKcBatches[KC_ONE_LOAD] / f, sKcCorners[0] / f, sKcVerts[0] / f,
+                 sKcTris[0] / f, seen0 ? 100.0 * sKcChanged[0] / seen0 : 0.0, sKcBatches[KC_TWO_LOADS] / f,
+                 sKcCorners[1] / f, sKcVerts[1] / f, seen1 ? 100.0 * sKcChanged[1] / seen1 : 0.0,
+                 sKcBatches[KC_DYNAMIC] / f, sKcBatches[KC_BILLBOARD] / f, sKcBatches[KC_NO_TABLES] / f,
+                 sKcTableFull ? " (buffer table full: some not compared)" : "");
+    }
+    __builtin_memset(sKcBatches, 0, sizeof(sKcBatches));
+    __builtin_memset(sKcCorners, 0, sizeof(sKcCorners));
+    __builtin_memset(sKcVerts, 0, sizeof(sKcVerts));
+    __builtin_memset(sKcChanged, 0, sizeof(sKcChanged));
+    __builtin_memset(sKcNew, 0, sizeof(sKcNew));
+    __builtin_memset(sKcTris, 0, sizeof(sKcTris));
+    sKcFrames = sKcTableFull = 0;
+}
+
 static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
@@ -6523,6 +6659,9 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         if (!sNativeRecords) {
             CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
         }
+        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+            kart_count(g.billboard ? KC_BILLBOARD : KC_DYNAMIC, vtx, numVerts, count, NULL);
+        }
         walk_step(WS_PATHS);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
@@ -6561,6 +6700,9 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     if (mesh == NULL || mesh->maxVertex >= total) {
         walk_step(WS_PATHS);
         sNativeDeclined++;
+        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+            kart_count(KC_NO_TABLES, vtx, total, count, NULL);
+        }
         if (!sNativeRecords) {
             CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
         }
@@ -6588,6 +6730,9 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         }
     }
     walk_step(WS_PATHS);
+    if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+        kart_count(dynamic ? KC_DYNAMIC : numLoads == 1 ? KC_ONE_LOAD : KC_TWO_LOADS, vtx, total, count, mesh);
+    }
     if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
         (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
         !REF_ACTIVE() && !UNLIKELY(sTracing) &&

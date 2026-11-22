@@ -33,7 +33,12 @@ CTRU_SRC := $(CTRU)/source/gpu/gpu.c $(CTRU)/source/gpu/shaderProgram.c $(CTRU)/
 C3D_OBJS  := $(patsubst $(C3D)/source/%.c,$(OUT)/citro3d/%.o,$(C3D_SRC))
 CTRU_OBJS := $(patsubst $(CTRU)/source/gpu/%.c,$(OUT)/ctru/%.o,$(CTRU_SRC))
 HARNESS_OBJS := $(OUT)/harness/replay.o $(OUT)/harness/stubs_ctru.o $(OUT)/harness/stubs_plat.o
-BACKEND_OBJS := $(OUT)/backend/gfx_c3d.o $(OUT)/shader/shader_shbin.o
+# The GS hang ladder's blob (P65 rank 4) only where PORT has it (a base checkout from before it doesn't).
+GSL_SRC := $(wildcard $(PORT)/3ds/gsl_n.v.pica $(PORT)/3ds/gsl_p.v.pica $(PORT)/3ds/gsl_p.g.pica \
+                      $(PORT)/3ds/gsl_t.v.pica $(PORT)/3ds/gsl_t.g.pica)
+GSL_OBJ := $(if $(GSL_SRC),$(OUT)/shader/gsl_shbin.o)
+GSL_HDR := $(if $(GSL_SRC),$(OUT)/shader/gsl_shbin.h)
+BACKEND_OBJS := $(OUT)/backend/gfx_c3d.o $(OUT)/shader/shader_shbin.o $(GSL_OBJ)
 
 # As the 3DS build links (port/Makefile): the backend's own wrap of citro3d's settings writer (gpu_cuts.inc) and of
 # libctru's screen calls; the GPU queue's run is a stub here.
@@ -58,7 +63,8 @@ $(OUT)/harness/%.o: $(HERE)%.c $(HERE)replay.h $(HERE)record_format.h $(PORT)/sr
 	@mkdir -p $(dir $@)
 	$(CC) $(HARNESS_CFLAGS) -c $< -o $@
 
-$(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(wildcard $(PORT)/3ds/*.inc) $(OUT)/shader/shader_shbin.h
+$(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(wildcard $(PORT)/3ds/*.inc $(PORT)/3ds/*.h) $(OUT)/shader/shader_shbin.h \
+                         $(GSL_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(BACKEND_CFLAGS) -c $< -o $@
 
@@ -71,4 +77,15 @@ $(OUT)/shader/shader_shbin.c $(OUT)/shader/shader_shbin.h: $(OUT)/shader/shader.
 	python3 $(HERE)bin2c.py $< $(OUT)/shader/shader_shbin
 
 $(OUT)/shader/shader_shbin.o: $(OUT)/shader/shader_shbin.c
+	$(CC) $(ARCH) -c $< -o $@
+
+# The GS hang ladder's own blob (P65 rank 4, port/3ds/rules.mk GSL_SRC); never bound in a replay.
+$(OUT)/shader/gsl.shbin: $(GSL_SRC)
+	@mkdir -p $(dir $@)
+	$(PICASSO) -o $@ $^
+
+$(OUT)/shader/gsl_shbin.c $(OUT)/shader/gsl_shbin.h: $(OUT)/shader/gsl.shbin
+	python3 $(HERE)bin2c.py $< $(OUT)/shader/gsl_shbin
+
+$(OUT)/shader/gsl_shbin.o: $(OUT)/shader/gsl_shbin.c
 	$(CC) $(ARCH) -c $< -o $@

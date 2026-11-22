@@ -395,6 +395,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the walk's and must say 0 wrong (log: "split lines: N frames compared, 0 differ, 0 frame ends not handed over").
     { "split ring hand-off in batches", { "DKR_SPLIT_LINES", NULL, NULL }, 0, 1, 0, 0 },
     { "split ring hand-off, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_LINES_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P65 (2026-11-22, proposals/3ds-custom-shader-plan.md section 6, steps 0 and 1). The two walk steps rows above now
+    // also split the sprite tiles' step ("sprites" set-up, "sprite corners", "sprite tris") and time billboards apart
+    // ("billboard corners", "billboard tris", out of "other paths"): rank 1's uniform-table sprite shader goes ahead
+    // only if sprite + billboard corners and tris come to 0.6 ms or more on the game core.
+    // Step 0: the karts' light by transform.v.pica's light path (DKR_GPU_LIGHT, off since #406 and never raced with the
+    // karts on the GPU) on top of the defaults (NATIVE_GPU 1). Plan estimate: game core -0.1 to -0.4 ms.
+    { "karts lit by the GPU's vertex shader (GPU_LIGHT, karts on the GPU)", { "DKR_GPU_LIGHT", NULL, NULL }, 0, 1, 1, 0 },
+    // Step 0: why the native track lost on the Old 3DS GPU (+3-4 ms, #367): the GPU timed by draw kind (DKR_GPU_KINDS,
+    // off by default here: its cut frame is a hitch) with the track on the GPU's vertex maths and without. The track
+    // kind's GPU ms grows with its vertices (same pixels both ways), so the difference is the vertex cost a slimmer
+    // track shader could cut. Both are measurements (left out of the all-together race).
+    { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 0 },
+    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK", NULL }, 0, 1, 1, 0 },
+    // Step 1, rank 2: the native kart batches by road (one load / two loads / dynamic / billboard / no tables), their
+    // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
+    // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
+    // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
+    { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
