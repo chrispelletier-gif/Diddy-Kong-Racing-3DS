@@ -389,11 +389,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
     { "page flip stress, panels the old way (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_PANEL_CACHE=0", NULL }, 0, 3, 1, 1 },
     { "page flip stress, screen on the game core (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_SYSCORE=0", NULL }, 0, 3, 1,
+      1 },
     // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
     // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
     // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
     // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
-    // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
+    // more draws). PC frames: rounding only.
     { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     // (The track-and-all-on-the-GPU row went in run 48; P59 E. These two stay as the raw register words rows' base.)

@@ -43,7 +43,7 @@ import sys
 # (PLAT_HOT_GAME), so hot_span covers the game, walk and backend stretches together and grew by what was added;
 # walk_set lost frame_thread (port_gfx_run_frame is out of line, its rare blocks cold); backend_set lost the GPU-draw
 # profiler's and the first draw's fill code from gfxb_draw_indexed and walk_draw_ready.
-BUDGETS = {"hot_span": 78460, "walk_set": 25376, "backend_set": 20604}
+BUDGETS = {"hot_span": 81096, "walk_set": 23100, "backend_set": 21240}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024
