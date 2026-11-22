@@ -498,6 +498,9 @@ progress bar. Your saves are not written while it runs. Tap Stop test (next to S
   stages, worst frames), `autorun_problems.txt`, `autorun_hitches.txt` and `autorun_drawmix.csv` (every test run and
   bench: per race a row per kind drawn, per costly object kind and for the scene, as on the monitor's pages); the
   issue sums the draw mix up under "Where the time goes".
+- New 3DS switch bench and boss fights (or any test run with `DKR_GPU_CENSUS=1`): `autorun_gpudraws.txt`, each race's
+  GPU picture: the GPU timeline (fills, command lists, copies; ms a frame), the command lists by kind, the costliest
+  draws, and the detail (box, colours, combiner, scissor) of the 3 costliest single draws and of the frame's first 3.
 - When the run ends or is stopped, and bug reports are set up, the results are sent as an issue titled
   "[3DS test run]". `python3 port/tools/bugreport_fetch.py <issue>` saves its files, and
   `python3 port/tools/autorun_report.py bugreport_<issue>/autorun_results.csv` turns them into tables by track and

@@ -126,6 +126,7 @@
 #define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
 #define DRAWMIX_FILE "autorun_drawmix.csv" // Each race's cost per kind of thing drawn and per object kind (profile.h)
 #define CORES_FILE "autorun_cores.txt" // Each race's core times, uncapped ceiling and game core breakdown (profile.h)
+#define GPUDRAWS_FILE "autorun_gpudraws.txt" // P62 M1: each race's GPU timeline, kinds and costliest draws (New 3DS)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -307,6 +308,14 @@ static const BenchSwitch sSwitchesNative[] = {
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
     // P55 S3 (gpu_raw.inc): GPU settings and draws as raw register words (see the Old 3DS list); renderer core ms.
     { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
+    // P62 M2 (2026-11-22, proposals/3ds-n3ds-gpu-headroom-plan.md): measurements for the New 3DS GPU headroom plan,
+    // left out of the all-together race. 3D at 60 fps (DKR_STEREO3D=2 draws in 3D whatever the slider says; 3D has no
+    // anti-aliasing, so two 400x240 eyes with every draw sent twice): the GPU time in 3D on today's build (last measured
+    // on bench #240), which says whether 3D with anti-aliasing could fit. 400 pixels with 2x anti-aliasing (BENCH_400):
+    // the floor under the usual 800 pixels and 4x. Each race's GPU picture is in autorun_gpudraws.txt (DKR_GPU_CENSUS;
+    // the 3D races have the timeline only: draws aren't timed one by one in 3D).
+    { "3D at 60 fps (GPU time in 3D)", { "DKR_STEREO3D", NULL, NULL }, 0, 2, 1, 0 },
+    { "400 px, 2x anti-aliasing (the floor)", { "BENCH_400", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -534,6 +543,7 @@ static void apply_config(s32 config) {
 
 static void set_phase(s32 phase);
 static void turn_off(const char *why);
+static void census_start(void);
 
 enum Phase {
     PHASE_OFF,
@@ -1927,6 +1937,7 @@ static void init(void) {
     if (sNext == 0) {
         io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
         io_queue(DRAWMIX_FILE, "", NULL, FALSE);
+        io_queue(GPUDRAWS_FILE, "", NULL, FALSE);
         io_queue(RUN_ISSUE_FILE, "", NULL, FALSE); // Its progress reports make a new issue.
     }
     set_phase(PHASE_TITLE);
@@ -2220,6 +2231,7 @@ static void start_menu_pass(void) {
     sDriving = TRUE;
     sRaceLevel = level_id();
     prof_window_start(PROF_WINDOW_SESSION);
+    census_start();
     prof_core_window_start();
     prof_draw_mix_window(NULL, NULL, TRUE);
     sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
@@ -2325,6 +2337,66 @@ int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char
 /* An instrumented build (profile-guided compiling) saves its counters here; nothing otherwise. */
 __attribute__((weak)) void port_autorun_section_done(const char *section) {
     (void) section;
+}
+
+/*
+ * P62 M1 (DKR_GPU_CENSUS; 2026-11-22, proposals/3ds-n3ds-gpu-headroom-plan.md): each race's GPU picture into
+ * GPUDRAWS_FILE, attached to the run's issue: the GPU timeline (memory fills, command lists, copies), the command
+ * lists by kind, the costliest draws and the detail of the 3 costliest and of the frame's first 3 (the New 3DS
+ * renderer's gpu_cuts.inc section 8 keeps them, from the frames it already times by draw). A measurement only: on by
+ * default in the New 3DS's switch bench and boss fights, off everywhere else (DKR_GPU_CENSUS=1 turns it on in any
+ * test run, 0 off). The renderer answers port_gpu_census: 1 starts counting (TRUE when the platform has a census),
+ * 2 stops, 3 writes the stopped race's lines into out (their length, or -1 while the renderer hasn't stopped yet).
+ * None on other platforms (this weak one).
+ */
+__attribute__((weak)) int port_gpu_census(int request, char *out, int size) {
+    (void) request;
+    (void) out;
+    (void) size;
+    return 0;
+}
+
+static s32 sCensusOn;        // Counting this race
+static s32 sCensusWaiting;   // Frames waited for the stopped race's lines (0: none pending)
+static char sCensusHead[256]; // The race's heading in GPUDRAWS_FILE
+
+static void census_start(void) {
+    sCensusOn = plat_switch("DKR_GPU_CENSUS", (sMode == MODE_SWITCH || sMode == MODE_BOSS) && !plat_old_3ds()) != 0 &&
+                port_gpu_census(1, NULL, 0);
+    sCensusWaiting = 0;
+}
+
+static void census_stop(const char *heading) {
+    if (!sCensusOn) {
+        return;
+    }
+    sCensusOn = FALSE;
+    port_gpu_census(2, NULL, 0);
+    plat_snprintf(sCensusHead, sizeof(sCensusHead), "%s", heading);
+    sCensusWaiting = 1;
+}
+
+/* Every frame: the stopped race's lines, once the renderer has stopped counting (it does at its next frame). */
+static void census_poll(void) {
+    static char text[8 * 1024];
+    s32 length, at;
+    if (sCensusWaiting == 0) {
+        return;
+    }
+    at = plat_snprintf(text, sizeof(text), "\n## %s\n\n", sCensusHead);
+    length = port_gpu_census(3, text + at, (int) sizeof(text) - at);
+    if (length < 0) {
+        if (++sCensusWaiting < 180) {
+            return;
+        }
+        length = plat_snprintf(text + at, sizeof(text) - at, "(none: the renderer never stopped counting)\n");
+    }
+    sCensusWaiting = 0;
+    append_file(GPUDRAWS_FILE, text,
+                "# The GPU in each race of the test runs (New 3DS, DKR_GPU_CENSUS; port/3ds/gpu_cuts.inc sections 1, 6 "
+                "and 8): the GPU timeline (ms a frame), the command lists cut at each kind (one frame in 60), the "
+                "costliest draws (one frame in 60 is cut before each of a window of draws) and the detail of the 3 "
+                "costliest single draws and of the frame's first 3.\n");
 }
 
 static s32 whole_ready(void);
@@ -3467,6 +3539,15 @@ static void end_race(const char *outcome, s32 position) {
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
     record_hitches(outcome);
     record_draw_mix(outcome);
+    {
+        Race *race = &sRaces[sNext];
+        char heading[256];
+        plat_snprintf(heading, sizeof(heading), "run %d race %d/%d: %s, %s, %s, %s, config %d (%s): %s", (int) sRun,
+                      (int) sNext + 1, (int) sNumRaces, stop_name(race), sCharacterNames[(s32) race->character],
+                      sVehicleNames[(s32) race->vehicle], graphics_setup(), is_bench() ? (int) race->config : -1,
+                      is_bench() ? config_name(race->config) : "-", outcome);
+        census_stop(heading);
+    }
     if (outcome_ok(outcome)) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
@@ -3654,6 +3735,7 @@ void port_autorun_frame(s32 updateRate) {
     if (sIoHeld > 0 && !io_quiet()) {
         io_release(); // P57 A2: the quiet window after the race start is over
     }
+    census_poll();
     if (sPhase == PHASE_RACING && sNext < sNumRaces && sRaces[sNext].kind == STOP_MENUS) {
         const char *outcome;
         sRaceRetraces += updateRate;
@@ -3683,6 +3765,7 @@ void port_autorun_frame(s32 updateRate) {
                     level_header()->laps = sRaces[sNext].laps; // The short whole game run: one lap
                 }
                 prof_window_start(PROF_WINDOW_SESSION);
+                census_start();
                 prof_core_window_start();
                 prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
