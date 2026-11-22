@@ -1306,6 +1306,33 @@ unsigned long plat_screen_draws(void) {
     return sScreenDraws;
 }
 
+/*
+ * P59 B: the game's waits for the console lock on the profiler's path (plat_overlay_show, plat_overlay_graph,
+ * plat_3ds_set_buttons). The screen's thread copies the whole State under it (bs_take_changes); on the system core
+ * at the lowest priority the backend can preempt it there, and the game then waits (the hitch log's "profiler" part).
+ */
+static volatile unsigned sLockWaitMaxUs[2];
+
+unsigned plat_screen_lock_wait_max_us(int reader) {
+    unsigned us = sLockWaitMaxUs[reader & 1];
+    sLockWaitMaxUs[reader & 1] = 0;
+    return us;
+}
+
+static void console_lock_timed(void) {
+    unsigned long long start = plat_time_ns();
+    unsigned us;
+    LightLock_Lock(&sConsoleLock);
+    us = (unsigned) ((plat_time_ns() - start) / 1000);
+    gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US] += us;
+    if (us > sLockWaitMaxUs[0]) {
+        sLockWaitMaxUs[0] = us;
+    }
+    if (us > sLockWaitMaxUs[1]) {
+        sLockWaitMaxUs[1] = us;
+    }
+}
+
 /* Copies rows of the image to the framebuffer, which is the screen turned on its side (the console lock is held). */
 static void screen_copy(int first, int end) {
     u16 width, height;
@@ -1369,6 +1396,8 @@ static void screen_changed(void) {
     }
 }
 
+static int sCeiling; /* DKR_BS_LOCK_CEILING, read by the system core's screen thread */
+
 static void screen_thread(void *arg) {
     LightEvent *event = arg != NULL ? &sScreenSysEvent : &sScreenEvent;
     bugreport_watch_thread(arg != NULL ? "screen (system core)" : "screen");
@@ -1376,9 +1405,26 @@ static void screen_thread(void *arg) {
         unsigned changes;
         LightEvent_Wait(event);
         LightLock_Lock(&sDrawLock); // One of the two threads at a time (DKR_BS_SYSCORE changes between races)
+        // P59 B, DKR_BS_LOCK_CEILING (default 1 on an Old 3DS, 0 on a New 3DS): the system core's screen thread runs
+        // at 0x3E, under the backend (0x31), which could preempt it while it holds the console lock to copy the
+        // State, leaving the game to wait for it. While it holds the lock it runs at 0x30, above the backend; it
+        // draws at 0x3E as before.
+        if (arg != NULL) {
+            static int sEpoch = -1;
+            if (sEpoch != gPlatSwitchEpoch) {
+                sEpoch = gPlatSwitchEpoch;
+                sCeiling = plat_switch("DKR_BS_LOCK_CEILING", !sNew3DS) != 0;
+            }
+        }
+        if (arg != NULL && sCeiling) {
+            svcSetThreadPriority(CUR_THREAD_HANDLE, 0x30);
+        }
         LightLock_Lock(&sConsoleLock);
         changes = bs_take_changes();
         LightLock_Unlock(&sConsoleLock);
+        if (arg != NULL && sCeiling) {
+            svcSetThreadPriority(CUR_THREAD_HANDLE, 0x3E);
+        }
         // Drawn without the lock, from the copy taken; only the copy to the screen holds it (see plat_3ds_exit).
         if (changes != 0) {
             unsigned long long start = plat_time_ns();
@@ -1481,7 +1527,7 @@ void plat_rom_loaded(void) {
 
 /* The buttons (see bs_set_buttons). */
 void plat_3ds_set_buttons(const char *const *labels, int count) {
-    LightLock_Lock(&sConsoleLock);
+    console_lock_timed();
     bs_set_buttons(labels, count);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
@@ -1668,14 +1714,14 @@ int plat_3ds_setup_touch(int x, int y) {
 
 /* The profiler's readout, under the messages. */
 void plat_overlay_show(const char *text) {
-    LightLock_Lock(&sConsoleLock);
+    console_lock_timed();
     bs_set_overlay(text);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);
 }
 
 void plat_overlay_graph(const unsigned char *halfMs, const unsigned char *kinds, int count) {
-    LightLock_Lock(&sConsoleLock);
+    console_lock_timed();
     bs_set_frame_graph(halfMs, kinds, count);
     screen_changed();
     LightLock_Unlock(&sConsoleLock);

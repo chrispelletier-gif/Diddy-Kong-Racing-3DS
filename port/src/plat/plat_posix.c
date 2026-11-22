@@ -71,6 +71,11 @@ unsigned long plat_screen_draws(void) {
     return 0;
 }
 
+unsigned plat_screen_lock_wait_max_us(int reader) {
+    (void) reader;
+    return 0;
+}
+
 void plat_shutdown(void) {
 }
 

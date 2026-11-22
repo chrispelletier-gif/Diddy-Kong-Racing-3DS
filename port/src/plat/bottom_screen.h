@@ -123,5 +123,7 @@ unsigned bs_take_changes(void);
 /* Draws an area into a 320x240 RGB565 image (row by row, from the top left) from the state of the last take. */
 void bs_draw(unsigned short *image, int area);
 void bs_area_rows(int area, int *first, int *end);
+/* P59 A: the profiler panel cache's rebuilds, checked redraws and differing pixels (DKR_BS_PANEL_CACHE_CHECK). */
+void bs_panel_cache_stats(unsigned *builds, unsigned *checks, unsigned *wrong);
 
 #endif

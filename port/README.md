@@ -168,6 +168,7 @@ environment variables:
 | `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
 | `DKR_BOTTOM_PREVIEW`| Draw the 3DS bottom screen's views (home, profiler, menu pages, updater) to PNG files in this directory and exit. `DKR_MONO_FONT` can name a copy of libctru's 8x8 font (2048 bytes) for the dense text. |
+| `DKR_BOTTOM_TIME`   | With `DKR_BOTTOM_PREVIEW`: also time 50 redraws of each area of every view and print `TIME <view> areaN us` lines (`DKR_BOTTOM_ONLY=name`: 400 of the views whose name holds it, none of the rest). |
 | `DKR_BOTTOM_RACE`   | Draw the 3DS bottom screen's race HUD to `race_NNNN.png` in this directory every 60 frames of a race, and leave those HUD pieces off the top screen as the 3DS does (`DKR_RACE_HUD=2` keeps them on both). `DKR_BOTTOM_RACE_LOG=1` also prints the player's map position and heading each frame. |
 
 `make -C port TARGET=host DEBUG=asan BUILD_DIR=build/asan` builds with AddressSanitizer, which is how the original
@@ -412,6 +413,17 @@ line too long for the page wraps at a space onto the next row (indented by 2) ra
 status shows the bench row's whole name; when the page runs out of rows the graph's key gives way first. The host
 build checks this (`DKR_PROF_TERM_CHECK=1 port/build/host/dkr`, run by CI): every page, with the longest status of
 each kind of run, on both consoles' layouts, must fit with no line lost.
+
+A page flip and the once-a-second update redraw the readout from a cache of its panels (`DKR_BS_PANEL_CACHE`, default
+1): the background, the panels, the graph's dim fill and its 60/30 fps labels are drawn once per look, and each redraw
+copies them and draws only the bars and the text over them. The panels' gradients were most of a redraw's time (on a
+PC about 400-1500 µs a redraw before, about 50-75 µs after). `DKR_BS_PANEL_CACHE=0` draws everything every time, as
+before. `DKR_BS_PANEL_CACHE_CHECK=1` draws each cached redraw the old way too and logs `bottom screen panel cache: N
+pixels differ` while any do; the host build checks every look and page this way in CI (`DKR_BS_PANEL_CACHE_CHECK=1`
+with `DKR_BOTTOM_PREVIEW`). On an Old 3DS the screen thread on the system core holds the bottom screen's lock at a
+priority above the renderer's backend (`DKR_BS_LOCK_CEILING`, default 1 there, 0 on a New 3DS), so the game never waits
+for it while the backend runs; the `bottom screen:` log line says how long the game waited for that lock (`game waited
+X ms a frame (max Y ms)`), and test run results carry it as `screen_lock_wait_ms` and `screen_lock_wait_max_ms`.
 
 With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
 the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's

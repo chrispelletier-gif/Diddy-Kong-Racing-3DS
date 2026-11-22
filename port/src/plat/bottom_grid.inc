@@ -4014,6 +4014,16 @@ static int gterm_on(void) {
     return plat_switch("DKR_PROF_TERM", 1) != 0;
 }
 
+/*
+ * P59 A (DKR_BS_PANEL_CACHE): which part of the readout gdebug draws. 0: all of it, as before. 1: the chrome only
+ * (what does not change between redraws: the panels, the graph's dim fill and its 60/30 fps labels), which
+ * bottom_screen.c keeps in a cache. 2: the ink only (the graph's bars, hitch caps and fps lines, and every line of
+ * text), drawn over the cached chrome. Each pass keeps the order of the pixels it draws, so 1 then 2 gives the same
+ * picture as 0 (DKR_BS_PANEL_CACHE_CHECK compares them). Only the terminal readout is split; the AA-font readout
+ * (gdebug_text) could be split the same way.
+ */
+static int sGdebugPass;
+
 /* Text in the terminal font from (x, y), the top of its cells, a colour per character (or one for all); stops at x1. */
 static void gterm_text(int x, int y, int x1, const char *t, const Colour *each, Colour ink) {
     int k, i, j;
@@ -4050,8 +4060,13 @@ static void gterm_lines(const State *s, int x0, int y0, int x1, int y1) {
     while (n > 0 && s->overlay[n - 1][0] == '\0') {
         n--;
     }
-    gbox(x0, y0, x1, y1, SK_PANEL);
-    log_rec('P', x0, y0, x1, y1, 0, "terminal");
+    if (sGdebugPass != 2) {
+        gbox(x0, y0, x1, y1, SK_PANEL);
+        log_rec('P', x0, y0, x1, y1, 0, "terminal");
+    }
+    if (sGdebugPass == 1) {
+        return; /* the chrome: the panel only */
+    }
     lx0 = x0 + 1 + TERM_PAD; /* the frame is 1 px */
     lx1 = x1 - 2 - TERM_PAD; /* the last pixel ink may use */
     /* 14 lines centred on their capitals (7 rows each) and descenders: as many rows above the first as under the last */
@@ -4112,7 +4127,9 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     int gx0, gx1 = x1 - GPAD, gy0_ = y0 + 4, gy1_ = y1 - 4, frames, first, i, labelW, top, h, lx;
     int y60, y30;
     float full = 54.0f;
-    gbox(x0, y0, x1, y1, SK_PANEL);
+    if (sGdebugPass != 2) {
+        gbox(x0, y0, x1, y1, SK_PANEL);
+    }
     labelW = gterm_on() ? gterm_width("60 fps") : gtext_width(GF_BODY, sStyle == 2 ? "60 FPS" : "60 fps", 0); /* the lines are frame rates: labelled so, as 60 sits under 30 (a unit: capitals in Broadcast/Carbon) */
     lx = gterm_on() ? x0 + 1 + TERM_PAD : x0 + gpad_x(SK_PANEL); /* terminal: on the readout's left edge (gterm_lines) */
     gx0 = lx + labelW + 8;
@@ -4124,8 +4141,10 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
     {
         int q = sQuiet;
         sQuiet = 1;
-        fill(gx0, gy0_, gx1, gy1_, (Colour){ 0, 0, 20, 160 });
-        for (i = 0; i < frames; i++) {
+        if (sGdebugPass != 2) {
+            fill(gx0, gy0_, gx1, gy1_, (Colour){ 0, 0, 20, 160 });
+        }
+        for (i = 0; i < frames && sGdebugPass != 1; i++) {
             int k = first + i, kind = s->graphKind[k] & 15, bx = gx1 - (frames - i) * 2;
             int bh = (int) (s->graphHeight[k] * 0.5f * (gy1_ - gy0_) / full + 0.5f);
             Colour c = sGraphColours[kind < BS_GRAPH_KINDS ? kind : 0];
@@ -4135,11 +4154,17 @@ static void gdebug_graph(const State *s, int x0, int y0, int x1, int y1) {
                 fill(bx, gy1_ - bh, bx + 2, gy1_ - bh + 2, WHITE);
             }
         }
-        fill(lx + labelW + 3, y60, gx1, y60 + 1, (Colour){ 255, 255, 255, 110 });
-        fill(lx + labelW + 3, y30, gx1, y30 + 1, (Colour){ 255, 255, 255, 80 });
+        if (sGdebugPass != 1) {
+            /* the fps lines over the bars: ink, as they must stay on top */
+            fill(lx + labelW + 3, y60, gx1, y60 + 1, (Colour){ 255, 255, 255, 110 });
+            fill(lx + labelW + 3, y30, gx1, y30 + 1, (Colour){ 255, 255, 255, 80 });
+        }
         sQuiet = q;
     }
     log_rec('P', gx0, gy0_, gx1, gy1_, 0, "graph");
+    if (sGdebugPass == 2) {
+        return; /* the labels are chrome: their place only depends on the panel's */
+    }
     if (gterm_on()) {
         /* the terminal font's labels, their digits (cell rows 0-6) centred on their lines, 4 px or more apart */
         int c60 = y60, c30 = y30, need = 7 + 4 - (y60 - y30);
