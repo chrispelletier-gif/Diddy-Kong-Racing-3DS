@@ -182,6 +182,8 @@ static u32 sBatchGeneration;
  */
 static GfxDrawState sTriState;
 static s32 sTriStateValid;
+/* The stencil mode the game's PORT_STENCIL_TAG set (kart shadows, P60 E), put in each triangle's draw state. */
+static u8 sStencilMode;
 static s32 sFrameCount;
 static unsigned long sNDrawStats[3]; // Native draws: drawn, materials captured, dropped
 static s32 sOpaquePending; // Sorted opaque CPU batches wait to be drawn (opaque_flush)
@@ -1713,6 +1715,19 @@ static NOINLINE HOT void make_draw_state(GfxDrawState *s, s32 isRect) {
     }
     __builtin_memcpy(s->scissor, g.scissor, sizeof(s->scissor));
     s->flat = isRect; // Triangles set it per triangle (draw_dkr_triangles).
+    if (UNLIKELY(sStencilMode != GFX_STENCIL_OFF) && !isRect) {
+        // A kart shadow's box or the shadow itself (gfx_backend.h): never written to depth, never sorted with the
+        // opaque draws; the box's pixels all count, so no alpha test.
+        s->stencil = sStencilMode;
+        s->depthWrite = FALSE;
+        if (sStencilMode != GFX_STENCIL_DRAW) {
+            s->decal = FALSE;
+            s->depthTest = TRUE;
+            s->alphaTest = FALSE;
+            s->alphaRef = 0;
+            s->fogEnabled = FALSE;
+        }
+    }
     if (isRect) {
         s->scissor[2] = scissor_right(cyc);
     }
@@ -2322,6 +2337,7 @@ static s32 sCpuCullSwitch; // DKR_CPU_CULL (see sCpuCull)
  * back faces cost no vertices, indices or GPU time. Off for 3D (stereo) frames, whose eye offset the test leaves out,
  * and for the host's clipping sweep, which looks at back faces. */
 static s32 sCpuCull;
+static s32 sCpuCullFrame; // sCpuCull for the frame (a kart shadow's box turns it off for a while, P60 E)
 /* In 3D (DKR_STEREO_CULL), the most an eye's offset moves a vertex's clip x this frame (gfxb_cpu_cull_margin); 0 in
  * 2D. */
 static f32 sCullMargin;
@@ -7703,6 +7719,18 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
         dl += 4;
     } else if (w1 == PORT_LIGHT_TAG) {
         sLightOn = FALSE;
+    } else if ((w1 & 0xFFFF0000) == PORT_STENCIL_TAG) {
+        // P60 E: the triangles so far are drawn in the mode they had; those after it carry the new one.
+        flush_batch();
+        _Static_assert(PORT_STENCIL_MARK_FAR == GFX_STENCIL_MARK_FAR &&
+                           PORT_STENCIL_MARK_NEAR == GFX_STENCIL_MARK_NEAR && PORT_STENCIL_DRAW == GFX_STENCIL_DRAW &&
+                           PORT_STENCIL_OFF == GFX_STENCIL_OFF,
+                       "the game's stencil modes are the backend's");
+        sStencilMode = (u8) (w1 & 3);
+        sTriStateValid = FALSE;
+        // The box's one sided faces reach the backend whichever way they face (no CPU culling), with cullMode saying
+        // which side is the front, as the viewport has it (mirrored tracks swap it).
+        sCpuCull = sStencilMode != GFX_STENCIL_MARK_FAR && sStencilMode != GFX_STENCIL_MARK_NEAR && sCpuCullFrame;
     }
     return (s32) (dl - start);
 }
@@ -8622,7 +8650,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
     sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch || sNativeGpuSwitch) &&
                     gfxb_gpu_transform();
-    sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
+    sCpuCull = sCpuCullFrame = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sCullMargin = sCpuCull ? gfxb_cpu_cull_margin() : 0.0f;
     sTrackMesh = sGpuTransform && sTrackMeshSwitch;
     sModelMesh = sGpuTransform && sModelMeshSwitch;
@@ -8651,6 +8679,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
     SETUP_END();
     walk_begin();
+    sStencilMode = GFX_STENCIL_OFF; // (A list cut short could have left a shadow's mode on)
     sCensusSkip = TRUE;
     if (UNLIKELY(sCensusOn > 0) && gPortNativeOps) { // (Frames before the first level load still write N64 commands)
         sCensusSkip = FALSE;

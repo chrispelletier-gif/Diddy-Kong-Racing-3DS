@@ -61,6 +61,25 @@ enum GfxBlendMode {
     GFX_BLEND_ALPHA_CVG /* opaque, alpha tested (cutout) */
 };
 
+/*
+ * GfxDrawState.stencil (P60 E, DKR_STENCIL_SHADOW): a kart's shadow kept to its square by a box on the GPU instead of
+ * the game clipping it against the track. One stencil bit (GFX_STENCIL_BIT) marks where what is already drawn lies
+ * inside the box, then the shadow's triangles are drawn only there. The box's own one sided triangles are drawn
+ * twice, with what the draw state says about depth, alpha testing and colour left aside; cullMode (1 or 2) still says
+ * which faces are the box's front ones, as for any model (a mirrored track swaps them):
+ *  - GFX_STENCIL_MARK_FAR: only the box's far side (the faces cullMode would cull), no colour or depth written;
+ *    each pixel's bit is set where the depth test fails (something drawn lies in front of the far side) and cleared
+ *    where it passes. Every pixel the box covers gets its bit made anew, so no clear is needed between shadows.
+ *  - GFX_STENCIL_MARK_NEAR: only the near side (the faces cullMode keeps), nothing written but the bit, cleared
+ *    where the depth test fails (what is drawn lies in front of the box).
+ *  - GFX_STENCIL_DRAW: drawn as the state says (writing no depth), but only where the bit is set.
+ */
+#define GFX_STENCIL_BIT 0x80
+#define GFX_STENCIL_OFF 0
+#define GFX_STENCIL_MARK_FAR 1
+#define GFX_STENCIL_MARK_NEAR 2
+#define GFX_STENCIL_DRAW 3
+
 /* GfxDrawState.decal: every pixel at the farthest depth, behind whatever was drawn. Nothing sets it now; it goes with the next simplify batch. */
 #define GFX_DEPTH_FAR 2
 
@@ -110,6 +129,7 @@ typedef struct GfxDrawState {
     unsigned char depthWrite;
     unsigned char decal;            /* Pull towards the camera to win depth fights (ZMODE_DEC), or GFX_DEPTH_FAR */
     unsigned char fogEnabled;       /* Blend towards fog colour using vertex alpha */
+    unsigned char stencil;          /* GFX_STENCIL_*: kart shadows by stencil (DKR_STENCIL_SHADOW), 0 for all else */
     short fogMul, fogOffset;        /* Fog factor = clamp(z / w * fogMul + fogOffset, 0, 255), for per pixel fog */
     unsigned char cullMode;         /* 0 none, 1 back faces, 2 front faces (in screen space, CCW front) */
     unsigned char flat;             /* Drawn flat on the screen: rectangles and orthographic triangles (gfx_flat_mode) */
@@ -198,7 +218,7 @@ static inline float gfx_cc_alpha_const(const GfxDrawState *st) {
     return combined;
 }
 static inline int gfx_draw_invisible(const GfxDrawState *st) {
-    return (st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD) && !st->depthWrite &&
+    return (st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD) && !st->depthWrite && !st->stencil &&
            st->combiner.numCycles >= 1 && gfx_cc_alpha_const(st) == 0.0f;
 }
 

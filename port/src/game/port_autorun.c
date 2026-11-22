@@ -381,6 +381,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, depth fill finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P60 E (DKR_STENCIL_SHADOW, tracks.c port_stencil_shadow): the racers' shadows kept to their squares by the GPU's
+    // stencil (a box drawn twice, then the track triangles under the shadow, whole, or cut to the square when too big
+    // for the texture coordinates) instead of the game clipping them.
+    // Read game_core_ms (the clipping was ~0.75 ms on Whale Bay, the walk's shadows ~0.4) against renderer_core_ms
+    // and the GPU ms (three draws a racer instead of one or two). Then one lap with the self-check: the game's own
+    // clipping runs too and the log must say "stencil shadow check: N shadows, light differs 0, shadow there
+    // differs 0" (it costs fps: it does both). The shadows look a little different: the owner judges them first.
+    { "kart shadows by GPU stencil (P60 E)", { "DKR_STENCIL_SHADOW", NULL, NULL }, 0, 1, 1, 0 },
+    { "kart shadows by GPU stencil, self-check (1 lap, log: 0 differ)",
+      { "DKR_STENCIL_SHADOW", "DKR_STENCIL_SHADOW_CHECK", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

@@ -37,6 +37,11 @@
 #include "port_track_cells.h"
 #ifdef TARGET_PORT
 static s32 sPortClipOnce; // v31 DKR_SHADOW_CLIP_ONCE (func_8002FF6C), read at each shadow_update
+static s32 sPortStencilShadow; // P60 E DKR_STENCIL_SHADOW (port_stencil_shadow), read at each shadow_update
+static s32 sPortStencilCheck;  // DKR_STENCIL_SHADOW_CHECK
+static u8 sPortStencilBoxMark; // A shadow heap entry whose texture is this: a stencil shadow's box (shadow_render)
+#define PORT_STENCIL_BOX ((TextureHeader *) &sPortStencilBoxMark)
+static void port_stencil_shadow_render(s32 i, s32 end, s32 flags);
 #endif
 #endif
 
@@ -3655,6 +3660,12 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
+#ifdef TARGET_PORT
+                if (gCurrShadowHeapData[i].texture == PORT_STENCIL_BOX) {
+                    port_stencil_shadow_render(i, shadow->meshEnd, flags);
+                    break;
+                }
+#endif
                 if (port_native_batch(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0,
                                       &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount],
                                       gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount,
@@ -3775,6 +3786,10 @@ void shadow_update(s32 group, s32 waterGroup, s32 updateRate) {
     // header are read (nothing below touches it then: most objects in a race), instead of after.
     s32 portQuick = plat_switch("DKR_SHADOW_QUICK", 1) != 0;
     sPortClipOnce = plat_switch("DKR_SHADOW_CLIP_ONCE", 1) != 0;
+    // P60 E: not with DKR_DEPTH24, whose depth buffer has no stencil bits (gfx_c3d.c).
+    sPortStencilShadow = group == SHADOW_ACTORS && plat_switch("DKR_STENCIL_SHADOW", 0) != 0 &&
+                         plat_switch("DKR_DEPTH24", 0) == 0;
+    sPortStencilCheck = sPortStencilShadow ? plat_switch("DKR_STENCIL_SHADOW_CHECK", 0) : 0;
 #endif
     while (objIndex < objectCount) {
         obj = objects[objIndex];
@@ -3948,6 +3963,454 @@ void func_8002DE30(Object *obj) {
     }
 }
 
+#ifdef TARGET_PORT
+/*
+ * P60 E (DKR_STENCIL_SHADOW, default off): a racer's shadow kept to its square by the GPU's stencil instead of the CPU
+ * clipping it. The game clips the shadow's square against every track triangle under it (func_8002E904,
+ * func_8002FF6C), joins the pieces' corners and works out their heights and texture coordinates (func_8002F2AC,
+ * func_8002F440): 0.75 ms of an Old 3DS game core on Whale Bay, plus the walk's 0.4 ms for the pieces. Here the same
+ * triangles are found (the same tests, without the clipping) and go to the heap whole (a big one cut to the square,
+ * so that its texture coordinates fit their 16 bits), each corner with the texture
+ * coordinates the game's formula gives it (the shadow laid straight down, turned with the racer), and lifted as the
+ * game lifts its pieces. As the texture coordinates are a flat map of x and z, a whole triangle shows the texture
+ * exactly where the game's piece of it would. Before them goes a box around the shadow's square (as wide, as high as
+ * the triangles reach), whose far and near sides mark in the stencil where what is already drawn lies inside it
+ * (gfx_backend.h GFX_STENCIL_*); the triangles are then drawn only there, so they end at the square's edges as the
+ * game's clipped pieces do. Where the game's pieces sit a little off their triangles (a corner shared by two pieces
+ * takes the first one's plane) these lie on them: the owner judges the look before it is a default.
+ *
+ * What the game takes from the pieces stays exact: the racer's shading (func_8002FA64, the track's light under it)
+ * needs the pieces' areas only when the triangles under it differ in light; then the game's own clipping runs for it.
+ * Otherwise the light is the one level, as func_8002FA64 works it out. Whether there is a shadow at all (some piece)
+ * is the game's clip of the found triangles, stopped at the first that leaves a piece. DKR_STENCIL_SHADOW_CHECK runs
+ * the game's way too for every shadow and logs where the light or the shadow's being there differs.
+ *
+ * Falls back to the game's way (returns 0, with nothing changed that the game's way doesn't set again) when one of
+ * the triangles is drawn after the shadows (see-through or water: not yet in the depth buffer to be marked), or there
+ * are more triangles than the table holds (about 5% of shadows over twelve tracks, most on see-through ground).
+ */
+#define PORT_SSH_MAX 64
+typedef struct PortSshTri {
+    unk8011C8B8 corners[3]; // x and z, as func_8002E904 hands them to func_8002FF6C
+    unk8011C8B8 *plane;
+    Vertex *v[3];
+    s32 level; // The batch's light level (flags >> 19 & 7)
+} PortSshTri;
+static PortSshTri sPortSshTris[PORT_SSH_MAX];
+static u32 sPortSshCounts[5]; // CHECK: shadows checked, light differs, shadow there differs, lines logged; and left
+                              // to the game's way (all shadows, CHECK or not)
+
+/* Whether render_level_segment draws batch b with the solid track, before the objects and their shadows (else with
+ * the see-through track after them, or never). */
+static s32 port_ssh_drawn_first(LevelModelSegment *seg, s32 b) {
+    TriangleBatchInfo *batch = &seg->batches[b];
+    u32 textureFlags = 0;
+    if (b >= seg->numberofOpaqueBatches) {
+        return FALSE;
+    }
+    if (batch->textureIndex != 0xFF) {
+        textureFlags = gCurrentLevelModel->textures[batch->textureIndex].texture->flags;
+    }
+    return (!(textureFlags & RENDER_SEMI_TRANSPARENT) && !(batch->flags & RENDER_WATER)) ||
+           (batch->flags & RENDER_DECAL);
+}
+
+/* func_8002E904's search of one segment for the triangles under the shadow, without the clipping. Returns FALSE when
+ * there are more than the table holds, or one is drawn after the shadows. */
+static s32 port_ssh_find(LevelModelSegment *seg, s32 mask, s32 *count, s32 *minY, s32 *maxY) {
+    f32 x0 = gNewShadowObj->trans.x_position - gNewShadowWidth, z0 = gNewShadowObj->trans.z_position - gNewShadowLength;
+    f32 x1 = gNewShadowObj->trans.x_position + gNewShadowWidth, z1 = gNewShadowObj->trans.z_position + gNewShadowLength;
+    const u64 *portCells = port_cells_segment_maps(gCurrentLevelModel, seg);
+    u64 portNeed = port_cells_any(mask);
+    s32 b, f, i;
+    for (b = 0; b < seg->numberOfBatches; b++) {
+        Vertex *vertices;
+        s32 level, drawn = -1;
+        if (PORT_CELLS_SKIP(portCells, b, portNeed) || (seg->batches[b].flags & FLAGS_8002E904)) {
+            continue;
+        }
+        vertices = &seg->vertices[seg->batches[b].verticesOffset];
+        level = (seg->batches[b].flags >> 0x13) & 7;
+        for (f = seg->batches[b].facesOffset; f < seg->batches[b + 1].facesOffset; f++) {
+            Triangle *tri;
+            s32 lo, hi, y, planeIndex;
+            PortSshTri *t;
+            if (!(((seg->unk10[f] & mask) & 0xFF) && ((seg->unk10[f] & mask) & 0xFF00))) {
+                continue;
+            }
+            tri = &seg->triangles[f];
+            lo = hi = vertices[tri->verticesArray[1]].y;
+            for (i = 1; i < 3; i++) {
+                y = vertices[tri->verticesArray[i + 1]].y;
+                if (y < lo) {
+                    lo = y;
+                } else if (hi < y) {
+                    hi = y;
+                }
+            }
+            if (gNewShadowY2 < lo || hi < gNewShadowY1) {
+                continue;
+            }
+            if (*count >= PORT_SSH_MAX) {
+                return FALSE;
+            }
+            t = &sPortSshTris[*count];
+            for (i = 0; i < 3; i++) {
+                t->v[i] = &vertices[tri->verticesArray[i + 1]];
+                t->corners[i].x = t->v[i]->x;
+                t->corners[i].z = t->v[i]->z;
+                t->corners[i].unkC_union.s.unkE = -1;
+            }
+            if (func_8002FD74(x0, z0, x1, z1, 3, (Vec4f *) t->corners) == 0) {
+                continue;
+            }
+            planeIndex = seg->collisionFacets[f].basePlaneIndex * 4;
+            if (seg->collisionPlanes[planeIndex + 1] == 0) {
+                continue;
+            }
+            if (drawn < 0) {
+                drawn = port_ssh_drawn_first(seg, b);
+            }
+            if (!drawn) {
+                return FALSE; // Drawn after the shadows (see-through): not in the depth buffer to be marked
+            }
+            t->plane = (unk8011C8B8 *) &seg->collisionPlanes[planeIndex];
+            t->level = level;
+            D_8011D0BC = t->plane;
+            if (D_8011D0F0 > 0.0f) {
+                func_800304C8(t->corners); // The highest ground under the racer (its fade and size off the ground)
+            }
+            if (lo < *minY) {
+                *minY = lo;
+            }
+            if (hi > *maxY) {
+                *maxY = hi;
+            }
+            (*count)++;
+        }
+    }
+    return TRUE;
+}
+
+/* The game's own clipping of the shadow's segments (shadow_generate), for the light under the racer: whether there is
+ * a piece, and func_8002FA64's light when there is. The pieces themselves are dropped. */
+static s32 port_ssh_game_light(s32 *inSegs, s32 segs, f32 *light) {
+    s32 i, found;
+    D_8011C230 = 0;
+    D_8011B118 = 0;
+    for (i = 0; i < ARRAY_COUNT(D_8011B320); i++) {
+        D_8011B320[i] = 0;
+    }
+    D_8011D0E8 = -1;
+    D_8011D0EC = -1;
+    for (i = 0; i < segs; i++) {
+        if (inSegs[i] >= 0) {
+            s32 mask = compute_grid_overlap_mask(&gCurrentLevelModel->segmentsBoundingBoxes[inSegs[i]],
+                                                 gNewShadowObj->trans.x_position - gNewShadowWidth,
+                                                 gNewShadowObj->trans.z_position - gNewShadowLength,
+                                                 gNewShadowObj->trans.x_position + gNewShadowWidth,
+                                                 gNewShadowObj->trans.z_position + gNewShadowLength);
+            func_8002E904(&gCurrentLevelModel->segments[inSegs[i]], mask, FALSE);
+        }
+    }
+    found = D_8011C230 > 0;
+    *light = found ? func_8002FA64() : 0.0f;
+    D_8011C230 = 0;
+    return found;
+}
+
+#define PORT_SSH_POLY 7 // A triangle cut by the square's four sides has at most seven corners
+
+/* A triangle to draw: its corners (x, y, z) and their texture coordinates. */
+typedef struct PortSshOut {
+    f32 pos[3][3];
+    s16 uv[3][2];
+} PortSshOut;
+static PortSshOut sPortSshOut[PORT_SSH_MAX];
+
+/* func_8002F440's texture coordinates for n corners (into uv, when not NULL); FALSE if one is out of an s16's reach. */
+static s32 port_ssh_uv(f32 (*pos)[3], s32 n, f32 cx, f32 cz, f32 yRotSin, f32 yRotCos, f32 scale, f32 texMid,
+                       s16 (*uv)[2]) {
+    s32 k;
+    for (k = 0; k < n; k++) {
+        f32 xDiff = pos[k][0] - cx, zDiff = pos[k][2] - cz;
+        f32 u = (((xDiff * yRotCos) - (zDiff * yRotSin)) * scale) + texMid;
+        f32 v = (((zDiff * yRotCos) + (xDiff * yRotSin)) * scale) + texMid;
+        if (u < -32768.0f || u > 32767.0f || v < -32768.0f || v > 32767.0f) {
+            return FALSE;
+        }
+        if (uv != NULL) {
+            uv[k][0] = F2S16(u);
+            uv[k][1] = F2S16(v);
+        }
+    }
+    return TRUE;
+}
+
+/* Cuts the triangle poly[0..2] to box (x from box[0] to box[1], z from box[2] to box[3]) on the ground's plane, a
+ * side at a time; the heights follow the triangle's edges. Returns the corners left (fewer than 3: nothing). */
+static s32 port_ssh_cut(f32 (*poly)[3], const f32 *box) {
+    f32 tmp[PORT_SSH_POLY][3], (*src)[3] = poly, (*dst)[3] = tmp, (*swap)[3];
+    s32 n = 3, side, i, m;
+    for (side = 0; side < 4 && n >= 3; side++) {
+        s32 axis = side < 2 ? 0 : 2;
+        f32 limit = box[side], sign = (side & 1) ? -1.0f : 1.0f; // Kept: (value - limit) * sign >= 0
+        m = 0;
+        for (i = 0; i < n; i++) {
+            f32 *a = src[i], *b = src[(i + 1) % n];
+            f32 da = (a[axis] - limit) * sign, db = (b[axis] - limit) * sign;
+            if (da >= 0.0f) {
+                __builtin_memcpy(dst[m++], a, sizeof(tmp[0]));
+            }
+            if ((da >= 0.0f) != (db >= 0.0f)) {
+                f32 t = da / (da - db);
+                dst[m][0] = a[0] + (b[0] - a[0]) * t;
+                dst[m][1] = a[1] + (b[1] - a[1]) * t;
+                dst[m][2] = a[2] + (b[2] - a[2]) * t;
+                m++;
+            }
+        }
+        n = m;
+        swap = src;
+        src = dst;
+        dst = swap;
+    }
+    if (src != poly) {
+        __builtin_memcpy(poly, src, sizeof(tmp[0]) * n);
+    }
+    return n;
+}
+
+/* A heap entry (func_8002F440's layout: an entry per draw, its corners counted from 0) of this texture. */
+static void port_ssh_entry(TextureHeader *texture) {
+    gCurrShadowHeapData[gShadowTail].texture = texture;
+    gCurrShadowHeapData[gShadowTail].triCount = gNewShadowTriCount;
+    gCurrShadowHeapData[gShadowTail].vtxCount = gNewShadowVtxCount;
+    gShadowTail++;
+}
+
+static void port_ssh_vertex(f32 x, f32 y, f32 z, s32 alpha) {
+    Vertex *v = &gCurrShadowVerts[gNewShadowVtxCount++];
+    v->x = (s16) (x < 0.0f ? x - 0.5f : x + 0.5f); // Rounded: a cut triangle's corners lie between whole units
+    v->y = (s16) (y < 0.0f ? y - 0.5f : y + 0.5f);
+    v->z = (s16) (z < 0.0f ? z - 0.5f : z + 0.5f);
+    v->r = v->g = v->b = 255;
+    v->a = alpha;
+}
+
+/* The box's twelve triangles over corners 0-7 (bit 0: +x, bit 1: +y, bit 2: +z), each wound as a solid model's face
+ * seen from outside, so that the GPU's culling picks the near or the far side (gfx_c3d.c set_stencil_shadow). */
+static const u8 sPortSshBox[12][3] = {
+    { 0, 2, 3 }, { 0, 3, 1 }, // -z
+    { 4, 5, 7 }, { 4, 7, 6 }, // +z
+    { 0, 4, 6 }, { 0, 6, 2 }, // -x
+    { 1, 3, 7 }, { 1, 7, 5 }, // +x
+    { 0, 1, 5 }, { 0, 5, 4 }, // -y
+    { 2, 6, 7 }, { 2, 7, 3 }, // +y
+};
+
+#define PORT_SSH_HEAP_TRIS 800   // A shadow heap's triangles and corners (init_track's allocations)
+#define PORT_SSH_HEAP_VERTS 2000
+#define PORT_SSH_PER_DRAW 8 // Triangles a heap entry: 24 corners, as func_8002F440 keeps under
+
+static s32 port_stencil_shadow(Object *obj, s32 *inSegs, s32 segs) {
+    s32 count = 0, minY = 0x7FFF, maxY = -0x8000, i, k, found, level, mixed, alpha;
+    f32 cx = obj->trans.x_position, cz = obj->trans.z_position, light = 0.0f;
+    f32 yRotSin, yRotCos, scale, texMid, someY, box[4];
+    s32 out = 0;
+
+    for (i = 0; i < segs; i++) {
+        if (inSegs[i] >= 0) {
+            s32 mask = compute_grid_overlap_mask(&gCurrentLevelModel->segmentsBoundingBoxes[inSegs[i]],
+                                                 cx - gNewShadowWidth, cz - gNewShadowLength, cx + gNewShadowWidth,
+                                                 cz + gNewShadowLength);
+            if (!port_ssh_find(&gCurrentLevelModel->segments[inSegs[i]], mask, &count, &minY, &maxY)) {
+                return FALSE;
+            }
+        }
+    }
+
+    // The texture's size, turn and fade, as func_8002F440 has them.
+    alpha = 255;
+    yRotSin = sins_f(obj->trans.rotation.y_rotation);
+    yRotCos = coss_f(obj->trans.rotation.y_rotation);
+    texMid = gNewShadowTexture->width * 16;
+    scale = ((gNewShadowTexture->width * 16) / gNewShadowWidth);
+    scale *= 1.4142f;
+    if (D_8011D0F0 > 0.0f) {
+        someY = obj->trans.y_position - D_8011D0D0;
+        if (D_8011D0F0 < someY) {
+            alpha = 255;
+            alpha -= (s32) ((255 * (someY - D_8011D0F0)) / D_8011D0F4);
+            if (alpha < 0) {
+                alpha = 0;
+            }
+        }
+        if (someY > 0.0f) {
+            scale *= 1.0f + (0.005f * someY);
+        }
+    }
+    alpha *= gShadowOpacity;
+    level = count > 0 ? sPortSshTris[0].level : 0;
+    mixed = FALSE;
+    for (i = 0; i < count; i++) {
+        if (sPortSshTris[i].level != level) {
+            mixed = TRUE;
+        }
+    }
+
+    // The triangles to draw, whole where their texture coordinates fit (most), else cut to the box's square.
+    box[0] = cx - gNewShadowWidth - 1.0f;
+    box[1] = cx + gNewShadowWidth + 1.0f;
+    box[2] = cz - gNewShadowLength - 1.0f;
+    box[3] = cz + gNewShadowLength + 1.0f;
+    for (i = 0; i < count; i++) {
+        f32 poly[PORT_SSH_POLY][3];
+        s32 n;
+        for (k = 0; k < 3; k++) {
+            poly[k][0] = sPortSshTris[i].v[k]->x;
+            poly[k][1] = sPortSshTris[i].v[k]->y;
+            poly[k][2] = sPortSshTris[i].v[k]->z;
+        }
+        n = port_ssh_uv(poly, 3, cx, cz, yRotSin, yRotCos, scale, texMid, NULL) ? 3 : port_ssh_cut(poly, box);
+        for (k = 1; k + 1 < n; k++) {
+            PortSshOut *o;
+            if (out >= PORT_SSH_MAX) {
+                return FALSE; // More than the table holds: the game's way
+            }
+            o = &sPortSshOut[out++];
+            __builtin_memcpy(o->pos[0], poly[0], sizeof(poly[0]));
+            __builtin_memcpy(o->pos[1], poly[k], sizeof(poly[0]));
+            __builtin_memcpy(o->pos[2], poly[k + 1], sizeof(poly[0]));
+            if (!port_ssh_uv(o->pos, 3, cx, cz, yRotSin, yRotCos, scale, texMid, o->uv)) {
+                return FALSE; // Too far for the texture coordinates even cut (a huge shadow): the game's way
+            }
+        }
+    }
+
+    // Is there a shadow at all, and the light under the racer, as the game has them.
+    found = FALSE;
+    if (mixed) {
+        found = port_ssh_game_light(inSegs, segs, &light);
+    } else {
+        for (i = 0; i < count && !found; i++) {
+            unk8011C8B8 clip[8];
+            Vec2f square[4];
+            __builtin_memcpy(clip, sPortSshTris[i].corners, sizeof(sPortSshTris[i].corners));
+            square[0].x = cx + gNewShadowWidth;
+            square[0].y = cz + gNewShadowLength;
+            square[1].x = cx - gNewShadowWidth;
+            square[1].y = cz + gNewShadowLength;
+            square[2].x = cx - gNewShadowWidth;
+            square[2].y = cz - gNewShadowLength;
+            square[3].x = cx + gNewShadowWidth;
+            square[3].y = cz - gNewShadowLength;
+            D_8011D0BC = sPortSshTris[i].plane;
+            found = func_8002FF6C(3, clip, 4, square) >= 3;
+        }
+        if (found) {
+            D_8011C230 = 1; // One level all over: func_8002FA64 reads no pieces
+            D_8011D0E8 = level;
+            D_8011D0EC = -1;
+            light = func_8002FA64();
+            D_8011C230 = 0;
+        }
+    }
+    if (sPortStencilCheck) {
+        f32 gameLight;
+        s32 gameFound = port_ssh_game_light(inSegs, segs, &gameLight);
+        sPortSshCounts[0]++;
+        if (found != gameFound || (found && obj->shading != NULL && light != gameLight)) {
+            sPortSshCounts[found != gameFound ? 2 : 1]++;
+            if (sPortSshCounts[3] < 20) {
+                sPortSshCounts[3]++;
+                plat_log("stencil shadow check: racer at %d %d %d: shadow %d (game %d), light %f (game %f)", (int) cx,
+                         (int) obj->trans.y_position, (int) cz, found, gameFound, (double) light, (double) gameLight);
+            }
+        }
+        if ((sPortSshCounts[0] & 0x3FF) == 0) {
+            plat_log("stencil shadow check: %u shadows (%u more the game's way), light differs %u, "
+                     "shadow there differs %u",
+                     sPortSshCounts[0], sPortSshCounts[4], sPortSshCounts[1], sPortSshCounts[2]);
+        }
+    }
+    if (!found) {
+        return TRUE; // No piece, no shadow (and the light kept), as the game
+    }
+    if (obj->shading != NULL) {
+        obj->shading->unk0 = light;
+    }
+    if (out == 0) {
+        return TRUE; // The cut left nothing to draw (the game's piece was a sliver at the square's edge)
+    }
+    if (gNewShadowTriCount + 12 + out > PORT_SSH_HEAP_TRIS || gNewShadowVtxCount + 8 + out * 3 > PORT_SSH_HEAP_VERTS) {
+        return FALSE; // The heap is nearly full (the game's pieces take less of it)
+    }
+
+    // The box (a unit past the square, and well past the triangles' heights so that neither its top nor its bottom
+    // lies on the ground's depth), then the triangles, lifted as func_8002F440 lifts its pieces.
+    port_ssh_entry(PORT_STENCIL_BOX);
+    for (i = 0; i < 8; i++) {
+        port_ssh_vertex((i & 1) ? cx + gNewShadowWidth + 1.0f : cx - gNewShadowWidth - 1.0f,
+                        (i & 2) ? maxY + D_8011D0C8 + 8.0f : minY - 8.0f,
+                        (i & 4) ? cz + gNewShadowLength + 1.0f : cz - gNewShadowLength - 1.0f, alpha);
+    }
+    for (i = 0; i < 12; i++) {
+        Triangle *t = &gCurrShadowTris[gNewShadowTriCount++];
+        t->flags = 0; // One sided: the renderer culls one side or the other
+        t->vi0 = sPortSshBox[i][0];
+        t->vi1 = sPortSshBox[i][1];
+        t->vi2 = sPortSshBox[i][2];
+        t->uv0.u = t->uv0.v = t->uv1.u = t->uv1.v = t->uv2.u = t->uv2.v = 0;
+    }
+    for (i = 0; i < out; i++) {
+        Triangle *t;
+        if (i % PORT_SSH_PER_DRAW == 0) {
+            port_ssh_entry(gNewShadowTexture);
+        }
+        for (k = 0; k < 3; k++) {
+            port_ssh_vertex(sPortSshOut[i].pos[k][0], sPortSshOut[i].pos[k][1] + D_8011D0C8, sPortSshOut[i].pos[k][2],
+                            alpha);
+        }
+        t = &gCurrShadowTris[gNewShadowTriCount++];
+        k = (i % PORT_SSH_PER_DRAW) * 3;
+        t->flags = BACKFACE_DRAW;
+        t->vi0 = k;
+        t->vi1 = k + 1;
+        t->vi2 = k + 2;
+        t->uv0.u = sPortSshOut[i].uv[0][0];
+        t->uv0.v = sPortSshOut[i].uv[0][1];
+        t->uv1.u = sPortSshOut[i].uv[1][0];
+        t->uv1.v = sPortSshOut[i].uv[1][1];
+        t->uv2.u = sPortSshOut[i].uv[2][0];
+        t->uv2.v = sPortSshOut[i].uv[2][1];
+    }
+    return TRUE;
+}
+
+/* A stencil shadow's draws, heap entries i (the box) to end: the triangles' settings, then the box's far side and near
+ * side marking where it holds something, then the triangles where marked (port_drawtag.h PORT_STENCIL_TAG). */
+static void port_stencil_shadow_render(s32 i, s32 end, s32 flags) {
+    Vertex *box = &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount];
+    Triangle *boxTris = &gCurrShadowTris[gCurrShadowHeapData[i].triCount];
+    material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i + 1].texture, flags);
+    gDPNoOpTag(gTrackDL++, PORT_STENCIL_TAG | PORT_STENCIL_MARK_FAR);
+    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(box), 8, 0);
+    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(boxTris), 12, 1);
+    gDPNoOpTag(gTrackDL++, PORT_STENCIL_TAG | PORT_STENCIL_MARK_NEAR);
+    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(box), 8, 0);
+    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(boxTris), 12, 1);
+    gDPNoOpTag(gTrackDL++, PORT_STENCIL_TAG | PORT_STENCIL_DRAW);
+    for (i++; i < end; i++) {
+        s32 numVerts = gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount;
+        s32 numTris = gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount;
+        gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(&gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount]), numVerts, 0);
+        gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(&gCurrShadowTris[gCurrShadowHeapData[i].triCount]), numTris, 1);
+    }
+    gDPNoOpTag(gTrackDL++, PORT_STENCIL_TAG | PORT_STENCIL_OFF);
+}
+#endif
+
 /**
  * Generate shadow geometry for an object.
  * Handles water effects too, isWater is true.
@@ -4034,6 +4497,15 @@ void shadow_generate(Object *obj, s32 isWater) {
     }
     D_8011D0E8 = -1;
     D_8011D0EC = -1;
+#ifdef TARGET_PORT
+    if (sPortStencilShadow && !isWater && obj->behaviorId == BHV_RACER) {
+        if (port_stencil_shadow(obj, inSegs, segs)) {
+            obj->shadow->meshEnd = gShadowTail;
+            return;
+        }
+        sPortSshCounts[4]++;
+    }
+#endif
     for (i = 0; i < segs; i++) {
         if (inSegs[i] >= 0) {
             if (isWater && (gCurrentLevelModel->segments[inSegs[i]].hasWaves != 0) && (gWaveBlockCount != 0)) {
