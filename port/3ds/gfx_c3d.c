@@ -19,6 +19,8 @@
 #include "plat/settings.h"
 #include "plat/shown.h"
 #include "shader_shbin.h"
+#include "gsl_shbin.h"
+#include "gs_ladder.h"
 
 /* v28: textures in VRAM by default on the Old 3DS in the PICA_ALL build (benches #432/#436: steadier frames on
  * Whale Bay, even elsewhere); off elsewhere, as before. DKR_TEX_VRAM=0/1 still decides. */
@@ -889,6 +891,237 @@ PLAT_COLD static void gpu_self_test(void) {
     gpu_test_mark_passed();
 }
 
+/*
+ * GS hang ladder (roadmap P65 rank 4, DKR_GS_LADDER, default 0; proposals/3ds-custom-shader-plan.md section 3): which
+ * rule the sprite geometry shader (P60 D, DKR_SPRITE_GS=2) broke when it froze an Old 3DS in bench run 50. With
+ * DKR_GS_LADDER=1 in env.txt, before the game starts, six steps of 30 frames each are drawn, one more risky than the
+ * one before, with shaders of their own blob (gsl_*.pica, the game's shader.shbin untouched):
+ *   1. the geometry shader's program alone, one GS triangle a frame and nothing else;
+ *   2. a GS draw, then ordinary indexed draws (citro3d issue #53's order that works);
+ *   3. ordinary draws, then a GS draw (#53's order that hung, with a hard power-off);
+ *   4. 20 switches a frame between the ordinary program and the GS one (our sprites' pattern);
+ *   5. control for 6: the ordinary draws through a pass-through geometry shader, no other program;
+ *   6. 20 switches a frame with that pass-through GS on the ordinary program too (citro3d issue #56's workaround).
+ * Each step's file (gs_ladder_N.txt) says "testing" before its first draw and "passed" after its last frame, so a
+ * freeze points to its step: the next start records "hung" for it and goes on with the steps after it, so every step
+ * gets an answer, one power-off per hang. A GPU stall the console survives is written "gpu-hung" by the watchdog. The
+ * answers are logged ("GS ladder: ...") and kept in gs_ladder.txt; a step already answered is not run again
+ * (DKR_GS_LADDER=2 runs them all again). If 3 or 4 hang while 5 and 6 pass, #56's cause is ours and fix (a) works.
+ */
+#define GS_LADDER_STEPS 6
+#define GS_LADDER_FRAMES 30
+#define GS_LADDER_SWITCHES 20
+static const char *const sGslNames[GS_LADDER_STEPS + 1] = {
+    "",
+    "GS program alone, one GS triangle a frame",
+    "a GS draw, then ordinary indexed draws",
+    "ordinary indexed draws, then a GS draw",
+    "20 switches a frame between the ordinary and GS programs",
+    "control: ordinary draws through a pass-through GS, no switches",
+    "20 switches a frame, pass-through GS on the ordinary program too",
+};
+static DVLB_s *sGslDvlb;
+static shaderProgram_s sGslNormal, sGslPoint, sGslThrough;
+static int sGslEyeN = -1, sGslEyeT = -1, sGslStep, sGslIdx;
+
+static void gsl_marker_path(char *out, size_t size, int step) {
+    snprintf(out, size, "%s/gs_ladder_%d.txt", plat_data_dir(), step);
+}
+
+static void gsl_marker_write(int step, const char *what) {
+    char path[256], text[32];
+    gsl_marker_path(path, sizeof(path), step);
+    snprintf(text, sizeof(text), "%s %d\n", what, GS_LADDER_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+/* Waits for the GPU as gpu_test_wait does; a stall writes "gpu-hung" for the step and stops there. */
+static void gsl_wait(void) {
+    unsigned long long start = plat_time_ns();
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (plat_time_ns() - start > 2000000000ULL) {
+            gsl_marker_write(sGslStep, "gpu-hung");
+            plat_log("GS ladder step %d: the GPU hung, the console still runs (%s)", sGslStep, sGslNames[sGslStep]);
+            plat_status("GS ladder step %d hung the GPU: turn the console off and start again", sGslStep);
+            gPlatGfxStage = "GS ladder hung";
+            for (;;) {
+                plat_sleep_ns(1000000000ULL);
+            }
+        }
+        plat_sleep_ns(250000);
+    }
+    C3D_FrameEnd(0);
+}
+
+/* The self test's simplest state (its step 2), for every program of the ladder. */
+static void gsl_state(void) {
+    C3D_TexEnv *env;
+    int i;
+    C3D_TexBind(0, &sWhiteTex);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+}
+
+/* The ordinary program (or the one with the pass-through GS), set on the GPU now and its eye uniform written, as the
+ * sprite shader's draw went back to the game's program (P60 D draw_sprites_gs). */
+static void gsl_bind(int through) {
+    C3D_BindProgram(through ? &sGslThrough : &sGslNormal);
+    C3Di_UpdateContext();
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, through ? sGslEyeT : sGslEyeN, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+/* One white triangle drawn by index with the bound program (prim: GPU_GEOMETRY_PRIM through the pass-through GS). */
+static void gsl_ordinary_draw(GPU_Primitive_t prim) {
+    int first = gpu_test_triangle(-1), i;
+    u16 *idx = &sIbo[sGslIdx];
+    for (i = 0; i < 3; i++) {
+        idx[i] = (u16) (first + i);
+    }
+    gpu_flush(idx, 3 * sizeof(u16));
+    sGslIdx += 8; // 16 bytes apart
+    C3D_DrawElements(prim, 3, C3D_UNSIGNED_SHORT, idx);
+}
+
+/* One point through the GS program (a green triangle around the screen's middle). */
+static void gsl_point_draw(void) {
+    int first;
+    C3D_BindProgram(&sGslPoint);
+    first = gpu_test_triangle(-1); // Its first vertex is the point
+    C3D_DrawArrays(GPU_GEOMETRY_PRIM, first, 1);
+}
+
+static void gsl_run_step(int step) {
+    int f, k;
+    sGslStep = step;
+    gsl_marker_write(step, "testing");
+    plat_log("GS ladder step %d: %s: starting (a freeze from here is this step)", step, sGslNames[step]);
+    plat_status("GS ladder step %d of %d...", step, GS_LADDER_STEPS);
+    for (f = 0; f < GS_LADDER_FRAMES; f++) {
+        gsl_wait();
+        sVboUsed = 0;
+        sVfmtBound = -1;
+        sGslIdx = 0;
+        C3D_FrameBegin(0);
+        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
+        C3D_FrameDrawOn(sTarget);
+        gsl_state();
+        switch (step) {
+            case 1:
+                gsl_point_draw();
+                break;
+            case 2:
+                gsl_point_draw();
+                gsl_bind(0);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                }
+                break;
+            case 3:
+                gsl_bind(0);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                }
+                gsl_point_draw();
+                gsl_bind(0);
+                break;
+            case 4:
+            case 6:
+                for (k = 0; k < GS_LADDER_SWITCHES; k++) {
+                    gsl_bind(step == 6);
+                    gsl_ordinary_draw(step == 6 ? GPU_GEOMETRY_PRIM : GPU_TRIANGLES);
+                    gsl_point_draw();
+                }
+                gsl_bind(step == 6);
+                break;
+            default:
+                gsl_bind(1);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_GEOMETRY_PRIM);
+                }
+                break;
+        }
+        C3D_FrameEnd(0);
+    }
+    gsl_wait();
+    gsl_marker_write(step, "passed");
+    plat_log("GS ladder step %d: passed (%d frames)", step, GS_LADDER_FRAMES);
+}
+
+PLAT_COLD static void gs_ladder(void) {
+    const char *e = plat_getenv("DKR_GS_LADDER");
+    char summary[256], path[256], text[32];
+    int mode = e != NULL ? atoi(e) : 0, step, at;
+    if (!PLAT_DEBUG_TOOLS || mode <= 0) {
+        return;
+    }
+    sGslDvlb = DVLB_ParseFile((u32 *) gsl_shbin, gsl_shbin_size);
+    shaderProgramInit(&sGslNormal);
+    shaderProgramInit(&sGslPoint);
+    shaderProgramInit(&sGslThrough);
+    if (sGslDvlb == NULL || sGslDvlb->numDVLE < 5 || shaderProgramSetVsh(&sGslNormal, &sGslDvlb->DVLE[0]) != 0 ||
+        shaderProgramSetVsh(&sGslPoint, &sGslDvlb->DVLE[1]) != 0 ||
+        shaderProgramSetGsh(&sGslPoint, &sGslDvlb->DVLE[2], 1) != 0 ||
+        shaderProgramSetVsh(&sGslThrough, &sGslDvlb->DVLE[3]) != 0 ||
+        shaderProgramSetGsh(&sGslThrough, &sGslDvlb->DVLE[4], 12) != 0) {
+        plat_log("GS ladder: its shaders could not be set up, not run");
+        return;
+    }
+    sGslEyeN = shaderInstanceGetUniformLocation(sGslNormal.vertexShader, "eye");
+    sGslEyeT = shaderInstanceGetUniformLocation(sGslThrough.vertexShader, "eye");
+    plat_log("GS ladder (DKR_GS_LADDER=%d, version %d): %d steps of %d frames", mode, GS_LADDER_VERSION,
+             GS_LADDER_STEPS, GS_LADDER_FRAMES);
+    at = snprintf(summary, sizeof(summary), "GS ladder:");
+    for (step = 1; step <= GS_LADDER_STEPS; step++) {
+        int got, action;
+        const char *answer;
+        gsl_marker_path(path, sizeof(path), step);
+        got = plat_load_file_start(path, text, sizeof(text) - 1);
+        if (got > 0) {
+            text[got] = '\0';
+        }
+        action = gs_ladder_marker_action(got > 0 ? text : NULL, GS_LADDER_VERSION, mode == 2);
+        if (action == GSL_LOCKED_NOW) {
+            gsl_marker_write(step, "hung");
+            plat_log("GS ladder step %d: %s: LOCKED THE CONSOLE in the last start (left \"testing\")", step,
+                     sGslNames[step]);
+            answer = "HUNG (console)";
+        } else if (action == GSL_PASSED) {
+            answer = "passed";
+        } else if (action == GSL_HUNG) {
+            answer = strncmp(text, "gpu-hung", 8) == 0 ? "HUNG (GPU)" : "HUNG (console)";
+        } else {
+            gsl_run_step(step);
+            answer = "passed";
+        }
+        if (at < (int) sizeof(summary)) {
+            at += snprintf(summary + at, sizeof(summary) - at, " %d %s%s", step, answer,
+                           step < GS_LADDER_STEPS ? "," : "");
+        }
+    }
+    plat_log("%s", summary);
+    snprintf(path, sizeof(path), "%s/gs_ladder.txt", plat_data_dir());
+    plat_save_file(path, summary, strlen(summary));
+    plat_status("%s", summary);
+    // Back to the game's program and state, as the self test leaves them.
+    C3D_BindProgram(&sProgram);
+    C3Di_UpdateContext();
+    write_eye(0.0f, 0.0f);
+    sVboUsed = 0;
+    sVfmtBound = -1;
+    plat_sleep_ns(3000000000ULL); // The answers stay on the bottom screen a moment
+}
+
 static const char *aa_name(int aa) {
     return aa == PLAT_AA_4X ? "4x" : aa == PLAT_AA_2X ? "2x" : "off";
 }
@@ -1522,6 +1755,7 @@ void gfxb_init(void) {
 
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
+    gs_ladder();
 }
 
 /******************************** Frames ********************************/

@@ -2000,12 +2000,26 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
             {
-                char mix[640];
+                char mix[1024];
                 if (gfx_split_backend_mix(0, mix, sizeof(mix)) > 0) {
                     port_log("%s", mix); // P54 2b-A (DKR_BACKEND_MIX)
                 }
                 if (gfx_walk_steps(0, mix, sizeof(mix)) > 0) {
-                    port_log("%s", mix); // P61 M2 (DKR_WALK_STEPS)
+                    // P61 M2 (DKR_WALK_STEPS). P65 added steps, so the line is cut after a step where it would pass the
+                    // log's 512 characters; the rest follows on "walk steps (more):" lines.
+                    char *at = mix;
+                    s32 first = TRUE;
+                    while (*at != '\0') {
+                        s32 len = (s32) strlen(at), cut = len;
+                        if (len > 440) {
+                            for (cut = 440; cut > 0 && at[cut - 1] != ','; cut--) {
+                            }
+                            cut = cut > 0 ? cut : 440;
+                        }
+                        port_log("%s%.*s", first ? "" : "walk steps (more):", (int) cut, at);
+                        at += cut;
+                        first = FALSE;
+                    }
                 }
             }
             sLogFrames = frames;

@@ -1,0 +1,28 @@
+; GS hang ladder (roadmap P65 rank 4, DKR_GS_LADDER, gfx_c3d.c gs_ladder): the "normal" program of the ladder's own
+; blob, the same code as shader.v.pica, so a switch between it and the ladder's geometry program stays inside one blob
+; (as the game's sprite geometry shader did, P60 D, which froze an Old 3DS in bench run 50).
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register is written whole, once, with no
+; branches.
+
+.fvec eye
+
+.constf gsln_consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias gsln_scale gsln_consts.xxxx
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.entry gsln_main
+.proc gsln_main
+	mov r0, v0
+	mul r1, eye.xxxx, v0.wwww
+	add r1, eye.yyyy, r1
+	add r0.y, r0.y, r1.x
+	mov outpos, r0
+	mov outtc0, v1
+	mov outtc1, v2
+	mul outclr, gsln_scale, v3
+	end
+.end

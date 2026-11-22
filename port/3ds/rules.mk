@@ -38,10 +38,32 @@ $(SHADER_HDR): $(SHADER_ASM)
 $(SHADER_OBJS): $(SHADER_ASM)
 	@$(CC) $(ARCH) -x assembler-with-cpp -c $< -o $@
 
-# The renderer includes the generated header.
-$(call obj,3ds/gfx_c3d.c): $(SHADER_HDR)
+# The GS hang ladder's own blob (P65 rank 4, DKR_GS_LADDER, gfx_c3d.c gs_ladder): kept apart from shader.shbin so
+# that the game's shader code (and its upload) stays the same; only the ladder binds it.
+GSL_SRC := 3ds/gsl_n.v.pica 3ds/gsl_p.v.pica 3ds/gsl_p.g.pica 3ds/gsl_t.v.pica 3ds/gsl_t.g.pica
+GSL_BIN := $(BUILD_DIR)/shader/gsl.shbin
+GSL_ASM := $(BUILD_DIR)/shader/gsl_shbin.s
+GSL_HDR := $(BUILD_DIR)/shader/gsl_shbin.h
+GSL_OBJ := $(BUILD_DIR)/shader/gsl_shbin.o
 
-$(EXE): $(SHADER_OBJS)
+$(GSL_BIN): $(GSL_SRC)
+	@mkdir -p $(dir $@)
+	@echo "PICASSO $^"
+	@$(TOOLS_BIN)/picasso -o $@ $^
+
+$(GSL_ASM): $(GSL_BIN)
+	@cd $(dir $<) && $(TOOLS_BIN)/bin2s -a 4 -H gsl_shbin.h gsl.shbin > gsl_shbin.s.tmp && \
+		mv gsl_shbin.s.tmp gsl_shbin.s
+
+$(GSL_HDR): $(GSL_ASM)
+
+$(GSL_OBJ): $(GSL_ASM)
+	@$(CC) $(ARCH) -x assembler-with-cpp -c $< -o $@
+
+# The renderer includes the generated headers.
+$(call obj,3ds/gfx_c3d.c): $(SHADER_HDR) $(GSL_HDR)
+
+$(EXE): $(SHADER_OBJS) $(GSL_OBJ)
 
 # Rewritten only when the version changes, so the files that show it are rebuilt then (an incremental build would
 # otherwise keep the old one).
