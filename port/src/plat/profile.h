@@ -307,6 +307,7 @@ void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size)
 int prof_monitor_tap(int x, int y);
 #ifdef PORT_RELEASE
 #define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
+#define prof_monitor_state(shown, page, lastTapNs) (*(shown) = 0, *(page) = 0, *(lastTapNs) = 0ULL)
 #define prof_kind_name(kind) ((void) (kind), "-")
 #define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
 #define prof_object_logic_begin() 0ULL
