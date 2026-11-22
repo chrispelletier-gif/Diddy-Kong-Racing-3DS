@@ -320,7 +320,8 @@ jobs:
         # P59 E (rule K6): a fake check reported right and one wrong reach the CSV's chk cells as 2 run, 1 wrong
         run: DKR_CHECKS_CSV_TEST=1 port/build/host/dkr
       - name: Switch bench overrides all reach the game
-        # every switch bench race of both consoles' lists sets its switches without overflowing the override table
+        # every switch bench race of both consoles' lists sets its switches without overflowing the override table, and
+        # no row silently replaces another's usual setting (run 52); a planted list's 3 conflicts must be found
         run: |
           DKR_BENCH_OVERRIDE_CHECK=1 port/build/host/dkr
           DKR_BENCH_OVERRIDE_CHECK=1 DKR_HOST_OLD3DS=1 port/build/host/dkr
