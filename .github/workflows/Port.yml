@@ -403,6 +403,25 @@ jobs:
             exit 1
           fi
 
+      - name: Fog skip check
+        # P60 C: DKR_FOG_SKIP leaves out the per-vertex fog factor where nothing reads it, so the same build must draw
+        # identical frames with it on and off (first run). The second run keeps the backend on per-vertex fog
+        # (DKR_VERTEX_FOG=1, both builds), where the switch must turn itself off: dropping that test was this check's
+        # break-once (rule K6), and it reported 99 of 112 frames different. A run with no factors left out fails too.
+        run: |
+          python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" --head port/build/host/dkr \
+            --base port/build/host/dkr --head-env DKR_FOG_SKIP=1 --out "$RUNNER_TEMP/fog-skip" --max-images 0 \
+            --no-repeat-check --fail-on-diff
+          DKR_VERTEX_FOG=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_FOG_SKIP=1 --only levels \
+            --out "$RUNNER_TEMP/fog-skip-vertex" --max-images 0 --no-repeat-check --fail-on-diff
+          logs=$(find "$RUNNER_TEMP/fog-skip/runs" -path "*/head/log.txt")
+          grep -h "fog skip:" $logs | tail -n 5
+          if ! grep -q "fog skip: [1-9][0-9]* fog factors left out" $logs; then
+            echo "::error::DKR_FOG_SKIP left no fog factor out in any scenario (the switch never engaged)."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

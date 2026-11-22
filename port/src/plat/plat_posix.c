@@ -366,6 +366,9 @@ void plat_pmu_totals(int slot, PlatPmuSample *sum, unsigned int *frames) {
 }
 void plat_pmu_exit(void) {
 }
+void plat_vfp_frame(const char *thread) {
+    (void) thread;
+}
 int plat_shown_stats(int window, int restart, unsigned int *replaced, unsigned int *longestGapUs) {
     (void) window;
     (void) restart;
