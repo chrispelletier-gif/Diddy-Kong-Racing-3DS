@@ -342,6 +342,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // backend. log.txt's "VFP mode" lines say how the kernel starts them: if all three say "RunFast yes", this row
     // changes nothing and goes. Otherwise read the game core ms (denormals and NaNs trap to slow kernel code).
     { "VFP RunFast mode (flush-to-zero, default NaN)", { "DKR_VFP_RUNFAST", NULL, NULL }, 0, 1, 0, 0 },
+    // P60 C: the walk's per-vertex fog factor (a divide each) only where the draw's combiner reads it (~95% of fogged
+    // vertices left out in the host scenarios, frames identical). Estimate -0.1 to -0.3 ms of game core.
+    { "fog factors only where read (P60 C)", { "DKR_FOG_SKIP", NULL, NULL }, 0, 1, 0, 0 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames

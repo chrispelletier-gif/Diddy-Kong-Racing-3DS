@@ -83,6 +83,7 @@ static struct {
     u32 combineW0, combineW1;
     GfxCombiner combiner;
     u8 combinerTextures[3]; // Indexed by the number of cycles: bit 0 if the combiner reads texel 0, bit 1 texel 1
+    u8 combinerShadeAlpha;  // P60 C: the combiner reads the shade alpha (combiner_shade_alpha)
     u8 prim[4], env[4], fogColor[4], blendColor[4];
     u8 primLodFrac;
     u32 fillColor;
@@ -1557,6 +1558,26 @@ static inline u8 equation_texel_use(const GfxCCEquation *eq) {
     return sCCTexelUse[eq->a] | sCCTexelUse[eq->b] | sCCTexelUse[eq->c] | sCCTexelUse[eq->d];
 }
 
+/*
+ * P60 C: whether a combiner reads the shade alpha, in either cycle (both looked at, whatever the cycle count: the safe
+ * answer). With G_FOG set the RSP puts the fog factor there, but the backends fog per pixel from depth by default
+ * (gfx_c3d.c FOG_PIXEL, gfx_soft.c), so a fogged vertex's fog factor is only read where the combiner reads it as shade
+ * alpha (or with DKR_VERTEX_FOG). The alpha equation's result (COMBINED_ALPHA, the alpha test, blending) is covered by
+ * looking at the alpha equations themselves.
+ */
+static u8 combiner_shade_alpha(const GfxCombiner *cc) {
+    s32 k;
+    for (k = 0; k < 2; k++) {
+        const GfxCCEquation *c = &cc->rgb[k], *a = &cc->alpha[k];
+        if (c->a == GFX_CC_SHADE_ALPHA || c->b == GFX_CC_SHADE_ALPHA || c->c == GFX_CC_SHADE_ALPHA ||
+            c->d == GFX_CC_SHADE_ALPHA || a->a == GFX_CC_SHADE || a->b == GFX_CC_SHADE || a->c == GFX_CC_SHADE ||
+            a->d == GFX_CC_SHADE) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Not HOT: it runs for a G_SETCOMBINE, a third as often as a draw. */
 static NOINLINE HOT void decode_combiner(void) {
     u32 w0 = g.combineW0, w1 = g.combineW1;
@@ -1586,6 +1607,7 @@ static NOINLINE HOT void decode_combiner(void) {
     g.combinerTextures[1] = uses;
     uses |= equation_texel_use(&cc->rgb[1]) | equation_texel_use(&cc->alpha[1]);
     g.combinerTextures[2] = uses;
+    g.combinerShadeAlpha = combiner_shade_alpha(cc);
 }
 
 /* The scissor's right edge for rectangles: exclusive, except in fill and copy modes, where the RDP also draws the
@@ -2303,6 +2325,27 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+/*
+ * P60 C (proposals/3ds-native-arm-pica-candidates.md): DKR_FOG_SKIP=1 (default 0) works out a fogged vertex's fog
+ * factor (fog_factor, a divide each) only where it is read: the draw's combiner reads the shade alpha
+ * (combiner_shade_alpha), or the backend fogs per vertex (DKR_VERTEX_FOG). Elsewhere the vertex keeps its own alpha,
+ * which nothing reads, so frames are identical (CI's fog skip check races the host both ways). Vertices loaded into
+ * the RSP's slots under a combiner that doesn't read it get their factor late if a draw that does reads them
+ * (fog_late_vertices). sFogSkipped counts the factors left out, logged every 600 frames while the switch is on.
+ */
+static s32 sFogSkip;
+static u32 sFogSkipped, sFogWorked;
+
+/* P60 C: whether fogged vertices drawn with a combiner (shadeAlpha: combiner_shade_alpha's answer) need their fog
+ * factor; counts n vertices one way or the other. */
+static inline s32 fog_needed(s32 shadeAlpha, s32 n) {
+    if (!sFogSkip || shadeAlpha) {
+        sFogWorked += (u32) n;
+        return TRUE;
+    }
+    sFogSkipped += (u32) n;
+    return FALSE;
+}
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
 static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
@@ -2360,6 +2403,8 @@ static COLD void read_switches_now(void) {
     // On by default on an Old 3DS only: it cut the renderer's time per triangle there and showed nothing on a New
     // 3DS. Bit-identical to the C loop.
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
+    // P60 C: off where the backend reads the vertex fog (its DKR_VERTEX_FOG, read the same way)
+    sFogSkip = plat_switch("DKR_FOG_SKIP", 0) != 0 && plat_switch("DKR_VERTEX_FOG", 0) == 0;
     // 8 frames on an Old 3DS (the best of its switches together with the system-call flush).
     sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
     if (sTexRehash < 1) {
@@ -2545,8 +2590,14 @@ static inline __attribute__((always_inline)) s32 load_vertices_core(RspVertex *a
 static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
                                            s32 billboard) {
     u32 anyFlat;
-    s32 n = load_vertices_core(g.verts, &g.verts[0], src, count, dest, m, fog, billboard, &anyFlat);
+    s32 n;
     u64 loaded;
+    // P60 C (DKR_FOG_SKIP): left without a factor, as if loaded with fog off, unless this combiner reads it; a draw
+    // that reads it works it out late (fog_late_vertices)
+    if (fog && !fog_needed(g.combinerShadeAlpha, count)) {
+        fog = FALSE;
+    }
+    n = load_vertices_core(g.verts, &g.verts[0], src, count, dest, m, fog, billboard, &anyFlat);
     if (n <= 0) {
         return;
     }
@@ -4090,6 +4141,10 @@ static inline __attribute__((always_inline)) void draw_triangles_impl(const RspV
         sTriStateValid = TRUE;
     }
     state = sTriState;
+    if (fog && UNLIKELY(sFogSkip) && !g.combinerShadeAlpha) {
+        // P60 C (DKR_FOG_SKIP): nothing reads the shade alpha: the vertices keep their own, no late factors
+        fog = FALSE;
+    }
     if (UNLIKELY(slots && fog && g.vertsWithoutFog)) {
         fog_late_vertices();
     }
@@ -4736,6 +4791,9 @@ static NOINLINE HOT_WALK s32 native_mesh(const Gfx *dl, s32 remaining) {
     }
 
     // The loads, as load_vertices_now makes them (only what draw_dkr_triangles then reads).
+    if (fog && !fog_needed(g.combinerShadeAlpha, total)) {
+        fog = FALSE; // P60 C (DKR_FOG_SKIP): the combiner doesn't read the factor; the vertices keep their own alpha
+    }
     for (i = 0; i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
@@ -4913,6 +4971,7 @@ typedef struct NMat {
     u16 texEntry[2];
     u8 texGen[2];
     u8 valid, fog;
+    u8 shadeAlpha; // P60 C: its combiner reads the shade alpha (combiner_shade_alpha)
     u8 axReady; // axes[] hold the texture axes for its tiles and textures
     TexAxis axes[4]; // u0, v0, u1, v1
 } NMat;
@@ -4977,6 +5036,7 @@ static COLD void nmat_capture(u32 id) {
     m->tiles[0] = g.tiles[0];
     m->tiles[1] = g.tiles[1];
     m->fog = (g.geometryMode & G_FOG) != 0;
+    m->shadeAlpha = combiner_shade_alpha(&m->state.combiner);
     m->valid = TRUE;
     m->axReady = FALSE;
     for (k = 0; k < 2; k++) {
@@ -5685,7 +5745,8 @@ static NOINLINE HOT void native_remote_send(const NMat *mat, const GfxDrawState 
     np->numLoads = (u8) numLoads;
     np->frontCull = frontCull;
     np->kind = (u8) sDrawKind;
-    np->flags = (mat->fog ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
+    // P60 C (DKR_FOG_SKIP): no fog factors where the combiner doesn't read them (done: the walk's vertices, finished)
+    np->flags = (mat->fog && (done || fog_needed(mat->shadeAlpha, total)) ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
                 NP_REJECT | NP_SCREEN | NP_FAST_OUTCODE | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
                 (tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
                 (done ? NP_DONE : 0) | (share ? NP_SHARED : 0);
@@ -5839,7 +5900,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     } loads[2];
     NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
     s32 numLoads = 0, numVerts, start, textured, count, total, i, k, tex0, tex1, zeroTex1, cur = g.curMatrix, dynamic;
-    s32 direct, directTris = 0, *vcount = NULL, axisFast;
+    s32 direct, directTris = 0, *vcount = NULL, axisFast, recFog;
     float su0 = 0.0f, ou0 = 0.0f, sv0 = 0.0f, ov0 = 0.0f;
     GfxVertex *vbase;
     OpaqueBucket *bucket = NULL;
@@ -6044,6 +6105,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
+    recFog = mat->fog && fog_needed(mat->shadeAlpha, total); // P60 C (DKR_FOG_SKIP)
     for (i = 0; i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
@@ -6066,7 +6128,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 u8 *cc = (u8 *) &rgba;
                 cc[0] = cc[1] = cc[2] = gfx_light_shade(src[k].r, src[k].g, src[k].b, sLight);
             }
-            if (mat->fog) {
+            if (recFog) {
                 rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
             }
             verts[k].rgba = rgba;
@@ -8550,6 +8612,14 @@ static COLD void end_reference_frame(void) {
 }
 #endif
 
+/* P60 C (DKR_FOG_SKIP): the fogged vertices whose fog factor was left out and worked out, every 600 frames while the
+ * switch is on (CI's fog skip check looks for a line with some left out). */
+static COLD void fog_skip_log_600(void) {
+    plat_log("fog skip: %u fog factors left out, %u worked out in 600 frames", (unsigned) sFogSkipped,
+             (unsigned) sFogWorked);
+    sFogSkipped = sFogWorked = 0;
+}
+
 /* The GPU vertex maths' meshes, every 600 frames (port_gfx_run_frame). */
 static COLD void mesh_log_600(void) {
     plat_log("meshes: %u KB, %u draws, %u made, %u not recorded, %u data changes", (unsigned) (sMeshBytes / 1024),
@@ -8571,6 +8641,9 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     port_gfx_init();
     plat_vfp_frame("walk"); // P60 A2: logs the VFP mode once; DKR_VFP_RUNFAST
     sFrameCount++;
+    if (UNLIKELY(sFogSkip) && sFrameCount % 600 == 0) {
+        fog_skip_log_600();
+    }
     kind_frame_start(sFrameCount);
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
