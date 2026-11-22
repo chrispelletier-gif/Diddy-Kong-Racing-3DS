@@ -331,6 +331,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
     // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
     { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
+    // P60 B (DKR_VERTEX_ASM, gfx_vertex_asm.h): the native draws' vertex passes (transform, colour and fog, screen edges)
+    // as one hand-scheduled VFP loop instead of three passes over memory; bit-identical (qemu-arm test, and the check
+    // row). Read the game core ms (estimate -0.7 to -1.2 ms). The check row's log must say "vertex asm: N vertices
+    // checked, 0 words differ"; the broken row (rule K6: the check's C leaves the fog out on purpose) must say words
+    // differ, with "vertex asm: a load of ... differs" lines.
+    { "fused VFP vertex loop (P60 B)", { "DKR_VERTEX_ASM", NULL, NULL }, 0, 1, 0, 0 },
+    { "fused VFP vertex loop, self-check (1 lap, log: 0 words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 1, 1, 1 },
+    { "fused VFP vertex loop, self-check broken on purpose (1 lap, log: words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 2, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
