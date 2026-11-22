@@ -356,6 +356,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // log's "raw GPU words: ..." lines end "0 differ".
     { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
       1 },
+    // P63 (2026-11-22, proposals/3ds-old3ds-bucket-handoff-plan.md): the opaque buckets handed to the backend by pointer
+    // instead of copied into the split ring on the game core (DKR_SPLIT_REF; estimated -0.4..-0.7 ms game core, judged
+    // on the 4-track mean; the renderer core should not move). The log's "split ref: N handed over, M fallbacks" lines
+    // say how often the pool ran dry. The timed row's "split copy" step and write misses (PMU 4: the load/store unit
+    // stall and D-cache write misses) read against the walk steps rows above; the self-check row must say 0 wrong.
+    { "buckets handed over without copying", { "DKR_SPLIT_REF", NULL, NULL }, 0, 1, 0, 0 },
+    { "buckets handed over, walk steps timed (PMU 4, 1 lap)", { "DKR_SPLIT_REF", "DKR_WALK_STEPS", "DKR_PMU", NULL },
+      0, 4, 1, 1 },
+    { "buckets handed over, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_REF_CHECK", NULL, NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
