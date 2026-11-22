@@ -78,8 +78,8 @@ def supports_lockstep(exe):
         return b"DKR_LOCKSTEP" in f.read()
 
 
-def run(exe, rom, scenario, out_dir):
-    """Plays one scenario. Returns (ok, message, seconds)."""
+def run(exe, rom, scenario, out_dir, extra_env=None):
+    """Plays one scenario. Returns (ok, message, seconds). extra_env: settings for this build only (--head-env)."""
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
     frames_dir = os.path.join(out_dir, "frames")
@@ -90,6 +90,7 @@ def run(exe, rom, scenario, out_dir):
 
     env = dict(os.environ)
     env.update(scenario["env"])
+    env.update(extra_env or {})
     env.update({
         "DKR_LOCKSTEP": "1",
         "DKR_DATA_DIR": out_dir,
@@ -164,7 +165,11 @@ def main():
     parser.add_argument("--no-repeat-check", action="store_true",
                         help="skip playing the first scenario twice on the head build")
     parser.add_argument("--fail-on-diff", action="store_true")
+    parser.add_argument("--head-env", action="append", default=[], metavar="NAME=VALUE",
+                        help="a setting for the head build only (P60: a switch raced against the same build without "
+                             "it; give --base the same build)")
     args = parser.parse_args()
+    head_env = dict(item.split("=", 1) for item in args.head_env)
 
     prepare_scenarios()
     scenarios = SCENARIOS
@@ -205,7 +210,7 @@ def main():
         base_dir = os.path.join(runs_dir, name, "base")
         # Each run keeps about one core busy, so the two builds play side by side.
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            head_future = pool.submit(run, args.head, args.rom, scenario, head_dir)
+            head_future = pool.submit(run, args.head, args.rom, scenario, head_dir, head_env)
             base_future = pool.submit(run, args.base, args.rom, scenario, base_dir) if compare else None
             ok, message, head_seconds = head_future.result()
             base_result = base_future.result() if base_future is not None else None
@@ -232,7 +237,7 @@ def main():
         scenario = scenarios[0]
         first_dir = os.path.join(runs_dir, scenario["name"], "head")
         again_dir = os.path.join(runs_dir, scenario["name"], "head_again")
-        ok, message, _ = run(args.head, args.rom, scenario, again_dir)
+        ok, message, _ = run(args.head, args.rom, scenario, again_dir, head_env)
         repeat = compare_runs(first_dir, again_dir, None, "", 0) if ok else ["(run failed: %s)" % message]
         if repeat:
             failures.append("%s: two runs of the head build differ in %d frames, so lockstep isn't repeatable" %

@@ -305,6 +305,8 @@ static const BenchSwitch sSwitchesNative[] = {
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 2, 1, 0 },
     // P59 D: the profiler's page turned every 3 frames (DKR_PROF_PAGE_FLIP), to show the stress is harmless here.
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
+    // P55 S3 (gpu_raw.inc): GPU settings and draws as raw register words (see the Old 3DS list); renderer core ms.
+    { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -331,6 +333,29 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
     // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
     { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
+    // P60 B (DKR_VERTEX_ASM, gfx_vertex_asm.h): the native draws' vertex passes (transform, colour and fog, screen edges)
+    // as one hand-scheduled VFP loop instead of three passes over memory; bit-identical (qemu-arm test, and the check
+    // row). Read the game core ms (estimate -0.7 to -1.2 ms). The check row's log must say "vertex asm: N vertices
+    // checked, 0 words differ"; the broken row (rule K6: the check's C leaves the fog out on purpose) must say words
+    // differ, with "vertex asm: a load of ... differs" lines.
+    { "fused VFP vertex loop (P60 B)", { "DKR_VERTEX_ASM", NULL, NULL }, 0, 1, 0, 0 },
+    { "fused VFP vertex loop, self-check (1 lap, log: 0 words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 1, 1, 1 },
+    { "fused VFP vertex loop, self-check broken on purpose (1 lap, log: words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 2, 1, 1 },
+    // P60 A1 (proposals/3ds-native-arm-pica-candidates.md): what the D-cache misses cost. PMU 3: the cycles stalled on a
+    // data hazard and the instructions executed (cycles per instruction; the summary line and log say it); PMU 4: the
+    // cycles the load/store unit was full and the D-cache write misses. Over ~15% data stall on the game core: data
+    // layout first; cycles per instruction near 1-1.3 outside the fetch stall: instruction-bound (the asm vertex pass).
+    { "CPU counters, data stalls + CPI (PMU 3, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 3, 1, 1 },
+    { "CPU counters, LSU full + write misses (PMU 4, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 4, 1, 1 },
+    // P60 A2: the VFP in RunFast mode (flush-to-zero, default NaN, no traps) on the game thread, the walk and the
+    // backend. log.txt's "VFP mode" lines say how the kernel starts them: if all three say "RunFast yes", this row
+    // changes nothing and goes. Otherwise read the game core ms (denormals and NaNs trap to slow kernel code).
+    { "VFP RunFast mode (flush-to-zero, default NaN)", { "DKR_VFP_RUNFAST", NULL, NULL }, 0, 1, 0, 0 },
+    // P60 C: the walk's per-vertex fog factor (a divide each) only where the draw's combiner reads it (~95% of fogged
+    // vertices left out in the host scenarios, frames identical). Estimate -0.1 to -0.3 ms of game core.
+    { "fog factors only where read (P60 C)", { "DKR_FOG_SKIP", NULL, NULL }, 0, 1, 0, 0 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -358,6 +383,27 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
     { "page flip stress, panels the old way (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_PANEL_CACHE=0", NULL }, 0, 3, 1, 1 },
     { "page flip stress, screen on the game core (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_SYSCORE=0", NULL }, 0, 3, 1,
+    // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
+    // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
+    // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
+    // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
+    // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
+    { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
+    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
+    { "track, karts and objects on the GPU, depth fill finished before drawing",
+      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P55 S3 / P60 F (2026-11-22, gpu_raw.inc): each draw's GPU settings as one block of register words made once per
+    // draw state, its uniforms and the draw command as words too, instead of citro3d's setters, settings writer and
+    // draw call. The backend replay finds the same GPU registers at every draw. Read renderer_core_ms (the limit with
+    // NATIVE_GPU on), then the two NATIVE_GPU rows on top of it against the two without above (run 48: game core
+    // -3.7 ms with karts on the GPU, but the backend's model draws cost 4.9-12.7 ms). The 1-lap self-check row also
+    // makes each reused block through citro3d and compares: the log's "raw GPU words: ..." lines must end "0 differ".
+    // Any value but 0 turns DKR_RAW_REGS on, so a row can share the test value with DKR_NATIVE_GPU.
+    { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
+    { "raw register words, karts' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL }, 0, 1, 1, 0 },
+    { "raw register words, karts' and objects' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL },
+      0, 2, 1, 0 },
+    { "raw register words, self-check (1 lap, log: 0 differ)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
       1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
@@ -1528,11 +1574,15 @@ static s32 core_summary(char *out, s32 size) {
  * P56 (proposals/3ds-kohjoh-lessons-plan.md package B), a game frame each over the race (stats NULL: not measured):
  * ,pmu,<game core Mcycles>,<its fetch stall %>,<its PMN1 thousands>,<renderer core the same three>,<PMN1 kind>
  * (DKR_PMU, profile.h ProfCpuStats; the renderer's "-" when it shares the game's core, kind icache or dcache);
+ * P60 A1: kind datastall (DKR_PMU=3: the stall % column is the data hazard stall, PMN1 the instructions executed, in
+ * thousands) or lsufull (DKR_PMU=4: the load/store unit full stall, PMN1 the data cache write misses);
  * ,shown,<pictures replaced before they reached the screen in the race>,<longest gap between two shown, ms>;
  * ,sndcb,<the DSP frame callback, ms a game frame>; ,clk,<plat_time_ns calls a game frame>. "-" where not measured.
  * Then (2026-11-20, DKR_WALK_VERTS coverage) ,wv,<draws the walk made>,<draws it left to the backend>,<left out for
  * room>, each a walked frame over the race ("-" when the walk made no frames: the switch off, or not a 3DS).
  */
+static const char *const sPmuKindNames[5] = { "-", "icache", "dcache", "datastall", "lsufull" };
+
 static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
     const ProfCpuStats *c = stats != NULL ? &stats->cpu : NULL;
     u32 frames = stats != NULL ? stats->gameFrames : 0;
@@ -1548,7 +1598,8 @@ static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
             at += plat_snprintf(out + at, size - at, ",-,-,-");
         }
     }
-    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || !c->pmuKind ? "-" : c->pmuKind == 2 ? "dcache" : "icache");
+    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || c->pmuKind < 1 || c->pmuKind > 4 ? "-"
+                                                    : sPmuKindNames[c->pmuKind]);
     if (c != NULL && c->shownMeasured) {
         at += plat_snprintf(out + at, size - at, ",shown,%u,%.1f", c->replaced, c->longestShownGapUs / 1000.0);
     } else {
@@ -2631,6 +2682,11 @@ typedef struct BenchGroup {
     // with the pictures replaced (after "shown")
     s32 stallRaces[2], shownRaces;
     double stall[2], replaced;
+    // P60 A1: races whose counters counted another stall (DKR_PMU 3 data hazard, 4 load/store unit full), apart from
+    // the fetch stall above; otherKind 'D' or 'L' (the last race's)
+    s32 otherRaces[2];
+    double other[2];
+    char otherKind;
 } BenchGroup;
 
 /* prof_limit's answers: DKR_PROF_CORES=0 (and results written before P54) gives the first three, =1 the GPU and the last
@@ -2660,12 +2716,22 @@ static const char *timeline_cell(const BenchGroup *g) {
 }
 
 /* P56: the switch bench's CPU cell: the fetch stall % of the game's core / the renderer's (DKR_PMU, "-" without), and the
- * pictures replaced before they reached the screen a race. */
+ * pictures replaced before they reached the screen a race. P60 A1: a row that counted only another stall (DKR_PMU 3 or
+ * 4) shows that one instead, marked D (data hazard) or L (load/store unit full), e.g. "D 12.3 / D 4.0". */
 static const char *cpu_cells(const BenchGroup *g) {
     static char cell[48];
-    char a[12], b[12], r[12];
-    plat_snprintf(a, sizeof(a), g->stallRaces[0] ? "%.1f" : "-", g->stallRaces[0] ? g->stall[0] / g->stallRaces[0] : 0.0);
-    plat_snprintf(b, sizeof(b), g->stallRaces[1] ? "%.1f" : "-", g->stallRaces[1] ? g->stall[1] / g->stallRaces[1] : 0.0);
+    char a[16], b[16], r[12];
+    char *outs[2] = { a, b };
+    s32 core;
+    for (core = 0; core < 2; core++) {
+        if (g->stallRaces[core]) {
+            plat_snprintf(outs[core], 16, "%.1f", g->stall[core] / g->stallRaces[core]);
+        } else if (g->otherRaces[core]) {
+            plat_snprintf(outs[core], 16, "%c %.1f", g->otherKind, g->other[core] / g->otherRaces[core]);
+        } else {
+            plat_snprintf(outs[core], 16, "-");
+        }
+    }
     plat_snprintf(r, sizeof(r), g->shownRaces ? "%.0f" : "-", g->shownRaces ? g->replaced / g->shownRaces : 0.0);
     plat_snprintf(cell, sizeof(cell), "%s / %s | %s", a, b, r);
     return cell;
@@ -2858,8 +2924,17 @@ static void bench_summary(char *out, s32 size) {
             if (str_equal(fields[i], "pmu")) {
                 // ,pmu,game mcycles,stall %,pmn1 k,render mcycles,stall %,pmn1 k,kind (pmu_cells)
                 s32 core;
+                // P60 A1: DKR_PMU 3 and 4 count another stall in the same column; kept apart from the fetch stall
+                s32 other = str_equal(fields[i + 7], "datastall") ? 'D' : str_equal(fields[i + 7], "lsufull") ? 'L' : 0;
                 for (core = 0; core < 2; core++) {
-                    if (fields[i + 2 + 3 * core][0] != '-') {
+                    if (fields[i + 2 + 3 * core][0] == '-') {
+                        continue;
+                    }
+                    if (other != 0) {
+                        g->otherRaces[core]++;
+                        g->other[core] += parse_decimal(fields[i + 2 + 3 * core]);
+                        g->otherKind = (char) other;
+                    } else {
                         g->stallRaces[core]++;
                         g->stall[core] += parse_decimal(fields[i + 2 + 3 * core]);
                     }
