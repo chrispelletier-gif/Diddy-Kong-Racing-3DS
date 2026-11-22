@@ -309,7 +309,9 @@ enum {
     WS_STATE,     // (7) State, axes, opaque_direct_ok
     WS_TRIS,      // (8) The triangle loop
     WS_BUCKET,    // (9) Inside it: bucket finds and draws, batch starts
-    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free)
+    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free) bar their corners:
+    WS_SPRITE_CORNERS, // (10b) P64 candidate 4: a sprite record's corners made (vertex maths, billboard placement) and
+                       // drawn (draw_record_triangles / draw_dkr_triangles), what a vertex shader table would replace
     WS_OPS,       // (11) native_op and the other state commands
     WS_COPY,      // (12) gfx_split_draw_indexed's copy into the split ring
     WS_FLUSH,     // (13) opaque_flush_now
@@ -318,7 +320,7 @@ enum {
 };
 static const char *const sWalkStepNames[WS_COUNT] = {
     "rest", "entry", "find", "box", "transform", "colour/fog", "edges", "state", "triangles", "buckets",
-    "sprites", "state commands", "split copy", "opaque flush", "other paths",
+    "sprites", "sprite corners", "state commands", "split copy", "opaque flush", "other paths",
 };
 static u8 sDrawKind; // The kind being drawn (the draw mix, below)
 static s32 sWalkStepsSwitch; // DKR_WALK_STEPS (read_switches)
@@ -5440,12 +5442,16 @@ static NOINLINE HOT void native_record_append(NMat *mat, const Vertex *vtx, s32 
             }
             forget_slots(dest, dest + numVerts);
         }
+        walk_step(WS_SPRITE_CORNERS);
         load_vertices_now(vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard);
+        walk_step(WS_SPRITES);
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    walk_step(WS_SPRITE_CORNERS);
     draw_dkr_triangles(tris, count, textured);
+    walk_step(WS_SPRITES);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -5525,8 +5531,10 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
         g.tiles[0] = mat->tiles[0];
         g.tiles[1] = mat->tiles[1];
         g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+        walk_step(WS_SPRITE_CORNERS);
         load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
                            &f);
+        walk_step(WS_SPRITES);
         sSprFlat = flatBits | f;
         sSprFrame = (u32) sFrameCount;
         sSprValid = TRUE;
@@ -5540,7 +5548,9 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    walk_step(WS_SPRITE_CORNERS);
     draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    walk_step(WS_SPRITES);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
