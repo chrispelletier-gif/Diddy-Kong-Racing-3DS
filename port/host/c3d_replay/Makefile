@@ -63,7 +63,8 @@ $(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(PORT)/3ds/gpu_cuts.inc $(OUT)/
 	$(CC) $(BACKEND_CFLAGS) -c $< -o $@
 
 # The vertex shaders, assembled as the 3DS build does (port/3ds/rules.mk), into a C array instead of bin2s's assembly.
-$(OUT)/shader/shader.shbin: $(PORT)/3ds/shader.v.pica $(PORT)/3ds/transform.v.pica
+$(OUT)/shader/shader.shbin: $(PORT)/3ds/shader.v.pica $(PORT)/3ds/transform.v.pica $(PORT)/3ds/sprite.v.pica \
+                           $(PORT)/3ds/sprite.g.pica
 	@mkdir -p $(dir $@)
 	$(PICASSO) -o $@ $^
 

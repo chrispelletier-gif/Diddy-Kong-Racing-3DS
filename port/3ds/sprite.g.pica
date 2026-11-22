@@ -1,0 +1,100 @@
+; Geometry shader for sprite points (roadmap P60 D, DKR_SPRITE_GS=2, gfx_c3d.c draw_sprites_gs). Each point (seven
+; registers from sprite.v.pica) becomes the sprite tile's two triangles, (p, q, r) and (d, r, q), with
+; q = p + e1, r = p + e2 and d = p + e1 + e2: the same corners gfx_sprite_expand (gfx_backend.h) makes on the CPU.
+; Inputs, already in the 3DS screen's clip space (as shader.v.pica's positions; gfx_c3d.c sprite_gpu_point):
+;   v0 p's position (its z not yet pinned), v1 e1, v2 e2
+;   v3 p's texture coordinates (xy) and e1's (zw), v4 e2's (xy; zw 0)
+;   v5 the colour, bytes 0 to 255 (its alpha is p's), v6 the alphas of q, r and d (xyz)
+; Outputs: shader.v.pica's four, in its order, so the rest of the GPU sees the same vertices.
+; Rules for a shader that a real 3DS runs (transform.v.pica; Star 3D's HARDWARE_DEBUG.md): every output register is
+; written whole for every vertex emitted, with no branches; intermediate results go to temporaries.
+.gsh point c0
+
+; Constants (the geometry shader's own uniform space)
+.constf gconsts(0.00392156862745098, 0.0, 0.5, 1.0)
+.alias rgba_scale gconsts.xxxx
+.alias zeros gconsts.yyyy
+
+; Outputs
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.entry sprite_gmain
+.proc sprite_gmain
+	; The inputs are copied to temporaries first: picasso won't let one instruction read two input registers.
+	; r6 = p, r7 = e1, r8 = e2, r4 and r5 the texture coordinates, r9 the alphas; r1: a corner's texture coordinates
+	; (zw stay 0), r2: its colour
+	mov r6, v0
+	mov r7, v1
+	mov r8, v2
+	mov r4, v3
+	mov r5, v4
+	mov r9, v6
+	mov r1, zeros
+	mov r2, v5
+
+	; p
+	mov r0, r6
+	mov r1.xy, r4.xy
+	mov r2.w, v5.w
+	setemit 0
+	call sprite_put
+	emit
+
+	; q = p + e1
+	add r0, r6, r7
+	add r1.xy, r4.xy, r4.zw
+	mov r2.w, r9.x
+	setemit 1
+	call sprite_put
+	emit
+
+	; r = p + e2
+	add r0, r6, r8
+	add r1.xy, r4.xy, r5.xy
+	mov r2.w, r9.y
+	setemit 2, prim
+	call sprite_put
+	emit
+
+	; d = p + e1 + e2
+	add r0, r6, r7
+	add r0, r0, r8
+	add r1.xy, r4.xy, r4.zw
+	add r1.xy, r1.xy, r5.xy
+	mov r2.w, r9.z
+	setemit 0
+	call sprite_put
+	emit
+
+	; r again
+	add r0, r6, r8
+	add r1.xy, r4.xy, r5.xy
+	mov r2.w, r9.y
+	setemit 1
+	call sprite_put
+	emit
+
+	; q again
+	add r0, r6, r7
+	add r1.xy, r4.xy, r4.zw
+	mov r2.w, r9.x
+	setemit 2, prim
+	call sprite_put
+	emit
+
+	end
+.end
+
+; Writes the vertex r0 (position), r1 (texture coordinates), r2 (colour) to every output, whole. The depth is pinned
+; as gfx_c3d.c's to_screen does: z = min(z, 0), nothing beyond the farthest depth is clipped.
+.proc sprite_put
+	mov r3, r0
+	min r3.z, zeros, r3.z
+	mov outpos, r3
+	mov outtc0, r1
+	mov outtc1, zeros
+	mul outclr, rgba_scale, r2
+.end

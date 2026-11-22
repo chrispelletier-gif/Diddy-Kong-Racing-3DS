@@ -230,6 +230,53 @@ void gfxb_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int nu
 #define GFX_MAX_BATCH_TRIANGLES 256
 #define GFX_MAX_BATCH_VERTICES (GFX_MAX_BATCH_TRIANGLES * 3)
 /*
+ * Sprite points (roadmap P60 D, DKR_SPRITE_GS, default off). A sprite tile of the 3D world (two triangles forming a
+ * parallelogram, one texture, the same shade colour at each corner but for its alpha) handed over as one point
+ * instead of four vertices and six indices. Its corners are p, q = p + e1, r = p + e2 and d = p + e1 + e2, all as a
+ * GfxVertex would hold them (the N64 viewport folded in); the triangles are (p, q, r) and (d, r, q), so both keep the
+ * winding the game gave them. gfx_sprite_expand makes the four vertices and six indices; the 3DS backend can instead
+ * let the GPU's geometry shader make them (gfx_c3d.c, sprite.g.pica). Never flat (the walk only makes points for the
+ * 3D world) and never with a second texture.
+ */
+typedef struct GfxSpritePoint {
+    float p[4], e1[4], e2[4];  /* x, y, z, w */
+    float uv[6];               /* p's u0, v0, then e1's and e2's */
+    unsigned char rgba[4];     /* p's colour (with fog on, a is its fog factor, as GfxVertex.a) */
+    unsigned char alpha[4];    /* q's, r's and d's alpha, then 0 */
+} GfxSpritePoint;
+#define GFX_MAX_SPRITE_POINTS (GFX_MAX_BATCH_TRIANGLES / 2)
+
+/* The two triangles of each point, as gfxb_draw_indexed takes them: 4 vertices and 6 indices a point. */
+static inline void gfx_sprite_expand(const GfxSpritePoint *pts, int n, GfxVertex *verts, unsigned short *indices) {
+    int i, k;
+    for (i = 0; i < n; i++) {
+        const GfxSpritePoint *s = &pts[i];
+        GfxVertex *v = &verts[i * 4];
+        unsigned short *t = &indices[i * 6], b = (unsigned short) (i * 4);
+        for (k = 0; k < 4; k++) {
+            int a = k & 1, c = k >> 1; // p (0, 0), q (1, 0), r (0, 1), d (1, 1)
+            float x = s->p[0], y = s->p[1], z = s->p[2], w = s->p[3], u = s->uv[0], vv = s->uv[1];
+            if (a) {
+                x += s->e1[0], y += s->e1[1], z += s->e1[2], w += s->e1[3], u += s->uv[2], vv += s->uv[3];
+            }
+            if (c) {
+                x += s->e2[0], y += s->e2[1], z += s->e2[2], w += s->e2[3], u += s->uv[4], vv += s->uv[5];
+            }
+            v[k].x = x, v[k].y = y, v[k].z = z, v[k].w = w;
+            v[k].u0 = u, v[k].v0 = vv;
+            v[k].u1 = 0.0f, v[k].v1 = 0.0f;
+            v[k].r = s->rgba[0], v[k].g = s->rgba[1], v[k].b = s->rgba[2];
+            v[k].a = k == 0 ? s->rgba[3] : s->alpha[k - 1];
+        }
+        t[0] = b, t[1] = (unsigned short) (b + 1), t[2] = (unsigned short) (b + 2);
+        t[3] = (unsigned short) (b + 3), t[4] = (unsigned short) (b + 2), t[5] = (unsigned short) (b + 1);
+    }
+}
+/* Whether the backend takes sprite points itself (gfxb_draw_sprites); 0: the frontend expands them and draws them as
+ * gfxb_draw_indexed (gfx_split_draw_sprites). Read once a frame. */
+int gfxb_sprite_points(void);
+void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints);
+/*
  * GPU vertex maths. While the backend says so (gfxb_gpu_transform, at the start of each frame), the
  * frontend hands triangles over in the game's own model space where it can, with the draw's matrix, and the GPU
  * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes

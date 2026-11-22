@@ -381,6 +381,18 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, depth fill finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P60 D (2026-11-22, DKR_SPRITE_GS): sprite tiles of the 3D world (particles, smoke, trees' billboards) handed
+    // over as one point each instead of two triangles. 1: the renderer's core makes the corners (the walk's saving
+    // alone); 2: the GPU's geometry shader makes them. Read game_core_ms (the walk's saving) and renderer_core_ms; the
+    // log's "sprite points" lines count the points and why tiles were left as triangles. Then one lap with the
+    // self-check (log: "sprite points check: N corners compared, 0 differ"). The geometry shader row is last: it has
+    // never run on real hardware, and a GPU hang there would stop the run (the next start finds sprite_gs.txt saying
+    // "testing" and leaves the geometry shader off). Watch the smoke, sparks and the balloons for missing or torn
+    // sprites in row 2.
+    { "sprite tiles as points, corners by the CPU (P60 D)", { "DKR_SPRITE_GS", NULL, NULL }, 0, 1, 1, 0 },
+    { "sprite points, self-check (1 lap, log: 0 differ)", { "DKR_SPRITE_GS", "DKR_SPRITE_GS_CHECK", NULL }, 0, 1, 1,
+      1 },
+    { "sprite tiles as points, GPU geometry shader (P60 D)", { "DKR_SPRITE_GS", NULL, NULL }, 0, 2, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

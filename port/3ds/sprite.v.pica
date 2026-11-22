@@ -1,0 +1,28 @@
+; Vertex shader for sprite points (roadmap P60 D, DKR_SPRITE_GS=2, gfx_c3d.c draw_sprites_gs). A point is one vertex of
+; seven registers (gfx_c3d.c SpriteGpuPoint); this passes them through unchanged to the geometry shader
+; (sprite.g.pica), which makes the sprite tile's four corners from them.
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register is written whole, once, with no
+; branches. It has no uniforms or constants of its own, so binding it leaves the vertex units' uniform registers as
+; shader.v.pica had them (gfx_c3d.c writes the eye uniform again when it goes back to that program).
+
+.entry sprite_vmain
+
+; Outputs: generic registers for the geometry shader, in the order it reads them (v0 to v6)
+.out sp0 dummy o0
+.out sp1 dummy o1
+.out sp2 dummy o2
+.out sp3 dummy o3
+.out sp4 dummy o4
+.out sp5 dummy o5
+.out sp6 dummy o6
+
+.proc sprite_vmain
+	mov sp0, v0
+	mov sp1, v1
+	mov sp2, v2
+	mov sp3, v3
+	mov sp4, v4
+	mov sp5, v5
+	mov sp6, v6
+	end
+.end
