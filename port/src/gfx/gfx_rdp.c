@@ -1195,6 +1195,7 @@ static s32 tex_cache_index(const GfxTexture *t) {
 
 static COLD void tex_memo_check_answer(s32 tileIndex, const GfxTexture *pinned, const GfxTexture *memoTex) {
     const GfxTexture *full = find_texture(tileIndex, pinned, NULL);
+    unsigned long differBefore = (unsigned long) sMemoDiffer;
     sMemoChecked++;
     if (full != memoTex) {
         const Tile *tile = &g.tiles[tileIndex & 7];
@@ -1223,6 +1224,7 @@ static COLD void tex_memo_check_answer(s32 tileIndex, const GfxTexture *pinned, 
                      b >= 0 ? (unsigned long) sTexCache[b].hash : 0UL);
         }
     }
+    plat_check_report("texture memo", (unsigned long) sMemoDiffer != differBefore); /* P59 E: checks_run / _wrong */
     if ((u32) sFrameCount - sMemoLoggedFrame >= 600) {
         sMemoLoggedFrame = (u32) sFrameCount;
         plat_log("texture memo check: %lu hits checked, %lu differ, %lu the same texture in another cache entry",

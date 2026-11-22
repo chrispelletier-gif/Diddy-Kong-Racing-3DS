@@ -316,6 +316,9 @@ jobs:
           DKR_BS_PANEL_CACHE_CHECK=1 DKR_DATA_DIR="$RUNNER_TEMP/rom" DKR_BOTTOM_PREVIEW="$RUNNER_TEMP/panel-cache" \
             port/build/host/dkr | grep "panel cache"
           test "${PIPESTATUS[0]}" -eq 0
+      - name: Self-checks reach the test run's results
+        # P59 E (rule K6): a fake check reported right and one wrong reach the CSV's chk cells as 2 run, 1 wrong
+        run: DKR_CHECKS_CSV_TEST=1 port/build/host/dkr
       - name: Switch bench overrides all reach the game
         # every switch bench race of both consoles' lists sets its switches without overflowing the override table
         run: |

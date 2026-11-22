@@ -71,6 +71,10 @@ unsigned long plat_screen_draws(void) {
     return 0;
 }
 
+void plat_screen_hang_info(char *out, int size) {
+    snprintf(out, (size_t) size, "  bottom screen: n/a\n");
+}
+
 unsigned plat_screen_lock_wait_max_us(int reader) {
     (void) reader;
     return 0;

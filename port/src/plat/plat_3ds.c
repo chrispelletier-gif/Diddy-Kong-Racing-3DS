@@ -1333,6 +1333,11 @@ static void console_lock_timed(void) {
     }
 }
 
+/* P59 C: what the screen's threads are doing, for gpu_hang.txt (plat_screen_hang_info) */
+static volatile int sDrawingArea = -1, sDrawingSys;
+static volatile unsigned long long sDrawStartNs, sLastDrawEndNs, sLastScreenFlushNs;
+static volatile u32 sLastScreenFlushFrom, sLastScreenFlushSize;
+
 /* Copies rows of the image to the framebuffer, which is the screen turned on its side (the console lock is held). */
 static void screen_copy(int first, int end) {
     u16 width, height;
@@ -1359,10 +1364,15 @@ static void screen_copy(int first, int end) {
         }
         if (sSvc && end > first) {
             u32 from = (u32) (fb + 239 - (end - 1)), to = (u32) (fb + (BS_WIDTH - 1) * 240 + 239 - first + 1);
+            sLastScreenFlushFrom = from;
+            sLastScreenFlushSize = to - from;
             svcFlushProcessDataCache(CUR_PROCESS_HANDLE, from, to - from);
         } else {
+            sLastScreenFlushFrom = (u32) fb;
+            sLastScreenFlushSize = width * height * 2;
             GSPGPU_FlushDataCache(fb, width * height * 2);
         }
+        sLastScreenFlushNs = plat_time_ns();
     }
 }
 
@@ -1398,6 +1408,45 @@ static void screen_changed(void) {
 
 static int sCeiling; /* DKR_BS_LOCK_CEILING, read by the system core's screen thread */
 
+int bugreport_thread_list(char *out, int size);
+
+/* Whether a lock is held now: tried and given back at once (only for gpu_hang.txt, long after the hang began). */
+static const char *lock_held(LightLock *lock) {
+    if (LightLock_TryLock(lock) == 0) {
+        LightLock_Unlock(lock);
+        return "free";
+    }
+    return "held";
+}
+
+void plat_screen_hang_info(char *out, int size) {
+    static const char *const sAreas[BS_AREA_COUNT] = { "top", "buttons", "status" };
+    unsigned long long now, lastTap = 0;
+    int area = sDrawingArea, shown = 0, page = 0, length;
+    now = plat_time_ns();
+    prof_monitor_state(&shown, &page, &lastTap);
+    length = snprintf(out, size, "  bottom screen: %s", area >= 0 && area < BS_AREA_COUNT ? "drawing the " : "not drawing");
+    if (area >= 0 && area < BS_AREA_COUNT && length < size) {
+        length += snprintf(out + length, size - length, "%s area on the %s core for %.1f ms", sAreas[area],
+                           sDrawingSys ? "system" : "game", (now - sDrawStartNs) / 1e6);
+    }
+    if (length < size) {
+        length += snprintf(out + length, size - length,
+                           "; last draw done %.1f ms ago; last flush %08lX +%lu bytes %.1f ms ago; console lock %s, "
+                           "copy lock %s, draw lock %s; lock ceiling %s\n"
+                           "  profiler readout %s, page %d, last tap %s%.1f ms ago\n",
+                           sLastDrawEndNs ? (now - sLastDrawEndNs) / 1e6 : -1.0, (unsigned long) sLastScreenFlushFrom,
+                           (unsigned long) sLastScreenFlushSize,
+                           sLastScreenFlushNs ? (now - sLastScreenFlushNs) / 1e6 : -1.0, lock_held(&sConsoleLock),
+                           lock_held(&sCopyLock), sScreenThreadStarted ? lock_held(&sDrawLock) : "-",
+                           sCeiling ? "on" : "off", shown ? "shown" : "off", page, lastTap ? "" : "never, ",
+                           lastTap ? (now - lastTap) / 1e6 : 0.0);
+    }
+    if (length < size) {
+        length += bugreport_thread_list(out + length, size - length);
+    }
+}
+
 static void screen_thread(void *arg) {
     LightEvent *event = arg != NULL ? &sScreenSysEvent : &sScreenEvent;
     bugreport_watch_thread(arg != NULL ? "screen (system core)" : "screen");
@@ -1432,6 +1481,9 @@ static void screen_thread(void *arg) {
             for (area = 0; area < BS_AREA_COUNT; area++) {
                 if (changes & (1 << area)) {
                     int first, end;
+                    sDrawStartNs = plat_time_ns();
+                    sDrawingSys = arg != NULL;
+                    sDrawingArea = area;
                     bs_draw(sImage, area);
                     bs_area_rows(area, &first, &end);
                     if (sCopyLockOn) {
@@ -1444,6 +1496,8 @@ static void screen_thread(void *arg) {
                         LightLock_Unlock(&sConsoleLock);
                     }
                     sScreenDraws++;
+                    sDrawingArea = -1;
+                    sLastDrawEndNs = plat_time_ns();
                 }
             }
             // Includes any time other threads took the core meanwhile: on the game's core at a low priority, this

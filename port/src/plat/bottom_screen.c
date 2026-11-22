@@ -7093,6 +7093,7 @@ static void panel_cache_check(unsigned short *image, const State *s) {
     }
     sChromeChecks++;
     sChromeWrong += (unsigned) wrong;
+    plat_check_report("panel cache", wrong > 0); /* P59 E: the race's checks_run / checks_wrong */
     if (wrong > 0) {
         unsigned long long now = plat_time_ns();
         gPlatCounters[PLAT_COUNTER_PANEL_CACHE_WRONG] += (unsigned) wrong;

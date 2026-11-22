@@ -278,8 +278,12 @@ static inline void ibo_align(void) {
  * stays off.
  */
 static int sSvcFlush;
+static const void *volatile sLastFlushData; /* P59 C: the last range gpu_flush wrote out, for gpu_hang.txt */
+static volatile u32 sLastFlushSize;
 
 static void gpu_flush(const void *data, u32 size) {
+    sLastFlushData = data;
+    sLastFlushSize = size;
     if (sSvcFlush) {
         svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32) data, size);
     } else {
@@ -3037,6 +3041,89 @@ PLAT_HOT static HangDraw *hang_draw_start(const GfxDrawState *state, int numTria
     return d;
 }
 
+/*
+ * P59 C, DKR_GPU_HANG_INFO (default 1): gpu_hang.txt's section "GPU and system state at the hang", to tell a lost
+ * P3D interrupt (the GPU idle, its queue entry never marked done) from a GPU really stuck (busy), and what the bottom
+ * screen and the other threads were doing (#576 stopped within a frame of the profiler's readout update).
+ *
+ * Registers, read through GSP (GSPGPU_ReadHWRegs takes the offset from physical 0x10000000, up to 0x80 bytes), per
+ * 3dbrew "GPU/External Registers" (https://www.3dbrew.org/wiki/GPU/External_Registers):
+ *  - 0x10400034 "GPU Busy": bit 26 PSC0 (memory fill 1), bit 27 PSC1 (memory fill 2), bit 30 PPF, bit 31 P3D; the
+ *    other bits are not documented.
+ *  - 0x10401000 + 4 * reg: the GPU's internal registers ("GPU/Internal Registers"): regs 0x0000-0x0017 the P3D
+ *    interrupt registers (IRQ_ACK 0x00-0x07, IRQ_REQ 0x08-0x0F, IRQ_CMP 0x10-0x13, IRQ_MASK 0x14-0x15, IRQ_AUTOSTOP
+ *    0x16), regs 0x0238-0x023D the command list ones (GPUREG_CMDBUF_SIZE0/1, ADDR0/1, JUMP0/1; 3dbrew's external page
+ *    lists the same words at 0x104018E0 as P3D's "command list" size, address and start).
+ * Each is read twice, 100 ms apart, to show whether anything still moves. The GSP interrupt queue's header (current
+ * index, count, error flag) is in GSP shared memory, which libctru keeps private (gspgpu.c), and the P3D/PPF/VBlank
+ * events can't be counted without replacing gxqueue's own handler (gspSetEventCallback holds one callback an event),
+ * so neither is printed.
+ */
+static void hang_state_info(char *text, int *lengthIo, int size, const FrameSlot *slot) {
+    static const struct {
+        u32 addr;
+        int words;
+        const char *name;
+    } sRegs[] = {
+        { 0x400034, 1, "GPU busy 0x10400034" },
+        { 0x401000, 24, "P3D interrupt regs 0x0000-0x0017" },
+        { 0x4018E0, 6, "P3D command list regs 0x0238-0x023D" },
+    };
+    u32 values[2][3][24];
+    Result res[2][3];
+    int length = *lengthIo, pass, r, k;
+    static char screen[2048];
+#define ADD_AT(...)                                                                                                    \
+    do {                                                                                                               \
+        if (length < size) {                                                                                           \
+            length += snprintf(text + length, size - length, __VA_ARGS__);                                            \
+        }                                                                                                              \
+    } while (0)
+    memset(values, 0, sizeof(values));
+    for (pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            svcSleepThread(100000000LL);
+        }
+        for (r = 0; r < 3; r++) {
+            res[pass][r] = GSPGPU_ReadHWRegs(sRegs[r].addr, values[pass][r], (u8) (sRegs[r].words * 4));
+        }
+    }
+    ADD_AT("\nGPU and system state at the hang (DKR_GPU_HANG_INFO; read twice, 100 ms apart)\n");
+    for (r = 0; r < 3; r++) {
+        for (pass = 0; pass < 2; pass++) {
+            ADD_AT("  %-36s %s:", sRegs[r].name, pass == 0 ? "first" : "+100ms");
+            if (R_FAILED(res[pass][r])) {
+                ADD_AT(" n/a (0x%08lX)\n", (unsigned long) res[pass][r]);
+                continue;
+            }
+            for (k = 0; k < sRegs[r].words; k++) {
+                ADD_AT(" %08lX", (unsigned long) values[pass][r][k]);
+            }
+            ADD_AT("\n");
+        }
+    }
+    for (pass = 0; pass < 2; pass++) {
+        if (R_SUCCEEDED(res[pass][0])) {
+            u32 busy = values[pass][0][0];
+            ADD_AT("  GPU busy %s: P3D %s, PPF %s, PSC0 %s, PSC1 %s\n", pass == 0 ? "first" : "+100ms",
+                   busy & (1u << 31) ? "busy" : "idle", busy & (1u << 30) ? "busy" : "idle",
+                   busy & (1u << 26) ? "busy" : "idle", busy & (1u << 27) ? "busy" : "idle");
+        }
+    }
+    {
+        const gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
+        ADD_AT("  GX queue now: %u entries, %u sent, %u done (P3D idle with entries not done: a lost interrupt)\n",
+               queue->numEntries, queue->curEntry, queue->lastEntry);
+    }
+    ADD_AT("  renderer: last cache flush %p, %lu bytes; slot frame %d; %s\n", sLastFlushData,
+           (unsigned long) sLastFlushSize, slot->frame,
+           sOverlap ? "built while the GPU drew the frame before" : "built with the GPU idle");
+    plat_screen_hang_info(screen, (int) sizeof(screen));
+    ADD_AT("%s", screen);
+#undef ADD_AT
+    *lengthIo = length;
+}
+
 /* Writes gpu_hang.txt and gpu_hang_cmd.bin, once, when the GPU stops responding during the frame last handed over. */
 PLAT_COLD static void save_gpu_hang(void) {
     const gxCmdQueue_s *queue = &__C3D_Context.gxQueue;
@@ -3086,6 +3173,9 @@ PLAT_COLD static void save_gpu_hang(void) {
             ADD("  %2d: GX command %lu (%08lX %08lX %08lX)%s\n", i, (unsigned long) (data[0] & 0xFF),
                 (unsigned long) data[1], (unsigned long) data[2], (unsigned long) data[3], mark);
         }
+    }
+    if (plat_switch("DKR_GPU_HANG_INFO", 1)) {
+        hang_state_info(text, &length, size, slot);
     }
     ADD("\nDraws (cmd = word offsets in gpu_hang_cmd.bin; cc = combiner rgb/alpha per cycle; tex = GPU size, format, "
         "address; '*' = in the command list the GPU stopped in)\n");
@@ -3282,6 +3372,11 @@ static void wait_for_gpu(int measure) {
     }
     gPlatGfxStage = "waiting for the GPU";
     waitStart = plat_time_ns();
+    if (sFrameCount == 120 && plat_switch("DKR_GPU_HANG_TEST", 0)) {
+        // P59 C: a test of gpu_hang.txt's writing (its state section above all) with no hang: once, at frame 120.
+        plat_log("DKR_GPU_HANG_TEST: writing gpu_hang.txt as a hang would");
+        save_gpu_hang();
+    }
     if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
         // Poll instead of blocking, so that a GPU that never finishes the previous frame gets reported.
         unsigned long long start = plat_time_ns();
@@ -6728,6 +6823,7 @@ static void __attribute__((noinline, cold)) walk_check(const WalkReady *r, const
     } else if (memcmp(ind, walkIdx, count * sizeof(u16)) != 0) {
         what = "indices";
     }
+    plat_check_report("walk verts", what != NULL); /* P59 E: the race's checks_run / checks_wrong */
     if (what == NULL) {
         return;
     }

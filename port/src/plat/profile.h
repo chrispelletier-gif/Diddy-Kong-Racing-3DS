@@ -190,6 +190,8 @@ void prof_set_status(const char *text);
 int prof_term_check(char *report, int size);
 /* The PC preview's PROFILER page in the terminal font, for a New 3DS or an Old 3DS (renderer on the game's core). */
 void prof_term_preview(int oldLayout, char *out, int size);
+/* P59 C: whether the readout is shown, its page, and when it was last tapped (plat_time_ns; 0: never). */
+void prof_monitor_state(int *shown, int *page, unsigned long long *lastTapNs);
 
 /*
  * A player's build has no profiler (port_profile.c is left out of RELEASE=1): it is never on, and the calls compile
@@ -305,6 +307,7 @@ void prof_format_object_mix(const ProfObjMix *mix, int top, char *out, int size)
 int prof_monitor_tap(int x, int y);
 #ifdef PORT_RELEASE
 #define prof_monitor_tap(x, y) ((void) (x), (void) (y), 0)
+#define prof_monitor_state(shown, page, lastTapNs) (*(shown) = 0, *(page) = 0, *(lastTapNs) = 0ULL)
 #define prof_kind_name(kind) ((void) (kind), "-")
 #define prof_scene_frame(segments, allowed, drawn, objects) ((void) 0)
 #define prof_object_logic_begin() 0ULL

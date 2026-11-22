@@ -1338,11 +1338,20 @@ static s32 mon_pages(void) {
     return mon_term() ? TERM_PAGES : MON_PAGES;
 }
 
+static volatile unsigned long long sLastTapNs; /* P59 C: the last page tap or freeze, for gpu_hang.txt */
+
+void prof_monitor_state(int *shown, int *page, unsigned long long *lastTapNs) {
+    *shown = sOverlayShown;
+    *page = sMonPage;
+    *lastTapNs = sLastTapNs;
+}
+
 int prof_monitor_tap(int x, int y) {
     (void) x;
     if (!sOverlayShown) {
         return 0;
     }
+    sLastTapNs = plat_time_ns();
     if (y < BS_GRAPH_BOTTOM) {
         sMonFrozen = !sMonFrozen;
     } else {
@@ -1718,9 +1727,18 @@ static void log_rest(int step) {
  * and every log line of the profiler, and the bug reports' frame history (gfx_c3d.c: ~3.9 ms a frame of the Old 3DS
  * renderer's system core time, bench #458).
  */
+/*
+ * P59 D, DKR_PROF_PAGE_FLIP=N (test runs only, default 0): the readout is shown and its page turns every N game
+ * frames, as a tap would, on the results and menu screens too: a stress of the bottom screen's redraws (GPU hang
+ * #576 came at one).
+ */
+static s32 page_flip_every(void) {
+    return port_autorun_enabled() ? plat_switch("DKR_PROF_PAGE_FLIP", 0) : 0;
+}
+
 static s32 sLean;
 static s32 prof_lean_now(void) {
-    return sLean && !sEnabled && !sUserOn;
+    return sLean && !sEnabled && !sUserOn && page_flip_every() <= 0;
 }
 
 static void show_overlay(void) {
@@ -1838,7 +1856,7 @@ static void show_overlay(void) {
             n->clockReads = s.gameFrames ? s.cpu.clockReads / s.gameFrames : 0;
         }
     }
-    if (sEnabled || sUserOn) {
+    if (sEnabled || sUserOn || page_flip_every() > 0) {
         sOverlayShown = TRUE;
         if (!sMonFrozen) {
             show_graph();
@@ -2177,6 +2195,14 @@ static void record_frame(u32 periodUs, u32 buildUs, int updateRate, unsigned lon
     }
     core_frame(row.logicUs + row.sceneUs, row.rdpUs + row.texUs, row.gpuUs, now);
     rec_game_frame(&row);
+    {
+        static u32 sFlipFrames;
+        s32 every = page_flip_every();
+        if (every > 0 && sOverlayShown && ++sFlipFrames >= (u32) every) {
+            sFlipFrames = 0;
+            prof_monitor_tap(0, BS_GRAPH_BOTTOM); /* a tap under the graph: the next page */
+        }
+    }
     if (sMonDirty && sOverlayShown) {
         // A tap on the monitor: show it now rather than at the next second.
         sMonDirty = FALSE;

@@ -9,9 +9,11 @@
  *   DKR_INPUT       scripted input, see host_input.c
  *   DKR_PROF_TERM_CHECK  check that every profiler page fits the terminal font's 47 columns and 14 lines, then exit
  *   DKR_BENCH_OVERRIDE_CHECK  check that every switch bench race's switches reach the game (port_autorun.c), then exit
+ *   DKR_CHECKS_CSV_TEST  check that the self-checks' totals reach the test run's results line (port_autorun.c), then exit
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "plat/controls.h"
@@ -101,6 +103,28 @@ int main(int argc, char **argv) {
         int failed = prof_term_check(report, (int) sizeof(report));
         fputs(report, stdout);
         return failed;
+    }
+    if (getenv("DKR_CHECKS_CSV_TEST") != NULL) {
+        /* CI (P59 E, rule K6): the self-checks' totals reach the test run's results line */
+        /* a fake check reported right and one reported wrong must reach the cells as chk,2,1,<its name> */
+        void port_autorun_result_cells(char *out, int size);
+        char cells[160], name[40] = "";
+        const char *chk, *first;
+        unsigned run = 99, wrong = 99;
+        plat_checks_take(&run, &wrong, &first); /* start from nothing */
+        plat_check_report("fake check", 0);
+        plat_check_report("fake check", 1);
+        port_autorun_result_cells(cells, (int) sizeof(cells));
+        cells[strcspn(cells, "\n")] = '\0';
+        chk = strstr(cells, ",chk,");
+        run = wrong = 99;
+        if (chk == NULL || sscanf(chk, ",chk,%u,%u,%39[^,]", &run, &wrong, name) != 3 || run != 2 || wrong != 1 ||
+            strcmp(name, "fake check") != 0) {
+            printf("results checks test: FAILED: cells \"%s\" (want chk,2,1,fake check)\n", cells);
+            return 1;
+        }
+        printf("results checks test: ok (%s)\n", cells);
+        return 0;
     }
     if (getenv("DKR_BENCH_OVERRIDE_CHECK") != NULL) {
         /* CI: no switch bench override is turned away by a full table, on either console's list */

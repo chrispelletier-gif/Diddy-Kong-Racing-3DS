@@ -407,3 +407,11 @@ ssize_t decompressCallback_Stdio(void *userdata, void *buffer, size_t size) {
     (void) size;
     return -1;
 }
+
+/* P59 C (gpu_hang.txt's state section): no GPU registers on the PC, so they print as n/a */
+Result GSPGPU_ReadHWRegs(u32 regAddr, u32 *data, u8 size) {
+    (void) regAddr;
+    (void) data;
+    (void) size;
+    return -1;
+}
