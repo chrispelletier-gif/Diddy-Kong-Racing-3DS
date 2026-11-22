@@ -354,7 +354,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // P55 S3 / P60 F (gpu_raw.inc): the raw register words' self-check, one lap on top of the new defaults: each reused
     // block is made again through citro3d and compared. The results' checks columns (chk) must say 0 wrong, and the
     // log's "raw GPU words: ..." lines end "0 differ".
-    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
+    // Usual -1, not 0 (run 52 on 36913ec, proposals/3ds-switch-bench-36913ec-o3ds-results.md): every race first sets
+    // each row's variables to their usual setting, rows in order, so a usual 0 here turned DKR_RAW_REGS off in the
+    // usual races and every other row, and run 52 raced the new defaults without raw words.
+    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
       1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
@@ -453,6 +456,24 @@ static s32 switch_race_laps(s32 config) {
 
 static s32 sMode; // enum Mode
 
+/* The bench's own render settings (apply_config), set in every switch bench race before the rows' usual settings, so
+ * a row's usual setting of one of these variables replaces it (the conflict check below reports that). */
+typedef struct BenchPin {
+    const char *name;
+    s8 value;
+} BenchPin;
+static const BenchPin sBenchRender[] = {
+    { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
+    { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
+};
+static const BenchPin sBenchRenderBoth[] = {
+    { "BENCH_RENDER_AHEAD", 1 }, { "BENCH_WIDESCREEN", 2 }, { "BENCH_AA", PLAT_AA_2X },
+};
+// A New 3DS races at the player's GPU-bound settings (2026-10-31): 800 pixels, 4x anti-aliasing, colour boost.
+static const BenchPin sBenchRenderNew3ds[] = {
+    { "BENCH_WIDE800", 1 }, { "BENCH_COLOUR", 1 }, { "BENCH_AA", PLAT_AA_4X },
+};
+
 static s32 config_count(void);
 static const char *config_name(s32 config);
 
@@ -475,28 +496,14 @@ static void apply_config(s32 config) {
         // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
         // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
         // variable several switches share (the GPU route's rows) keeps the race's test setting.
-        static const struct {
-            const char *name;
-            s8 value;
-        } sBenchRender[] = {
-            { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
-            { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
-        };
-        // A New 3DS races at the player's GPU-bound settings (2026-10-31): 800 pixels, 4x anti-aliasing, colour boost.
-        static const struct {
-            const char *name;
-            s8 value;
-        } sBenchRenderNew3ds[] = {
-            { "BENCH_WIDE800", 1 }, { "BENCH_COLOUR", 1 }, { "BENCH_AA", PLAT_AA_4X },
-        };
         plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         lean_apply(); // The lean bench only (v34; DKR_BENCH_FULL_PROFILE=1 keeps the profiler's lines and frame history)
-        plat_override_switch("BENCH_RENDER_AHEAD", 1);
-        plat_override_switch("BENCH_WIDESCREEN", 2);
-        plat_override_switch("BENCH_AA", PLAT_AA_2X);
+        for (i = 0; i < (s32) ARRAY_COUNT(sBenchRenderBoth); i++) {
+            plat_override_switch(sBenchRenderBoth[i].name, sBenchRenderBoth[i].value);
+        }
         if (!plat_old_3ds()) {
             for (i = 0; i < (s32) ARRAY_COUNT(sBenchRenderNew3ds); i++) {
                 plat_override_switch(sBenchRenderNew3ds[i].name, sBenchRenderNew3ds[i].value);
@@ -530,6 +537,112 @@ static void apply_config(s32 config) {
     }
     plat_set_gpu_config(sBenchConfigs[config].aa);
     plat_set_60fps(sBenchConfigs[config].fps60);
+}
+
+/*
+ * Switch bench conflicts (run 52 on 36913ec, proposals/3ds-switch-bench-36913ec-o3ds-results.md): apply_config sets
+ * every row's variables to the row's usual setting, rows in order, so when two rows give one variable different usual
+ * settings the later row's silently wins in every race but their own (the raw self-check's DKR_RAW_REGS usual 0 turned
+ * raw words off in all of run 52's usual races). Reports, for one list:
+ *   - two rows giving one variable different usual settings ("NAME=value" variables count as usual -1);
+ *   - a row's usual setting replacing one of the bench's own render settings (sBenchRender..., set before the rows;
+ *     DKR_FPS_PIN is set after them on purpose, so the uncapped rows' usual -1 is not a conflict);
+ *   - two rows in the all-together race giving one variable different test settings (the later row's wins).
+ * Diagnostic only: nothing about the races changes. Logged at the start of each switch bench run ("switch bench
+ * conflict" lines) and checked in CI by port_autorun_override_check. Returns the number of conflicts.
+ */
+static s32 bench_same_name(const char *a, const char *b) { // (the game's string.h has no strcmp)
+    while (*a != '\0' && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static s32 bench_pin_conflicts(const BenchSwitch *row, const char *name, s32 usual, const BenchPin *pins, s32 count,
+                               char *report, s32 size, s32 *at) {
+    s32 p, conflicts = 0;
+    for (p = 0; p < count; p++) {
+        if (bench_same_name(name, pins[p].name) && usual != pins[p].value) {
+            conflicts++;
+            *at += plat_snprintf(report + *at, size - *at,
+                                 "switch bench conflict: %s: row \"%s\" usual %d replaces the bench's own %d\n", name,
+                                 row->name, (int) usual, (int) pins[p].value);
+            if (*at >= size - 1) {
+                *at = size - 1;
+            }
+        }
+    }
+    return conflicts;
+}
+
+static s32 bench_conflicts(const BenchSwitch *list, s32 old3ds, char *report, s32 size) {
+    s32 i, j, k, m, at = 0, conflicts = 0;
+    report[0] = '\0';
+    for (i = 0; list[i].name != NULL; i++) {
+        for (k = 0; k < BENCH_SWITCH_VARS && list[i].env[k] != NULL; k++) {
+            s32 fixedA, usualA, testA;
+            const char *nameA = bench_var(list[i].env[k], &fixedA);
+            usualA = fixedA != BENCH_VAR_PLAIN ? -1 : list[i].usual;
+            testA = fixedA != BENCH_VAR_PLAIN ? fixedA : list[i].test;
+            conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRender, ARRAY_COUNT(sBenchRender), report,
+                                             size, &at);
+            conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRenderBoth, ARRAY_COUNT(sBenchRenderBoth),
+                                             report, size, &at);
+            if (!old3ds) {
+                conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRenderNew3ds,
+                                                 ARRAY_COUNT(sBenchRenderNew3ds), report, size, &at);
+            }
+            for (j = i + 1; list[j].name != NULL; j++) {
+                for (m = 0; m < BENCH_SWITCH_VARS && list[j].env[m] != NULL; m++) {
+                    s32 fixedB, usualB, testB;
+                    const char *nameB = bench_var(list[j].env[m], &fixedB);
+                    if (!bench_same_name(nameA, nameB)) {
+                        continue;
+                    }
+                    usualB = fixedB != BENCH_VAR_PLAIN ? -1 : list[j].usual;
+                    testB = fixedB != BENCH_VAR_PLAIN ? fixedB : list[j].test;
+                    if (usualA != usualB) {
+                        conflicts++;
+                        at += plat_snprintf(report + at, size - at,
+                                            "switch bench conflict: %s: row \"%s\" usual %d, row \"%s\" usual %d (the "
+                                            "second wins in every race but their own)\n",
+                                            nameA, list[i].name, (int) usualA, list[j].name, (int) usualB);
+                    }
+                    if (!list[i].alone && !list[j].alone && testA != testB) {
+                        conflicts++;
+                        at += plat_snprintf(report + at, size - at,
+                                            "switch bench conflict: %s: rows \"%s\" test %d and \"%s\" test %d in the "
+                                            "all-together race (the second wins)\n",
+                                            nameA, list[i].name, (int) testA, list[j].name, (int) testB);
+                    }
+                    if (at >= size - 1) {
+                        at = size - 1;
+                    }
+                }
+            }
+        }
+    }
+    return conflicts;
+}
+
+/* At the start of a switch bench run: one log line per conflict, then the count (0 when the list is clean). */
+static void log_bench_conflicts(void) {
+    static char report[2048];
+    s32 conflicts = bench_conflicts(sSwitches, plat_old_3ds(), report, (s32) sizeof(report));
+    char *line = report;
+    while (*line != '\0') {
+        char *end = strchr(line, '\n');
+        if (end != NULL) {
+            *end = '\0';
+        }
+        port_log("autorun: %s", line);
+        if (end == NULL) {
+            break;
+        }
+        line = end + 1;
+    }
+    port_log("autorun: switch bench settings: %d conflicts", (int) conflicts);
 }
 
 static void set_phase(s32 phase);
@@ -1921,6 +2034,9 @@ static void init(void) {
     }
     plat_free(state);
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
+    if (sMode == MODE_SWITCH) {
+        log_bench_conflicts(); // (Diagnostic: a row silently replacing another's usual setting, run 52)
+    }
     reset_hitches();
     reset_draw_mix();
     sCoreLineCount = 0;
@@ -3868,7 +3984,8 @@ s32 port_sweep_level_vertex(const void *vertices) {
  * switches as the bench does (apply_config) and checks that none was turned away by a full override table
  * (gPlatOverridesDropped), and that each row's own race reads each of its variables back at the row's test setting.
  * Until 2026-11-19 the table held 16 and silently dropped the rest, so most rows of both consoles raced the usual
- * settings. Returns the number of failures.
+ * settings. Also fails on any switch bench conflict (bench_conflicts: rows silently replacing each other's settings, as
+ * in run 52) and on a planted list whose three conflicts aren't all found. Returns the number of failures.
  */
 int port_autorun_override_check(char *report, int size) {
     s32 config, k, at = 0, failures = 0, configs;
@@ -3903,6 +4020,40 @@ int port_autorun_override_check(char *report, int size) {
         }
     }
     apply_config(-1);
+    {
+        // Rows silently replacing each other's settings (bench_conflicts): this console's lists, then a planted list
+        // that must report its three conflicts (rule K6: the check is shown to catch them in every CI run).
+        static const BenchSwitch sPlanted[] = {
+            { "planted A", { "DKR_PLANTED_ONE", "DKR_PLANTED_TWO", NULL }, -1, 1, 0, 0 },
+            { "planted B (usual 0 replaces A's -1)", { "DKR_PLANTED_ONE", NULL }, 0, 1, 1, 0 },
+            { "planted C (test 2 against A's 1, all together)", { "DKR_PLANTED_TWO=2", NULL }, -1, 0, 0, 0 },
+            { "planted D (usual 1 replaces the bench's own DKR_STEREO3D 0)", { "DKR_STEREO3D", NULL }, 1, 0, 1, 0 },
+            { NULL, { NULL }, 0, 0 },
+        };
+        static char lines[4096];
+        s32 n, l;
+        const BenchSwitch *lists[2];
+        s32 count = 0;
+        lists[count++] = plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds;
+        if (!plat_old_3ds()) {
+            lists[count++] = sSwitchesShelved;
+        }
+        for (l = 0; l < count; l++) {
+            n = bench_conflicts(lists[l], plat_old_3ds(), lines, (s32) sizeof(lines));
+            at += plat_snprintf(report + at, size - at, "%s", lines);
+            failures += n;
+        }
+        n = bench_conflicts(sPlanted, plat_old_3ds(), lines, (s32) sizeof(lines));
+        at += plat_snprintf(report + at, size - at, "switch bench conflict self-test (planted list, want 3): %d found%s\n",
+                            (int) n, n == 3 ? ", ok" : ", FAILED");
+        if (n != 3) {
+            failures++;
+            at += plat_snprintf(report + at, size - at, "%s", lines);
+        }
+        if (at >= size - 1) {
+            at = size - 1;
+        }
+    }
     at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
                         plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) configs, (int) (SWITCH_CONFIGS - 1), (int) failures);
     sMode = savedMode;
