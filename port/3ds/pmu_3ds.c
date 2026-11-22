@@ -8,6 +8,12 @@
  * executed (PMN1, so cycles per instruction = CCNT / PMN1); DKR_PMU=4 the cycles the load/store unit was full (PMN0,
  * PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL: D-cache misses and the write buffer) and data cache write misses (PMN1).
  * They price the D-cache misses PMU 2 counts, and say whether the game core is bound by its instructions or its data.
+ * P64 candidate 3 (proposals/3ds-breakthrough-candidates.md): DKR_PMU=5 counts the data micro TLB misses (PMN0,
+ * PERFCOUNTEREVT_CORE_DATA_MICRO_TLB_MISS) and DKR_PMU=6 the instruction micro TLB misses (PMN0,
+ * ..._INST_MICRO_TLB_MISS), both with the main TLB misses (PMN1, PERFCOUNTEREVT_CORE_MAIN_TLB_MISS): page lookups the
+ * game's 4 KB pages may cost. The first frame of kind 5 or 6 also runs the TLB probe (tlb_probe): it reads 1 MB of the
+ * heap (where the game's pool and the ROM are) and 1 MB of linear memory (where GPU buffers are) a page at a time, and
+ * logs the misses of each, to say whether the system maps either in large pages.
  * Debug builds only, default 0.
  *
  * The CP15 counters belong to a core, not a thread: a sample on the game's core counts everything that ran there
@@ -18,6 +24,7 @@
  * cycles are far from 268M a second, the feature goes (these functions become the stubs in plat_posix.c).
  */
 #include <3ds.h>
+#include <stdlib.h>
 
 #include "plat/plat.h"
 
@@ -51,7 +58,7 @@ int plat_pmu_on(void) {
     if (epoch != sEpoch) {
         sEpoch = epoch;
         sKind = plat_switch("DKR_PMU", 0);
-        sKind = sKind >= 1 && sKind <= 4 ? sKind : 0;
+        sKind = sKind >= 1 && sKind <= 6 ? sKind : 0;
         if (sKind != 0 && sState == 0) {
             sState = pmu_enable();
             if (sState < 0) {
@@ -69,11 +76,14 @@ void plat_pmu_thread_start(void) {
         return;
     }
     // PMN0 and PMN1 by kind (plat.h plat_pmu_on): 1 fetch stall + I-cache misses, 2 fetch stall + D-cache read misses,
-    // 3 data hazard stall + instructions executed, 4 load/store unit full stall + D-cache write misses.
-    static const u32 sPmn0[5] = { 0, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST,
-                                  PERFCOUNTEREVT_CORE_STALL_BY_DATA_HAZARD, PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL };
-    static const u32 sPmn1[5] = { 0, PERFCOUNTEREVT_CORE_INST_CACHE_MISS, PERFCOUNTEREVT_CORE_DATA_CACHE_READ_MISS,
-                                  PERFCOUNTEREVT_CORE_INST_EXECUTED, PERFCOUNTEREVT_CORE_DATA_CACHE_WRITE_MISS };
+    // 3 data hazard stall + instructions executed, 4 load/store unit full stall + D-cache write misses, P64: 5 data
+    // micro TLB misses + main TLB misses, 6 instruction micro TLB misses + main TLB misses.
+    static const u32 sPmn0[7] = { 0, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST,
+                                  PERFCOUNTEREVT_CORE_STALL_BY_DATA_HAZARD, PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL,
+                                  PERFCOUNTEREVT_CORE_DATA_MICRO_TLB_MISS, PERFCOUNTEREVT_CORE_INST_MICRO_TLB_MISS };
+    static const u32 sPmn1[7] = { 0, PERFCOUNTEREVT_CORE_INST_CACHE_MISS, PERFCOUNTEREVT_CORE_DATA_CACHE_READ_MISS,
+                                  PERFCOUNTEREVT_CORE_INST_EXECUTED, PERFCOUNTEREVT_CORE_DATA_CACHE_WRITE_MISS,
+                                  PERFCOUNTEREVT_CORE_MAIN_TLB_MISS, PERFCOUNTEREVT_CORE_MAIN_TLB_MISS };
     svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_0, sPmn0[kind]);
     svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_1, sPmn1[kind]);
     svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_CYCLE_COUNTER,
@@ -92,6 +102,63 @@ void plat_pmu_sample(PlatPmuSample *s) {
                                                        PERFCOUNTERREG_CORE_COUNT_REG_1, 0)) ? v : 0;
 }
 
+/*
+ * P64 candidate 3: does the system map the heap or linear memory in pages bigger than 4 KB? Reads one byte in each 4 KB
+ * page of a 1 MB block, 4 passes after a warm-up one, and counts what this core's counters (kind 5 or 6, just set)
+ * add over those passes. 1 MB is 256 pages of 4 KB, four times what the main TLB holds (64 entries, ARM11 MPCore), so
+ * memory in 4 KB pages misses about 256 times a pass and memory in 1 MB sections about once. Runs once per kind, on
+ * the game thread, at the row's first frame (a few hundred microseconds). The block of each kind is freed at once.
+ */
+#define TLB_PROBE_SIZE (1u << 20)
+#define TLB_PROBE_PASSES 4
+
+static void tlb_walk(const volatile u8 *p, PlatPmuSample *d) {
+    PlatPmuSample a, b;
+    unsigned int pass, o, sink = 0;
+    for (o = 0; o < TLB_PROBE_SIZE; o += 4096) {
+        sink += p[o]; // Warm-up: pages faulted in, entries for the first pages taken
+    }
+    plat_pmu_sample(&a);
+    for (pass = 0; pass < TLB_PROBE_PASSES; pass++) {
+        for (o = 0; o < TLB_PROBE_SIZE; o += 4096) {
+            sink += p[o];
+        }
+    }
+    plat_pmu_sample(&b);
+    (void) sink;
+    d->pmn0 = (b.pmn0 - a.pmn0) / TLB_PROBE_PASSES;
+    d->pmn1 = (b.pmn1 - a.pmn1) / TLB_PROBE_PASSES;
+    d->cycles = (b.cycles - a.cycles) / TLB_PROBE_PASSES;
+}
+
+static void tlb_probe(int kind) {
+    static int sDone[7];
+    PlatPmuSample heap, linear;
+    u8 *h, *l;
+    if (kind < 5 || sDone[kind]) {
+        return;
+    }
+    sDone[kind] = 1;
+    h = (u8 *) malloc(TLB_PROBE_SIZE);
+    l = (u8 *) linearAlloc(TLB_PROBE_SIZE);
+    if (h == NULL || l == NULL) {
+        plat_log("TLB probe (PMU %d): no room for 1 MB of %s", kind, h == NULL ? "heap" : "linear memory");
+    } else {
+        tlb_walk(h, &heap);
+        tlb_walk(l, &linear);
+        // Main TLB misses a pass decide it: ~256 = 4 KB pages, a handful = large pages (64 KB pages give ~16).
+        plat_log("TLB probe (PMU %d, 1 MB a page at a time, a pass): heap at %p %llu main TLB / %llu %s micro TLB "
+                 "misses, %llu cycles; linear at %p %llu / %llu, %llu cycles (256 pages: ~256 main misses = 4 KB "
+                 "pages, ~16 = 64 KB, under 8 = 1 MB sections)",
+                 kind, (void *) h, heap.pmn1, heap.pmn0, kind == 5 ? "data" : "instruction", heap.cycles, (void *) l,
+                 linear.pmn1, linear.pmn0, linear.cycles);
+    }
+    free(h);
+    if (l != NULL) {
+        linearFree(l);
+    }
+}
+
 /* One sample a frame on a slot's thread: what its core counted since the slot's last sample goes to its totals. */
 void plat_pmu_frame(int slot) {
     PlatPmuSample now;
@@ -103,6 +170,9 @@ void plat_pmu_frame(int slot) {
     if (sThreadKind != kind) {
         plat_pmu_thread_start(); // (Resets the counters: the next delta starts here.)
         sHaveLast[slot] = 0;
+        if (slot == PLAT_PMU_GAME) {
+            tlb_probe(kind); // P64: once per kind 5 or 6, before this frame's first sample
+        }
     }
     plat_pmu_sample(&now);
     // A delta that went backwards (another thread reset the counters, if a reset reaches every core) is dropped.

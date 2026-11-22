@@ -338,6 +338,25 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // read misses.
     { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
+    // P64 (2026-11-22, proposals/3ds-breakthrough-candidates.md). The walk steps rows above also split the sprites step
+    // in two (candidate 4): "sprites" (the record's checks, state and axes) and "sprite corners" (their vertex maths
+    // and drawing, what a vertex shader table of sprites would replace); under half the sprites time in corners, stop.
+    // Candidate 1: the native track (NR4, DKR_NATIVE_TRACK: the track's vertices kept on the GPU, its vertex shader
+    // doing the maths) lost in runs 45, 48 and 50, but always without raw register words, which turned the karts' GPU
+    // maths from a renderer core loss into -3.6 ms. Raw words are the Old 3DS default now, so these rows race the track
+    // with them, alone and with the frame's fills finished first (DKR_FILL_WAIT, the Jungle Falls tunnel fix, T1).
+    // Read both cores and the race start (meshes are still made the first time a batch is seen): if both cores drop,
+    // the next step is building them during the level load.
+    { "native track with raw words (P64 1)", { "DKR_NATIVE_TRACK", NULL, NULL }, -1, 1, 1, 0 },
+    { "native track with raw words, fills finished first (P64 1)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1,
+      1, 1, 0 },
+    // Candidate 3: page lookups. PMU 5 counts the data micro TLB misses and PMU 6 the instruction ones, both with the
+    // main TLB misses (the log's "TLB misses a frame" line; the results' pmn1 column, thousands a frame, and the CPU
+    // cell marked T / I for the micro ones). Their first frame logs a "TLB probe" line: main TLB misses a pass over
+    // 1 MB of the heap (the game's pool) and of linear memory, ~256 for 4 KB pages, a few for large ones. Gate: over
+    // about 5k main TLB misses a frame on the game core, and linear memory in large pages, plan moving the pool there.
+    { "TLB misses, data micro + main (PMU 5, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 5, 1, 1 },
+    { "TLB misses, instruction micro + main (PMU 6, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 6, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -1657,12 +1676,14 @@ static s32 core_summary(char *out, s32 size) {
  * (DKR_PMU, profile.h ProfCpuStats; the renderer's "-" when it shares the game's core, kind icache or dcache);
  * P60 A1: kind datastall (DKR_PMU=3: the stall % column is the data hazard stall, PMN1 the instructions executed, in
  * thousands) or lsufull (DKR_PMU=4: the load/store unit full stall, PMN1 the data cache write misses);
+ * P64: kind dtlb (DKR_PMU=5) or itlb (6): the stall % column holds the data / instruction micro TLB misses a frame in
+ * thousands (events, not a share of cycles) and PMN1 the main TLB misses a frame in thousands;
  * ,shown,<pictures replaced before they reached the screen in the race>,<longest gap between two shown, ms>;
  * ,sndcb,<the DSP frame callback, ms a game frame>; ,clk,<plat_time_ns calls a game frame>. "-" where not measured.
  * Then (2026-11-20, DKR_WALK_VERTS coverage) ,wv,<draws the walk made>,<draws it left to the backend>,<left out for
  * room>, each a walked frame over the race ("-" when the walk made no frames: the switch off, or not a 3DS).
  */
-static const char *const sPmuKindNames[5] = { "-", "icache", "dcache", "datastall", "lsufull" };
+static const char *const sPmuKindNames[7] = { "-", "icache", "dcache", "datastall", "lsufull", "dtlb", "itlb" };
 
 static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
     const ProfCpuStats *c = stats != NULL ? &stats->cpu : NULL;
@@ -1673,13 +1694,16 @@ static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
         u32 n = c != NULL ? c->pmuFrames[k] : 0;
         if (c != NULL && c->pmuKind && n > 0) {
             // (Zeros are written as zeros: counters that read 0 on the hardware are the finding, not "not measured")
+            // (P64: kinds 5 and 6 put PMN0's misses, thousands a frame, where the stall share goes)
             at += plat_snprintf(out + at, size - at, ",%.2f,%.1f,%.1f", c->cycles[k] / 1e6 / n,
-                                c->cycles[k] ? c->fetchStall[k] * 100.0 / c->cycles[k] : 0.0, c->pmn1[k] / 1e3 / n);
+                                c->pmuKind >= 5 ? c->fetchStall[k] / 1e3 / n
+                                : c->cycles[k] ? c->fetchStall[k] * 100.0 / c->cycles[k] : 0.0,
+                                c->pmn1[k] / 1e3 / n);
         } else {
             at += plat_snprintf(out + at, size - at, ",-,-,-");
         }
     }
-    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || c->pmuKind < 1 || c->pmuKind > 4 ? "-"
+    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || c->pmuKind < 1 || c->pmuKind > 6 ? "-"
                                                     : sPmuKindNames[c->pmuKind]);
     if (c != NULL && c->shownMeasured) {
         at += plat_snprintf(out + at, size - at, ",shown,%u,%.1f", c->replaced, c->longestShownGapUs / 1000.0);
@@ -2801,7 +2825,8 @@ static const char *timeline_cell(const BenchGroup *g) {
 
 /* P56: the switch bench's CPU cell: the fetch stall % of the game's core / the renderer's (DKR_PMU, "-" without), and the
  * pictures replaced before they reached the screen a race. P60 A1: a row that counted only another stall (DKR_PMU 3 or
- * 4) shows that one instead, marked D (data hazard) or L (load/store unit full), e.g. "D 12.3 / D 4.0". */
+ * 4) shows that one instead, marked D (data hazard) or L (load/store unit full), e.g. "D 12.3 / D 4.0". P64: DKR_PMU 5
+ * and 6 show the data (T) or instruction (I) micro TLB misses a frame in thousands, e.g. "T 4.1 / T 2.0". */
 static const char *cpu_cells(const BenchGroup *g) {
     static char cell[48];
     char a[16], b[16], r[12];
@@ -3009,7 +3034,12 @@ static void bench_summary(char *out, s32 size) {
                 // ,pmu,game mcycles,stall %,pmn1 k,render mcycles,stall %,pmn1 k,kind (pmu_cells)
                 s32 core;
                 // P60 A1: DKR_PMU 3 and 4 count another stall in the same column; kept apart from the fetch stall
-                s32 other = str_equal(fields[i + 7], "datastall") ? 'D' : str_equal(fields[i + 7], "lsufull") ? 'L' : 0;
+                // P64: DKR_PMU 5 and 6 put micro TLB misses (thousands a frame) there, marked T (data) and I
+                s32 other = str_equal(fields[i + 7], "datastall") ? 'D'
+                            : str_equal(fields[i + 7], "lsufull") ? 'L'
+                            : str_equal(fields[i + 7], "dtlb")    ? 'T'
+                            : str_equal(fields[i + 7], "itlb")    ? 'I'
+                                                                  : 0;
                 for (core = 0; core < 2; core++) {
                     if (fields[i + 2 + 3 * core][0] == '-') {
                         continue;
