@@ -58,7 +58,7 @@ $(OUT)/harness/%.o: $(HERE)%.c $(HERE)replay.h $(HERE)record_format.h $(PORT)/sr
 	@mkdir -p $(dir $@)
 	$(CC) $(HARNESS_CFLAGS) -c $< -o $@
 
-$(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(PORT)/3ds/gpu_cuts.inc $(OUT)/shader/shader_shbin.h
+$(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(wildcard $(PORT)/3ds/*.inc) $(OUT)/shader/shader_shbin.h
 	@mkdir -p $(dir $@)
 	$(CC) $(BACKEND_CFLAGS) -c $< -o $@
 
