@@ -288,6 +288,147 @@ static void walk_end(void) {
     prof_part(PROF_PART_WALK_TIMER, readTicks * 1000000000ULL / perSecond);
 }
 
+/*
+ * P61 M2 (DKR_WALK_STEPS, default 0; proposals/3ds-old3ds-game-core-hot-plan.md): the walk's time by step, per draw
+ * kind, on one frame in 16 while the profiler is on: inside native_record (entry and material checks, the mesh lookup,
+ * the box test, the transform, the colour/fog loop, the screen edges, state and axes, the triangle loop and its bucket
+ * finds/draws, the other draw paths), and outside it (sprite records, state commands, the split ring's copy, the opaque
+ * flush, and the rest of the walk). A clock read at each step change on timed frames; untimed, each mark is one load
+ * and a branch. Read one clock read's cost back out of each span. The totals are never reset: each reader
+ * (gfx_walk_steps) keeps where it last read.
+ */
+enum {
+    WS_REST,      // The rest of the walk: the dispatcher, tags, matrices, rectangles, everything not below
+    WS_ENTRY,     // (1) A record's entry and its material/texture checks, to just before native_find
+    WS_FIND,      // (2) native_find
+    WS_BOX,       // (3) The track's box test
+    WS_TRANSFORM, // (4) The vertex transform (transform_vertices_vfp)
+    WS_COLOUR,    // (5) The colour/fog loop
+    WS_EDGES,     // (6) The screen-edge loop
+    WS_STATE,     // (7) State, axes, opaque_direct_ok
+    WS_TRIS,      // (8) The triangle loop
+    WS_BUCKET,    // (9) Inside it: bucket finds and draws, batch starts
+    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free)
+    WS_OPS,       // (11) native_op and the other state commands
+    WS_COPY,      // (12) gfx_split_draw_indexed's copy into the split ring
+    WS_FLUSH,     // (13) opaque_flush_now
+    WS_PATHS,     // Records that leave by another road: through the slots, the GPU's maths, the backend's maths
+    WS_COUNT
+};
+static const char *const sWalkStepNames[WS_COUNT] = {
+    "rest", "entry", "find", "box", "transform", "colour/fog", "edges", "state", "triangles", "buckets",
+    "sprites", "state commands", "split copy", "opaque flush", "other paths",
+};
+static u8 sDrawKind; // The kind being drawn (the draw mix, below)
+static s32 sWalkStepsSwitch; // DKR_WALK_STEPS (read_switches)
+static s32 sWalkStepsOn;     // This frame's steps are being timed (walk_steps_begin)
+static u32 sWalkStepNow, sWalkStepFrameCount;
+static unsigned long long sWalkStepLast, sWalkStepReadCost;
+static unsigned long long sWalkStepTicks[PORT_DRAW_KINDS][WS_COUNT];
+static u32 sWalkStepSpans[PORT_DRAW_KINDS][WS_COUNT];
+static volatile u32 sWalkStepFrames;
+enum { WSG_RACERS, WSG_TRACK, WSG_OBJECTS, WSG_ALL, WSG_COUNT };
+static unsigned long long sWalkStepRead[2][WSG_COUNT][WS_COUNT];
+static u32 sWalkStepReadFrames[2];
+
+static COLD u32 walk_step_timed(u32 step) {
+    u32 old = sWalkStepNow, kind = sDrawKind < PORT_DRAW_KINDS ? sDrawKind : PORT_DRAW_OTHER;
+    unsigned long long now = plat_ticks();
+    sWalkStepTicks[kind][old] += now - sWalkStepLast;
+    sWalkStepSpans[kind][old]++;
+    sWalkStepLast = now;
+    sWalkStepNow = step;
+    return old;
+}
+
+/* Switches the steps' timing to this step; returns the step it was in, to switch back to (0 while untimed). A
+ * player's build has no profiler, so no marks either (they cost native_record ~1 KB of code). */
+static inline u32 walk_step(u32 step) {
+    if (!PLAT_DEBUG_TOOLS || !UNLIKELY(sWalkStepsOn)) {
+        return 0;
+    }
+    return walk_step_timed(step);
+}
+
+static COLD void walk_steps_begin(void) {
+    sWalkStepsOn = sWalkStepsSwitch && prof_enabled() && ++sWalkStepFrameCount % 16 == 0;
+    if (!sWalkStepsOn) {
+        return;
+    }
+    if (sWalkStepReadCost == 0) {
+        sWalkStepReadCost = prof_clock_read_cost();
+    }
+    sWalkStepNow = WS_REST;
+    sWalkStepLast = plat_ticks();
+}
+
+static COLD void walk_steps_end(void) {
+    if (!sWalkStepsOn) {
+        return;
+    }
+    walk_step_timed(WS_REST);
+    sWalkStepsOn = FALSE;
+    __sync_synchronize(); // (the totals are written before the frame count a reader goes by)
+    sWalkStepFrames++;
+}
+
+COLD int gfx_walk_steps(int reader, char *out, int size) {
+    unsigned long long now[WSG_COUNT][WS_COUNT];
+    double perTick = 1e3 / (double) plat_ticks_per_second(), ms[WSG_COUNT][WS_COUNT], all = 0.0;
+    u32 frames, k, i;
+    int at;
+    frames = sWalkStepFrames - sWalkStepReadFrames[reader];
+    __sync_synchronize();
+    __builtin_memset(now, 0, sizeof(now));
+    for (i = 0; i < PORT_DRAW_KINDS; i++) {
+        for (k = 0; k < WS_COUNT; k++) {
+            unsigned long long reads = sWalkStepSpans[i][k] * sWalkStepReadCost / 256, t = sWalkStepTicks[i][k];
+            t = t > reads ? t - reads : 0;
+            now[WSG_ALL][k] += t;
+            if (i == PORT_DRAW_RACERS) {
+                now[WSG_RACERS][k] += t;
+            } else if (i == PORT_DRAW_TRACK) {
+                now[WSG_TRACK][k] += t;
+            } else if (i == PORT_DRAW_OBJECTS) {
+                now[WSG_OBJECTS][k] += t;
+            }
+        }
+    }
+    for (i = 0; i < WSG_COUNT; i++) {
+        for (k = 0; k < WS_COUNT; k++) {
+            ms[i][k] = frames ? (now[i][k] - sWalkStepRead[reader][i][k]) * perTick / frames : 0.0;
+            sWalkStepRead[reader][i][k] = now[i][k];
+        }
+    }
+    sWalkStepReadFrames[reader] += frames;
+    if (frames == 0 || size <= 0) {
+        if (size > 0) {
+            out[0] = '\0';
+        }
+        return 0;
+    }
+    for (k = 0; k < WS_COUNT; k++) {
+        all += ms[WSG_ALL][k];
+    }
+    at = plat_snprintf(out, size, reader == 0 ? "walk steps (ms a frame, racers / track / objects / all; %.2f in all):"
+                                              : "walk steps (ms a frame, all kinds; %.2f in all):", all);
+    for (k = 0; k < WS_COUNT && at < size; k++) {
+        if (ms[WSG_ALL][k] < 0.005) {
+            continue;
+        }
+        if (reader == 0) {
+            at += plat_snprintf(out + at, size - at, " %s %.2f/%.2f/%.2f/%.2f,", sWalkStepNames[k],
+                                ms[WSG_RACERS][k], ms[WSG_TRACK][k], ms[WSG_OBJECTS][k], ms[WSG_ALL][k]);
+        } else {
+            at += plat_snprintf(out + at, size - at, " %s %.2f,", sWalkStepNames[k], ms[WSG_ALL][k]);
+        }
+    }
+    if (at < size) {
+        at += plat_snprintf(out + at, size - at, " %lu frames timed", (unsigned long) frames);
+    }
+    return at < size ? at : size - 1;
+}
+
 /******************************** Helpers ********************************/
 
 static inline const u8 *seg_addr(u32 addr) {
@@ -1803,7 +1944,7 @@ static COLD void flush_mesh_batch(void);
 /* The draw mix (profile.h ProfDrawMix): what the draws are for, from the game's tags (port_drawtag.h), and per kind
  * what they cost and how much was wasted, since the profiler last took them. Plain counters: the walk's thread writes
  * them, and a take that lands mid-frame is off by part of a frame. */
-static u8 sDrawKind;
+// (sDrawKind is declared with the walk steps, above, which read it)
 static u8 sDrawObj = PROF_OBJ_NONE; // The object kind whose tag came last (profile.h ProfObjMix)
 static ProfDrawMix sMix;
 static unsigned long sObjTris[PROF_OBJ_BUCKETS + 1]; // The last one: no object's
@@ -1972,7 +2113,9 @@ static void opaque_draw(OpaqueBucket *b) {
         gfxb_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris); // On the backend thread
         sEngStats[1]++;
     } else {
+        u32 ws = walk_step(WS_COPY);
         gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
+        walk_step(ws);
         prof_count(PROF_DRAWS, 1);
         sOpaqueStats[1]++;
     }
@@ -1983,7 +2126,7 @@ static void opaque_draw(OpaqueBucket *b) {
 /* Draws the buckets (by whichever thread has them). */
 static HOT void opaque_flush_now(void) {
     s32 i;
-    u32 part = sRemote ? 0 : walk_switch(WALK_DRAWS);
+    u32 part = sRemote ? 0 : walk_switch(WALK_DRAWS), ws = sRemote ? 0 : walk_step(WS_FLUSH);
     ENG_PENDING = FALSE;
     for (i = 0; i < sOpaqueCount; i++) {
         opaque_draw(&sOpaque[i]);
@@ -1991,6 +2134,7 @@ static HOT void opaque_flush_now(void) {
     sOpaqueCount = 0;
     if (!sRemote) {
         walk_switch(part);
+        walk_step(ws);
     }
 }
 
@@ -2166,7 +2310,9 @@ static NOINLINE HOT void flush_cpu_batch(void) {
             return;
         }
         OPAQUE_FLUSH();
+        u32 ws = walk_step(WS_COPY);
         gfx_split_draw_indexed(&sBatchState, sBatchVerts, sBatchVertices, sBatchIndices, sBatchCount);
+        walk_step(ws);
         prof_count(PROF_TRIANGLES, sBatchCount);
         prof_count(PROF_DRAWS, 1);
         sMix.kinds[sDrawKind].draws++;
@@ -2390,6 +2536,7 @@ static COLD void read_switches_now(void) {
     // The profiler's breakdown of the walk (see sWalkTimed): off on an Old 3DS, where its clock reads are system calls
     // that cost the walk a few milliseconds a frame.
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
+    sWalkStepsSwitch = plat_switch("DKR_WALK_STEPS", 0) != 0;
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
@@ -5834,7 +5981,7 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
     return TRUE;
 }
 
-static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
+static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
         s32 count, dest, matrix;
@@ -5916,6 +6063,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         if (!sNativeRecords) {
             CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
         }
+        walk_step(WS_SPRITES);
         native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5932,6 +6080,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         if (!sNativeRecords) {
             CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
         }
+        walk_step(WS_PATHS);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -5957,6 +6106,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     if (total > MAX_VERTICES || count <= 0) {
         return 2;
     }
+    walk_step(WS_FIND);
     {
         s32 track = !dynamic; // The level's batches (tracks.c) and models' (render_mesh): see native_find
         mesh = native_find(tris, count, dynamic, track);
@@ -5964,7 +6114,9 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
         }
     }
+    walk_step(WS_BOX);
     if (mesh == NULL || mesh->maxVertex >= total) {
+        walk_step(WS_PATHS);
         sNativeDeclined++;
         if (!sNativeRecords) {
             CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
@@ -5992,6 +6144,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
+    walk_step(WS_PATHS);
     if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
         (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
         !REF_ACTIVE() && !UNLIKELY(sTracing) &&
@@ -6051,6 +6204,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         const Vertex *src = loads[i].src;
         s32 c = loads[i].count;
         float(*m)[4] = g.matrices[loads[i].matrix];
+        walk_step(WS_TRANSFORM);
 #ifdef HAVE_VFP_VECTORS
         // The VFP's short vectors, as the old path's loads use them on the Old 3DS (DKR_VFP_VECTORS; the native path
         // had been left on the scalar transform).
@@ -6061,6 +6215,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         {
             transform_vertices(src, c, verts, m);
         }
+        walk_step(WS_COLOUR);
         for (k = 0; k < c; k++) {
             u32 rgba;
             __builtin_memcpy(&rgba, &src[k].r, 4);
@@ -6081,6 +6236,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
+    walk_step(WS_EDGES);
     viewport_init(&vp);
     {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
@@ -6102,6 +6258,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
+    walk_step(WS_STATE);
     nmat_state(mat, &state, textured);
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
@@ -6141,6 +6298,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         // A batch was waiting (see above): it is drawn, and the backend takes the finished vertices.
         TexAxis ax[4] = {u0, v0, u1, v1};
         s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
+        walk_step(WS_PATHS);
         flush_batch();
         native_remote_send(mat, &state, ax, vtx, total, count, mesh, numLoads, loads[0].count, matrices, frontCull,
                            FALSE, TRUE);
@@ -6159,6 +6317,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sBatchGeneration++;
     generation = sBatchGeneration;
     stamp = ++sNativeStamp;
+    walk_step(WS_TRIS);
     for (i = 0; i < count; i++) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
@@ -6183,6 +6342,7 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
         if (direct) {
             if (batchKey != batchedKey || bucket->numTris >= MAX_BATCH_TRIANGLES ||
                 bucket->numVerts + 3 > MAX_BATCH_VERTICES) {
+                u32 ws = walk_step(WS_BUCKET);
                 if (batchKey != batchedKey) {
                     bucket = opaque_bucket_find(&state);
                     batchedKey = batchKey;
@@ -6197,13 +6357,16 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
                 vcount = &bucket->numVerts;
                 stamp = ++sNativeStamp; // Corner indices are the bucket's
                 sOpaquePending = TRUE;
+                walk_step(ws);
             }
             out = &bucket->indices[bucket->numTris++ * 3];
             directTris++;
         } else if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
             out = &sBatchIndices[sBatchCount++ * 3];
         } else {
+            u32 ws = walk_step(WS_BUCKET);
             out = batch_triangle(&state);
+            walk_step(ws);
             batchedKey = batchKey;
             if (sBatchGeneration != generation) {
                 generation = sBatchGeneration;
@@ -6256,6 +6419,14 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     }
     sTriStateValid = FALSE;
     return 2;
+}
+
+/* The record (native_record_body) with its steps timed from its entry (P61 M2, DKR_WALK_STEPS). */
+static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
+    u32 ws = walk_step(WS_ENTRY);
+    s32 used = native_record_body(dl, remaining, id);
+    walk_step(ws);
+    return used;
 }
 
 /******************************** RDP rectangles ********************************/
@@ -7757,7 +7928,9 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
                             return;
                         }
                     } else {
+                        u32 ws = walk_step(WS_OPS);
                         native_op(w0, w1);
+                        walk_step(ws);
                     }
                     break;
                 }
@@ -8002,7 +8175,9 @@ HOT s32 gfx_frame_tag(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
 }
 
 void gfx_frame_op(u32 w0, u32 w1) {
+    u32 ws = walk_step(WS_OPS);
     native_op(w0, w1);
+    walk_step(ws);
 }
 
 s32 gfx_frame_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
@@ -8653,6 +8828,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     STALL_MARK("frame start (switches, textures, meshes)", 0, 0);
     SETUP_END();
     walk_begin();
+    walk_steps_begin();
     sCensusSkip = TRUE;
     if (UNLIKELY(sCensusOn > 0) && gPortNativeOps) { // (Frames before the first level load still write N64 commands)
         sCensusSkip = FALSE;
@@ -8681,6 +8857,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     OPAQUE_FLUSH();
     STALL_MARK("backend frame end", 0, 0);
     gfx_split_frame_end();
+    walk_steps_end();
     walk_end();
     STALL_MARK(NULL, 0, 0); // Not timed until the next frame starts
 #ifdef PORT_GFX_REFERENCE

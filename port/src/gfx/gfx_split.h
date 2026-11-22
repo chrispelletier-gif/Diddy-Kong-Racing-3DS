@@ -47,6 +47,9 @@ unsigned long long gfx_split_backend_busy_ns(void);
 /* P54 DKR_BACKEND_MIX: the backend's ms a timed frame by record type since this reader (0 the log, 1 the core window)
  * last asked, as one line; returns its length (0: no frame timed). */
 int gfx_split_backend_mix(int reader, char *out, int size);
+/* P61 M2 DKR_WALK_STEPS (gfx_rdp.c): the walk's ms a timed frame by step since this reader (0 the log: racers / track /
+ * objects / all kinds; 1 the core window: all kinds) last asked, as one line; returns its length (0: none timed). */
+int gfx_walk_steps(int reader, char *out, int size);
 void gfx_split_take_times(unsigned long long *walkWaitNs, unsigned long long *backendBusyNs,
                           unsigned int *backendFrames, unsigned int *backendWakes);
 

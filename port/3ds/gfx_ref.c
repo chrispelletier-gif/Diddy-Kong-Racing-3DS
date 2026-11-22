@@ -27,6 +27,8 @@
 #define gfxb_walk_frame_start refb_walk_frame_start
 #define gfxb_walk_draw_indexed refb_walk_draw_indexed
 #define gfxb_walk_coverage refb_walk_coverage
+#define gfxb_model_split_totals refb_model_split_totals
+#define gGfxbModelSplitOn gRefbModelSplitOn
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>
 // None of the host renderer's own debug settings apply here.

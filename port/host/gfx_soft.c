@@ -998,6 +998,15 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
     return (all & 15) ? GFX_MODEL_HIDDEN : any ? GFX_MODEL_CPU : GFX_MODEL_GPU;
 }
 
+volatile int gGfxbModelSplitOn; // P61 M3: the 3DS backend's split; this one has none
+void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsigned int *draws, unsigned int *reads) {
+    int i;
+    for (i = 0; i < GFXB_MSPLIT_COUNT; i++) {
+        ticks[i] = 0;
+    }
+    *draws = *reads = 0;
+}
+
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles) {
     static GfxVertex sConverted[GFX_MAX_BATCH_VERTICES];

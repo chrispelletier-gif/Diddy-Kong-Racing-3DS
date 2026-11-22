@@ -395,6 +395,20 @@ system call on an Old 3DS). Each race's results line ends with them (`,pmu,...,s
 `pmu_cells` in `port_autorun.c`), along with the pictures replaced before they reached the screen and the longest gap
 between two that did (`port/src/plat/shown.h`). The switch bench's table has the fetch stall and the replaced count.
 
+Where the game core's time goes, in more detail (roadmap P61 M, 2026-11-22; off unless set, so the usual races are
+untouched). With `DKR_PMU` on, the counters are also read at each game core section change on the timed frames (an Old
+3DS's 1 in 8): the log's and `autorun_cores.txt`'s `game core sections (PMU n, ...)` give, per section, the M cycles,
+the share of them spent waiting for instructions and the thousands of events (I-cache misses for 1, D-cache read
+misses for 2) a frame; `top` holds the walk on an Old 3DS. `DKR_WALK_STEPS=1` times the display list walk's steps on
+one frame in 16 while the profiler is on: inside each native record its entry and material checks, the mesh lookup,
+the track's box test, the vertex transform, the colour/fog loop, the screen edges, state and axes, the triangle loop
+and its bucket finds and draws, and records that leave by another road; outside them the sprite records, the state
+commands, the split ring's copy, the opaque flush and the rest. The log line `walk steps (ms a frame, racers / track
+/ objects / all)` and the all-kinds part of `autorun_cores.txt` give them, less the clock reads' own cost. On the
+backend mix's timed frames (`DKR_BACKEND_MIX`) the backend's model and mesh draws (GPU vertex maths: `DKR_NATIVE_GPU`,
+the native track) are also split into their parts (`backend model/mesh draws: N a frame, drain, state, settings
+twice, uniforms, copies, indices, draw, other`), after the `backend records` line.
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the
