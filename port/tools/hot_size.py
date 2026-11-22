@@ -43,7 +43,9 @@ import sys
 # (PLAT_HOT_GAME), so hot_span covers the game, walk and backend stretches together and grew by what was added;
 # walk_set lost frame_thread (port_gfx_run_frame is out of line, its rare blocks cold); backend_set lost the GPU-draw
 # profiler's and the first draw's fill code from gfxb_draw_indexed and walk_draw_ready.
-BUDGETS = {"hot_span": 78460, "walk_set": 25376, "backend_set": 20604}
+# Run 50 (2026-11-22, PR #589): #580 (fused VFP vertex loop), #581 (fog skip) and #583 (raw GPU words) bought ~5 ms of
+# the Old 3DS's limiting core for the growth, so the budgets were reset to the merged tree's CI debug build.
+BUDGETS = {"hot_span": 79632, "walk_set": 22912, "backend_set": 21200}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024
