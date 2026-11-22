@@ -23,7 +23,7 @@
  * covered here, in the best of this file's last 16 frames (the renderer may draw a frame twice or skip one), as pixels
  * covered by both over pixels covered by either. A few frames always differ by a whole batch (the renderer holds some
  * cut-outs back and draws them under a later kind), so "occl check" lines give the median frame's match: FAILED under
- * 99%. DKR_OCCL_BREAK=1 breaks the count on purpose (rule K6: triangles cut by the near plane are left out) to show
+ * 97% (the four Old 3DS bench tracks give 98-100%; the break below gives 93-96%). DKR_OCCL_BREAK=1 breaks the count on purpose (rule K6: triangles cut by the near plane are left out) to show
  * that the check notices.
  */
 #include <stdio.h>
@@ -336,7 +336,7 @@ static void log_check(const char *what) {
              "at 99%% or more%s",
              what, sCheckFrames, median, sCheckFrames > 0 ? 100.0 * (sCheckHist[99] + sCheckHist[100]) / sCheckFrames : 0.0,
              sCheckFrames == 0 ? " (nothing compared: run with DKR_FRAG_STATS=1 and the same DKR_WIDESCREEN)"
-             : median < 99 ? " FAILED" : " ok");
+             : median < 97 ? " FAILED" : " ok");
     sCheckFrames = 0;
     memset(sCheckHist, 0, sizeof(sCheckHist));
 }
