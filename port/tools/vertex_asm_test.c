@@ -4,7 +4,7 @@
  *
  *   arm-none-eabi-gcc -O3 -ffast-math -march=armv6k -mtune=mpcore -mfloat-abi=hard -mfpu=vfp -marm \
  *       -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector \
- *       -nostdlib -static -Isrc/gfx -o vertex_asm_test tools/vertex_asm_test.c -lgcc
+ *       -nostdlib -static -Wl,-Ttext-segment=0x400000 -Isrc/gfx -o vertex_asm_test tools/vertex_asm_test.c -lgcc
  *   qemu-arm -cpu arm11mpcore ./vertex_asm_test        (from port/; the flags are the hot files' on the 3DS)
  *
  * The reference is a copy of native_record's three passes (transform_vertices_vfp, the colour and
