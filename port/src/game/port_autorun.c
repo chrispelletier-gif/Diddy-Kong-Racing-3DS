@@ -328,15 +328,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // native track rows (kept off), two of the three page flip rows, NATIVE_GPU alone and raw with objects on the GPU.
     // None of the four winners were raced together in run 50, so this bench confirms them: the usual races (new
     // defaults) against the previous defaults on every track.
+    // Unified Old 3DS test build 3 (2026-11-22, test branch only, not for master): a shorter bench. The previous
+    // defaults row is a measurement here (alone: the all-together race is the bucket hand-off with the batched split
+    // ring hand-off). Left out (master keeps them): walk steps PMU 1, uncapped parts, page flip stress and the raw
+    // self-check (run 52: 0 wrong, no hang). The GPU time by kind rows use usual -1 (both switches are off by default
+    // on the Old 3DS) so DKR_NATIVE_TRACK's usual matches the P64 rows' (bench conflict check).
     { "previous defaults (raw words, karts on the GPU, vertex loop, fog skip off)",
-      { "DKR_RAW_REGS", "DKR_NATIVE_GPU", "DKR_VERTEX_ASM", "DKR_FOG_SKIP", NULL }, -1, 0, 0, 0 },
+      { "DKR_RAW_REGS", "DKR_NATIVE_GPU", "DKR_VERTEX_ASM", "DKR_FOG_SKIP", NULL }, -1, 0, 1, 0 },
     // P61 M (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): hardware truth for the game core's hot code,
     // kept until P61 has its before/after. Each measures, one lap: the CPU counters per game core section (log and
     // autorun_cores.txt: "game core sections (PMU n, ...)": M cycles / fetch stall share / k misses a frame for top
     // (the walk is inside it), logic, objects...) and the walk's steps (DKR_WALK_STEPS, any non-zero value: "walk
     // steps (ms a frame, racers / track / objects / all)", one frame in 16). PMU 1: I-cache misses; PMU 2: D-cache
     // read misses.
-    { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
     // P64 (2026-11-22, proposals/3ds-breakthrough-candidates.md). The walk steps rows above also split the sprites step
     // in two (candidate 4): "sprites" (the record's checks, state and axes) and "sprite corners" (their vertex maths
@@ -357,27 +361,6 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // about 5k main TLB misses a frame on the game core, and linear memory in large pages, plan moving the pool there.
     { "TLB misses, data micro + main (PMU 5, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 5, 1, 1 },
     { "TLB misses, instruction micro + main (PMU 6, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 6, 1, 1 },
-    // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
-    // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
-    // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
-    // within 16.7 ms, the renderer's core the longest), so the plain uncapped row went: every race's ceiling columns
-    // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
-    { "uncapped (60 cap), walk/draw parts timed (costs fps)",
-      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    // P59 D (2026-11-22, proposals/3ds-profiler-tabs-gpu-hang-plan.md): GPU hang #576 came within a frame of the
-    // profiler's readout redraw, with the owner flipping its pages. This bug-check row shows the readout and turns its
-    // page every 3 frames (DKR_PROF_PAGE_FLIP), in races and on the results and menus between them (no hang in run
-    // 50's 12 stress races; kept as a hang guard). A hang writes gpu_hang.txt with its "GPU and system state" section
-    // (P59 C).
-    { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
-    // P55 S3 / P60 F (gpu_raw.inc): the raw register words' self-check, one lap on top of the new defaults: each reused
-    // block is made again through citro3d and compared. The results' checks columns (chk) must say 0 wrong, and the
-    // log's "raw GPU words: ..." lines end "0 differ".
-    // Usual -1, not 0 (run 52 on 36913ec, proposals/3ds-switch-bench-36913ec-o3ds-results.md): every race first sets
-    // each row's variables to their usual setting, rows in order, so a usual 0 here turned DKR_RAW_REGS off in the
-    // usual races and every other row, and run 52 raced the new defaults without raw words.
-    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
-      1 },
     // P63 (2026-11-22, proposals/3ds-old3ds-bucket-handoff-plan.md): the opaque buckets handed to the backend by pointer
     // instead of copied into the split ring on the game core (DKR_SPLIT_REF; estimated -0.4..-0.7 ms game core, judged
     // on the 4-track mean; the renderer core should not move). The log's "split ref: N handed over, M fallbacks" lines
@@ -406,8 +389,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // off by default here: its cut frame is a hitch) with the track on the GPU's vertex maths and without. The track
     // kind's GPU ms grows with its vertices (same pixels both ways), so the difference is the vertex cost a slimmer
     // track shader could cut. Both are measurements (left out of the all-together race).
-    { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 0 },
-    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK", NULL }, 0, 1, 1, 0 },
+    { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, -1, 1, 1, 0 },
+    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK", NULL }, -1, 1, 1, 0 },
     // Step 1, rank 2: the native kart batches by road (one load / two loads / dynamic / billboard / no tables), their
     // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
