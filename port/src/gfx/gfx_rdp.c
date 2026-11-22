@@ -485,6 +485,9 @@ typedef struct TexCacheEntry {
 } TexCacheEntry;
 
 static TexCacheEntry sTexCache[TEX_CACHE_SIZE];
+/* P61 W2 (DKR_NMAT_ONCE): moves whenever a cache entry stops being usable (free_entry, free_entry_later: used cleared,
+ * gen moved), so a material whose textures were found usable earlier in this frame, at this epoch, still has them. */
+static u32 sTexFreeEpoch;
 /* The texture queue's position (see prewarm_textures) that decodes are stamped with: the notice being run, or during a
  * frame the next one. */
 static u32 sTexSeqNow;
@@ -864,6 +867,7 @@ static void free_entry(TexCacheEntry *e) {
     e->atlasState[0] = e->atlasState[1] = 0; // Its place in a page is not given out again (see atlas_place)
     e->used = FALSE;
     e->gen++;
+    sTexFreeEpoch++; // P61 W2
     if (e->gen == 0) {
         tex_memo_forget(); // The 8-bit generation wrapped: a memo entry from 256 frees ago must not match it again
     }
@@ -900,6 +904,7 @@ static void free_entry_later(TexCacheEntry *e) {
     e->atlasState[0] = e->atlasState[1] = 0;
     e->used = FALSE;
     e->gen++;
+    sTexFreeEpoch++; // P61 W2
     if (e->gen == 0) {
         tex_memo_forget();
     }
@@ -2145,6 +2150,10 @@ static s32 sNativeRemote; // DKR_NATIVE_REMOTE (read_switches): 1 opaque draws, 
 static u32 sNativeCopies; // Shared tables remade beside the old (profiler log)
 static u32 sNativeUnshares; // Drains for shared tables (profiler log)
 static u32 sTrisSkipped, sTrisMissed; // Track batches not compared, and changes found that skipping would have missed
+static s32 sWalkBackface; // P61 W1 DKR_WALK_BACKFACE (read_switches): the triangle loop reads mesh->backface
+static s32 sNmatOnce;     // P61 W2 DKR_NMAT_ONCE: a material's textures checked once a frame (nmat_textures_ok)
+static s32 sNmatOnceCheck; // P61 W2 DKR_NMAT_ONCE_CHECK: 1 checks each skip the old way, 2 also frees textures mid-frame
+static s32 sWalkPld;      // P61 W3 DKR_WALK_PLD: prefetches, bits: 1 vertex loop, 2 triangle loop, 4 next texture entry
 static s32 sWalkPrefetch; // DKR_WALK_PREFETCH (read_switches): native_record starts loading the next record's data
 static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
@@ -2539,6 +2548,42 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
                      : [m] "r"(m), [srcSize] "I"(sizeof(Vertex)), [dstSize] "I"(sizeof(RspVertex))
                      : "d0", "d1", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "cc", "memory");
 }
+
+/* P61 W3 (a) (DKR_WALK_PLD bit 1): the same loop with a PLD at its top for the vertices two lines ahead (10 bytes
+ * each: one PLD a vertex keeps the loads ahead of the loop). A copy of the asm, not a branch inside it. */
+static void transform_vertices_vfp_pld(const Vertex *src, s32 count, RspVertex *dst, float (*m)[4]) {
+    u32 savedFpscr, x, y, z;
+    __asm__ volatile("vldmia %[m], {s8-s23}\n\t"
+                     "vmrs %[saved], fpscr\n\t"
+                     "bic %[x], %[saved], #0x00370000\n\t" // LEN (bits 16-18) and STRIDE (20-21)
+                     "orr %[x], %[x], #0x00030000\n\t"     // LEN = 4, STRIDE = 1
+                     "vmsr fpscr, %[x]\n"
+                     "1:\n\t"
+                     "pld [%[src], #64]\n\t"
+                     "ldrsh %[x], [%[src]]\n\t"
+                     "ldrsh %[y], [%[src], #2]\n\t"
+                     "ldrsh %[z], [%[src], #4]\n\t"
+                     "add %[src], %[src], %[srcSize]\n\t"
+                     "vmov s0, %[x]\n\t"
+                     "vmov s1, %[y]\n\t"
+                     "vmov s2, %[z]\n\t"
+                     "vcvt.f32.s32 s0, s0\n\t"
+                     "vcvt.f32.s32 s1, s1\n\t"
+                     "vcvt.f32.s32 s2, s2\n\t"
+                     "vmul.f32 s24, s8, s0\n\t"  // s24-s27 = row 0 * x
+                     "vmla.f32 s24, s12, s1\n\t" // += row 1 * y
+                     "vmla.f32 s24, s16, s2\n\t" // += row 2 * z
+                     "vadd.f32 s24, s24, s20\n\t" // += row 3
+                     "vstmia %[dst], {s24-s27}\n\t"
+                     "add %[dst], %[dst], %[dstSize]\n\t"
+                     "subs %[count], %[count], #1\n\t"
+                     "bne 1b\n\t"
+                     "vmsr fpscr, %[saved]"
+                     : [src] "+r"(src), [dst] "+r"(dst), [count] "+r"(count), [saved] "=&r"(savedFpscr), [x] "=&r"(x),
+                       [y] "=&r"(y), [z] "=&r"(z)
+                     : [m] "r"(m), [srcSize] "I"(sizeof(Vertex)), [dstSize] "I"(sizeof(RspVertex))
+                     : "d0", "d1", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "cc", "memory");
+}
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
@@ -2683,6 +2728,14 @@ static COLD void read_switches_now(void) {
     // 3DS default, v28) and 1 stay for the bench and rollback.
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", 0);
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
+    // P61 W (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): the walk's exact data cuts. W1 and W2 change no
+    // picture (on by default on both consoles; 0 = the old way); W3's prefetches are hints (Old 3DS, bits 1 and 2;
+    // bit 4, the next record's texture entry, reads the next material's line just asked for, so it stays off until
+    // a bench says otherwise).
+    sWalkBackface = plat_switch("DKR_WALK_BACKFACE", 1) != 0;
+    sNmatOnce = plat_switch("DKR_NMAT_ONCE", 1) != 0;
+    sNmatOnceCheck = plat_switch("DKR_NMAT_ONCE_CHECK", 0);
+    sWalkPld = plat_switch("DKR_WALK_PLD", plat_old_3ds() ? 3 : 0);
     // R3: texture loads by handle (see TexHandle). Its game side (obj_asm.c) reads the same switch at level load.
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
@@ -5136,7 +5189,7 @@ static NOINLINE HOT_WALK s32 native_mesh(const Gfx *dl, s32 remaining) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
         u16 *out;
-        state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
+        state.cullMode = (sWalkBackface ? mesh->backface[i] : (mesh->copy[i].flags & BACKFACE_DRAW)) ? 0 : frontCull;
         if (sCpuCull && state.cullMode != 0) {
             s32 face = face_test(&sNativeVerts[mesh->cornerVertex[tc[0]]], &sNativeVerts[mesh->cornerVertex[tc[1]]],
                                    &sNativeVerts[mesh->cornerVertex[tc[2]]], keepSign);
@@ -5217,6 +5270,7 @@ typedef struct NMat {
     u8 shadeAlpha; // P60 C: its combiner reads the shade alpha (combiner_shade_alpha)
     u8 axReady; // axes[] hold the texture axes for its tiles and textures
     TexAxis axes[4]; // u0, v0, u1, v1
+    u32 texOkFrame, texOkEpoch; // P61 W2: the frame and sTexFreeEpoch its textures were last found usable at
 } NMat;
 static NMat sNMats[NMAT_MAX];
 extern volatile unsigned char gPortNMatBad[];
@@ -5282,6 +5336,7 @@ static COLD void nmat_capture(u32 id) {
     m->shadeAlpha = combiner_shade_alpha(&m->state.combiner);
     m->valid = TRUE;
     m->axReady = FALSE;
+    m->texOkFrame = ~0u; // P61 W2: its textures are checked at its next record
     for (k = 0; k < 2; k++) {
         s32 e = tex_entry_of(m->state.textures[k]);
         if (m->state.textures[k] != NULL && e < 0) {
@@ -5294,6 +5349,84 @@ static COLD void nmat_capture(u32 id) {
     if (!m->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
     }
+}
+
+/*
+ * P61 W2 (DKR_NMAT_ONCE): a record's material textures, still the ones captured (used, the same generation)? Each
+ * record used to read its material's one or two cache entries (a line each) and write their lastFrame. Now that is
+ * done once a frame per material: a material found good in this frame (sFrameCount), with no entry made unusable
+ * since (sTexFreeEpoch), is good. The lastFrame writes are the same (one a frame was all they recorded). FALSE: a
+ * texture is gone (the caller drops the material).
+ */
+static inline s32 nmat_textures_full(NMat *mat) {
+    s32 k;
+    for (k = 0; k < 2; k++) {
+        if (mat->state.textures[k] != NULL) {
+            TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
+            if (!e->used || e->gen != mat->texGen[k]) {
+                return FALSE;
+            }
+            e->lastFrame = sFrameCount;
+        }
+    }
+    mat->texOkFrame = (u32) sFrameCount;
+    mat->texOkEpoch = sTexFreeEpoch;
+    return TRUE;
+}
+
+static inline s32 nmat_textures_stamped(const NMat *mat) {
+    return mat->texOkFrame == (u32) sFrameCount && mat->texOkEpoch == sTexFreeEpoch;
+}
+
+/*
+ * DKR_NMAT_ONCE_CHECK=1 (test builds): each record the stamp lets through is checked the old way too, and one the old
+ * way would have dropped is counted ("would have dropped", the run's checks_wrong) and dropped as before. 2 also
+ * frees, every 30th frame, the texture of a material already found good in that frame (as an eviction mid-frame
+ * does), so the check has something to catch (K6: with free_entry_later's epoch bump taken out, it counted them).
+ */
+static u32 sNmatSkipped, sNmatWrong, sNmatStressFrees, sNmatLoggedFrame, sNmatStressFrame;
+
+static COLD NOINLINE s32 nmat_textures_checked(NMat *mat) {
+    s32 k, ok = TRUE;
+    if (sNmatOnceCheck >= 2 && sNmatOnce && nmat_textures_stamped(mat) && sFrameCount % 30 == 0 &&
+        sNmatStressFrame != (u32) sFrameCount && mat->state.textures[0] != NULL) {
+        TexCacheEntry *e = &sTexCache[mat->texEntry[0]];
+        if (e->used && !texture_in_use(e, NULL)) {
+            sNmatStressFrame = (u32) sFrameCount;
+            sNmatStressFrees++;
+            free_entry_later(e);
+        }
+    }
+    if (!sNmatOnce || !nmat_textures_stamped(mat)) {
+        return nmat_textures_full(mat);
+    }
+    for (k = 0; k < 2; k++) {
+        if (mat->state.textures[k] != NULL) {
+            const TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
+            if (!e->used || e->gen != mat->texGen[k]) {
+                ok = FALSE;
+            }
+        }
+    }
+    sNmatSkipped++;
+    sNmatWrong += !ok;
+    plat_check_report("material once", !ok); /* P59 E: the race's checks_run / checks_wrong */
+    if ((u32) sFrameCount - sNmatLoggedFrame >= 600) {
+        sNmatLoggedFrame = (u32) sFrameCount;
+        plat_log("material once check: %lu skipped, %lu would have dropped (%lu textures freed mid-frame on purpose)",
+                 (unsigned long) sNmatSkipped, (unsigned long) sNmatWrong, (unsigned long) sNmatStressFrees);
+    }
+    return ok ? TRUE : nmat_textures_full(mat);
+}
+
+static inline s32 nmat_textures_ok(NMat *mat) {
+    if (UNLIKELY(sNmatOnceCheck)) {
+        return nmat_textures_checked(mat);
+    }
+    if (sNmatOnce && nmat_textures_stamped(mat)) {
+        return TRUE;
+    }
+    return nmat_textures_full(mat);
 }
 
 /* A material's state with this moment's colours, fog and scissor. */
@@ -5799,17 +5932,11 @@ static NOINLINE HOT s32 native_rect(const Gfx *dl, u32 id) {
         sNDrawStats[2]++;
         return 3;
     }
-    for (k = 0; k < 2; k++) {
-        if (mat->state.textures[k] != NULL) {
-            TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
-            if (!e->used || e->gen != mat->texGen[k]) {
-                mat->valid = FALSE;
-                gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
-                sNDrawStats[2]++;
-                return 3;
-            }
-            e->lastFrame = sFrameCount;
-        }
+    if (!nmat_textures_ok(mat)) { // P61 W2
+        mat->valid = FALSE;
+        gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+        sNDrawStats[2]++;
+        return 3;
     }
     sRectOverride = TRUE;
     // The texture with the filter the other mode sets now, which need not be the one it had when the material was
@@ -6536,6 +6663,10 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         __builtin_prefetch(nextVtx);
         __builtin_prefetch(nextVtx + 32);
         __builtin_prefetch(&sNativeMeshes[h]);
+        if (UNLIKELY(sWalkPld & 4) && nextMat->state.textures[0] != NULL && !nmat_textures_stamped(nextMat)) {
+            // P61 W3 (c): the next material's first texture entry, when its check will read it (W2's stamp stale).
+            __builtin_prefetch(&sTexCache[nextMat->texEntry[0]]);
+        }
     }
     numVerts = dl[1].words.w0 & 0xFF;
     start = (dl[1].words.w0 >> 8) & 0xFF;
@@ -6556,21 +6687,15 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         }
         return 2;
     }
-    for (k = 0; k < 2; k++) {
-        if (mat->state.textures[k] != NULL) {
-            TexCacheEntry *e = &sTexCache[mat->texEntry[k]];
-            if (!e->used || e->gen != mat->texGen[k]) {
-                mat->valid = FALSE;
-                gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
-                sNDrawStats[2]++;
-                CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
-                if (UNLIKELY(sTracing)) {
-                    plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
-                }
-                return 2;
-            }
-            e->lastFrame = sFrameCount;
+    if (!nmat_textures_ok(mat)) { // P61 W2
+        mat->valid = FALSE;
+        gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
+        sNDrawStats[2]++;
+        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
+        if (UNLIKELY(sTracing)) {
+            plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
         }
+        return 2;
     }
     if (dl[1].words.w0 & 0x40000) {
         if (!sNativeRecords) {
@@ -6732,8 +6857,10 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         walk_step(WS_TRANSFORM);
 #ifdef HAVE_VFP_VECTORS
         // The VFP's short vectors, as the old path's loads use them on the Old 3DS (DKR_VFP_VECTORS; the native path
-        // had been left on the scalar transform).
-        if (sVfpVectors) {
+        // had been left on the scalar transform). P61 W3 (a): with the vertices prefetched ahead (DKR_WALK_PLD 1).
+        if (sVfpVectors && (sWalkPld & 1)) {
+            transform_vertices_vfp_pld(src, c, verts, m);
+        } else if (sVfpVectors) {
             transform_vertices_vfp(src, c, verts, m);
         } else
 #endif
@@ -6846,12 +6973,22 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
         u16 *out;
+        if ((sWalkPld & 2) && (i & 7) == 0) {
+            // P61 W3 (b): the corner table (6 bytes a triangle) 16 triangles ahead and the back-face flags (a byte
+            // each) 32 ahead start loading. Hints only.
+            if (i + 16 < count) {
+                __builtin_prefetch(&mesh->triCorners[(i + 16) * 3]);
+            }
+            if (i + 32 < count) {
+                __builtin_prefetch(&mesh->backface[i + 32]);
+            }
+        }
         if ((sNativeOut[mesh->cornerVertex[tc[0]]] & sNativeOut[mesh->cornerVertex[tc[1]]] &
                            sNativeOut[mesh->cornerVertex[tc[2]]]) != 0) {
             sWalkRejectedTris++;
             continue;
         }
-        state.cullMode = (mesh->copy[i].flags & BACKFACE_DRAW) ? 0 : frontCull;
+        state.cullMode = (sWalkBackface ? mesh->backface[i] : (mesh->copy[i].flags & BACKFACE_DRAW)) ? 0 : frontCull;
         if (sCpuCull && state.cullMode != 0) {
             s32 face = face_test(&sNativeVerts[mesh->cornerVertex[tc[0]]], &sNativeVerts[mesh->cornerVertex[tc[1]]],
                                    &sNativeVerts[mesh->cornerVertex[tc[2]]], keepSign);
