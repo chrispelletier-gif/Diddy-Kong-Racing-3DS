@@ -60,12 +60,27 @@ def measured(group, key):
     return out
 
 
+# P60 A1: DKR_PMU 3 and 4 put another stall in the stall % columns (pmn1_kind datastall / lsufull); marked D or L.
+OTHER_STALLS = {"datastall": "D", "lsufull": "L"}
+
+
 def cpu_cells(group):
-    """P56: the fetch stall % of the game's core / the renderer's (DKR_PMU) and the pictures replaced a race."""
+    """P56: the fetch stall % of the game's core / the renderer's (DKR_PMU) and the pictures replaced a race.
+
+    P60 A1: races that counted another stall (DKR_PMU 3 or 4) are kept apart; a group with only those shows that
+    stall marked D (data hazard) or L (load/store unit full)."""
     cells = []
+    fetch = [r for r in group if r.get("pmn1_kind") not in OTHER_STALLS]
+    other = [r for r in group if r.get("pmn1_kind") in OTHER_STALLS]
     for key in ("game_ifstall_pct", "render_ifstall_pct"):
-        rows = measured(group, key)
-        cells.append(f"{mean(num(r, key) for r in rows):.1f}" if rows else "-")
+        rows = measured(fetch, key)
+        others = measured(other, key)
+        if rows:
+            cells.append(f"{mean(num(r, key) for r in rows):.1f}")
+        elif others:
+            cells.append(f"{OTHER_STALLS[others[-1]['pmn1_kind']]} {mean(num(r, key) for r in others):.1f}")
+        else:
+            cells.append("-")
     replaced = measured(group, "replaced")
     return " / ".join(cells) + " | " + (f"{mean(num(r, 'replaced') for r in replaced):.0f}" if replaced else "-")
 

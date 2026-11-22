@@ -227,6 +227,9 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_SCISSOR=1`
 - `DKR_NO_FOG=1`
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
+- `DKR_FOG_SKIP=1` (roadmap P60 C: the walk works out a fogged vertex's fog factor, a divide each, only where the
+  draw's combiner reads the shade alpha; the GPU fogs per pixel, so frames are the same. Off with `DKR_VERTEX_FOG=1`.
+  Logs `fog skip: N fog factors left out` every 600 frames)
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
@@ -408,6 +411,15 @@ commands, the split ring's copy, the opaque flush and the rest. The log line `wa
 backend mix's timed frames (`DKR_BACKEND_MIX`) the backend's model and mesh draws (GPU vertex maths: `DKR_NATIVE_GPU`,
 the native track) are also split into their parts (`backend model/mesh draws: N a frame, drain, state, settings
 twice, uniforms, copies, indices, draw, other`), after the `backend records` line.
+
+What the data side costs (roadmap P60 A, 2026-11-22). `DKR_PMU=3` counts, in the stall column, the cycles the core
+stalled on a data hazard (a load's or the VFP's result not ready yet) and, in place of the misses, the instructions
+executed, so the summary line gives the cycles per instruction; `DKR_PMU=4` the cycles the load/store unit was full
+and the data cache write misses. The results' `pmn1_kind` cell says which (`datastall`, `lsufull`); the switch bench
+table marks those stalls `D` and `L`. `DKR_VFP_RUNFAST=1` (default 0) runs the game thread, the walk and the backend
+with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps off), which keeps denormals and NaNs
+off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
+FPSCR ...`).
 
 The walk's exact data cuts (roadmap P61 W, 2026-11-22), each its own switch, `0` the old way:
 `DKR_WALK_BACKFACE` (default 1) reads each triangle's back-face flag from the mesh's 1-byte table instead of its
