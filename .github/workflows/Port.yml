@@ -450,6 +450,7 @@ jobs:
             ${{ runner.temp }}/replay/out/report.md
             ${{ runner.temp }}/replay/out/words-diff.txt
             ${{ runner.temp }}/replay/out/state-diff.txt
+            ${{ runner.temp }}/replay/out/raw-diff.txt
             ${{ runner.temp }}/replay/out/walk-diff.txt
           if-no-files-found: ignore
           retention-days: 7

@@ -13,6 +13,9 @@ for the PC, and writes down the PICA200 command words of every draw and the GPU 
          with the defaults (only changed settings sent): the registers must hold the same values at every draw. Any
          difference is a state cache bug. It doesn't see ordering (which registers a draw still reads while the next
          list is written): the Crescent Island hang was that kind, texture registers written right after a draw.
+  raw    (P55 S3) the records with DKR_RAW_REGS=1 DKR_RAW_REGS_CHECK=1 against the defaults: the registers must hold
+         the same values at every draw (the fog colour only while fog is on), and the backend's own check, which
+         makes each reused block again through citro3d, must count 0 differ.
   walk   (once the backend has DKR_WALK_VERTS, PR #563) the Old 3DS records with the walk making each draw's
          vertices (REPLAY_WALK=1 DKR_WALK_VERTS=1 DKR_WALK_VERTS_CHECK=1) against the lean draw: every draw's
          command words and vertex data must be the same, and the backend's own self-check must count 0 differ.
@@ -24,7 +27,7 @@ for the PC, and writes down the PICA200 command words of every draw and the GPU 
   backend_replay.py ci --deps DEPS --exe dkr --rom baserom.z64 --work DIR [--base-port OLD/port]
 
 `ci` does all four (the "Backend replay" step in .github/workflows/Port.yml). Writes DIR/report.md (also appended to
-$GITHUB_STEP_SUMMARY), DIR/words-diff.txt and DIR/state-diff.txt. Exit 1 when a check fails or something breaks.
+$GITHUB_STEP_SUMMARY), DIR/words-diff.txt, DIR/state-diff.txt, DIR/raw-diff.txt and DIR/walk-diff.txt. Exit 1 when a check fails or something breaks.
 """
 import argparse
 import concurrent.futures
@@ -58,6 +61,8 @@ REPLAY_ENV = {"REPLAY_QUIET": "1"}
 CONSOLES = [("New 3DS", {"REPLAY_OLD3DS": "0"}), ("Old 3DS", {"REPLAY_OLD3DS": "1"})]
 STATE_FULL = {"DKR_STATE_CACHE": "0", "DKR_FAST_STATE": "0"}
 WALK = {"REPLAY_OLD3DS": "1", "REPLAY_WALK": "1", "DKR_WALK_VERTS": "1", "DKR_WALK_VERTS_CHECK": "1"}
+# P55 S3: settings and draws as raw register words, each reuse of a block also checked against citro3d.
+RAW = {"DKR_RAW_REGS": "1", "DKR_RAW_REGS_CHECK": "1"}
 MAX_SHOWN = 8
 MAX_DIFF_LINES = 2000
 
@@ -226,8 +231,12 @@ def read_states(path):
         yield frame, draw, pairs
 
 
-def compare_states(full_path, cached_path, label, diff_out):
-    """At every draw, every register and port word either run has set. Returns (draws, differing, shown)."""
+def compare_states(full_path, cached_path, label, diff_out, names=("all-set", "cached"), raw=False):
+    """At every draw, every register and port word either run has set. Returns (draws, differing, shown).
+    raw (the DKR_RAW_REGS check): the fog colour (0x0E1) is left out while both runs have fog off (0x0E0's low bits
+    0): citro3d writes its last fog colour with the fog mode either way, and a raw block keeps the one it was made with.
+    So is the float uniform index (0x2C0), the uniform port's write position: the raw path writes each changed uniform
+    by itself (and all of them at a frame's first draw), citro3d in runs; the uniforms' values are compared."""
     va, vb, bad = {}, {}, set()
     draws = differing = 0
     shown = []
@@ -251,7 +260,10 @@ def compare_states(full_path, cached_path, label, diff_out):
         for vals, pairs in ((va, a[2]), (vb, b[2])):
             for i in range(0, len(pairs), 2):
                 vals[pairs[i]] = pairs[i + 1]
-        for k in set(a[2][0::2]) | set(b[2][0::2]):
+        for k in set(a[2][0::2]) | set(b[2][0::2]) | (bad if raw else set()):
+            if raw and (k == 0x2C0 or (k == 0x0E1 and va.get(0x0E0, 0) & 7 == 0 and vb.get(0x0E0, 0) & 7 == 0)):
+                bad.discard(k)
+                continue
             if va.get(k, 0) != vb.get(k, 0):
                 bad.add(k)
             else:
@@ -260,7 +272,8 @@ def compare_states(full_path, cached_path, label, diff_out):
         if bad:
             differing += 1
             text = "%s: frame %d draw %d: %s" % (label, a[0], a[1], "; ".join(
-                "%s all-set 0x%08x, cached 0x%08x" % (key_name(k), va.get(k, 0), vb.get(k, 0)) for k in sorted(bad)[:6]))
+                "%s %s 0x%08x, %s 0x%08x" % (key_name(k), names[0], va.get(k, 0), names[1], vb.get(k, 0))
+                for k in sorted(bad)[:6]))
             if len(shown) < MAX_SHOWN:
                 shown.append(text)
             if differing <= MAX_DIFF_LINES:
@@ -288,6 +301,9 @@ def check(records, head, base, out_dir, expected):
                 if base:
                     jobs[("base", tag)] = pool.submit(replay, base, rec, env,
                                                       os.path.join(out_dir, tag + ".base.words"))
+                raw = dict(env)
+                raw.update(RAW)
+                jobs[("raw", tag)] = pool.submit(replay, head, rec, raw, None, os.path.join(out_dir, tag + ".raw.state"))
                 if env["REPLAY_OLD3DS"] == "1":
                     jobs[("walk", tag)] = pool.submit(replay, head, rec, WALK, os.path.join(out_dir, tag + ".walk.words"))
         results = {}
@@ -318,6 +334,27 @@ def check(records, head, base, out_dir, expected):
             walk_shown += shown
             walk_rows.append("| %s | %d | %d | %d | %d | %d |" % (name, w["draws"], w.get("walk_drawn", 0), diff,
                                                                   w.get("walk_checked", 0), differ))
+
+    raw_rows, raw_shown, raw_bad, raw_none = [], [], 0, False
+    with open(os.path.join(out_dir, "raw-diff.txt"), "w") as rd:
+        for rec in records:
+            name = os.path.basename(rec)[:-len(".rec")]
+            for console, env in CONSOLES:
+                tag = "%s-%s" % (name, env["REPLAY_OLD3DS"])
+                h, r = results.get(("head", tag)), results.get(("raw", tag))
+                if h is None or r is None:
+                    continue
+                if "raw_draws" not in r:
+                    raw_none = True
+                    continue
+                draws, diff, shown = compare_states(os.path.join(out_dir, tag + ".cached.state"),
+                                                    os.path.join(out_dir, tag + ".raw.state"), "%s, %s" % (name, console),
+                                                    rd, ("citro3d", "raw"), raw=True)
+                differ = int(r.get("raw_differ", 0))
+                raw_bad += diff + differ
+                raw_shown += shown
+                raw_rows.append("| %s, %s | %d | %d | %d | %d | %.1f | %.1f |" % (
+                    name, console, draws, diff, r["raw_hits"], differ, h["words/draw"], r["words/draw"]))
 
     words_rows, state_rows = [], []
     words_shown, state_shown = [], []
@@ -386,6 +423,29 @@ def check(records, head, base, out_dir, expected):
     else:
         report.append("The GPU registers are the same at every draw. (Ordering against the GPU, such as texture "
                       "registers written right after a draw, is not modelled.)")
+    report.append("")
+    report.append("### Raw words (DKR_RAW_REGS, P55 S3) against citro3d, the defaults otherwise")
+    report.append("")
+    if raw_none or not raw_rows:
+        report.append("This backend has no DKR_RAW_REGS: not checked.")
+    else:
+        report.append("| record | draws | draws whose registers differ | blocks reused (each self-checked) | "
+                      "self-check differ | words/draw citro3d | words/draw raw |")
+        report.append("|---|---|---|---|---|---|---|")
+        report += raw_rows
+        report.append("")
+        if raw_bad:
+            ok = False
+            report.append("**The raw words leave different GPU registers, or the self-check found a stale block (%d).**"
+                          % raw_bad)
+            report.append("")
+            report.append("```")
+            report += raw_shown[:MAX_SHOWN]
+            report.append("```")
+        else:
+            report.append("The GPU registers and uniforms are the same at every draw (the fog colour is left out while "
+                          "fog is off, the uniform write position always), and every reused block matched what citro3d "
+                          "makes of the draw.")
     report.append("")
     report.append("### Walk: Old 3DS, the walk making the vertices (DKR_WALK_VERTS) against the lean draw")
     report.append("")

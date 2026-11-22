@@ -208,6 +208,30 @@ static int stereo_wanted(float slider);
 #define C3D_ONCE_FLAGS ((1u << 2) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | \
                         (1u << 14) | (1u << 17) | (7u << 23) | (0x3Fu << 26))
 void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
+/* DKR_RAW_REGS (P55 S3, gpu_raw.inc): citro3d's always-on flag, the draw flag, and the fog table's. */
+#define C3D_FLAG_ACTIVE (1u << 0)
+#define C3D_FLAG_DRAW_USED (1u << 1)
+#define C3D_FLAG_FOG_LUT (1u << 17)
+static int sRawWanted;            // DKR_RAW_REGS
+static int sRawDraw;              // This frame's settings and draws are written as raw words
+static int sRawSynced;            // citro3d has nothing pending beyond what its flags say (gpu_raw.inc raw_sync)
+static const struct RawBlock *sRawLast; // The block the GPU has from the last draw, NULL if unknown
+static int raw_set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1);
+static int raw_again(void);
+static void raw_emit_uniforms(unsigned changed);
+static void raw_draw_elements(int count, const u16 *indices);
+static void raw_frame_start(void);
+static void raw_read_switches(void);
+static inline int same_words(const void *a, const void *b, unsigned int n);
+
+/* C3D_DrawElements for indexed triangles, or its raw words (DKR_RAW_REGS). */
+static inline void draw_elements(int count, const u16 *indices) {
+    if (__builtin_expect(sRawDraw, 0)) {
+        raw_draw_elements(count, indices);
+    } else {
+        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+    }
+}
 
 /*
  * The GPU reads vertices and textures from memory, not from the CPU's cache, so whatever the CPU wrote has to be
@@ -484,6 +508,7 @@ static struct {
 
 PLAT_HOT static void forget_gpu_state(void) {
     sGpu.known = 0;
+    sRawLast = NULL; // DKR_RAW_REGS: the next draw writes its block
     sFrameForgets++;
 }
 
@@ -2983,7 +3008,7 @@ static inline void draw_prims(int vertex, int count, const u16 *indices) {
     if (sStereo && !sOnceFrame) {
         draw_prims_stereo(vertex, count, indices);
     } else if (indices != NULL) {
-        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, indices);
+        draw_elements(count, indices);
     } else {
         C3D_DrawArrays(GPU_TRIANGLES, vertex, count);
     }
@@ -3518,7 +3543,16 @@ static void set_unif(int u, float x, float y, float z, float w) {
     c[1] = y;
     c[2] = z;
     c[3] = w;
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUnifLoc[u], x, y, z, w);
+    if (sRawDraw) {
+        // DKR_RAW_REGS: citro3d's copy is kept (for after the HOME menu) but not marked: written as words.
+        C3D_FVec *v = &C3D_FVUnif[GPU_VERTEX_SHADER][sUnifLoc[u]];
+        v->x = x;
+        v->y = y;
+        v->z = z;
+        v->w = w;
+    } else {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sUnifLoc[u], x, y, z, w);
+    }
     sUnifChanged |= 1u << u;
 }
 
@@ -3533,6 +3567,10 @@ static void PLAT_COLD unif_write_twice_now(void) {
     unsigned changed = sUnifChanged;
     int u;
     sUnifChanged = 0;
+    if (sRawDraw) {
+        raw_emit_uniforms(changed); // Written now, twice unless DKR_UNIF_TWICE=0
+        return;
+    }
     if (!sUnifTwice) {
         return;
     }
@@ -3592,8 +3630,21 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
     float a[3][3], b[3], det, cof[3][3];
     double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 };
     static const int sCols[3] = { 0, 1, 3 };
+    // DKR_RAW_REGS: the last matrix's uniforms, as most of a kart's draws share one matrix (P61 K, hypothesis 1). The
+    // same matrix and 3D width give the same words, so the solve is skipped; set_unif writes nothing that is unchanged.
+    static float sMemoIn[4][4], sMemoMtx[4][4], sMemoCam[3], sMemoScale;
+    static int sMemoOk;
     int r, k;
 
+    if (sRawDraw && sMemoOk && sMemoScale == sScale3D && same_words(p->mtx, sMemoIn, 16)) {
+        for (k = 0; k < 4; k++) {
+            set_unif(UNIF_MTX + k, sMemoMtx[k][0], sMemoMtx[k][1], sMemoMtx[k][2], sMemoMtx[k][3]);
+        }
+        for (k = 0; k < 3; k++) {
+            cam[k] = sMemoCam[k];
+        }
+        goto rest;
+    }
     for (r = 0; r < 4; r++) {
         rows[0][r] = p->mtx[r][1];
         rows[1][r] = -(double) p->mtx[r][0] * sScale3D;
@@ -3626,8 +3677,19 @@ static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, fl
     }
     for (k = 0; k < 4; k++) {
         double t = rows[k][3] + cam[0] * rows[k][0] + cam[1] * rows[k][1] + cam[2] * rows[k][2];
-        set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
+        sMemoMtx[k][0] = (float) rows[k][0];
+        sMemoMtx[k][1] = (float) rows[k][1];
+        sMemoMtx[k][2] = (float) rows[k][2];
+        sMemoMtx[k][3] = (float) t;
+        set_unif(UNIF_MTX + k, sMemoMtx[k][0], sMemoMtx[k][1], sMemoMtx[k][2], sMemoMtx[k][3]);
     }
+    memcpy(sMemoIn, p->mtx, sizeof(sMemoIn));
+    for (k = 0; k < 3; k++) {
+        sMemoCam[k] = (float) cam[k];
+    }
+    sMemoScale = sScale3D;
+    sMemoOk = 1;
+rest:
 #else
 
     double rows[4][4], cam[3] = { 0.0, 0.0, 0.0 }, a[3][3], b[3], det;
@@ -3833,6 +3895,7 @@ static void read_switches(void) {
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
                        plat_switch("DKR_NATIVE_TRACK", 0) != 0 || plat_switch("DKR_NATIVE_GPU", 0) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
+    raw_read_switches(); // DKR_RAW_REGS, DKR_RAW_REGS_CHECK
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
 #ifdef PICA_ALL
     // Off in the PICA_ALL build (user 2026-11-06): test run #430 (4x, 800 pixels) spent 80-100% of its frames at the
@@ -3965,6 +4028,7 @@ void gfxb_start_frame(void) {
     }
     sFrameStarted = 1;
     walk_publish_consts(); // DKR_WALK_VERTS: this frame's settings, for the walk
+    raw_frame_start();     // DKR_RAW_REGS
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -4880,8 +4944,10 @@ static int sFogOn = -1;
 
 /* Builds and binds the fog table for the draw's fog settings. Out of line: a draw's fog settings mostly match the
  * table's, so the per-draw code doesn't carry this. */
+static C3D_FogLut sFogLutData; // The table sLutMul and sLutOffset made (also written as words, gpu_raw.inc)
+static short sRawLutMul = 0x7FFF, sRawLutOffset; // DKR_RAW_REGS: the table the GPU has (gpu_raw.inc raw_fog_lut)
+
 static void __attribute__((noinline)) bind_fog_lut(const GfxDrawState *state) {
-    static C3D_FogLut sLut;
     float data[256];
     int i;
     // Depth d runs from 1 at the near plane to 0 at the far plane, and z / w = 1 - 2d (see to_screen).
@@ -4898,8 +4964,9 @@ static void __attribute__((noinline)) bind_fog_lut(const GfxDrawState *state) {
             data[i + 127] = keep - data[i - 1];
         }
     }
-    FogLut_FromArray(&sLut, data);
-    C3D_FogLutBind(&sLut);
+    FogLut_FromArray(&sFogLutData, data);
+    C3D_FogLutBind(&sFogLutData);
+    sRawLutMul = 0x7FFF; // citro3d may write it: unknown to the raw path
     sLutMul = state->fogMul;
     sLutOffset = state->fogOffset;
 }
@@ -5610,6 +5677,9 @@ static void __attribute__((noinline, cold)) read_state_cache_setting(void) {
 PLAT_HOT static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     int newTexture;
 
+    if (__builtin_expect(sRawDraw, 0) && raw_set_all_state(state, su0, sv0, su1, sv1)) {
+        return; // DKR_RAW_REGS (gpu_raw.inc)
+    }
     if (__builtin_expect(sStateCache < 0, 0)) {
         read_state_cache_setting();
     }
@@ -5652,6 +5722,9 @@ PLAT_HOT static void set_all_state(const GfxDrawState *state, float *su0, float 
  * same groups with the same values, so the command list comes out the same for less work.
  */
 PLAT_HOT static void write_settings_twice(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
+    if (__builtin_expect(sRawDraw, 0) && raw_again()) {
+        return; // DKR_RAW_REGS: the block once more
+    }
     if (sFastState) {
         u32 again = __C3D_Context.flags & C3D_SETTINGS_FLAGS;
         C3Di_UpdateContext();
@@ -5662,6 +5735,8 @@ PLAT_HOT static void write_settings_twice(const GfxDrawState *state, float *su0,
     forget_gpu_state();
     set_all_state(state, su0, sv0, su1, sv1);
 }
+
+#include "gpu_raw.inc" // DKR_RAW_REGS (P55 S3): settings, uniforms and draws as raw register words
 
 /* Triangles reaching far off the screen, such as the sky dome and big stretches of ground around the camera, are cut
  * down to a guard band before they reach the GPU, as the N64 does. The 3DS's GPU can drop such triangles or draw them
@@ -6380,7 +6455,7 @@ static inline __attribute__((always_inline)) void lean_draw_tail(const GfxDrawSt
     if (sStereo && !sOnceFrame) {
         draw_prims_stereo(vertex, count, ibo);
     } else {
-        C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, ibo);
+        draw_elements(count, ibo);
     }
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
