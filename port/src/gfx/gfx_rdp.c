@@ -2303,6 +2303,8 @@ static void transform_vertices_vfp(const Vertex *src, s32 count, RspVertex *dst,
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+static s32 sVertexAsm;  // DKR_VERTEX_ASM (P60 B): native_record's vertex passes as one assembly loop (gfx_vertex_asm.h)
+static s32 sVertexAsmCheck; // DKR_VERTEX_ASM_CHECK: the C passes run too and are compared (vertex_asm_check)
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
 static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
@@ -2360,6 +2362,12 @@ static COLD void read_switches_now(void) {
     // On by default on an Old 3DS only: it cut the renderer's time per triangle there and showed nothing on a New
     // 3DS. Bit-identical to the C loop.
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
+    // P60 B: off by default until the Old 3DS bench. Only with the VFP's short vectors: its loop is their transform's
+    // (the C transform, built with -ffast-math, rounds differently).
+    sVertexAsm = plat_switch("DKR_VERTEX_ASM", 0) != 0 && sVfpVectors;
+#if PLAT_DEBUG_TOOLS
+    sVertexAsmCheck = plat_switch("DKR_VERTEX_ASM_CHECK", 0); // 2: broken on purpose (rule K6), see vertex_asm_check
+#endif
     // 8 frames on an Old 3DS (the best of its switches together with the system-call flush).
     sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
     if (sTexRehash < 1) {
@@ -5832,6 +5840,106 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
     return TRUE;
 }
 
+#define VERTEX_ASM_SECTION HOT
+#include "gfx_vertex_asm.h"
+#ifdef HAVE_VERTEX_ASM
+_Static_assert(sizeof(Vertex) == VERTEX_ASM_SRC_SIZE && sizeof(RspVertex) == VERTEX_ASM_DST_SIZE &&
+                   __builtin_offsetof(RspVertex, rgba) == VERTEX_ASM_DST_RGBA,
+               "gfx_vertex_asm's layout");
+
+static inline u32 f32_bits(float f) {
+    u32 bits;
+    __builtin_memcpy(&bits, &f, 4);
+    return bits;
+}
+
+static RspVertex sVaVerts[MAX_VERTICES];
+static float sVaSx[MAX_VERTICES], sVaSy[MAX_VERTICES];
+static u8 sVaOut[MAX_VERTICES];
+static u32 sVaChecked, sVaDiffer, sVaShown;
+static s32 sVaLogFrame;
+
+/*
+ * DKR_VERTEX_ASM_CHECK (test builds): a load gfx_vertex_asm made is made again by native_record's C passes (the same
+ * lines: transform_vertices_vfp, the colour and fog loop, the edges loop) into the check's own arrays, and every word
+ * compared (vertex_asm_compare, which port/tools/vertex_asm_test.c also uses). Logs "vertex asm: N vertices checked, M
+ * words differ" every 300 frames, and the first few loads that differ. DKR_VERTEX_ASM_CHECK=2 breaks it on purpose (rule
+ * K6): the C leaves the fog out, so every fogged load must be reported.
+ */
+static COLD void vertex_asm_check(const Vertex *src, s32 c, s32 dest, const VertexAsmArgs *a, u32 all) {
+    s32 i;
+    int first = -1;
+    u32 ref = 0x1F, differ;
+    transform_vertices_vfp(src, c, sVaVerts, a->m);
+    for (i = 0; i < c; i++) {
+        u32 rgba;
+        __builtin_memcpy(&rgba, &src[i].r, 4);
+        if (a->fog && sVertexAsmCheck != 2) {
+            rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&sVaVerts[i], a->fogMul, a->fogOffset) << 24);
+        }
+        sVaVerts[i].rgba = rgba;
+    }
+    for (i = 0; i < c; i++) {
+        const RspVertex *v = &sVaVerts[i];
+        float w = v->w, x = v->x * a->scaleX + w * a->transX, y = v->y * a->scaleY + w * a->transY;
+        u32 oc = float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) | (float_sign(y + w) << 3) |
+                 ((float_sign(1e-3f - w) ^ 1u) << 4);
+        sVaSx[i] = x;
+        sVaSy[i] = y;
+        sVaOut[i] = (u8) oc;
+        ref &= oc;
+    }
+    differ = vertex_asm_compare(&sNativeVerts[dest], sVaVerts, a->sx, sVaSx, a->sy, sVaSy, a->out, sVaOut, c, &first) +
+             (ref != all);
+    sVaChecked += (u32) c;
+    sVaDiffer += differ;
+    if (differ != 0 && sVaShown < 5) {
+        sVaShown++;
+        i = first >= 0 ? first : 0;
+        plat_log("vertex asm: a load of %d (fog %u) differs from vertex %d: asm %08lX %08lX %08lX %08lX %08lX "
+                 "%08lX %08lX %02X, C %08lX %08lX %08lX %08lX %08lX %08lX %08lX %02X; edges ANDed %02lX / %02lX",
+                 (int) c, a->fog, (int) i, (unsigned long) f32_bits(sNativeVerts[dest + i].x),
+                 (unsigned long) f32_bits(sNativeVerts[dest + i].y), (unsigned long) f32_bits(sNativeVerts[dest + i].z),
+                 (unsigned long) f32_bits(sNativeVerts[dest + i].w), (unsigned long) sNativeVerts[dest + i].rgba,
+                 (unsigned long) f32_bits(a->sx[i]), (unsigned long) f32_bits(a->sy[i]), a->out[i],
+                 (unsigned long) f32_bits(sVaVerts[i].x), (unsigned long) f32_bits(sVaVerts[i].y),
+                 (unsigned long) f32_bits(sVaVerts[i].z), (unsigned long) f32_bits(sVaVerts[i].w),
+                 (unsigned long) sVaVerts[i].rgba, (unsigned long) f32_bits(sVaSx[i]), (unsigned long) f32_bits(sVaSy[i]),
+                 sVaOut[i], (unsigned long) all, (unsigned long) ref);
+    }
+    if (sFrameCount != sVaLogFrame && sFrameCount % 300 == 0) {
+        sVaLogFrame = sFrameCount;
+        plat_log("vertex asm: %lu vertices checked, %lu words differ", (unsigned long) sVaChecked,
+                 (unsigned long) sVaDiffer);
+    }
+}
+
+/* DKR_VERTEX_ASM (P60 B): one load's vertices (transform, colour and fog), screen x and y and edges, as native_record's
+ * passes make them, in one assembly loop (gfx_vertex_asm.h). Returns the load's edges ANDed. */
+static NOINLINE HOT u32 native_vertices_asm(const Vertex *src, s32 c, s32 dest, float (*m)[4], const Viewport *vp, u32 fog,
+                                      float fogMul, float fogOffset) {
+    VertexAsmArgs a;
+    u32 all;
+    if (c <= 0) {
+        return 0x1F;
+    }
+    a.m = m;
+    a.sx = &sNativeSx[dest];
+    a.sy = &sNativeSy[dest];
+    a.out = &sNativeOut[dest];
+    a.scaleX = vp->scaleX, a.transX = vp->transX, a.scaleY = vp->scaleY, a.transY = vp->transY;
+    a.fogMul = fogMul, a.fogOffset = fogOffset;
+    a.tiny = 0.0001f; // fog_factor's
+    a.edge = 1e-3f;   // vertex_outcode's
+    a.fog = fog;
+    all = gfx_vertex_asm(src, c, &sNativeVerts[dest], &a);
+    if (UNLIKELY(sVertexAsmCheck)) {
+        vertex_asm_check(src, c, dest, &a, all);
+    }
+    return all;
+}
+#endif
+
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
@@ -5853,6 +5961,8 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     u8 batchedKey = 0xFF, frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     u32 generation, stamp;
     float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+    s32 asmDone = FALSE; // DKR_VERTEX_ASM made the vertices, screen x and y and edges (asmAll: the edges ANDed)
+    u32 asmAll = 0x1F;
 
     if (remaining < 2) {
         return 0;
@@ -6044,7 +6154,18 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
             return 2;
         }
     }
-    for (i = 0; i < numLoads; i++) {
+    viewport_init(&vp);
+#ifdef HAVE_VERTEX_ASM
+    if (sVertexAsm && !UNLIKELY(sLightOn)) {
+        // DKR_VERTEX_ASM (P60 B): the loads' passes below (transform, colour and fog, screen edges) in one.
+        for (i = 0; i < numLoads; i++) {
+            asmAll &= native_vertices_asm(loads[i].src, loads[i].count, loads[i].dest, g.matrices[loads[i].matrix],
+                                          &vp, mat->fog, fogMul, fogOffset);
+        }
+        asmDone = TRUE;
+    }
+#endif
+    for (i = 0; !asmDone && i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
         s32 c = loads[i].count;
@@ -6079,12 +6200,11 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
-    viewport_init(&vp);
     {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
         // again (the same sums, so the same values). A batch wholly past one edge is done here.
-        u32 all = 0x1F;
-        for (i = 0; i < total; i++) {
+        u32 all = asmAll;
+        for (i = 0; !asmDone && i < total; i++) {
             const RspVertex *v = &sNativeVerts[i];
             float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
             u32 oc = float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |

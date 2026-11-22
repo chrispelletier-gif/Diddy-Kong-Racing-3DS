@@ -287,7 +287,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib python3-pil
+          sudo apt-get install -y gcc-multilib python3-pil gcc-arm-none-eabi qemu-user
 
       - name: Download include/asset_enums.h
         uses: actions/download-artifact@v4
@@ -316,6 +316,17 @@ jobs:
       - name: Pictures shown logic
         # P56 K7: the replaced pictures and the longest gap between shown ones (port/src/plat/shown.h)
         run: gcc -Iport/src -o "$RUNNER_TEMP/shown_test" port/tools/shown_test.c && "$RUNNER_TEMP/shown_test"
+      - name: Fused VFP vertex loop matches the C
+        # P60 B: gfx_vertex_asm (DKR_VERTEX_ASM) against native_record's C passes on random vertices in an ARM11, with
+        # the 3DS hot files' flags; then broken on purpose (rule K6: the C leaves the fog out), which must fail.
+        run: |
+          arm-none-eabi-gcc -O3 -ffast-math -march=armv6k -mtune=mpcore -mfloat-abi=hard -mfpu=vfp -marm \
+            -fno-math-errno -funsigned-char -fno-strict-aliasing -fwrapv -fno-common -fno-stack-protector -Wall \
+            -nostdlib -static -Iport/src/gfx -o "$RUNNER_TEMP/vertex_asm_test" port/tools/vertex_asm_test.c -lgcc
+          qemu-arm -cpu arm11mpcore "$RUNNER_TEMP/vertex_asm_test"
+          if VERTEX_ASM_BREAK=1 qemu-arm -cpu arm11mpcore "$RUNNER_TEMP/vertex_asm_test" | tail -1; then
+            echo "the broken test passed"; exit 1
+          fi
 
       - name: Upload the host build
         uses: actions/upload-artifact@v4

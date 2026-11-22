@@ -320,6 +320,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // ~10% less walk time for the "effects" kind). Read the game core ms and the effects kind's walk time; watch the
     // smoke, dust and sparks.
     { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
+    // P60 B (DKR_VERTEX_ASM, gfx_vertex_asm.h): the native draws' vertex passes (transform, colour and fog, screen edges)
+    // as one hand-scheduled VFP loop instead of three passes over memory; bit-identical (qemu-arm test, and the check
+    // row). Read the game core ms (estimate -0.7 to -1.2 ms). The check row's log must say "vertex asm: N vertices
+    // checked, 0 words differ"; the broken row (rule K6: the check's C leaves the fog out on purpose) must say words
+    // differ, with "vertex asm: a load of ... differs" lines.
+    { "fused VFP vertex loop (P60 B)", { "DKR_VERTEX_ASM", NULL, NULL }, 0, 1, 0, 0 },
+    { "fused VFP vertex loop, self-check (1 lap, log: 0 words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 1, 1, 1 },
+    { "fused VFP vertex loop, self-check broken on purpose (1 lap, log: words differ)",
+      { "DKR_VERTEX_ASM", "DKR_VERTEX_ASM_CHECK", NULL }, 0, 2, 1, 1 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
     // P57 A (2026-11-20, proposals/3ds-old3ds-perf-next-plan.md): the race-start stall (250-294 ms in the first racing
     // frame's set-up, run 45). Every race now keeps the run's SD writes away from the load and its first 5 s
