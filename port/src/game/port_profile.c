@@ -338,15 +338,27 @@ static void cpu_window_read(int window, const Window *w, ProfCpuStats *out) {
 
 /* P56: the summary's line for the CPU counters (DKR_PMU), the sound callback and the clock reads, a game frame each. */
 static const char *cpu_line(const ProfStats *s) {
-    static char line[128];
+    static char line[192];
     s32 at = 0;
     line[0] = '\0';
     if (s->cpu.pmuKind && s->cpu.pmuFrames[0]) {
-        at += plat_snprintf(line + at, sizeof(line) - at, "fetch stall: game core %d%%",
+        // P60 A1: PMN0 is the fetch stall for DKR_PMU 1 and 2, the data hazard stall for 3, the load/store unit full
+        // stall for 4 (plat.h plat_pmu_on)
+        static const char *const sStallNames[5] = { "fetch", "fetch", "fetch", "data", "load/store full" };
+        at += plat_snprintf(line + at, sizeof(line) - at, "%s stall: game core %d%%",
+                            sStallNames[s->cpu.pmuKind >= 1 && s->cpu.pmuKind <= 4 ? s->cpu.pmuKind : 0],
                             s->cpu.cycles[0] ? (int) (s->cpu.fetchStall[0] * 100 / s->cpu.cycles[0]) : 0);
+        if (s->cpu.pmuKind == 3 && s->cpu.pmn1[0]) {
+            // PMN1 counted the instructions executed: cycles per instruction
+            at += plat_snprintf(line + at, sizeof(line) - at, " (%.2f cycles an instruction)",
+                                (double) s->cpu.cycles[0] / s->cpu.pmn1[0]);
+        }
         if (s->cpu.pmuFrames[1]) {
             at += plat_snprintf(line + at, sizeof(line) - at, " render core %d%%",
                                 s->cpu.cycles[1] ? (int) (s->cpu.fetchStall[1] * 100 / s->cpu.cycles[1]) : 0);
+            if (s->cpu.pmuKind == 3 && s->cpu.pmn1[1]) {
+                at += plat_snprintf(line + at, sizeof(line) - at, " (%.2f)", (double) s->cpu.cycles[1] / s->cpu.pmn1[1]);
+            }
         }
         at += plat_snprintf(line + at, sizeof(line) - at, "\n");
     }
@@ -2206,6 +2218,7 @@ void prof_game_mark(int mark, int updateRate) {
             if (__builtin_expect(plat_pmu_on() != 0, 0)) {
                 plat_pmu_frame(PLAT_PMU_GAME);
             }
+            plat_vfp_frame("game"); // P60 A2: logs the VFP mode once; DKR_VFP_RUNFAST
             sLogicNs = 0;
             sSharedOn = plat_switch("DKR_PROF_SHARED_CORE", 1) != 0;
             sLogicOtherNs = 0;

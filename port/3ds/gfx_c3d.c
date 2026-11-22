@@ -3789,6 +3789,7 @@ void gfxb_start_frame(void) {
         plat_pmu_frame(PLAT_PMU_RENDER);
     }
 #endif
+    plat_vfp_frame("renderer backend"); // P60 A2: logs the VFP mode once; DKR_VFP_RUNFAST
     // No vblank throttling here: the emulated VI already paces the game.
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();

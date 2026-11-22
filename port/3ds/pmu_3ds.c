@@ -3,6 +3,11 @@
  * DKR_PMU=1 counts, on each measured core, the cycles (CCNT), the cycles the core waited for instructions (PMN0,
  * PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST: the share of time lost to instruction fetches, F-Zero's metric for its
  * I-cache layout) and instruction cache misses (PMN1); DKR_PMU=2 the same with PMN1 counting data cache read misses.
+ * P60 A1 (proposals/3ds-native-arm-pica-candidates.md): DKR_PMU=3 counts the cycles the core waited on a data hazard
+ * (PMN0, PERFCOUNTEREVT_CORE_STALL_BY_DATA_HAZARD: a load's result or a VFP result not ready yet) and the instructions
+ * executed (PMN1, so cycles per instruction = CCNT / PMN1); DKR_PMU=4 the cycles the load/store unit was full (PMN0,
+ * PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL: D-cache misses and the write buffer) and data cache write misses (PMN1).
+ * They price the D-cache misses PMU 2 counts, and say whether the game core is bound by its instructions or its data.
  * Debug builds only, default 0.
  *
  * The CP15 counters belong to a core, not a thread: a sample on the game's core counts everything that ran there
@@ -46,7 +51,7 @@ int plat_pmu_on(void) {
     if (epoch != sEpoch) {
         sEpoch = epoch;
         sKind = plat_switch("DKR_PMU", 0);
-        sKind = sKind == 1 || sKind == 2 ? sKind : 0;
+        sKind = sKind >= 1 && sKind <= 4 ? sKind : 0;
         if (sKind != 0 && sState == 0) {
             sState = pmu_enable();
             if (sState < 0) {
@@ -63,11 +68,14 @@ void plat_pmu_thread_start(void) {
     if (kind == 0) {
         return;
     }
-    svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_0,
-                                 PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST);
-    svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_1,
-                                 kind == 2 ? PERFCOUNTEREVT_CORE_DATA_CACHE_READ_MISS
-                                           : PERFCOUNTEREVT_CORE_INST_CACHE_MISS);
+    // PMN0 and PMN1 by kind (plat.h plat_pmu_on): 1 fetch stall + I-cache misses, 2 fetch stall + D-cache read misses,
+    // 3 data hazard stall + instructions executed, 4 load/store unit full stall + D-cache write misses.
+    static const u32 sPmn0[5] = { 0, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST, PERFCOUNTEREVT_CORE_STALL_BY_LACK_OF_INST,
+                                  PERFCOUNTEREVT_CORE_STALL_BY_DATA_HAZARD, PERFCOUNTEREVT_CORE_STALL_BY_LSU_FULL };
+    static const u32 sPmn1[5] = { 0, PERFCOUNTEREVT_CORE_INST_CACHE_MISS, PERFCOUNTEREVT_CORE_DATA_CACHE_READ_MISS,
+                                  PERFCOUNTEREVT_CORE_INST_EXECUTED, PERFCOUNTEREVT_CORE_DATA_CACHE_WRITE_MISS };
+    svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_0, sPmn0[kind]);
+    svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_COUNT_REG_1, sPmn1[kind]);
     svcControlPerformanceCounter(&unused, PERFCOUNTEROP_SET_EVENT, PERFCOUNTERREG_CORE_CYCLE_COUNTER,
                                  PERFCOUNTEREVT_CORE_CYCLE_COUNT);
     svcControlPerformanceCounter(&unused, PERFCOUNTEROP_RESET, BIT(0) | BIT(1) | BIT(2), BIT(0) | BIT(1) | BIT(2));
@@ -147,3 +155,41 @@ void plat_pmu_exit(void) {
 }
 
 #endif
+
+/*
+ * P60 A2 (proposals/3ds-native-arm-pica-candidates.md): the VFP's RunFast mode. The ARM11's VFP hands denormal inputs
+ * and results, and NaN handling, to the kernel's support code (hundreds of cycles each) unless the FPSCR has
+ * flush-to-zero (FZ, bit 24) and default NaN (DN, bit 25) set and every exception trap off (bits 8-12 and 15). Nothing
+ * in the port sets them; whether the kernel starts threads that way was never checked. The first call on each thread
+ * logs its FPSCR ("VFP mode"); with DKR_VFP_RUNFAST=1 (default 0) the thread runs with FZ and DN set and the traps off,
+ * re-read at each switch change. Called once a frame by the game thread, the walk and the backend.
+ */
+#define FPSCR_FZ (1u << 24)
+#define FPSCR_DN (1u << 25)
+#define FPSCR_TRAPS (0x1Fu << 8 | 1u << 15)
+
+static __thread int sVfpEpoch = -1;
+static __thread int sVfpSeen;
+static __thread u32 sVfpBase; // The thread's FPSCR as the kernel started it
+
+void plat_vfp_frame(const char *thread) {
+    u32 now, want;
+    int epoch = gPlatSwitchEpoch;
+    if (__builtin_expect(epoch == sVfpEpoch, 1)) {
+        return;
+    }
+    sVfpEpoch = epoch;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(now));
+    if (!sVfpSeen) {
+        sVfpSeen = 1;
+        sVfpBase = now;
+        plat_log("VFP mode, %s thread: FPSCR %08lx, flush-to-zero %s, default NaN %s, traps %s: RunFast %s", thread,
+                 (unsigned long) now, now & FPSCR_FZ ? "on" : "off", now & FPSCR_DN ? "on" : "off",
+                 now & FPSCR_TRAPS ? "on" : "off",
+                 (now & (FPSCR_FZ | FPSCR_DN)) == (FPSCR_FZ | FPSCR_DN) && !(now & FPSCR_TRAPS) ? "yes" : "no");
+    }
+    want = plat_switch("DKR_VFP_RUNFAST", 0) ? (sVfpBase | FPSCR_FZ | FPSCR_DN) & ~FPSCR_TRAPS : sVfpBase;
+    if (want != now) {
+        __asm__ volatile("vmsr fpscr, %0" : : "r"(want));
+    }
+}

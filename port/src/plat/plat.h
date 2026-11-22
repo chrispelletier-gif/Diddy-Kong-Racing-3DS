@@ -389,8 +389,9 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
 
 /*
  * P56 K2: the ARM11's performance counters (DKR_PMU, debug builds, default 0; port/3ds/pmu_3ds.c, stubs elsewhere).
- * plat_pmu_on: 0 off (or not available), 1 PMN1 counts instruction cache misses, 2 data cache read misses (PMN0 is
- * always the cycles the core waited for instructions). The counters are per core, not per thread. plat_pmu_frame
+ * plat_pmu_on: 0 off (or not available), 1 PMN1 counts instruction cache misses, 2 data cache read misses (PMN0 the
+ * cycles the core waited for instructions in both); P60 A1: 3 PMN0 the cycles stalled on a data hazard, PMN1 the
+ * instructions executed; 4 PMN0 the cycles the load/store unit was full, PMN1 data cache write misses. The counters are per core, not per thread. plat_pmu_frame
  * samples the calling core once a frame for a slot (PLAT_PMU_GAME on the game thread, PLAT_PMU_RENDER on the
  * renderer's core) and adds what it counted since the slot's last sample to the slot's totals.
  */
@@ -405,6 +406,12 @@ void plat_pmu_sample(PlatPmuSample *s);
 void plat_pmu_frame(int slot);
 void plat_pmu_totals(int slot, PlatPmuSample *sum, unsigned int *frames);
 void plat_pmu_exit(void);
+/*
+ * P60 A2: the VFP's RunFast mode (3DS; nothing elsewhere). Once a frame on the game thread, the walk and the backend:
+ * the first call on a thread logs its FPSCR (flush-to-zero, default NaN, traps); DKR_VFP_RUNFAST=1 (default 0) sets
+ * flush-to-zero and default NaN with the traps off, re-read when the switches change. thread: a name for the log.
+ */
+void plat_vfp_frame(const char *thread);
 /*
  * P56 K7: the top screen's pictures (3DS; 0 elsewhere, not measured): how many were replaced before they reached the
  * screen (a swap while the one before was still waiting to be shown) and the longest time between two that reached

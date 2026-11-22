@@ -388,6 +388,15 @@ system call on an Old 3DS). Each race's results line ends with them (`,pmu,...,s
 `pmu_cells` in `port_autorun.c`), along with the pictures replaced before they reached the screen and the longest gap
 between two that did (`port/src/plat/shown.h`). The switch bench's table has the fetch stall and the replaced count.
 
+What the data side costs (roadmap P60 A, 2026-11-22). `DKR_PMU=3` counts, in the stall column, the cycles the core
+stalled on a data hazard (a load's or the VFP's result not ready yet) and, in place of the misses, the instructions
+executed, so the summary line gives the cycles per instruction; `DKR_PMU=4` the cycles the load/store unit was full
+and the data cache write misses. The results' `pmn1_kind` cell says which (`datastall`, `lsufull`); the switch bench
+table marks those stalls `D` and `L`. `DKR_VFP_RUNFAST=1` (default 0) runs the game thread, the walk and the backend
+with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps off), which keeps denormals and NaNs
+off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
+FPSCR ...`).
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the

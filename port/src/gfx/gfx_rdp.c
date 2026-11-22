@@ -8569,6 +8569,7 @@ void port_gfx_run_task(void *taskPtr) {
 NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     int snapshot;
     port_gfx_init();
+    plat_vfp_frame("walk"); // P60 A2: logs the VFP mode once; DKR_VFP_RUNFAST
     sFrameCount++;
     kind_frame_start(sFrameCount);
 #ifdef PORT_GFX_REFERENCE

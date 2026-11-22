@@ -244,3 +244,8 @@ int plat_pmu_on(void) {
 void plat_pmu_frame(int slot) {
     (void) slot;
 }
+
+/* P60 A2: the VFP mode is the 3DS's only. */
+void plat_vfp_frame(const char *thread) {
+    (void) thread;
+}
