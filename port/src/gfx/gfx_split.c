@@ -43,6 +43,7 @@ enum {
     OP_MESHES,
     OP_MESH_FREE,
     OP_CALL, // v28: a function of the walk's run on the backend thread with the record's bytes (gfx_split_call_reserve)
+    OP_INDEXED_REF, // P63 DKR_SPLIT_REF: an indexed draw whose arrays stay the walk's (gfx_split_draw_indexed_ref)
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -59,6 +60,20 @@ typedef struct SplitDraw {
     GfxDrawState state;
     int numVerts, numTriangles; // OP_TRIANGLES: numVerts is 3 * numTriangles and there are no indices
 } SplitDraw;
+
+/* OP_INDEXED_REF: the arrays by pointer; with check set, followed by a copy of them (numVerts vertices, then the
+ * indices) to compare them with (DKR_SPLIT_REF_CHECK). */
+typedef struct SplitDrawRef {
+    GfxDrawState state;
+    const GfxVertex *verts;
+    const unsigned short *indices;
+    int numVerts, numTriangles;
+    unsigned int ticket, check;
+} SplitDrawRef;
+
+/* P63: the last draw ticket given out (walk) and the last one the backend has drawn; the self-check's totals. */
+static unsigned int sRefTicket;
+static volatile unsigned int sRefDone, sRefCompared, sRefDiffer;
 
 /* OP_MODEL: followed by numVerts model vertices and 3 * numTriangles indices. OP_MESHES: by numParts parts. */
 typedef struct SplitModel {
@@ -138,6 +153,7 @@ static int mix_kind(unsigned int op, const void *p) {
         case OP_CLEAR_DEPTH:
         case OP_TRIANGLES:
         case OP_INDEXED:
+        case OP_INDEXED_REF:
             return MIX_DRAWS;
         case OP_MODEL:
         case OP_MESHES:
@@ -262,14 +278,20 @@ static void *reserve(unsigned int op, unsigned int payload) {
  * sWakeBytes are queued, or at the frame's end (DKR_SPLIT_WAKE_KB=0 = every record, as before). The head is moved
  * before the flag is read, and the backend sets the flag before it looks at the head, so one of them sees the other.
  */
+/* P63: bytes the walk's OP_INDEXED_REF records hand over by pointer since the backend was last woken, counted as
+ * queued for the wake-up (a by-pointer draw would otherwise leave the backend asleep, and the walk's blocks unreturned,
+ * until 16 KB of other records came). */
+static unsigned int sRefWakeBytes;
+
 static void commit(void *payload) {
     SplitRecord *rec = (SplitRecord *) payload - 1;
     unsigned int op = rec->op;
     __sync_synchronize(); // The record is written before the head moves past it.
     sHead += rec->bytes;
     __sync_synchronize();
-    if (sBackendIdle && (op == OP_END || sHead - sTail >= sWakeBytes)) {
+    if (sBackendIdle && (op == OP_END || sHead - sTail + sRefWakeBytes >= sWakeBytes)) {
         sBackendIdle = 0;
+        sRefWakeBytes = 0;
         plat_sem_post(sData);
     }
 }
@@ -366,6 +388,29 @@ static void backend_thread(void *arg) {
                         gfxb_draw_indexed(&d->state, verts, d->numVerts, (const unsigned short *) (verts + d->numVerts),
                                           d->numTriangles);
                     }
+                    break;
+                }
+                case OP_INDEXED_REF: {
+                    SplitDrawRef *r = p;
+                    const GfxVertex *verts = r->verts;
+                    const unsigned short *indices = r->indices;
+                    if (r->check) {
+                        // The walk must not have touched the arrays since it queued them (a block reused too early).
+                        // A difference is counted and the queued copy drawn instead, so a broken pool shows in the
+                        // counts rather than as a crash on a reused block's indices.
+                        const GfxVertex *copy = (const GfxVertex *) (r + 1);
+                        const unsigned short *copyIndices = (const unsigned short *) (copy + r->numVerts);
+                        if (__builtin_memcmp(copy, verts, (size_t) r->numVerts * sizeof(GfxVertex)) != 0 ||
+                            __builtin_memcmp(copyIndices, indices, (size_t) r->numTriangles * 3u * sizeof(short)) != 0) {
+                            sRefDiffer++;
+                            verts = copy;
+                            indices = copyIndices;
+                        }
+                        sRefCompared++;
+                    }
+                    gfxb_draw_indexed(&r->state, verts, r->numVerts, indices, r->numTriangles);
+                    // Only now may the walk reuse the arrays: the backend has made its own copy (the GPU's VBO).
+                    __atomic_store_n(&sRefDone, r->ticket, __ATOMIC_RELEASE);
                     break;
                 }
                 case OP_MODEL: {
@@ -675,6 +720,58 @@ PLAT_HOT_GAME PLAT_NOINLINE void gfx_split_draw_indexed(const GfxDrawState *stat
     memcpy(d + 1, verts, vertBytes);
     memcpy((unsigned char *) (d + 1) + vertBytes, indices, indexBytes);
     commit(d);
+}
+
+/*
+ * P63 DKR_SPLIT_REF (gfx_split.h): the same as gfx_split_draw_indexed but for the copy, which the walk's bucket draws
+ * spent ~1.2 ms a frame on in the Old 3DS's game core (run 50). The backend reads the walk's arrays inside
+ * gfxb_draw_indexed and keeps no pointer to them, so a done ticket after that call frees them again.
+ */
+PLAT_HOT_GAME PLAT_NOINLINE int gfx_split_draw_indexed_ref(const GfxDrawState *state, const GfxVertex *verts,
+                                                           int numVerts, const unsigned short *indices,
+                                                           int numTriangles, int check, unsigned int *ticket) {
+    SplitDrawRef *r;
+    unsigned int copyBytes = 0;
+    if (!sActive) {
+        return SPLIT_REF_NOT_QUEUED;
+    }
+    if (check) {
+        copyBytes = (unsigned int) numVerts * sizeof(GfxVertex) + (unsigned int) numTriangles * 3u * sizeof(short);
+        if (sizeof(SplitDrawRef) + copyBytes + 64u > SPLIT_RING_BYTES / 4u) {
+            return SPLIT_REF_NOT_QUEUED;
+        }
+    }
+    if (gfxb_walk_draw_indexed(state, verts, numVerts, indices, numTriangles)) {
+        return SPLIT_REF_DRAWN; // DKR_WALK_VERTS: the walk made the GPU's vertices and queued them (a call record)
+    }
+    r = reserve(OP_INDEXED_REF, sizeof(SplitDrawRef) + copyBytes);
+    r->state = *state;
+    r->verts = verts;
+    r->indices = indices;
+    r->numVerts = numVerts;
+    r->numTriangles = numTriangles;
+    if (++sRefTicket == 0) {
+        sRefTicket = 1;
+    }
+    r->ticket = sRefTicket;
+    r->check = check != 0;
+    if (check) {
+        memcpy(r + 1, verts, (size_t) numVerts * sizeof(GfxVertex));
+        memcpy((GfxVertex *) (r + 1) + numVerts, indices, (size_t) numTriangles * 3u * sizeof(short));
+    }
+    sRefWakeBytes += (unsigned int) numVerts * sizeof(GfxVertex) + (unsigned int) numTriangles * 3u * sizeof(short);
+    commit(r);
+    *ticket = sRefTicket;
+    return SPLIT_REF_QUEUED;
+}
+
+int gfx_split_ref_done(unsigned int ticket) {
+    return (int) (__atomic_load_n(&sRefDone, __ATOMIC_ACQUIRE) - ticket) >= 0;
+}
+
+void gfx_split_ref_counts(unsigned int *compared, unsigned int *differ) {
+    *compared = sRefCompared;
+    *differ = sRefDiffer;
 }
 
 static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) {
