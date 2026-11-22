@@ -695,3 +695,24 @@ void plat_trace(const char *name, const char *fmt, ...) {
     vfprintf(sFile, fmt, ap);
     va_end(ap);
 }
+
+/* P59 E: the self-checks' totals (plat.h plat_check_report) */
+static unsigned sChecksRun, sChecksWrong;
+static const char *volatile sFirstWrong;
+
+void plat_check_report(const char *name, int wrong) {
+    __atomic_fetch_add(&sChecksRun, 1, __ATOMIC_RELAXED);
+    if (wrong) {
+        __atomic_fetch_add(&sChecksWrong, 1, __ATOMIC_RELAXED);
+        if (sFirstWrong == NULL) {
+            sFirstWrong = name;
+        }
+    }
+}
+
+void plat_checks_take(unsigned *run, unsigned *wrong, const char **firstWrong) {
+    *run = __atomic_exchange_n(&sChecksRun, 0, __ATOMIC_RELAXED);
+    *wrong = __atomic_exchange_n(&sChecksWrong, 0, __ATOMIC_RELAXED);
+    *firstWrong = sFirstWrong != NULL ? sFirstWrong : "";
+    sFirstWrong = NULL;
+}

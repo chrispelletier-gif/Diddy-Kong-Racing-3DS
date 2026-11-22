@@ -111,6 +111,19 @@ unsigned long plat_screen_draws(void);
  * 1: the test run's results) has its own. The total is PLAT_COUNTER_SCREEN_LOCK_WAIT_US. 0 where there is no lock.
  */
 unsigned plat_screen_lock_wait_max_us(int reader);
+/*
+ * P59 C: for gpu_hang.txt, what the bottom screen was doing (drawing which area and since when, its last draw and
+ * cache flush, its locks held, the profiler's page and last tap) and each watched thread's core and priority, as
+ * indented lines. "n/a" where there is no such screen.
+ */
+void plat_screen_hang_info(char *out, int size);
+/*
+ * P59 E: the self-checks' (*_CHECK switches) results for the test run's CSV: each check made reports itself, wrong or
+ * not (any thread). plat_checks_take returns the totals since the last call and starts them again, and the name of the
+ * first check that went wrong in that time (or "").
+ */
+void plat_check_report(const char *name, int wrong);
+void plat_checks_take(unsigned *run, unsigned *wrong, const char **firstWrong);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);

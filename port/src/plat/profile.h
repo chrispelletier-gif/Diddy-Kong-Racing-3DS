@@ -190,6 +190,8 @@ void prof_set_status(const char *text);
 int prof_term_check(char *report, int size);
 /* The PC preview's PROFILER page in the terminal font, for a New 3DS or an Old 3DS (renderer on the game's core). */
 void prof_term_preview(int oldLayout, char *out, int size);
+/* P59 C: whether the readout is shown, its page, and when it was last tapped (plat_time_ns; 0: never). */
+void prof_monitor_state(int *shown, int *page, unsigned long long *lastTapNs);
 
 /*
  * A player's build has no profiler (port_profile.c is left out of RELEASE=1): it is never on, and the calls compile

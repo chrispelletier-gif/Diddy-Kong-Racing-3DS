@@ -303,6 +303,8 @@ static const BenchSwitch sSwitchesNative[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, fills finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 2, 1, 0 },
+    // P59 D: the profiler's page turned every 3 frames (DKR_PROF_PAGE_FLIP), to show the stress is harmless here.
+    { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -312,24 +314,12 @@ static const BenchSwitch sSwitchesNative[] = {
  * New 3DS keeps them (sSwitchesNative).
  */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    // Run 45 (02b948b, 2026-11-20): the memo check, the PMU checks (the counters work), the old walk, the frame
-    // history the old way, the sound players and bottom screen thread on the game core and the atlas were settled or
-    // neutral, so their rows went. NATIVE_REMOTE 0 won (renderer core -7 ms, game core +3) and is the default now.
-    { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
-    // P54 2b-D (DKR_NATIVE_PARTICLES): each sprite particle as two records instead of about ten (same frames on the PC,
-    // ~10% less walk time for the "effects" kind). Read the game core ms and the effects kind's walk time; watch the
-    // smoke, dust and sparks.
-    { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
-    { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
-    // P57 A (2026-11-20, proposals/3ds-old3ds-perf-next-plan.md): the race-start stall (250-294 ms in the first racing
-    // frame's set-up, run 45). Every race now keeps the run's SD writes away from the load and its first 5 s
-    // (DKR_AUTORUN_QUIET) and applies the old level's texture frees at the load's end (DKR_LOAD_FREES); these rows race
-    // one lap each the old way, to compare the results' race start columns. Read log.txt's "STALL set-up" lines: each
-    // names the set-up's steps with their ms, the drains and the log waits.
-    { "autorun SD writes at the race start (old way, 1 lap)", { "DKR_AUTORUN_QUIET", NULL, NULL }, 1, 0, 1, 1 },
-    { "old level's texture frees at the first frame (old way, 1 lap)", { "DKR_LOAD_FREES", NULL, NULL }, 1, 0, 1, 1 },
-    // P57 B: the CPU counters again (they worked in run 45, on NATIVE_REMOTE 3), now on NATIVE_REMOTE 0, so the
-    // game core's hot code work (P57 D) starts from today's numbers. PMU 1: I-cache misses; PMU 2: D-cache misses.
+    // Run 48 (a2008be, 2026-11-22, proposals/3ds-switch-bench-a2008be-o3ds-results.md item 7): N1, 2b-D, the old-way
+    // prewarm, SD writes and frees, NATIVE_REMOTE 3, STATE_CACHE 2, REWRITE 0, both WALK_VERTS rows and the three
+    // NATIVE_GPU rows were settled or neutral, so their rows went (their switches untouched; port/docs/bench-history.md
+    // keeps the earlier results). Run 45 had already settled the memo check, the old walk and the atlas.
+    // P57 B: the CPU counters on NATIVE_REMOTE 0, kept until P57 D has its before/after. PMU 1: I-cache misses;
+    // PMU 2: D-cache misses.
     { "CPU counters, I-cache misses (PMU 1, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
     { "CPU counters, D-cache misses (PMU 2, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
@@ -339,48 +329,27 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    // P54 (2026-11-17, proposals/3ds-old3ds-core-balance-plan.md): the core that limits the Old 3DS is the system core
-    // (the renderer's backend, 28-32 ms a frame of 33.4 in #560), not the game's (~10-14 ms spare a frame). Each row is
-    // raced alone for the track's own laps; read the results' renderer_core_ms and game_core_ms (and the flashes
-    // column), and the "backend records" part of each autorun_cores.txt line (DKR_BACKEND_MIX).
-    // Step 1b: the native draws' vertex maths on the backend (DKR_NATIVE_REMOTE 3, the Old 3DS default from v28 to
-    // run 45) against today's default 0, all on the walk.
-    { "native vertex maths on the backend (NATIVE_REMOTE 3, old default)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 0, 3,
-      1, 0 },
-    // Step 3: fewer GPU settings written per draw. Small wins in run 45 (-0.6 / -1.0 ms renderer core, no more
-    // flashes); they stay off until the owner has seen no flicker or dropouts (an AI racer's head, far cliffs, the
-    // intro logo).
-    { "GPU settings: only the changes set (STATE_CACHE 2)", { "DKR_STATE_CACHE", NULL, NULL }, 1, 2, 1, 0 },
-    { "GPU settings written twice only where known (REWRITE 0)", { "DKR_REWRITE", NULL, NULL }, 1, 0, 1, 0 },
-    // Step 2 (DKR_WALK_VERTS, gfx_c3d.c "The walk writes the vertices"): the walk (game core) tests, converts and cuts
-    // each draw's vertices, which the renderer's core did. In run 45 it saved only 0.4 ms: with NATIVE_REMOTE 3 the
-    // native draws went to the backend by another road and the walk made about a third of the draws
-    // (proposals/3ds-walk-verts-review.md). With NATIVE_REMOTE 0 the default now, every draw passes the walk: this row
-    // is walk-verts on top of it. Keep it only if the renderer core falls by more than the game core (now the limit)
-    // rises; the results' wv columns say how many draws a frame the walk made, left and left out for room. Then one
-    // lap with the self-check: the renderer's core also makes each draw's vertices the old way and compares; the log
-    // must say "walk verts: N draws checked, 0 differ" (its fps is low: it does both).
-    { "walk writes the GPU vertices, native maths on the walk (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
-    { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
-      { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
-    // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306). The GSP can run the frame's depth
-    // fill alongside its first command lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear
-    // drawn instead). Rows: the depth fill back on with the wait (should be clean, and the fill is cheaper), the native
-    // track (NR4, GPU vertex maths) as it was, and the native track with the fill and the wait. Jungle Falls is in the
-    // list for its tunnel; watch the tunnel and the flashes column.
+    // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306), kept while the Jungle Falls tunnel
+    // still needs checking (coordinator 2026-11-22). The GSP can run the frame's depth fill alongside its first command
+    // lists (gfx_c3d.c fill_wait), which fits run 22 (no flashes with the depth clear drawn instead). Rows: the depth
+    // fill back on with the wait (should be clean, and the fill is cheaper), the native track (NR4, GPU vertex maths)
+    // as it was, and the native track with the fill and the wait. Jungle Falls is in the list for its tunnel; watch the
+    // tunnel and the flashes column.
     { "depth clear as a memory fill, finished before drawing", { "DKR_DEPTH_FILL", "DKR_FILL_WAIT", NULL }, 0, 1, 1, 0 },
     { "native track (GPU vertex maths, one draw per material)", { "DKR_NATIVE_TRACK", NULL, NULL }, 0, 1, 1, 0 },
     { "native track, depth fill finished before drawing",
       { "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 1, 1, 0 },
-    // Core balance plan 2b-B (2026-11-17, owner: build it and bench it with T1): the old GPU vertex maths switches
-    // (P30/P31/P34) no longer reach any draw since the native records, so they have no rows. DKR_NATIVE_GPU sends the
-    // native kart (1) and also object (2) draws to the GPU's vertex maths (gfx_rdp.c native_gpu_draw): neither core
-    // transforms, tests or clips their vertices; each draw is one GPU draw (no material buckets across objects, so
-    // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
-    { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
-    { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
-    { "track, karts and objects on the GPU, depth fill finished before drawing",
-      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P59 D (2026-11-22, proposals/3ds-profiler-tabs-gpu-hang-plan.md): GPU hang #576 came within a frame of the
+    // profiler's readout redraw, with the owner flipping its pages. These bug-check rows show the readout and turn its
+    // page every 3 frames (DKR_PROF_PAGE_FLIP), in races and on the results and menus between them: with the cached
+    // panels (P59 A), with the panels drawn the old way, and with the screen thread on the game core. A hang in any
+    // writes gpu_hang.txt with its "GPU and system state" section (P59 C). The results' scr columns give the game's
+    // waits for the screen's lock and the bottom screen's ms per area drawn: compare the first two rows' for the lag
+    // fix. NAME=value entries are set to that value in the row's race (and left to the console's default otherwise).
+    { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
+    { "page flip stress, panels the old way (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_PANEL_CACHE=0", NULL }, 0, 3, 1, 1 },
+    { "page flip stress, screen on the game core (1 lap)", { "DKR_PROF_PAGE_FLIP", "DKR_BS_SYSCORE=0", NULL }, 0, 3, 1,
+      1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -417,6 +386,49 @@ static s32 switch_all_config(void) {
     return settings >= 2 ? SWITCH_CONFIGS : -1;
 }
 #define SWITCH_ALL switch_all_config()
+
+/*
+ * A row's variable: "NAME" takes the row's usual and test settings; "NAME=value" (P59 D) is left to the console's
+ * default in every other race and set to value in the row's own (a row whose variables need different settings).
+ * Returns the name (its own copy, kept for the override table, which holds the pointer), and *fixed the value or
+ * BENCH_VAR_PLAIN.
+ */
+#define BENCH_VAR_PLAIN (-32768)
+static const char *bench_var(const char *entry, s32 *fixed) {
+    static char sNames[8][40];
+    const char *eq = strchr(entry, '=');
+    s32 i, n;
+    *fixed = BENCH_VAR_PLAIN;
+    if (eq == NULL) {
+        return entry;
+    }
+    {
+        const char *v = eq + 1;
+        s32 sign = *v == '-' ? -1 : 1, value = 0;
+        v += *v == '-';
+        while (*v >= '0' && *v <= '9') {
+            value = value * 10 + (*v++ - '0');
+        }
+        *fixed = sign * value;
+    }
+    n = (s32) (eq - entry);
+    for (i = 0; i < (s32) ARRAY_COUNT(sNames); i++) {
+        if (sNames[i][0] == '\0') {
+            plat_snprintf(sNames[i], sizeof(sNames[i]), "%.*s", (int) n, entry);
+            return sNames[i];
+        }
+        {
+            s32 c = 0;
+            while (c < n && sNames[i][c] == entry[c]) {
+                c++;
+            }
+            if (c == n && sNames[i][n] == '\0') {
+                return sNames[i];
+            }
+        }
+    }
+    return entry; /* (more than 8 names: a list to fix; the override check reports it) */
+}
 
 /* Laps for a switch bench race in config (0 = the usual settings): one for a bug check row, and for the usual races
  * when every row is one; else the track's own. */
@@ -486,7 +498,9 @@ static void apply_config(s32 config) {
         }
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
-                plat_override_switch(sSwitches[i].env[k], sSwitches[i].usual);
+                s32 fixed;
+                const char *name = bench_var(sSwitches[i].env[k], &fixed);
+                plat_override_switch(name, fixed != BENCH_VAR_PLAIN ? -1 : sSwitches[i].usual);
             }
         }
         // The bench's own frame rate cap, after the usual settings (the uncapped rows share its variable), so that only
@@ -495,7 +509,9 @@ static void apply_config(s32 config) {
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             if (config == i + 1 || (config == SWITCH_ALL && !sSwitches[i].alone)) {
                 for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
-                    plat_override_switch(sSwitches[i].env[k], sSwitches[i].test);
+                    s32 fixed;
+                    const char *name = bench_var(sSwitches[i].env[k], &fixed);
+                    plat_override_switch(name, fixed != BENCH_VAR_PLAIN ? fixed : sSwitches[i].test);
                 }
             }
         }
@@ -622,6 +638,8 @@ static ProfStats sRaceStats;
 static unsigned int sWalkStart[4]; // gfxb_walk_coverage at the race start (pmu_cells)
 static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart, sWakesStart;
 static u32 sLockWaitStart; /* P59 B: PLAT_COUNTER_SCREEN_LOCK_WAIT_US at the race's start */
+static unsigned long long sScreenNsStart; /* P59 D: the bottom screen's busy time and areas drawn at the race's start */
+static unsigned long sScreenDrawsStart;
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -1550,6 +1568,33 @@ static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
     }
 }
 
+/*
+ * The results line's last cells (2026-11-22, P59): the "scr" mark, the game's waits for the bottom screen's lock on
+ * the profiler's path (a game frame's mean and the longest, P59 B), the bottom screen thread's ms per area drawn (its
+ * wall time, other threads' turns included: the page flip stress rows' lag measure, P59 D); then the "chk" mark, the
+ * self-checks (*_CHECK switches, plat_check_report) made since the race began, how many went wrong and the first such
+ * check's name (P59 E: log.txt keeps only its first 200 lines, so their "N differ" lines can be lost). Ends the line.
+ * stats NULL: the race never got going.
+ */
+static void screen_check_cells(char *out, s32 size, const ProfStats *stats) {
+    unsigned long draws = plat_screen_draws() - sScreenDrawsStart;
+    const char *firstWrong;
+    unsigned run, wrong;
+    plat_checks_take(&run, &wrong, &firstWrong);
+    plat_snprintf(out, size, ",scr,%.3f,%.2f,%.2f,chk,%u,%u,%s\n",
+                  stats == NULL || stats->gameFrames == 0
+                      ? 0.0
+                      : (gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US] - sLockWaitStart) / 1e3 / stats->gameFrames,
+                  plat_screen_lock_wait_max_us(1) / 1e3,
+                  stats == NULL || draws == 0 ? 0.0 : (plat_screen_busy_ns() - sScreenNsStart) / 1e6 / draws, run, wrong,
+                  firstWrong[0] != '\0' ? firstWrong : "-");
+}
+
+/* P59 E, rule K6 (CI: host_main.c, DKR_CHECKS_CSV_TEST=1): the results line's last cells as a race's end writes them. */
+void port_autorun_result_cells(char *out, int size) {
+    screen_check_cells(out, size, NULL);
+}
+
 /* Writes the results line of the race that just ended. stats may be NULL (the race never got going). */
 static void record_result(const char *outcome, s32 position, const ProfStats *stats) {
     static char header[1536];
@@ -1572,7 +1617,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "start_worst_ms,pmu_mark,game_mcycles,game_ifstall_pct,game_pmn1_k,render_mcycles,render_ifstall_pct,"
                   "render_pmn1_k,pmn1_kind,shown_mark,replaced,longest_shown_gap_ms,sndcb_mark,sound_callback_ms,"
                   "clk_mark,clock_reads,wv_mark,walk_draws,walk_left,walk_noroom,scr_mark,screen_lock_wait_ms,"
-                  "screen_lock_wait_max_ms\n",
+                  "screen_lock_wait_max_ms,screen_ms_area,chk_mark,checks_run,checks_wrong,first_wrong_check\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1669,12 +1714,11 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
         length--;
     }
     // Then (2026-11-22, P59 B) the game's waits for the bottom screen's lock on the profiler's path: a game frame's
-    // mean and the longest, after the "scr" mark.
-    plat_snprintf(line + length, sizeof(line) - length, ",scr,%.3f,%.2f\n",
-                  stats == &empty || stats->gameFrames == 0
-                      ? 0.0
-                      : (gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US] - sLockWaitStart) / 1e3 / stats->gameFrames,
-                  plat_screen_lock_wait_max_us(1) / 1e3);
+    // mean and the longest, after the "scr" mark; (P59 D) the bottom screen's thread's ms per area it drew (its wall
+    // time, other threads' turns included), the page flip stress rows' lag measure. Then (P59 E) the self-checks
+    // (*_CHECK switches, plat_check_report) made in the race and how many went wrong, with the first one's name,
+    // after the "chk" mark: log.txt keeps only its first 200 lines, so their "N differ" lines can be lost.
+    screen_check_cells(line + length, sizeof(line) - length, stats == &empty ? NULL : stats);
     append_file(results_file(), line, header);
     if (stats != &empty && cores.frames > 0) {
         record_cores(outcome, &cores, stats);
@@ -3614,6 +3658,13 @@ void port_autorun_frame(s32 updateRate) {
                 sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
                 sLockWaitStart = gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US];
                 plat_screen_lock_wait_max_us(1); /* the longest wait from here on */
+                sScreenNsStart = plat_screen_busy_ns();
+                sScreenDrawsStart = plat_screen_draws();
+                {
+                    unsigned run, wrong;
+                    const char *first;
+                    plat_checks_take(&run, &wrong, &first); /* the race's checks from here on */
+                }
                 {
                     char none[8];
                     rec_slow_take(none, sizeof(none)); // The slowest frames are listed from here, as worst_frame_ms
@@ -3801,11 +3852,14 @@ int port_autorun_override_check(char *report, int size) {
         if (config >= 1 && config < SWITCH_CONFIGS) {
             const BenchSwitch *row = &sSwitches[config - 1];
             for (k = 0; k < BENCH_SWITCH_VARS && row->env[k] != NULL; k++) {
-                s32 value = plat_switch(row->env[k], -12345);
-                if (value != row->test) {
+                s32 fixed, want, value;
+                const char *name = bench_var(row->env[k], &fixed);
+                want = fixed != BENCH_VAR_PLAIN ? fixed : row->test;
+                value = plat_switch(name, -12345);
+                if (value != want) {
                     failures++;
                     at += plat_snprintf(report + at, size - at, "race %d (%s): %s reads %d, not its test setting %d\n",
-                                        (int) config, row->name, row->env[k], (int) value, (int) row->test);
+                                        (int) config, row->name, name, (int) value, (int) want);
                 }
             }
         }

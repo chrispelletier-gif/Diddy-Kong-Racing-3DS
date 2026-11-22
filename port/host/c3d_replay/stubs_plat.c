@@ -244,3 +244,14 @@ int plat_pmu_on(void) {
 void plat_pmu_frame(int slot) {
     (void) slot;
 }
+
+/* P59 C: no bottom screen in the replay */
+void plat_screen_hang_info(char *out, int size) {
+    snprintf(out, (size_t) size, "  bottom screen: n/a\n");
+}
+
+/* P59 E: the self-checks' totals are the test run's; the replay only reports them */
+void plat_check_report(const char *name, int wrong) {
+    (void) name;
+    (void) wrong;
+}

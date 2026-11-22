@@ -197,10 +197,43 @@ static void crash_handler(ERRF_ExceptionInfo *info, CpuRegisters *regs) {
     svcExitProcess();
 }
 
+/* P59 C: the watched threads, for gpu_hang.txt (bugreport_thread_list) */
+static const char *sWatchedName[CRASH_STACKS];
+static Handle sWatchedHandle[CRASH_STACKS];
+static s32 sWatchedCore[CRASH_STACKS], sWatchedPrio[CRASH_STACKS];
+
+/* Each watched thread: its name, the core it started on, its priority then and now (0x18 highest, 0x3F lowest). */
+int bugreport_thread_list(char *out, int size) {
+    int i, n = __atomic_load_n(&sCrashStackCount, __ATOMIC_RELAXED), length = 0;
+    n = n > CRASH_STACKS ? CRASH_STACKS : n;
+    for (i = 0; i < n && length < size; i++) {
+        s32 now = -1;
+        if (sWatchedName[i] == NULL) {
+            continue;
+        }
+        if (sWatchedHandle[i] != 0 && R_FAILED(svcGetThreadPriority(&now, sWatchedHandle[i]))) {
+            now = -1;
+        }
+        length += snprintf(out + length, size - length, "  thread %-22s core %ld priority 0x%02lX at start, now %s%02lX\n",
+                           sWatchedName[i], (long) sWatchedCore[i], (unsigned long) sWatchedPrio[i],
+                           now >= 0 ? "0x" : "?", (unsigned long) (now >= 0 ? now : 0));
+    }
+    return length < size ? length : size - 1;
+}
+
 void bugreport_watch_thread(const char *name) {
     int slot = __atomic_fetch_add(&sCrashStackCount, 1, __ATOMIC_RELAXED);
     if (slot >= CRASH_STACKS) {
         slot = CRASH_STACKS - 1;
+    }
+    {
+        Thread self = threadGetCurrent();
+        s32 prio = -1;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        sWatchedHandle[slot] = self != NULL ? threadGetHandle(self) : 0;
+        sWatchedCore[slot] = svcGetProcessorID();
+        sWatchedPrio[slot] = prio;
+        sWatchedName[slot] = name;
     }
     sThreadName = name;
     threadOnException(crash_handler, sCrashStacks[slot] + CRASH_STACK_SIZE, WRITE_DATA_TO_HANDLER_STACK);

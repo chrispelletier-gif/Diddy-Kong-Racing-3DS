@@ -275,6 +275,12 @@ The issue body has the build, the console, the counters and the end of the log. 
 lines; the body has the latest ones. When the GPU stops responding, the game saves `gpu_hang.txt` (the GPU's command
 queue, marking the command list it stopped in, and every draw of the stuck frame, those in that list starred) and
 `gpu_hang_cmd.bin` (the frame's command list), and 20 seconds into any hang `hang_log.txt` (the latest log lines).
+`gpu_hang.txt` also has a "GPU and system state at the hang" section (`DKR_GPU_HANG_INFO`, default 1): the GPU's busy
+register (P3D, PPF, PSC0/1) and its P3D interrupt and command list registers, each read twice 100 ms apart (an idle P3D
+with the queue entry not done points to a lost interrupt, a busy one to a GPU really stuck), the renderer's last cache
+flush, what the bottom screen was doing (the area it was drawing and for how long, its last draw and flush, its locks,
+the profiler's page and last tap) and each watched thread's core and priority. `DKR_GPU_HANG_TEST=1` writes the file
+once at frame 120 with no hang, to see the section (it then won't write a real hang's in that session).
 They go with a report sent right away, or as `last_*` files with the report on the next launch.
 
 A debug build also keeps a flight recorder going all the time (`port/src/plat/recorder.h`), whether the Profiler row
@@ -424,6 +430,10 @@ with `DKR_BOTTOM_PREVIEW`). On an Old 3DS the screen thread on the system core h
 priority above the renderer's backend (`DKR_BS_LOCK_CEILING`, default 1 there, 0 on a New 3DS), so the game never waits
 for it while the backend runs; the `bottom screen:` log line says how long the game waited for that lock (`game waited
 X ms a frame (max Y ms)`), and test run results carry it as `screen_lock_wait_ms` and `screen_lock_wait_max_ms`.
+Test run results also carry the bottom screen thread's ms per area drawn (`screen_ms_area`) and, after a `chk` mark,
+the self-checks (`*_CHECK` switches) made in each race, how many went wrong and the first one's name (`checks_run`,
+`checks_wrong`, `first_wrong_check`). `DKR_PROF_PAGE_FLIP=N` (test runs only) shows the readout and turns its page every
+N game frames, on the results and menus between races too: the switch bench's 1-lap "page flip stress" rows.
 
 With the two-core renderer (the default on both consoles) the renderer's time per kind is the display list walk's;
 the GPU hand-off on the other core is in the log's `two-core renderer` line. The renderer's and the game thread's
