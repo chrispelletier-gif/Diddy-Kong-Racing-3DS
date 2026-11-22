@@ -255,6 +255,8 @@ void plat_3ds_quit_point(int parkedState);
 /* Whether the renderer is to stop at its next quit point (closing or suspending): see gfxb_end_frame. */
 int plat_3ds_renderer_should_park(void);
 void plat_3ds_pause_renderer(int pause);
+/* Holds the game (as the HOME menu does) while a network transfer runs, on an Old 3DS (DKR_NET_HOLD). Counted. */
+void plat_3ds_hold_game_for_net(int hold);
 /* Keeps the console awake when the lid closes while held (counted: each hold needs a release). */
 void plat_3ds_hold_sleep(int hold);
 void plat_3ds_exit(void) __attribute__((noreturn));
