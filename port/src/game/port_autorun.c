@@ -303,6 +303,8 @@ static const BenchSwitch sSwitchesNative[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, fills finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, 0, 2, 1, 0 },
+    // P55 S3 (gpu_raw.inc): GPU settings and draws as raw register words (see the Old 3DS list); renderer core ms.
+    { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -381,6 +383,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
     { "track, karts and objects on the GPU, depth fill finished before drawing",
       { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // P55 S3 / P60 F (2026-11-22, gpu_raw.inc): each draw's GPU settings as one block of register words made once per
+    // draw state, its uniforms and the draw command as words too, instead of citro3d's setters, settings writer and
+    // draw call. The backend replay finds the same GPU registers at every draw. Read renderer_core_ms (the limit with
+    // NATIVE_GPU on), then the two NATIVE_GPU rows on top of it against the two without above (run 48: game core
+    // -3.7 ms with karts on the GPU, but the backend's model draws cost 4.9-12.7 ms). The 1-lap self-check row also
+    // makes each reused block through citro3d and compares: the log's "raw GPU words: ..." lines must end "0 differ".
+    // Any value but 0 turns DKR_RAW_REGS on, so a row can share the test value with DKR_NATIVE_GPU.
+    { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
+    { "raw register words, karts' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL }, 0, 1, 1, 0 },
+    { "raw register words, karts' and objects' vertex maths on the GPU", { "DKR_RAW_REGS", "DKR_NATIVE_GPU", NULL },
+      0, 2, 1, 0 },
+    { "raw register words, self-check (1 lap, log: 0 differ)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
+      1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
