@@ -2598,14 +2598,16 @@ static COLD void read_switches_now(void) {
     // On by default on an Old 3DS only: it cut the renderer's time per triangle there and showed nothing on a New
     // 3DS. Bit-identical to the C loop.
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
-    // P60 B: off by default until the Old 3DS bench. Only with the VFP's short vectors: its loop is their transform's
-    // (the C transform, built with -ffast-math, rounds differently).
-    sVertexAsm = plat_switch("DKR_VERTEX_ASM", 0) != 0 && sVfpVectors;
+    // P60 B: on by default on an Old 3DS (bench run 50 on 62ac36e: game core -0.5 ms on all four tracks). Only with
+    // the VFP's short vectors: its loop is their transform's (the C transform, built with -ffast-math, rounds
+    // differently).
+    sVertexAsm = plat_switch("DKR_VERTEX_ASM", plat_old_3ds()) != 0 && sVfpVectors;
 #if PLAT_DEBUG_TOOLS
     sVertexAsmCheck = plat_switch("DKR_VERTEX_ASM_CHECK", 0); // 2: broken on purpose (rule K6), see vertex_asm_check
 #endif
-    // P60 C: off where the backend reads the vertex fog (its DKR_VERTEX_FOG, read the same way)
-    sFogSkip = plat_switch("DKR_FOG_SKIP", 0) != 0 && plat_switch("DKR_VERTEX_FOG", 0) == 0;
+    // P60 C: on by default on an Old 3DS (bench run 50: game core -0.7 ms). Off where the backend reads the vertex fog
+    // (its DKR_VERTEX_FOG, read the same way)
+    sFogSkip = plat_switch("DKR_FOG_SKIP", plat_old_3ds()) != 0 && plat_switch("DKR_VERTEX_FOG", 0) == 0;
     // 8 frames on an Old 3DS (the best of its switches together with the system-call flush).
     sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
     if (sTexRehash < 1) {
@@ -2642,7 +2644,10 @@ static COLD void read_switches_now(void) {
     // The native track (NR4) turns the backend's GPU vertex maths on for itself: the other kinds stay on the CPU
     // path unless DKR_GPU_TRANSFORM is on too.
     sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
-    sNativeGpuSwitch = plat_switch("DKR_NATIVE_GPU", 0);
+    // Karts' vertex maths on the GPU (1) is the Old 3DS default together with raw register words (DKR_RAW_REGS): bench
+    // run 50 on 62ac36e, game core -4.3 ms and renderer core -3.6 ms. Alone it only moves the work to the renderer's
+    // core; 2 (objects too) was no better. Read the same way in gfx_c3d.c (sTransformWanted) and host/gfx_soft.c.
+    sNativeGpuSwitch = plat_switch("DKR_NATIVE_GPU", plat_old_3ds());
     if (!plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)) {
         sGpuKinds = 0;
     }
@@ -6230,6 +6235,7 @@ static COLD void vertex_asm_check(const Vertex *src, s32 c, s32 dest, const Vert
              (ref != all);
     sVaChecked += (u32) c;
     sVaDiffer += differ;
+    plat_check_report("vertex asm", differ != 0); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
     if (differ != 0 && sVaShown < 5) {
         sVaShown++;
         i = first >= 0 ? first : 0;

@@ -144,7 +144,9 @@ static void PLAT_COLD raw_build_draw_words(void) {
 
 /* Read with the other switches (read_switches): whether raw words are wanted, and the check. */
 static void PLAT_COLD raw_read_switches(void) {
-    sRawWanted = plat_switch("DKR_RAW_REGS", 0) != 0;
+    // On by default on an Old 3DS (bench run 50 on 62ac36e: renderer core -4.3 ms on every track; with the karts'
+    // vertex maths on the GPU, DKR_NATIVE_GPU 1, game core -4.3 ms and renderer core -3.6 ms). Off in stereo 3D.
+    sRawWanted = plat_switch("DKR_RAW_REGS", plat_old_3ds()) != 0;
 #ifndef PORT_RELEASE
     sRawCheck = plat_switch("DKR_RAW_REGS_CHECK", 0) != 0;
 #endif
@@ -396,7 +398,9 @@ static void PLAT_COLD __attribute__((noinline)) raw_check(const RawBlock *b, con
             plat_log("raw GPU words check: frame %d draw %u: texture scales differ", sFrameCount, sRawStats.draws);
         }
         sRawStats.differ += !differ;
+        differ = 1;
     }
+    plat_check_report("raw GPU words", differ); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
 }
 #endif
 
