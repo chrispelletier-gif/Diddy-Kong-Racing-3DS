@@ -511,6 +511,7 @@ static struct {
     u8 earlyDepth;
     u8 decal;
     u8 cull;
+    u8 stencil; // GfxDrawState.stencil
     short scissor[4];
     u8 scissorFlat;
 } sGpu;
@@ -5563,6 +5564,36 @@ static void __attribute__((noinline, cold)) read_cull_setting(void) {
     sNoCull = plat_switch("DKR_NO_CULL", 0) != 0;
 }
 
+/*
+ * Kart shadows by stencil (P60 E, DKR_STENCIL_SHADOW; gfx_backend.h says what each pass does). The depth buffer's 8
+ * stencil bits were unused (P42); one, GFX_STENCIL_BIT, is the shadow's mark. With DKR_DEPTH24 there is no stencil:
+ * the game then never asks for it (tracks.c). The far side: the depth test as usual, nothing written but the bit, set
+ * where the test fails (the surface is in front of the far side) and cleared where it passes. The near side: cleared
+ * where the test fails. The shadow: drawn as its state says where the bit is set. Which side is drawn is the
+ * culling (set_draw_state): the box's triangles face outwards as a solid model's do and cullMode says which faces are
+ * the front ones, so its near side is what cullMode keeps and its far side what it culls.
+ */
+static void __attribute__((noinline, cold)) set_stencil_shadow(u8 mode, u8 *depthEnable, u8 *depthFunc, u8 *depthMask) {
+    if (mode != GFX_STENCIL_DRAW) {
+        *depthEnable = true;
+        *depthFunc = GPU_GEQUAL;
+        *depthMask = 0; // No colour, no depth: only the stencil bit is written
+    }
+    if (!sGpu.known || mode != sGpu.stencil) {
+        if (mode == GFX_STENCIL_MARK_FAR) {
+            C3D_StencilTest(true, GPU_ALWAYS, 0xFF, 0xFF, GFX_STENCIL_BIT);
+            C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_REPLACE, GPU_STENCIL_ZERO);
+        } else if (mode == GFX_STENCIL_MARK_NEAR) {
+            C3D_StencilTest(true, GPU_ALWAYS, 0, 0xFF, GFX_STENCIL_BIT);
+            C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_ZERO, GPU_STENCIL_KEEP);
+        } else {
+            C3D_StencilTest(true, GPU_EQUAL, GFX_STENCIL_BIT, GFX_STENCIL_BIT, 0);
+            C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
+        }
+        sGpu.stencil = mode;
+    }
+}
+
 PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
     u8 depthEnable, depthFunc, depthMask, cull, early;
 
@@ -5590,6 +5621,10 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
             alphaTest = 1;
             alphaRef = 1; // GEQUAL 1: every pixel whose alpha isn't 0
         }
+        if (__builtin_expect(state->stencil == GFX_STENCIL_MARK_FAR || state->stencil == GFX_STENCIL_MARK_NEAR, 0)) {
+            alphaTest = 0; // A shadow box marks every pixel it covers, whatever its texels (gfx_backend.h)
+            alphaRef = 0;
+        }
         if (!sGpu.known || alphaTest != sGpu.alphaTest || alphaRef != sGpu.alphaRef) {
             C3D_AlphaTest(alphaTest, GPU_GEQUAL, alphaRef);
             sGpu.alphaTest = alphaTest;
@@ -5608,6 +5643,15 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
         depthEnable = false;
         depthFunc = GPU_ALWAYS;
         depthMask = GPU_WRITE_COLOR;
+    }
+    if (__builtin_expect(state->stencil != GFX_STENCIL_OFF, 0) && !sDepthOnly) {
+        set_stencil_shadow(state->stencil, &depthEnable, &depthFunc, &depthMask);
+    } else if (__builtin_expect(sGpu.stencil != GFX_STENCIL_OFF, 0)) {
+        // Back to citro3d's own settings (C3D_Init), which every other draw has. Forgetting the settings (sGpu.known)
+        // leaves citro3d's as they were, so only a shadow's draw has to put them back.
+        C3D_StencilTest(false, GPU_ALWAYS, 0x00, 0xFF, 0x00);
+        C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
+        sGpu.stencil = GFX_STENCIL_OFF;
     }
     if (!sGpu.known || depthEnable != sGpu.depthEnable || depthFunc != sGpu.depthFunc ||
         depthMask != sGpu.depthMask) {
@@ -5642,6 +5686,13 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
     cull = (sNoCull || state->cullMode == 0) ? GPU_CULL_NONE
            : state->cullMode == 1             ? GPU_CULL_BACK_CCW
                                               : GPU_CULL_FRONT_CCW;
+    if (__builtin_expect(state->stencil == GFX_STENCIL_MARK_FAR, 0)) {
+        // The box's far side only: its front faces culled (cullMode, which the frontend gives as for any one sided
+        // model, says which those are, mirrored tracks too), whatever sNoCull says (see set_stencil_shadow)
+        cull = state->cullMode == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+    } else if (__builtin_expect(state->stencil == GFX_STENCIL_MARK_NEAR, 0)) {
+        cull = state->cullMode == 2 ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW; // The near side: as cullMode says
+    }
     if (!sGpu.known || cull != sGpu.cull) {
         C3D_CullFace(cull);
         sGpu.cull = cull;
@@ -5667,9 +5718,8 @@ PLAT_HOT static void set_draw_state(const GfxDrawState *state) {
  * More than half of a race frame's draws differ from the draw before only in their textures (PC count, P23). For
  * those the combiner, fog and draw settings below would only find again that nothing changed, so with DKR_FAST_STATE
  * (the default) they are skipped: the draw is compared with the last one whose settings were all checked, which is
- * kept here. The comparison leaves out the padding byte after fogEnabled. What else the settings depend on (colour
- * boost, wide screen, 3D, early depth) only changes between frames, when the settings are forgotten anyway; the depth
- * clear's sDepthOnly is compared too.
+ * kept here. What else the settings depend on (colour boost, wide screen, 3D, early depth) only changes between
+ * frames, when the settings are forgotten anyway; the depth clear's sDepthOnly is compared too.
  */
 static GfxDrawState sCheckedState;
 static int sCheckedDepthOnly;
@@ -5687,8 +5737,8 @@ static inline int same_but_textures(const GfxDrawState *a, const GfxDrawState *b
             return 0;
         }
     }
-    return a->fogEnabled == b->fogEnabled && a->fogMul == b->fogMul && a->fogOffset == b->fogOffset &&
-           a->cullMode == b->cullMode && a->flat == b->flat &&
+    return a->fogEnabled == b->fogEnabled && a->stencil == b->stencil && a->fogMul == b->fogMul &&
+           a->fogOffset == b->fogOffset && a->cullMode == b->cullMode && a->flat == b->flat &&
            wa[offsetof(GfxDrawState, scissor) / 4] == wb[offsetof(GfxDrawState, scissor) / 4] &&
            wa[offsetof(GfxDrawState, scissor) / 4 + 1] == wb[offsetof(GfxDrawState, scissor) / 4 + 1];
 }

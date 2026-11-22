@@ -405,6 +405,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       0, 2, 1, 0 },
     { "raw register words, self-check (1 lap, log: 0 differ)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
       1 },
+    // P60 E (DKR_STENCIL_SHADOW, tracks.c port_stencil_shadow): the racers' shadows kept to their squares by the GPU's
+    // stencil (a box drawn twice, then the track triangles under the shadow, whole, or cut to the square when too big
+    // for the texture coordinates) instead of the game clipping them.
+    // Read game_core_ms (the clipping was ~0.75 ms on Whale Bay, the walk's shadows ~0.4) against renderer_core_ms
+    // and the GPU ms (three draws a racer instead of one or two). Then one lap with the self-check: the game's own
+    // clipping runs too and the log must say "stencil shadow check: N shadows, light differs 0, shadow there
+    // differs 0" (it costs fps: it does both). The shadows look a little different: the owner judges them first.
+    { "kart shadows by GPU stencil (P60 E)", { "DKR_STENCIL_SHADOW", NULL, NULL }, 0, 1, 1, 0 },
+    { "kart shadows by GPU stencil, self-check (1 lap, log: 0 differ)",
+      { "DKR_STENCIL_SHADOW", "DKR_STENCIL_SHADOW_CHECK", NULL }, 0, 1, 1, 1 },
     // P60 D (2026-11-22, DKR_SPRITE_GS): sprite tiles of the 3D world (particles, smoke, trees' billboards) handed
     // over as one point each instead of two triangles. 1: the renderer's core makes the corners (the walk's saving
     // alone); 2: the GPU's geometry shader makes them. Read game_core_ms (the walk's saving) and renderer_core_ms; the

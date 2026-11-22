@@ -27,6 +27,7 @@ static int sWide;
 static uint8_t sColor[MAX_W * H * 4];
 static float sDepth[MAX_W * H];
 static float sDepthF[MAX_W * H];          // With DKR_DEPTH_BITS: the float depth buffer kept alongside, for comparing
+static uint8_t sStencilBuf[MAX_W * H];    // The 3DS's stencil bits (GFX_STENCIL_BIT: kart shadows, DKR_STENCIL_SHADOW)
 static uint32_t sWinQ[MAX_W * H], sWinF[MAX_W * H]; // The opaque triangle each depth test left showing
 static uint32_t sTriId;
 static volatile int sFramesRendered;
@@ -216,6 +217,7 @@ void gfxb_clear_depth(const int16_t rect[4]) {
         for (x = x0; x < x1; x++) {
             sDepth[y * W + x] = 1.0f;
             sDepthF[y * W + x] = 1.0f;
+            sStencilBuf[y * W + x] = 0;
         }
     }
 }
@@ -588,6 +590,9 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
     int minX, maxX, minY, maxY, x, y, k;
     float dw[2][3];
     CCInputs in;
+    // A kart shadow's box (gfx_backend.h): its far side culls the faces cullMode keeps, its near side as cullMode.
+    int cull = st->stencil == GFX_STENCIL_MARK_FAR ? (st->cullMode == 2 ? 1 : 2) : st->cullMode;
+    int mark = st->stencil == GFX_STENCIL_MARK_FAR || st->stencil == GFX_STENCIL_MARK_NEAR;
 
     if (area == 0.0f) {
         return;
@@ -597,8 +602,8 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
         sFragTris[sFragKind]++;
     }
     // Screen y points down, so counter clockwise triangles have a negative area here.
-    if ((st->cullMode == 1 && area > 0.0f) || (st->cullMode == 2 && area < 0.0f)) {
-        if (sSweep != NULL && gGfxSweepLevel && st->depthWrite && !gfx_flat_mode(st)) {
+    if ((cull == 1 && area > 0.0f) || (cull == 2 && area < 0.0f)) {
+        if (!mark && sSweep != NULL && gGfxSweepLevel && st->depthWrite && !gfx_flat_mode(st)) {
             sweep_back_face(st, v0, v1, v2, area);
         }
         return;
@@ -669,6 +674,20 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 z = -floorf(d * sDepthScale);
             } else if (st->decal == 1) {
                 z -= 0.0005f;
+            }
+            if (mark) {
+                // The depth test as below (quantised with DKR_DEPTH_BITS), only the stencil bit written.
+                uint8_t *sp = &sStencilBuf[y * W + x];
+                int fail = z > sDepth[y * W + x];
+                if (st->stencil == GFX_STENCIL_MARK_FAR) {
+                    *sp = fail ? (uint8_t) (*sp | GFX_STENCIL_BIT) : (uint8_t) (*sp & ~GFX_STENCIL_BIT);
+                } else if (fail) {
+                    *sp &= (uint8_t) ~GFX_STENCIL_BIT;
+                }
+                continue;
+            }
+            if (st->stencil == GFX_STENCIL_DRAW && !(sStencilBuf[y * W + x] & GFX_STENCIL_BIT)) {
+                continue;
             }
             if (sDepthBits) {
                 // Both tests are followed (the float one only for which triangle it leaves showing).

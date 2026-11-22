@@ -160,6 +160,14 @@ int port_native_particles(void);
  * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
  * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
 #define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* Kart shadows by stencil (P60 E, DKR_STENCIL_SHADOW): PORT_STENCIL_TAG | a GFX_STENCIL_* mode (gfx_backend.h; 1 to 3
+ * mark the box's far side, its near side, then draw the shadow where marked; 0 ends it). Each tag draws what came
+ * before it; the draws until the next carry the mode. */
+#define PORT_STENCIL_TAG 0x50530000 /* "PS" */
+#define PORT_STENCIL_OFF 0
+#define PORT_STENCIL_MARK_FAR 1
+#define PORT_STENCIL_MARK_NEAR 2
+#define PORT_STENCIL_DRAW 3
 /* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
  * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
 void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);
