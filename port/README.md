@@ -421,6 +421,16 @@ with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps 
 off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
 FPSCR ...`).
 
+The walk's exact data cuts (roadmap P61 W, 2026-11-22), each its own switch, `0` the old way:
+`DKR_WALK_BACKFACE` (default 1) reads each triangle's back-face flag from the mesh's 1-byte table instead of its
+16-byte triangle copy; `DKR_NMAT_ONCE` (default 1) checks a material's textures (still in the cache, the same
+generation) once a frame rather than at every record, again after any cache entry is freed; `DKR_WALK_PLD` (Old 3DS
+default 3, elsewhere 0) prefetches ahead in the vertex transform (bit 1) and the triangle loop (bit 2), bit 4 also the
+next record's texture entry. Neither W1 nor W2 changes a picture. `DKR_NMAT_ONCE_CHECK=1` (test builds) checks every
+skipped material the old way too and logs `material once check: N skipped, M would have dropped` (a wrong one counts in
+the results' `checks_wrong` and is dropped as before); `=2` also frees, every 30th frame, a texture of a material
+already checked in that frame, as an eviction mid-frame would, so the check has something to catch.
+
 ### Live monitor
 
 While the readout is on, the bottom screen is a live monitor: a graph of the last 158 frames (the newest on the
