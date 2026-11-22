@@ -260,70 +260,36 @@ typedef struct BenchSwitch {
  * the game's pool is sized by it, so a race can't flip it (test it by starting the game with the switch on).
  * The New 3DS's list (the Old 3DS has its own below since P53). */
 static const BenchSwitch sSwitchesNative[] = {
-    // R2 (PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots. One lap to check the
-    // sprites (hub trees, balloons), then a full race for the speed.
-    { "native records without vertex slots (bug check)", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 1, 1 },
+    // Bench #570 (02b948b, 2026-11-20): every row held 60 fps with 100% of frames paced, GPU-bound. The 1-lap check
+    // rows all ran clean and went, as did the camera records (G3: +0.5 ms renderer), the three uncapped rows (ceiling
+    // 87-129 fps, settled) and the profiler checks (passed). R2 and G2 below are small CPU wins (-0.1 / -0.2 ms
+    // renderer) that stay off until the owner has looked at the sprites, HUD, minimap and lights in their races.
+    // R2 (PR #529): sprite, billboard and flat records drawn without the RSP's vertex slots (hub trees, balloons).
     { "native records without vertex slots", { "DKR_NATIVE_RECORDS", NULL, NULL }, 0, 1, 0, 0 },
-    // G2 (PR #528): HUD, minimap and menu sprite frames and the blinking-light batches as native records. One lap to
-    // look at the HUD, the minimap and Spaceport Alpha's lights, then the performance row.
-    { "native HUD/menu sprites and blinking-light batches (check)", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 1, 1 },
+    // G2 (PR #528): HUD, minimap and menu sprite frames and the blinking-light batches as native records (look at the
+    // HUD, the minimap and Spaceport Alpha's lights).
     { "native HUD/menu sprites and blinking-light batches", { "DKR_NATIVE_LEFTOVERS", NULL, NULL }, 0, 1, 0, 0 },
-    // G3 (PR #530): billboard anchors and the weather's projection matrix as records, with R2's records (it needs
-    // them). One lap on trees, particles and snow to check for bugs, then the race for the walk and renderer time.
-    { "native camera records, bug check (1 lap)", { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 1, 1 },
-    { "native camera records (billboard anchors, weather matrix; with R2 records)",
-      { "DKR_NATIVE_CAMERA", "DKR_NATIVE_RECORDS", NULL }, 0, 1, 0, 0 },
     // N1 (PR #524): object animation and shading as native code (bit-exact on the PC): cuts the game thread's time in
     // races with many animated objects.
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
     // R3 (PR #531): materials name their texture by handle, and a texture freed while a frame is built stays until
-    // that frame is drawn. One lap to check textures (Crescent Island water, door numbers, HUD), then a race.
-    { "textures by handle (check)", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 1, 1 },
+    // that frame is drawn. It adds ~30 ms to the race start (#570).
     { "textures by handle", { "DKR_NATIVE_TEXHANDLE", NULL, NULL }, 0, 1, 0, 0 },
     // R4 (PR #538): with every native switch on, the frame is run as records by its own dispatcher (gfx/nframe.c,
-    // DKR_NATIVE_FRAME) instead of the display list walk; PC frames identical to the walk's with the same switches. One
-    // lap with all five on to check for anything missing or misplaced, then the five against the four walked: the
-    // profiler's "display list walk" line is the one to watch. Measurements, left out of the all-together race.
-    { "native frame stream, all native switches (bug check, 1 lap)",
-      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
-      0, 1, 1, 1 },
+    // DKR_NATIVE_FRAME) instead of the display list walk; PC frames identical to the walk's with the same switches. The
+    // five against the four walked: the profiler's "display list walk" line is the one to watch. Measurements, left
+    // out of the all-together race.
     { "native frame stream (all native switches)",
       { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
       0, 1, 1, 0 },
     { "all native switches, walked (old)",
       { "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE", NULL }, 0, 1, 1, 0 },
-    // Profiler (2026-11-15, "Fix profiler scene time on Old 3DS"): the renderer's walk preempts the game on this core,
-    // and its time was counted as the game's scene. DKR_PROF_SHARED_CORE shows it apart (shared_core_ms) and leaves
-    // scene the game's own. Bug check, one lap each, both ways: expect logic + scene + shared_core with it on to match
-    // logic + scene with it off (within 0.3 ms), shared_core near rdp, scene about 5-7 ms. Drop both once confirmed.
-    { "profiler: renderer on the game core apart (check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 1, 1, 1 },
-    { "profiler: renderer counted in scene (old, check, 1 lap)", { "DKR_PROF_SHARED_CORE", NULL, NULL }, 1, 0, 1, 1 },
     // R5 (PR #545, DKR_FRAME_DIRECT 1 and 2: frames straight to the renderer, whole frame on the system core) gained
     // nothing in two benches, so its four rows went (the switch stays, default off).
     // Bug report #548 (PR #549): other karts always at full detail (DKR_RACER_LOD_FAR=255) held 30 fps on the Old 3DS
     // (bench #553, Whale Bay 29.8 fps, 99% of frames at 30), so it is the Old 3DS default and its rows went.
-    // Uncapped (2026-11-17, owner: "how much higher is the fps uncapped on the Old 3DS? could we target 60?"). The
-    // bench's 30 fps cap (Old 3DS) is lifted to the 60 fps one: a frame is shown at the first retrace after it is done,
-    // and the game logic steps by the retraces each frame really took (port_rate.c, the New 3DS's 60 fps path: half
-    // steps on one-retrace frames, whole ones on two), so the race runs at its normal speed. The frame rate and 1% low
-    // are what the Old 3DS really shows at 60 (whole retraces only); the results' ceiling columns (profile.h
-    // ProfCoreStats) give what it could reach with no cap or vsync at all: per frame, the longest of the game core, the
-    // renderer's core and the GPU. Each race's breakdown (game core sections, with the walk inside each) is in
-    // autorun_cores.txt. Measurements, raced alone and for the track's own laps: the usual settings, then with every
-    // native switch (the frame stream, R4, and the four it needs), then with the walk's and the draws' parts timed (their
-    // clock reads are system calls on an Old 3DS and cost it 2.5-4 fps, so that row's fps is low: it is there for where
-    // the renderer's time goes). On a New 3DS, which already races at 60, the first row matches its usual one.
-    { "uncapped (60 cap), usual settings", { "DKR_FPS_PIN", NULL }, 0, 60, 1, 0 },
-    { "uncapped (60 cap), all native switches + frame stream",
-      { "DKR_FPS_PIN", "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA",
-        "DKR_NATIVE_TEXHANDLE" },
-      0, 60, 1, 0 },
-    { "uncapped (60 cap), walk/draw parts timed (costs fps)",
-      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    // P53 (2026-11-17): a level's textures are decoded and uploaded during its load, behind the black screen
-    // (DKR_LOAD_PREWARM, default on), not on the first three frames after it, where the race start's iris opened in
-    // jerks. The usual races do it; this row races one lap the old way, to compare the results' race start columns.
-    { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
+    // The uncapped rows (PR #556, DKR_FPS_PIN 60) and the old-way texture prewarm row went after #570: the New 3DS is
+    // GPU-bound at 87-129 fps uncapped, and the prewarm won (race start 50 ms over vs 117).
     // T1, gate G-T (2026-11-14, "Fix track GPU maths and tunnel dropouts", PR #526): the vanishing tunnel walls (#234,
     // #306). libctru hands the GSP the frame's memory fills (colour + depth) and its first command lists together, so a
     // fill can still be clearing the depth buffer while the GPU draws (gfx_c3d.c fill_wait). DKR_FILL_WAIT=1 lets the
@@ -342,68 +308,48 @@ static const BenchSwitch sSwitchesNative[] = {
 #define sSwitchesNew3ds sSwitchesNative
 /*
  * Old 3DS (P53, 2026-11-17): the native frame stream (R4 and the four switches it needs) is the Old 3DS default, so
- * its rows went; one 1-lap row turns all five off to compare. The New 3DS keeps them (sSwitchesNative).
+ * its rows went (the 1-lap row with all five off went after run 45: the stream is worth ~1.6 ms of game core). The
+ * New 3DS keeps them (sSwitchesNative).
  */
 static const BenchSwitch sSwitchesOld3ds[] = {
-    // P56 K4 (2026-11-19): every texture memo hit checked against the full lookup (DKR_TEX_MEMO_CHECK, gfx_rdp.c
-    // tex_memo_check_answer). One lap, a check: the log's "texture memo check: N hits checked, M differ" lines should
-    // say 0 differ (a "first difference" line names the tile). The PC's CI runs the same check with the memo forced
-    // on; this row is the Old 3DS's own textures and timing. Drop it after one clean bench.
-    { "texture memo check (TEX_MEMO_CHECK 1, check, 1 lap)", { "DKR_TEX_MEMO_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // Run 45 (02b948b, 2026-11-20): the memo check, the PMU checks (the counters work), the old walk, the frame
+    // history the old way, the sound players and bottom screen thread on the game core and the atlas were settled or
+    // neutral, so their rows went. NATIVE_REMOTE 0 won (renderer core -7 ms, game core +3) and is the default now.
     { "native object animation and shading (N1)", { "DKR_NATIVE_ANIM", NULL, NULL }, 0, 1, 0, 0 },
     // P54 2b-D (DKR_NATIVE_PARTICLES): each sprite particle as two records instead of about ten (same frames on the PC,
     // ~10% less walk time for the "effects" kind). Read the game core ms and the effects kind's walk time; watch the
     // smoke, dust and sparks.
     { "sprite particles as native records (P54 2b-D)", { "DKR_NATIVE_PARTICLES", NULL, NULL }, 0, 1, 0, 0 },
-    { "native switches off (old walk, 1 lap)",
-      { "DKR_NATIVE_FRAME", "DKR_NATIVE_RECORDS", "DKR_NATIVE_LEFTOVERS", "DKR_NATIVE_CAMERA", "DKR_NATIVE_TEXHANDLE" },
-      1, 0, 1, 1 },
     { "textures decoded at the first frame (old way, 1 lap)", { "DKR_LOAD_PREWARM", NULL, NULL }, 1, 0, 1, 1 },
-    // The uncapped rows (PR #556, see sSwitchesNative); its "all native switches" row is the usual one here now.
+    // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
+    // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
     // within 16.7 ms, the renderer's core the longest), so the plain uncapped row went: every race's ceiling columns
     // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
       { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
-    // The two profiler check rows (DKR_PROF_SHARED_CORE) went after benches #553 and #560 confirmed the split.
     // P54 (2026-11-17, proposals/3ds-old3ds-core-balance-plan.md): the core that limits the Old 3DS is the system core
     // (the renderer's backend, 28-32 ms a frame of 33.4 in #560), not the game's (~10-14 ms spare a frame). Each row is
     // raced alone for the track's own laps; read the results' renderer_core_ms and game_core_ms (and the flashes
     // column), and the "backend records" part of each autorun_cores.txt line (DKR_BACKEND_MIX).
-    // Step 1: the frame history (test builds only, ~4 ms a frame) now samples on the game's core; the old way.
-    { "frame history on the renderer core (old way)", { "DKR_HISTORY_CORE", NULL, NULL }, 1, 0, 1, 0 },
-    // Step 1b: two moves onto the system core from when the game's core was the limit (v28, v31), raced back: the
-    // native draws' vertex maths (DKR_NATIVE_REMOTE, default 3) all on the walk, or only opaque draws' on the backend;
-    // the N64 sound players (~0.5 ms) on the game's core; then both.
-    { "native vertex maths all on the walk (NATIVE_REMOTE 0)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 0, 1, 0 },
-    { "only opaque native draws' maths on the backend (NATIVE_REMOTE 1)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 3, 1, 1,
-      0 },
-    { "sound players on the game core (PLAYERS_SYSCORE 0)", { "DKR_PLAYERS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
-    { "native maths on the walk + sound players on the game core",
-      { "DKR_NATIVE_REMOTE", "DKR_PLAYERS_SYSCORE", NULL }, -1, 0, 1, 0 },
-    // Step 3: fewer GPU settings written per draw, never raced on an Old 3DS in today's renderer. Watch for flicker or
-    // dropouts (an AI racer's head, far cliffs, the intro logo) as well as the times.
+    // Step 1b: the native draws' vertex maths on the backend (DKR_NATIVE_REMOTE 3, the Old 3DS default from v28 to
+    // run 45) against today's default 0, all on the walk.
+    { "native vertex maths on the backend (NATIVE_REMOTE 3, old default)", { "DKR_NATIVE_REMOTE", NULL, NULL }, 0, 3,
+      1, 0 },
+    // Step 3: fewer GPU settings written per draw. Small wins in run 45 (-0.6 / -1.0 ms renderer core, no more
+    // flashes); they stay off until the owner has seen no flicker or dropouts (an AI racer's head, far cliffs, the
+    // intro logo).
     { "GPU settings: only the changes set (STATE_CACHE 2)", { "DKR_STATE_CACHE", NULL, NULL }, 1, 2, 1, 0 },
     { "GPU settings written twice only where known (REWRITE 0)", { "DKR_REWRITE", NULL, NULL }, 1, 0, 1, 0 },
-    // Step 4: the bottom screen's thread on the game's core again, now that it has the spare time (v30 moved it).
-    { "bottom screen thread on the game core (BS_SYSCORE 0)", { "DKR_BS_SYSCORE", NULL, NULL }, 1, 0, 1, 0 },
-    // 2b-C: the texture atlas (fewer draws: most batch breaks are texture changes) lost ~2 ms on each core in run 15
-    // (v35), when both were full; the game's core has room now.
-    { "texture atlas (TEX_ATLAS 1)", { "DKR_TEX_ATLAS", NULL, NULL }, 0, 1, 1, 0 },
-    // P56 K2 (2026-11-19, proposals/3ds-kohjoh-lessons-plan.md B1): can the game read the ARM11's own counters on a
-    // retail Old 3DS? One lap each, measurements (left out of the all-together race). Read the results' pmu columns:
-    // game_mcycles should be near 268 x the frame time in s (about 8.9 Mcycles a 33 ms frame), the fetch stall a
-    // plausible per cent, pmn1 nonzero; zeros, or "CPU counters: not available" in the log, mean the feature goes.
-    // PMU 1: PMN1 = instruction cache misses; PMU 2: data cache read misses. Both rows go after the first bench; if
-    // they worked, DKR_PMU becomes 1 by default in debug builds so every row carries the numbers.
-    { "CPU counters readable, I-cache misses (PMU 1, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
-    { "CPU counters readable, D-cache misses (PMU 2, check, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
     // Step 2 (DKR_WALK_VERTS, gfx_c3d.c "The walk writes the vertices"): the walk (game core) tests, converts and cuts
-    // each draw's vertices, which the renderer's core did. Expect renderer_core_ms 5-8 ms less and game_core_ms as much
-    // more (must stay under ~28), flashes 0. Then one lap with the self-check: the renderer's core also makes each
-    // draw's vertices the old way and compares; the log must say "walk verts: N draws checked, 0 differ" (its fps is
-    // low: it does both).
-    { "walk writes the GPU vertices (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
+    // each draw's vertices, which the renderer's core did. In run 45 it saved only 0.4 ms: with NATIVE_REMOTE 3 the
+    // native draws went to the backend by another road and the walk made about a third of the draws
+    // (proposals/3ds-walk-verts-review.md). With NATIVE_REMOTE 0 the default now, every draw passes the walk: this row
+    // is walk-verts on top of it. Keep it only if the renderer core falls by more than the game core (now the limit)
+    // rises; the results' wv columns say how many draws a frame the walk made, left and left out for room. Then one
+    // lap with the self-check: the renderer's core also makes each draw's vertices the old way and compares; the log
+    // must say "walk verts: N draws checked, 0 differ" (its fps is low: it does both).
+    { "walk writes the GPU vertices, native maths on the walk (P54)", { "DKR_WALK_VERTS", NULL, NULL }, 0, 1, 1, 0 },
     { "walk writes the GPU vertices, self-check (1 lap, log: 0 differ)",
       { "DKR_WALK_VERTS", "DKR_WALK_VERTS_CHECK", NULL }, 0, 1, 1, 1 },
     // T1, gate G-T (2026-11-14, PR #526): the vanishing tunnel walls (#234, #306). The GSP can run the frame's depth
@@ -662,6 +608,7 @@ static const char *sOutcome;
 static s32 sFinished, sProblems;
 static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
+static unsigned int sWalkStart[4]; // gfxb_walk_coverage at the race start (pmu_cells)
 static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart, sWakesStart;
 
 static s32 str_equal(const char *a, const char *b) {
@@ -1503,6 +1450,8 @@ static s32 core_summary(char *out, s32 size) {
  * (DKR_PMU, profile.h ProfCpuStats; the renderer's "-" when it shares the game's core, kind icache or dcache);
  * ,shown,<pictures replaced before they reached the screen in the race>,<longest gap between two shown, ms>;
  * ,sndcb,<the DSP frame callback, ms a game frame>; ,clk,<plat_time_ns calls a game frame>. "-" where not measured.
+ * Then (2026-11-20, DKR_WALK_VERTS coverage) ,wv,<draws the walk made>,<draws it left to the backend>,<left out for
+ * room>, each a walked frame over the race ("-" when the walk made no frames: the switch off, or not a 3DS).
  */
 static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
     const ProfCpuStats *c = stats != NULL ? &stats->cpu : NULL;
@@ -1531,9 +1480,20 @@ static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
         at += plat_snprintf(out + at, size - at, ",sndcb,-");
     }
     if (c != NULL && frames > 0) {
-        at += plat_snprintf(out + at, size - at, ",clk,%.0f\n", (double) c->clockReads / frames);
+        at += plat_snprintf(out + at, size - at, ",clk,%.0f", (double) c->clockReads / frames);
     } else {
-        plat_snprintf(out + at, size - at, ",clk,-\n");
+        at += plat_snprintf(out + at, size - at, ",clk,-");
+    }
+    {
+        unsigned int now[4], walked;
+        gfxb_walk_coverage(now);
+        walked = now[0] - sWalkStart[0];
+        if (stats != NULL && walked > 0) {
+            plat_snprintf(out + at, size - at, ",wv,%.1f,%.1f,%.2f\n", (double) (now[1] - sWalkStart[1]) / walked,
+                          (double) (now[2] - sWalkStart[2]) / walked, (double) (now[3] - sWalkStart[3]) / walked);
+        } else {
+            plat_snprintf(out + at, size - at, ",wv,-,-,-\n");
+        }
     }
 }
 
@@ -1558,7 +1518,7 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit,start_mark,start_excess_ms,"
                   "start_worst_ms,pmu_mark,game_mcycles,game_ifstall_pct,game_pmn1_k,render_mcycles,render_ifstall_pct,"
                   "render_pmn1_k,pmn1_kind,shown_mark,replaced,longest_shown_gap_ms,sndcb_mark,sound_callback_ms,"
-                  "clk_mark,clock_reads\n",
+                  "clk_mark,clock_reads,wv_mark,walk_draws,walk_left,walk_noroom\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -3570,6 +3530,7 @@ void port_autorun_frame(s32 updateRate) {
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
                 sAudioDropsStart = gPlatCounters[PLAT_COUNTER_AUDIO_DROPPED];
                 sFlashesStart = gPlatCounters[PLAT_COUNTER_FLASHES];
+                gfxb_walk_coverage(sWalkStart);
                 sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
                 sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
                 {

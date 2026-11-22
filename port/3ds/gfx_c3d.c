@@ -6523,6 +6523,13 @@ static void walk_frame_consts(void *payload) {
     }
 }
 
+void gfxb_walk_coverage(unsigned int counts[4]) {
+    counts[0] = sWalkFrames;
+    counts[1] = sWalkDrawn;
+    counts[2] = sWalkLeft;
+    counts[3] = sWalkNoRoom;
+}
+
 /* For the PC's backend replay (port/host/c3d_replay, REPLAY_WALK): draws the walk made, and the self-check's counts. */
 void gfxb_walk_stats(unsigned int *drawn, unsigned int *checked, unsigned int *differ) {
     *drawn = sWalkDrawn;
