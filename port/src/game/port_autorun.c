@@ -328,11 +328,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // PMU 2: D-cache read misses.
     { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
-    // P61 M3: the karts' vertex maths on the GPU (NATIVE_GPU 1: game core -3.7 ms in run 48, but the backend's
-    // "model/mesh" 4.9-12.7 ms a frame), raced again only for the backend's model draws split into their parts:
-    // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
-    // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
-    { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
+    // P61 M3 (backend model draws split into their parts: "backend model/mesh draws: N a frame, drain, state, settings
+    // twice, uniforms, copies, indices, draw" beside "backend records") is read from the full "karts' vertex maths on
+    // the GPU" row further down (test build 2026-11-22: its own 1-lap row went, the split runs on every timed frame).
     // P60 B (DKR_VERTEX_ASM, gfx_vertex_asm.h): the native draws' vertex passes (transform, colour and fog, screen edges)
     // as one hand-scheduled VFP loop instead of three passes over memory; bit-identical (qemu-arm test, and the check
     // row). Read the game core ms (estimate -0.7 to -1.2 ms). The check row's log must say "vertex asm: N vertices
@@ -398,8 +396,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // more draws). PC frames: rounding only. The last row puts the track, karts and objects all on the GPU.
     { "karts' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 0 },
     { "karts' and objects' vertex maths on the GPU", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 2, 1, 0 },
-    { "track, karts and objects on the GPU, depth fill finished before drawing",
-      { "DKR_NATIVE_GPU", "DKR_NATIVE_TRACK", "DKR_DEPTH_FILL", "DKR_FILL_WAIT" }, 0, 2, 1, 0 },
+    // (The track-and-all-on-the-GPU row went in run 48; P59 E. These two stay as the raw register words rows' base.)
     // P55 S3 / P60 F (2026-11-22, gpu_raw.inc): each draw's GPU settings as one block of register words made once per
     // draw state, its uniforms and the draw command as words too, instead of citro3d's setters, settings writer and
     // draw call. The backend replay finds the same GPU registers at every draw. Read renderer_core_ms (the limit with
