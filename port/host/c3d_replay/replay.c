@@ -44,6 +44,9 @@ extern void gfxb_walk_frame_start(void) __attribute__((weak));
 extern int gfxb_walk_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                                   const unsigned short *indices, int numTriangles) __attribute__((weak));
 extern void gfxb_walk_stats(unsigned int *drawn, unsigned int *checked, unsigned int *differ) __attribute__((weak));
+/* DKR_RAW_REGS (P55 S3): the raw path's counts, with DKR_RAW_REGS_CHECK's. Weak: older backends have none. */
+extern void gfxb_raw_stats(unsigned int *draws, unsigned int *hits, unsigned int *checked, unsigned int *differ)
+    __attribute__((weak));
 static int sWalk; // REPLAY_WALK=1 and the backend has the walk's side
 
 /******** GPU register model ********/
@@ -629,6 +632,11 @@ done:
         unsigned int drawn, checked, differ;
         gfxb_walk_stats(&drawn, &checked, &differ);
         printf("walk_drawn %u walk_checked %u walk_differ %u ", drawn, checked, differ);
+    }
+    if (gfxb_raw_stats != NULL) {
+        unsigned int draws, hits, checked, differ;
+        gfxb_raw_stats(&draws, &hits, &checked, &differ);
+        printf("raw_draws %u raw_hits %u raw_checked %u raw_differ %u ", draws, hits, checked, differ);
     }
     printf("frames %d draws %llu words %llu words/draw %.2f jobs %llu\n", keptFrames, sDraws, sWordsTotal,
            sDraws ? (double) sWordsTotal / (double) sDraws : 0.0, sJobs);

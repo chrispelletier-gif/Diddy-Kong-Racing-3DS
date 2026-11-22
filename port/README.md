@@ -227,6 +227,9 @@ controls) work there, as do these renderer switches:
 - `DKR_NO_SCISSOR=1`
 - `DKR_NO_FOG=1`
 - `DKR_VERTEX_FOG=1` (the old per vertex fog, for comparison)
+- `DKR_FOG_SKIP=1` (roadmap P60 C: the walk works out a fogged vertex's fog factor, a divide each, only where the
+  draw's combiner reads the shade alpha; the GPU fogs per pixel, so frames are the same. Off with `DKR_VERTEX_FOG=1`.
+  Logs `fog skip: N fog factors left out` every 600 frames)
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
@@ -418,6 +421,15 @@ next record's texture entry. Neither W1 nor W2 changes a picture. `DKR_NMAT_ONCE
 skipped material the old way too and logs `material once check: N skipped, M would have dropped` (a wrong one counts in
 the results' `checks_wrong` and is dropped as before); `=2` also frees, every 30th frame, a texture of a material
 already checked in that frame, as an eviction mid-frame would, so the check has something to catch.
+
+What the data side costs (roadmap P60 A, 2026-11-22). `DKR_PMU=3` counts, in the stall column, the cycles the core
+stalled on a data hazard (a load's or the VFP's result not ready yet) and, in place of the misses, the instructions
+executed, so the summary line gives the cycles per instruction; `DKR_PMU=4` the cycles the load/store unit was full
+and the data cache write misses. The results' `pmn1_kind` cell says which (`datastall`, `lsufull`); the switch bench
+table marks those stalls `D` and `L`. `DKR_VFP_RUNFAST=1` (default 0) runs the game thread, the walk and the backend
+with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps off), which keeps denormals and NaNs
+off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
+FPSCR ...`).
 
 ### Live monitor
 

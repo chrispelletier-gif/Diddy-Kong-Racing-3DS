@@ -83,6 +83,7 @@ static struct {
     u32 combineW0, combineW1;
     GfxCombiner combiner;
     u8 combinerTextures[3]; // Indexed by the number of cycles: bit 0 if the combiner reads texel 0, bit 1 texel 1
+    u8 combinerShadeAlpha;  // P60 C: the combiner reads the shade alpha (combiner_shade_alpha)
     u8 prim[4], env[4], fogColor[4], blendColor[4];
     u8 primLodFrac;
     u32 fillColor;
@@ -1705,6 +1706,26 @@ static inline u8 equation_texel_use(const GfxCCEquation *eq) {
     return sCCTexelUse[eq->a] | sCCTexelUse[eq->b] | sCCTexelUse[eq->c] | sCCTexelUse[eq->d];
 }
 
+/*
+ * P60 C: whether a combiner reads the shade alpha, in either cycle (both looked at, whatever the cycle count: the safe
+ * answer). With G_FOG set the RSP puts the fog factor there, but the backends fog per pixel from depth by default
+ * (gfx_c3d.c FOG_PIXEL, gfx_soft.c), so a fogged vertex's fog factor is only read where the combiner reads it as shade
+ * alpha (or with DKR_VERTEX_FOG). The alpha equation's result (COMBINED_ALPHA, the alpha test, blending) is covered by
+ * looking at the alpha equations themselves.
+ */
+static u8 combiner_shade_alpha(const GfxCombiner *cc) {
+    s32 k;
+    for (k = 0; k < 2; k++) {
+        const GfxCCEquation *c = &cc->rgb[k], *a = &cc->alpha[k];
+        if (c->a == GFX_CC_SHADE_ALPHA || c->b == GFX_CC_SHADE_ALPHA || c->c == GFX_CC_SHADE_ALPHA ||
+            c->d == GFX_CC_SHADE_ALPHA || a->a == GFX_CC_SHADE || a->b == GFX_CC_SHADE || a->c == GFX_CC_SHADE ||
+            a->d == GFX_CC_SHADE) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Not HOT: it runs for a G_SETCOMBINE, a third as often as a draw. */
 static NOINLINE HOT void decode_combiner(void) {
     u32 w0 = g.combineW0, w1 = g.combineW1;
@@ -1734,6 +1755,7 @@ static NOINLINE HOT void decode_combiner(void) {
     g.combinerTextures[1] = uses;
     uses |= equation_texel_use(&cc->rgb[1]) | equation_texel_use(&cc->alpha[1]);
     g.combinerTextures[2] = uses;
+    g.combinerShadeAlpha = combiner_shade_alpha(cc);
 }
 
 /* The scissor's right edge for rectangles: exclusive, except in fill and copy modes, where the RDP also draws the
@@ -2496,6 +2518,29 @@ static void transform_vertices_vfp_pld(const Vertex *src, s32 count, RspVertex *
 #endif
 
 static s32 sVfpVectors; // DKR_VFP_VECTORS: transform vertices with the VFP's short vectors (P27)
+static s32 sVertexAsm;  // DKR_VERTEX_ASM (P60 B): native_record's vertex passes as one assembly loop (gfx_vertex_asm.h)
+static s32 sVertexAsmCheck; // DKR_VERTEX_ASM_CHECK: the C passes run too and are compared (vertex_asm_check)
+/*
+ * P60 C (proposals/3ds-native-arm-pica-candidates.md): DKR_FOG_SKIP=1 (default 0) works out a fogged vertex's fog
+ * factor (fog_factor, a divide each) only where it is read: the draw's combiner reads the shade alpha
+ * (combiner_shade_alpha), or the backend fogs per vertex (DKR_VERTEX_FOG). Elsewhere the vertex keeps its own alpha,
+ * which nothing reads, so frames are identical (CI's fog skip check races the host both ways). Vertices loaded into
+ * the RSP's slots under a combiner that doesn't read it get their factor late if a draw that does reads them
+ * (fog_late_vertices). sFogSkipped counts the factors left out, logged every 600 frames while the switch is on.
+ */
+static s32 sFogSkip;
+static u32 sFogSkipped, sFogWorked;
+
+/* P60 C: whether fogged vertices drawn with a combiner (shadeAlpha: combiner_shade_alpha's answer) need their fog
+ * factor; counts n vertices one way or the other. */
+static inline s32 fog_needed(s32 shadeAlpha, s32 n) {
+    if (!sFogSkip || shadeAlpha) {
+        sFogWorked += (u32) n;
+        return TRUE;
+    }
+    sFogSkipped += (u32) n;
+    return FALSE;
+}
 static s32 sWalkLean;   // DKR_WALK_LEAN: the walk's shortcuts (see read_switches)
 static s32 sBoxCheck;   // DKR_BOX_CHECK (PC), see box_check
 static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and flat records drawn without the vertex slots
@@ -2553,6 +2598,14 @@ static COLD void read_switches_now(void) {
     // On by default on an Old 3DS only: it cut the renderer's time per triangle there and showed nothing on a New
     // 3DS. Bit-identical to the C loop.
     sVfpVectors = plat_switch("DKR_VFP_VECTORS", plat_old_3ds()) != 0;
+    // P60 B: off by default until the Old 3DS bench. Only with the VFP's short vectors: its loop is their transform's
+    // (the C transform, built with -ffast-math, rounds differently).
+    sVertexAsm = plat_switch("DKR_VERTEX_ASM", 0) != 0 && sVfpVectors;
+#if PLAT_DEBUG_TOOLS
+    sVertexAsmCheck = plat_switch("DKR_VERTEX_ASM_CHECK", 0); // 2: broken on purpose (rule K6), see vertex_asm_check
+#endif
+    // P60 C: off where the backend reads the vertex fog (its DKR_VERTEX_FOG, read the same way)
+    sFogSkip = plat_switch("DKR_FOG_SKIP", 0) != 0 && plat_switch("DKR_VERTEX_FOG", 0) == 0;
     // 8 frames on an Old 3DS (the best of its switches together with the system-call flush).
     sTexRehash = plat_switch("DKR_TEX_REHASH", plat_old_3ds() ? 8 : 1);
     if (sTexRehash < 1) {
@@ -2747,8 +2800,14 @@ static inline __attribute__((always_inline)) s32 load_vertices_core(RspVertex *a
 static NOINLINE HOT void load_vertices_now(const Vertex *src, s32 count, s32 dest, float (*m)[4], s32 fog,
                                            s32 billboard) {
     u32 anyFlat;
-    s32 n = load_vertices_core(g.verts, &g.verts[0], src, count, dest, m, fog, billboard, &anyFlat);
+    s32 n;
     u64 loaded;
+    // P60 C (DKR_FOG_SKIP): left without a factor, as if loaded with fog off, unless this combiner reads it; a draw
+    // that reads it works it out late (fog_late_vertices)
+    if (fog && !fog_needed(g.combinerShadeAlpha, count)) {
+        fog = FALSE;
+    }
+    n = load_vertices_core(g.verts, &g.verts[0], src, count, dest, m, fog, billboard, &anyFlat);
     if (n <= 0) {
         return;
     }
@@ -4292,6 +4351,10 @@ static inline __attribute__((always_inline)) void draw_triangles_impl(const RspV
         sTriStateValid = TRUE;
     }
     state = sTriState;
+    if (fog && UNLIKELY(sFogSkip) && !g.combinerShadeAlpha) {
+        // P60 C (DKR_FOG_SKIP): nothing reads the shade alpha: the vertices keep their own, no late factors
+        fog = FALSE;
+    }
     if (UNLIKELY(slots && fog && g.vertsWithoutFog)) {
         fog_late_vertices();
     }
@@ -4938,6 +5001,9 @@ static NOINLINE HOT_WALK s32 native_mesh(const Gfx *dl, s32 remaining) {
     }
 
     // The loads, as load_vertices_now makes them (only what draw_dkr_triangles then reads).
+    if (fog && !fog_needed(g.combinerShadeAlpha, total)) {
+        fog = FALSE; // P60 C (DKR_FOG_SKIP): the combiner doesn't read the factor; the vertices keep their own alpha
+    }
     for (i = 0; i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
@@ -5115,6 +5181,7 @@ typedef struct NMat {
     u16 texEntry[2];
     u8 texGen[2];
     u8 valid, fog;
+    u8 shadeAlpha; // P60 C: its combiner reads the shade alpha (combiner_shade_alpha)
     u8 axReady; // axes[] hold the texture axes for its tiles and textures
     TexAxis axes[4]; // u0, v0, u1, v1
     u32 texOkFrame, texOkEpoch; // P61 W2: the frame and sTexFreeEpoch its textures were last found usable at
@@ -5180,6 +5247,7 @@ static COLD void nmat_capture(u32 id) {
     m->tiles[0] = g.tiles[0];
     m->tiles[1] = g.tiles[1];
     m->fog = (g.geometryMode & G_FOG) != 0;
+    m->shadeAlpha = combiner_shade_alpha(&m->state.combiner);
     m->valid = TRUE;
     m->axReady = FALSE;
     m->texOkFrame = ~0u; // P61 W2: its textures are checked at its next record
@@ -5961,7 +6029,8 @@ static NOINLINE HOT void native_remote_send(const NMat *mat, const GfxDrawState 
     np->numLoads = (u8) numLoads;
     np->frontCull = frontCull;
     np->kind = (u8) sDrawKind;
-    np->flags = (mat->fog ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
+    // P60 C (DKR_FOG_SKIP): no fog factors where the combiner doesn't read them (done: the walk's vertices, finished)
+    np->flags = (mat->fog && (done || fog_needed(mat->shadeAlpha, total)) ? NP_FOG : 0) | (sLightOn ? NP_LIGHT : 0) | (sCpuCull ? NP_CULL : 0) |
                 NP_REJECT | NP_SCREEN | NP_FAST_OUTCODE | (!state->textures[1] && !sWalkLean ? NP_ZERO_TEX1 : 0) |
                 (tex0 && !ax[0].divide && !ax[1].divide ? NP_AXIS_FAST : 0) | (ordered ? NP_ORDERED : 0) |
                 (done ? NP_DONE : 0) | (share ? NP_SHARED : 0);
@@ -6108,6 +6177,106 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
     return TRUE;
 }
 
+#define VERTEX_ASM_SECTION HOT
+#include "gfx_vertex_asm.h"
+#ifdef HAVE_VERTEX_ASM
+_Static_assert(sizeof(Vertex) == VERTEX_ASM_SRC_SIZE && sizeof(RspVertex) == VERTEX_ASM_DST_SIZE &&
+                   __builtin_offsetof(RspVertex, rgba) == VERTEX_ASM_DST_RGBA,
+               "gfx_vertex_asm's layout");
+
+static inline u32 f32_bits(float f) {
+    u32 bits;
+    __builtin_memcpy(&bits, &f, 4);
+    return bits;
+}
+
+static RspVertex sVaVerts[MAX_VERTICES];
+static float sVaSx[MAX_VERTICES], sVaSy[MAX_VERTICES];
+static u8 sVaOut[MAX_VERTICES];
+static u32 sVaChecked, sVaDiffer, sVaShown;
+static s32 sVaLogFrame;
+
+/*
+ * DKR_VERTEX_ASM_CHECK (test builds): a load gfx_vertex_asm made is made again by native_record's C passes (the same
+ * lines: transform_vertices_vfp, the colour and fog loop, the edges loop) into the check's own arrays, and every word
+ * compared (vertex_asm_compare, which port/tools/vertex_asm_test.c also uses). Logs "vertex asm: N vertices checked, M
+ * words differ" every 300 frames, and the first few loads that differ. DKR_VERTEX_ASM_CHECK=2 breaks it on purpose (rule
+ * K6): the C leaves the fog out, so every fogged load must be reported.
+ */
+static COLD void vertex_asm_check(const Vertex *src, s32 c, s32 dest, const VertexAsmArgs *a, u32 all) {
+    s32 i;
+    int first = -1;
+    u32 ref = 0x1F, differ;
+    transform_vertices_vfp(src, c, sVaVerts, a->m);
+    for (i = 0; i < c; i++) {
+        u32 rgba;
+        __builtin_memcpy(&rgba, &src[i].r, 4);
+        if (a->fog && sVertexAsmCheck != 2) {
+            rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&sVaVerts[i], a->fogMul, a->fogOffset) << 24);
+        }
+        sVaVerts[i].rgba = rgba;
+    }
+    for (i = 0; i < c; i++) {
+        const RspVertex *v = &sVaVerts[i];
+        float w = v->w, x = v->x * a->scaleX + w * a->transX, y = v->y * a->scaleY + w * a->transY;
+        u32 oc = float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) | (float_sign(y + w) << 3) |
+                 ((float_sign(1e-3f - w) ^ 1u) << 4);
+        sVaSx[i] = x;
+        sVaSy[i] = y;
+        sVaOut[i] = (u8) oc;
+        ref &= oc;
+    }
+    differ = vertex_asm_compare(&sNativeVerts[dest], sVaVerts, a->sx, sVaSx, a->sy, sVaSy, a->out, sVaOut, c, &first) +
+             (ref != all);
+    sVaChecked += (u32) c;
+    sVaDiffer += differ;
+    if (differ != 0 && sVaShown < 5) {
+        sVaShown++;
+        i = first >= 0 ? first : 0;
+        plat_log("vertex asm: a load of %d (fog %u) differs from vertex %d: asm %08lX %08lX %08lX %08lX %08lX "
+                 "%08lX %08lX %02X, C %08lX %08lX %08lX %08lX %08lX %08lX %08lX %02X; edges ANDed %02lX / %02lX",
+                 (int) c, a->fog, (int) i, (unsigned long) f32_bits(sNativeVerts[dest + i].x),
+                 (unsigned long) f32_bits(sNativeVerts[dest + i].y), (unsigned long) f32_bits(sNativeVerts[dest + i].z),
+                 (unsigned long) f32_bits(sNativeVerts[dest + i].w), (unsigned long) sNativeVerts[dest + i].rgba,
+                 (unsigned long) f32_bits(a->sx[i]), (unsigned long) f32_bits(a->sy[i]), a->out[i],
+                 (unsigned long) f32_bits(sVaVerts[i].x), (unsigned long) f32_bits(sVaVerts[i].y),
+                 (unsigned long) f32_bits(sVaVerts[i].z), (unsigned long) f32_bits(sVaVerts[i].w),
+                 (unsigned long) sVaVerts[i].rgba, (unsigned long) f32_bits(sVaSx[i]), (unsigned long) f32_bits(sVaSy[i]),
+                 sVaOut[i], (unsigned long) all, (unsigned long) ref);
+    }
+    if (sFrameCount != sVaLogFrame && sFrameCount % 300 == 0) {
+        sVaLogFrame = sFrameCount;
+        plat_log("vertex asm: %lu vertices checked, %lu words differ", (unsigned long) sVaChecked,
+                 (unsigned long) sVaDiffer);
+    }
+}
+
+/* DKR_VERTEX_ASM (P60 B): one load's vertices (transform, colour and fog), screen x and y and edges, as native_record's
+ * passes make them, in one assembly loop (gfx_vertex_asm.h). Returns the load's edges ANDed. */
+static NOINLINE HOT u32 native_vertices_asm(const Vertex *src, s32 c, s32 dest, float (*m)[4], const Viewport *vp, u32 fog,
+                                      float fogMul, float fogOffset) {
+    VertexAsmArgs a;
+    u32 all;
+    if (c <= 0) {
+        return 0x1F;
+    }
+    a.m = m;
+    a.sx = &sNativeSx[dest];
+    a.sy = &sNativeSy[dest];
+    a.out = &sNativeOut[dest];
+    a.scaleX = vp->scaleX, a.transX = vp->transX, a.scaleY = vp->scaleY, a.transY = vp->transY;
+    a.fogMul = fogMul, a.fogOffset = fogOffset;
+    a.tiny = 0.0001f; // fog_factor's
+    a.edge = 1e-3f;   // vertex_outcode's
+    a.fog = fog;
+    all = gfx_vertex_asm(src, c, &sNativeVerts[dest], &a);
+    if (UNLIKELY(sVertexAsmCheck)) {
+        vertex_asm_check(src, c, dest, &a, all);
+    }
+    return all;
+}
+#endif
+
 static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id) {
     struct {
         const Vertex *src;
@@ -6115,7 +6284,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     } loads[2];
     NMat *mat = &sNMats[id & (NMAT_MAX - 1)];
     s32 numLoads = 0, numVerts, start, textured, count, total, i, k, tex0, tex1, zeroTex1, cur = g.curMatrix, dynamic;
-    s32 direct, directTris = 0, *vcount = NULL, axisFast;
+    s32 direct, directTris = 0, *vcount = NULL, axisFast, recFog;
     float su0 = 0.0f, ou0 = 0.0f, sv0 = 0.0f, ov0 = 0.0f;
     GfxVertex *vbase;
     OpaqueBucket *bucket = NULL;
@@ -6129,6 +6298,8 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     u8 batchedKey = 0xFF, frontCull = g.vpScale[0] < 0.0f ? 2 : 1;
     u32 generation, stamp;
     float keepSign, fogMul = g.fogMul, fogOffset = g.fogOffset;
+    s32 asmDone = FALSE; // DKR_VERTEX_ASM made the vertices, screen x and y and edges (asmAll: the edges ANDed)
+    u32 asmAll = 0x1F;
 
     if (remaining < 2) {
         return 0;
@@ -6324,7 +6495,19 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             return 2;
         }
     }
-    for (i = 0; i < numLoads; i++) {
+    viewport_init(&vp);
+    recFog = mat->fog && fog_needed(mat->shadeAlpha, total); // P60 C (DKR_FOG_SKIP)
+#ifdef HAVE_VERTEX_ASM
+    if (sVertexAsm && !UNLIKELY(sLightOn)) {
+        // DKR_VERTEX_ASM (P60 B): the loads' passes below (transform, colour and fog, screen edges) in one.
+        for (i = 0; i < numLoads; i++) {
+            asmAll &= native_vertices_asm(loads[i].src, loads[i].count, loads[i].dest, g.matrices[loads[i].matrix],
+                                          &vp, recFog, fogMul, fogOffset);
+        }
+        asmDone = TRUE;
+    }
+#endif
+    for (i = 0; !asmDone && i < numLoads; i++) {
         RspVertex *verts = &sNativeVerts[loads[i].dest];
         const Vertex *src = loads[i].src;
         s32 c = loads[i].count;
@@ -6350,7 +6533,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
                 u8 *cc = (u8 *) &rgba;
                 cc[0] = cc[1] = cc[2] = gfx_light_shade(src[k].r, src[k].g, src[k].b, sLight);
             }
-            if (mat->fog) {
+            if (recFog) {
                 rgba = (rgba & 0x00FFFFFFu) | ((u32) fog_factor(&verts[k], fogMul, fogOffset) << 24);
             }
             verts[k].rgba = rgba;
@@ -6364,12 +6547,11 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     sNDrawStats[0]++;
 
     walk_step(WS_EDGES);
-    viewport_init(&vp);
     {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
         // again (the same sums, so the same values). A batch wholly past one edge is done here.
-        u32 all = 0x1F;
-        for (i = 0; i < total; i++) {
+        u32 all = asmAll;
+        for (i = 0; !asmDone && i < total; i++) {
             const RspVertex *v = &sNativeVerts[i];
             float w = v->w, x = v->x * vp.scaleX + w * vp.transX, y = v->y * vp.scaleY + w * vp.transY;
             u32 oc = float_sign(w - x) | (float_sign(x + w) << 1) | (float_sign(w - y) << 2) |
@@ -8864,6 +9046,14 @@ static COLD void end_reference_frame(void) {
 }
 #endif
 
+/* P60 C (DKR_FOG_SKIP): the fogged vertices whose fog factor was left out and worked out, every 600 frames while the
+ * switch is on (CI's fog skip check looks for a line with some left out). */
+static COLD void fog_skip_log_600(void) {
+    plat_log("fog skip: %u fog factors left out, %u worked out in 600 frames", (unsigned) sFogSkipped,
+             (unsigned) sFogWorked);
+    sFogSkipped = sFogWorked = 0;
+}
+
 /* The GPU vertex maths' meshes, every 600 frames (port_gfx_run_frame). */
 static COLD void mesh_log_600(void) {
     plat_log("meshes: %u KB, %u draws, %u made, %u not recorded, %u data changes", (unsigned) (sMeshBytes / 1024),
@@ -8883,7 +9073,11 @@ void port_gfx_run_task(void *taskPtr) {
 NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     int snapshot;
     port_gfx_init();
+    plat_vfp_frame("walk"); // P60 A2: logs the VFP mode once; DKR_VFP_RUNFAST
     sFrameCount++;
+    if (UNLIKELY(sFogSkip) && sFrameCount % 600 == 0) {
+        fog_skip_log_600();
+    }
     kind_frame_start(sFrameCount);
 #ifdef PORT_GFX_REFERENCE
     sRefActive = (sDiffEvery > 0 && sFrameCount % sDiffEvery == 0);
