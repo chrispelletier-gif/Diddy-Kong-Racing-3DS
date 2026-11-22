@@ -42,6 +42,24 @@ extern "C" {
 #else
 #define PLAT_HOT
 #endif
+/*
+ * P57 D: the two renderer cores have an instruction cache each, so the game core's per-draw code (the walk, the
+ * native records and the queue to the backend: PLAT_HOT_GAME) is laid out apart from the backend's (PLAT_HOT), each
+ * as one stretch, instead of the two interleaved in one section where every cache line holds code of both.
+ * PLAT_HOT_WALK is the walk's own per-command code (run_command_list and the draws only it makes), which the Old 3DS's
+ * native frame (DKR_NATIVE_FRAME) doesn't run: kept next to the game core's set, but out of it. The layout changes no
+ * behaviour; HOT_LAYOUT=0 (Makefile, DKR_HOT_LAYOUT 0) builds the old one, for a bench against it.
+ */
+#ifndef DKR_HOT_LAYOUT
+#define DKR_HOT_LAYOUT 1
+#endif
+#if defined(__arm__) && DKR_HOT_LAYOUT
+#define PLAT_HOT_GAME __attribute__((section(".text.hot.game")))
+#define PLAT_HOT_WALK __attribute__((section(".text.hot.walk")))
+#else
+#define PLAT_HOT_GAME PLAT_HOT
+#define PLAT_HOT_WALK PLAT_HOT
+#endif
 #define PLAT_COLD __attribute__((cold, noinline))
 #define PLAT_NOINLINE __attribute__((noinline))
 

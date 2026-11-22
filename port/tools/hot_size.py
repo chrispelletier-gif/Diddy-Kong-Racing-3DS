@@ -5,16 +5,27 @@ The Old 3DS has a 16 KB instruction cache per core. The renderer's per-draw code
 PLAT_HOT functions out together in .text.hot at ~16 KB), but nothing stopped it from growing back. This script
 measures three numbers from the linked ELF and fails CI when one grows past its budget:
 
-  hot_span     lowest to highest address (+ size) of the functions the source marks PLAT_HOT / HOT
+  hot_span     lowest to highest address (+ size) of the functions the source marks PLAT_HOT / HOT (all hot sections)
   walk_set     total size of the display list walk's per-command functions (the game core on the Old 3DS)
   backend_set  total size of the backend's per-draw functions and the citro3d calls they make (the system core)
+
+and, report-only until their budgets are set from CI (P57 D):
+
+  game_set     total size of the functions marked for the game core's stretch (PLAT_HOT_GAME, HOT in gfx_rdp.c):
+               the walk's per-draw code and the Old 3DS's native records path, which the game core runs every frame
+  game_span    lowest to highest address of that stretch; walk_span and backend_span the same for PLAT_HOT_WALK
+               (HOT_WALK) and PLAT_HOT
+
+The stretches must not interleave (P57 D: the two cores have an instruction cache each, so a cache line of the game
+core's stretch that holds backend code is wasted on both): a function of one group inside another group's span fails
+the check, whatever the budgets.
 
 It also checks that the port's memcpy (libultra/src/libc/string.c) makes no call to memcpy, memmove or memset: GCC
 can turn its copy loops into such a call, which would recurse or copy overlapping bytes differently from the N64.
 
 Usage: python3 port/tools/hot_size.py ELF [--nm PATH] [--objdump PATH] [--update] [--report-only]
   --update       rewrite BUDGETS below with this ELF's totals (commit the result when the growth is meant)
-  --report-only  print the numbers, never fail on a budget (the memcpy check still fails)
+  --report-only  print the numbers, never fail on a budget (the memcpy and stretch checks still fail)
 """
 
 import argparse
@@ -28,7 +39,13 @@ import sys
 # used instead of gfxb_draw_indexed's lean path, so a frame's draws run one or the other, not both) and the cutting
 # shared with the walk (clip_cut_k, clip_triangle_band, which were clip_cut_lean's and clip_triangle's code before).
 # A total may exceed its budget by up to SLACK bytes.
-BUDGETS = {"hot_span": 55596, "walk_set": 32052, "backend_set": 23300}
+# P57 D/G (2026-11-20): the native records path the Old 3DS's game core runs every frame is marked hot too
+# (PLAT_HOT_GAME), so hot_span covers the game, walk and backend stretches together and grew by what was added;
+# walk_set lost frame_thread (port_gfx_run_frame is out of line, its rare blocks cold); backend_set lost the GPU-draw
+# profiler's and the first draw's fill code from gfxb_draw_indexed and walk_draw_ready.
+BUDGETS = {"hot_span": 78460, "walk_set": 25376, "backend_set": 20604}
+# Report-only totals (no budget yet: printed, never failed on).
+REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024
 
 # A name ending in "?" is optional: GCC may inline it, or it only exists once a PR that adds it is merged (P54 step 2,
@@ -115,14 +132,16 @@ def strip_attributes(text):
         text = text[:i] + " " + text[k + 1:]
 
 
-HOT_MARK = re.compile(r"(^|\s)(PLAT_HOT|HOT)(\s|$)")
+HOT_MARK = re.compile(r"(^|\s)(PLAT_HOT_GAME|PLAT_HOT_WALK|PLAT_HOT|HOT_WALK|HOT)(\s|$)")
+# Which stretch each mark puts a function in. HOT is gfx_rdp.c's name for PLAT_HOT_GAME, HOT_WALK for PLAT_HOT_WALK.
+MARK_GROUP = {"PLAT_HOT_GAME": "game", "HOT": "game", "PLAT_HOT_WALK": "walk", "HOT_WALK": "walk", "PLAT_HOT": "backend"}
 FUNC_NAME = re.compile(r"([A-Za-z_]\w*)\s*\(")
 
 
 def hot_names_from_source():
     """Every function the source marks PLAT_HOT (or gfx_rdp.c's HOT): the name before the first ( after the mark.
 
-    Returns {name: source path relative to the repository}."""
+    Returns {name: (source path relative to the repository, group: game, walk or backend)}."""
     names = {}
     for directory, recurse in SOURCE_DIRS:
         root_dir = os.path.join(REPO, directory)
@@ -140,9 +159,12 @@ def hot_names_from_source():
                         continue
                     # The declaration can run onto the next lines (an attribute, then the name).
                     text = strip_attributes(" ".join(l.strip() for l in lines[i:i + 3]))
-                    m = FUNC_NAME.search(text[HOT_MARK.search(text).end():] if HOT_MARK.search(text) else text)
+                    mark = HOT_MARK.search(text)
+                    m = FUNC_NAME.search(text[mark.end():] if mark else text)
                     if m and m.group(1) not in names:
-                        names[m.group(1)] = "/" + os.path.relpath(os.path.join(root, f), REPO).replace("\\", "/")
+                        group = MARK_GROUP[mark.group(2) if mark else HOT_MARK.search(s).group(2)]
+                        names[m.group(1)] = ("/" + os.path.relpath(os.path.join(root, f), REPO).replace("\\", "/"),
+                                             group)
     return names
 
 
@@ -231,8 +253,9 @@ def main():
     missing = []
 
     hot_names = hot_names_from_source()
-    hot = [s for name, path in hot_names.items() for s in find(syms, name, (path,))]
-    hot_missing = [n for n, path in hot_names.items() if not find(syms, n, (path,))]
+    found = {name: find(syms, name, (path,)) for name, (path, _) in hot_names.items()}
+    hot = [sym for syms_of in found.values() for sym in syms_of]
+    hot_missing = [n for n, syms_of in found.items() if not syms_of]
     if hot:
         lo = min(a for a, _, _, _ in hot)
         hi = max(a + sz for a, sz, _, _ in hot)
@@ -246,6 +269,37 @@ def main():
         lines.append("")
         lines.append("hot_span: no marked function found")
 
+    # The stretches by group (P57 D), and the check that none lies inside another's span.
+    groups = {}
+    for name, (_, group) in hot_names.items():
+        for sym in found[name]:
+            groups.setdefault(group, []).append(sym)
+    spans = {}
+    interleaved = []
+    lines.append("")
+    lines.append("| stretch | from | to | span | functions | total size |")
+    lines.append("|---|---|---|---|---|---|")
+    for group in ("game", "walk", "backend"):
+        members = groups.get(group, [])
+        if not members:
+            spans[group] = (0, 0, 0)
+            lines.append("| {} | | | 0 | 0 | 0 |".format(group))
+            continue
+        g_lo = min(a for a, _, _, _ in members)
+        g_hi = max(a + sz for a, sz, _, _ in members)
+        spans[group] = (g_lo, g_hi, sum(sz for _, sz, _, _ in members))
+        lines.append("| {} | 0x{:x} | 0x{:x} | {} | {} | {} |".format(group, g_lo, g_hi, fmt(g_hi - g_lo), len(members),
+                                                                       fmt(spans[group][2])))
+    for group, members in groups.items():
+        for other, (o_lo, o_hi, _) in spans.items():
+            if other == group or o_hi == o_lo:
+                continue
+            for addr, size, sym, _ in members:
+                if o_lo < addr + size and addr < o_hi:
+                    interleaved.append("{} ({}) inside the {} stretch".format(sym, group, other))
+    lines.append("")
+    lines.append("stretches interleaved: " + ("; ".join(sorted(interleaved)) if interleaved else "none"))
+
     walk_names = list(WALK_SET)
     note = ""
     if not find(syms, "port_gfx_run_frame", WALK_WHERE):
@@ -258,7 +312,10 @@ def main():
         lines.append("")
         lines.append("not in this ELF (? = optional): " + ", ".join(missing))
 
-    totals = {"hot_span": hot_span, "walk_set": walk, "backend_set": backend}
+    totals = {"hot_span": hot_span, "walk_set": walk, "backend_set": backend,
+              "game_set": spans["game"][2], "game_span": spans["game"][1] - spans["game"][0],
+              "walk_span": spans["walk"][1] - spans["walk"][0],
+              "backend_span": spans["backend"][1] - spans["backend"][0]}
     lines.append("")
     lines.append("| total | bytes | budget |")
     lines.append("|---|---|---|")
@@ -268,7 +325,8 @@ def main():
                         "; fix the name in hot_size.py, or mark it optional with a trailing ?")
     for key, value in totals.items():
         budget = BUDGETS.get(key)
-        lines.append("| {} | {} | {} |".format(key, fmt(value), fmt(budget) if budget is not None else "not set"))
+        lines.append("| {} | {} | {} |".format(key, fmt(value), fmt(budget) if budget is not None else
+                                               "report only" if key in REPORTED else "not set"))
         if budget is not None and value > budget + SLACK:
             failures.append("hot code grew: {} {} > budget {} + 1 KB; if this is meant, run with --update and "
                             "commit".format(key, fmt(value), fmt(budget)))
@@ -295,6 +353,10 @@ def main():
             status = 1
     for p in problems:
         print("memcpy makes a call it must not: " + p, file=sys.stderr)
+        status = 1
+    if interleaved:
+        # Like the memcpy check, not a budget: --update and --report-only don't excuse it.
+        print("hot stretches interleave (plat.h PLAT_HOT_GAME): " + "; ".join(sorted(interleaved)), file=sys.stderr)
         status = 1
     return status
 

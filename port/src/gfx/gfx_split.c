@@ -620,7 +620,7 @@ void gfx_split_draw_triangles(const GfxDrawState *state, const GfxVertex *verts,
     commit(d);
 }
 
-void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+PLAT_HOT_GAME void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                             const unsigned short *indices, int numTriangles) {
     SplitDraw *d;
     unsigned int vertBytes = (unsigned int) numVerts * sizeof(GfxVertex);
@@ -755,11 +755,14 @@ void gfx_split_mesh_free(void *mesh) {
 }
 
 /*
+ * The walk's side of the queue (gfx_split_draw_indexed, gfx_split_call_reserve/commit) runs on the game core every
+ * draw: PLAT_HOT_GAME (plat.h, P57 D).
+ *
  * v28 (DKR_NATIVE_REMOTE): work of the walk's own run on the backend thread, in order with the draws: room
  * for bytes of the caller's (8-aligned), or NULL when the calls aren't queued this frame or the record is too big for
  * the ring (the caller then drains the queue and makes the call itself).
  */
-void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
+PLAT_HOT_GAME void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
     SplitCall *c;
     if (!sActive || sizeof(SplitCall) + bytes + 64u > SPLIT_RING_BYTES / 4u) {
         return NULL;
@@ -769,7 +772,7 @@ void *gfx_split_call_reserve(void (*fn)(void *), unsigned int bytes) {
     return c + 1;
 }
 
-void gfx_split_call_commit(void *payload) {
+PLAT_HOT_GAME void gfx_split_call_commit(void *payload) {
     commit((SplitCall *) payload - 1);
 }
 
