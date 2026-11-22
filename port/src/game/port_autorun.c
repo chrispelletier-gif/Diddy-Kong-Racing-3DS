@@ -331,6 +331,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
     // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
     { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
+    // P61 W (2026-11-22): the walk's exact data cuts, on by default (W1 the triangle loop reads the 1-byte back-face
+    // table, W2 a material's textures checked once a frame, W3 the vertex and triangle loops prefetch ahead), raced
+    // the old way together. Keep the defaults if this row's game core and walk ms are higher or equal. Then one lap
+    // of W2's self-check: each skipped material check is made the old way too; the results' checks_wrong must be 0
+    // (log: "material once check: N skipped, 0 would have dropped").
+    { "walk data cuts, old way (W1-W3 off)", { "DKR_WALK_BACKFACE", "DKR_NMAT_ONCE", "DKR_WALK_PLD", NULL }, -1, 0,
+      0, 0 },
+    { "material once self-check (1 lap)", { "DKR_NMAT_ONCE_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
