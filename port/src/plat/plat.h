@@ -105,6 +105,12 @@ int plat_old_3ds(void);
 int plat_syscore_call(void (*fn)(void), void *osThread);
 int plat_core_id(void); /* The core the calling thread runs on (-1 if unknown) */
 unsigned long plat_screen_draws(void);
+/*
+ * P59 B: the longest the game waited for the bottom screen's console lock (plat_overlay_show, plat_overlay_graph,
+ * plat_3ds_set_buttons) since this reader last asked, in microseconds; each reader (0: the profiler's log line,
+ * 1: the test run's results) has its own. The total is PLAT_COUNTER_SCREEN_LOCK_WAIT_US. 0 where there is no lock.
+ */
+unsigned plat_screen_lock_wait_max_us(int reader);
 
 /* Monotonic time. */
 unsigned long long plat_time_ns(void);
@@ -383,6 +389,8 @@ enum PlatCounter {
     PLAT_COUNTER_AA_LOW_FRAMES,  /* Of those, frames adaptive anti-aliasing drew at the low resolution. */
     PLAT_COUNTER_LATE_RETRACES,  /* Retraces that reached the VI thread more than 3 ms late (3DS, plat_wait_vblank). */
     PLAT_COUNTER_LATE_WAKES,     /* Game threads that ran more than 3 ms after the retrace they waited for (frames.c). */
+    PLAT_COUNTER_PANEL_CACHE_WRONG, /* P59 A: pixels the profiler's cached panels drew unlike the old way (_CHECK). */
+    PLAT_COUNTER_SCREEN_LOCK_WAIT_US, /* P59 B: microseconds the game waited for the bottom screen's console lock. */
     PLAT_COUNTER_COUNT
 };
 extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];

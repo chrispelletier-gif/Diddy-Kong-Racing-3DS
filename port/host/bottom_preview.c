@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "plat/bottom_screen.h"
 #include "plat/plat.h"
@@ -26,6 +27,25 @@ static void save(const char *dir, const char *name) {
     bs_take_changes();
     for (area = 0; area < BS_AREA_COUNT; area++) {
         bs_draw(sImage, area);
+    }
+    if (getenv("DKR_BOTTOM_TIME") != NULL) {
+        /* P59: the time one redraw of each area takes on this PC (the mean of 50; DKR_BOTTOM_ONLY=name: 400 of that
+           sheet's, none of the others'), for before/after numbers. Host only. */
+        const char *only = getenv("DKR_BOTTOM_ONLY");
+        int reps = only == NULL ? 50 : strstr(name, only) != NULL ? 400 : 0, k;
+        if (reps > 0) {
+            printf("TIME %-34s", name);
+            for (area = 0; area < BS_AREA_COUNT; area++) {
+                struct timespec t0, t1;
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+                for (k = 0; k < reps; k++) {
+                    bs_draw(sImage, area);
+                }
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                printf(" area%d %8.1f us", area, ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 1e3 / reps);
+            }
+            printf("\n");
+        }
     }
     for (i = 0; i < BS_WIDTH * BS_HEIGHT; i++) {
         unsigned short p = sImage[i];
@@ -64,6 +84,135 @@ static void tabs(BsMenu *m, int picked, int count) {
     }
     m->tabCount = count;
     m->tab = picked;
+}
+
+static const char sTermKinds[] =
+    "DRAW KINDS 2/3  tap: page\n"
+    "a frame:  tris drw   rdp  bld off bck tny over\n"
+    "track      458  56 15.20  3.6  21  52  10 1.38\n"
+    "racers     280  36  5.40  2.4  12  28   3 0.21\n"
+    "objects    238  28  4.10  1.3  58  30   6 0.12\n"
+    "sky         38  10  2.10  0.5  40  31   0 1.00\n"
+    "see-thru    22   6  0.60  0.2  18  30   2 0.09\n"
+    "effects     16   5  0.40  0.1  25   0   9 0.05\n"
+    "shadows     44   7  1.80  2.0  30  33   2 0.04\n"
+    "HUD         54  18  0.20  0.1   0   0   4 0.03\n"
+    "segments 11/24 (table 17) objects 13/62\n"
+    "off/bck/tny: % of tris off screen, culled by\n"
+    "the GPU, under a pixel; over: screens covered\n";
+static const char sTermObjects[] =
+    "OBJECTS 3/3 FROZEN  tap: page\n"
+    "a frame:     upd vis  tris  logic    bld    rdp\n"
+    "racer          8   4   280   9.80   2.40   5.40\n"
+    "scenery       22   5    30   1.20   0.60   2.30\n"
+    "dino whale     1   1   166   0.90   0.30   0.90\n"
+    "banana        14   0     0   1.10   0.00   0.00\n"
+    "checkpoint    12   0     0   1.20   0.00   0.00\n"
+    "weapon         3   2    18   0.60   0.30   0.40\n"
+    "exit           2   1    24   0.40   0.10   0.50\n"
+    "animator       6   3    40   0.30   0.20   0.35\n"
+    "audio          9   0     0   0.20   0.00   0.00\n"
+    "fish           5   5    20   0.10   0.10   0.15\n"
+    "door           2   2    16   0.05   0.05   0.10\n"
+    "fog changer    3   0     0   0.05   0.00   0.00\n";
+
+static void monitor_graph(void) {
+    // The live monitor: the frame graph over a page, made up to match its text: 30 fps held back by the renderer's
+    // CPU (most frames 28-30.5 ms, under the 30 fps line, renderer yellow), 5% of the frames a retrace late (50 ms) at
+    // uneven times, one of those a texture upload (the hitch), and a few frames led by
+    // logic, the scene build, the GPU or the retrace wait.
+    unsigned char height[BS_GRAPH_FRAMES], kind[BS_GRAPH_FRAMES];
+    unsigned seed = 7;
+    int i;
+    for (i = 0; i < BS_GRAPH_FRAMES; i++) {
+        int r;
+        seed = seed * 1103515245u + 12345u;
+        r = (int) ((seed >> 16) % 100);
+        height[i] = (unsigned char) (56 + (seed >> 8) % 6); /* 28-30.5 ms in half milliseconds: clear under the 30 fps line */
+        kind[i] = r < 70 ? BS_GRAPH_RENDERER : r < 80 ? BS_GRAPH_SCENE : r < 88 ? BS_GRAPH_LOGIC : r < 94 ? BS_GRAPH_RETRACE
+                                                                                                    : BS_GRAPH_GPU;
+    }
+    {
+        /* the late frames (5% of those shown, each a retrace late: 49-50 ms) where the renderer ran long, at uneven times */
+        static const int sLate[] = { 44, 59, 66, 97, 121, 150 };
+        unsigned j;
+        for (j = 0; j < sizeof(sLate) / sizeof(sLate[0]); j++) {
+            height[sLate[j]] = (unsigned char) (98 + j % 3);
+            kind[sLate[j]] = BS_GRAPH_RENDERER;
+        }
+    }
+    kind[97] = BS_GRAPH_TEXTURES | BS_GRAPH_HITCH; /* the worst: a late frame spent on a texture upload */
+    bs_set_frame_graph(height, kind, BS_GRAPH_FRAMES);
+}
+
+/*
+ * P59 A host test (DKR_BS_PANEL_CACHE_CHECK=1 with DKR_BOTTOM_PREVIEW): the terminal readout's three pages and the
+ * Old 3DS summary, in every look 0-7, with the graph and without, each drawn from the panel cache and checked against
+ * the old way (bottom_screen.c panel_cache_check). Midway through each look the look changes and back, which must
+ * rebuild the cache. Exits 1 when a pixel differs, nothing was checked or a look change did not rebuild the cache.
+ */
+static void apply_look(int look) {
+    static const unsigned char sStyleOf[8] = { 0, 1, 2, 3, 2, 3, 1, 1 }, sVariantOf[8] = { 0, 0, 0, 0, 1, 2, 3, 4 };
+    bs_set_variant(sVariantOf[look]); /* as plat_3ds.c apply_bottom_look */
+    bs_set_style(sStyleOf[look]);
+}
+
+static void cache_draw(int area) {
+    bs_take_changes();
+    bs_draw(sImage, area);
+}
+
+static int panel_cache_test(void) {
+    static char summary[2][1024];
+    const char *pages[4];
+    unsigned builds, checks, wrong, before, unused;
+    int look, graph, page, missed = 0;
+    prof_term_preview(0, summary[0], (int) sizeof(summary[0]));
+    prof_term_preview(1, summary[1], (int) sizeof(summary[1]));
+    pages[0] = summary[0];
+    pages[1] = summary[1];
+    pages[2] = sTermKinds;
+    pages[3] = sTermObjects;
+    bs_set_grid(1);
+    for (look = 0; look < 8; look++) {
+        apply_look(look);
+        for (graph = 1; graph >= 0; graph--) {
+            if (graph) {
+                monitor_graph();
+            } else {
+                bs_set_frame_graph(NULL, NULL, 0);
+            }
+            for (page = 0; page < 4; page++) {
+                bs_set_overlay(pages[page]);
+                cache_draw(BS_AREA_TOP); /* builds the cache (or not, if the key is the same) */
+                cache_draw(BS_AREA_TOP); /* from the cache */
+                if (page == 1) {
+                    /* a look change in the middle: the next redraw must rebuild, in that look and back in this one */
+                    bs_panel_cache_stats(&before, &unused, &unused);
+                    apply_look((look + 1) % 8);
+                    cache_draw(BS_AREA_TOP);
+                    apply_look(look);
+                    cache_draw(BS_AREA_TOP);
+                    bs_panel_cache_stats(&builds, &unused, &unused);
+                    if (builds != before + 2) {
+                        printf("panel cache check: look %d to %d and back rebuilt the cache %u times, not 2\n", look,
+                               (look + 1) % 8, builds - before);
+                        missed++;
+                    }
+                }
+            }
+        }
+    }
+    bs_set_frame_graph(NULL, NULL, 0);
+    bs_set_overlay("");
+    bs_panel_cache_stats(&builds, &checks, &wrong);
+    printf("panel cache check: %u redraws checked, %u rebuilds, %u pixels differ\n", checks, builds, wrong);
+    if (wrong > 0 || checks == 0 || missed > 0) {
+        printf("panel cache check: FAILED\n");
+        return 1;
+    }
+    printf("panel cache check: ok\n");
+    return 0;
 }
 
 void host_bottom_preview(const char *dir) {
@@ -126,6 +275,9 @@ void host_bottom_preview(const char *dir) {
     if (getenv("DKR_BOTTOM_SMOOTH") != NULL) {
         bs_set_smooth_art(atoi(getenv("DKR_BOTTOM_SMOOTH")));
     }
+    if (plat_switch("DKR_BS_PANEL_CACHE_CHECK", 0) && getenv("DKR_BOTTOM_TIME") == NULL) {
+        exit(panel_cache_test());
+    }
     {
         static const char *const sHome[3] = { "Settings", "Controls", "Updates" };
         bs_set_buttons(sHome, 3);
@@ -151,34 +303,7 @@ void host_bottom_preview(const char *dir) {
         static const char *const sRunning[2] = { "Settings", "Stop test" };
         bs_set_buttons(sRunning, 2);
     }
-    {
-        // The live monitor: the frame graph over a page, made up to match its text: 30 fps held back by the renderer's
-        // CPU (most frames 28-30.5 ms, under the 30 fps line, renderer yellow), 5% of the frames a retrace late (50 ms) at
-        // uneven times, one of those a texture upload (the hitch), and a few frames led by
-        // logic, the scene build, the GPU or the retrace wait.
-        unsigned char height[BS_GRAPH_FRAMES], kind[BS_GRAPH_FRAMES];
-        unsigned seed = 7;
-        int i;
-        for (i = 0; i < BS_GRAPH_FRAMES; i++) {
-            int r;
-            seed = seed * 1103515245u + 12345u;
-            r = (int) ((seed >> 16) % 100);
-            height[i] = (unsigned char) (56 + (seed >> 8) % 6); /* 28-30.5 ms in half milliseconds: clear under the 30 fps line */
-            kind[i] = r < 70 ? BS_GRAPH_RENDERER : r < 80 ? BS_GRAPH_SCENE : r < 88 ? BS_GRAPH_LOGIC : r < 94 ? BS_GRAPH_RETRACE
-                                                                                                        : BS_GRAPH_GPU;
-        }
-        {
-            /* the late frames (5% of those shown, each a retrace late: 49-50 ms) where the renderer ran long, at uneven times */
-            static const int sLate[] = { 44, 59, 66, 97, 121, 150 };
-            unsigned j;
-            for (j = 0; j < sizeof(sLate) / sizeof(sLate[0]); j++) {
-                height[sLate[j]] = (unsigned char) (98 + j % 3);
-                kind[sLate[j]] = BS_GRAPH_RENDERER;
-            }
-        }
-        kind[97] = BS_GRAPH_TEXTURES | BS_GRAPH_HITCH; /* the worst: a late frame spent on a texture upload */
-        bs_set_frame_graph(height, kind, BS_GRAPH_FRAMES);
-    }
+    monitor_graph();
     /*
      * One made-up second, the same on every page (budget 33.3 ms at 30 fps): the game core busy 27.0 (logic 15.2 +
      * scene 9.8 + sound 2.0), waiting 5.0, idle 1.3 (4%); the render core busy 29.0 (the kinds' rdp 28.6 + textures
@@ -198,34 +323,9 @@ void host_bottom_preview(const char *dir) {
             bs_set_overlay(page);
             save(dir, "2a_monitor_summary_old3ds");
         }
-        bs_set_overlay("DRAW KINDS 2/3  tap: page\n"
-                       "a frame:  tris drw   rdp  bld off bck tny over\n"
-                       "track      458  56 15.20  3.6  21  52  10 1.38\n"
-                       "racers     280  36  5.40  2.4  12  28   3 0.21\n"
-                       "objects    238  28  4.10  1.3  58  30   6 0.12\n"
-                       "sky         38  10  2.10  0.5  40  31   0 1.00\n"
-                       "see-thru    22   6  0.60  0.2  18  30   2 0.09\n"
-                       "effects     16   5  0.40  0.1  25   0   9 0.05\n"
-                       "shadows     44   7  1.80  2.0  30  33   2 0.04\n"
-                       "HUD         54  18  0.20  0.1   0   0   4 0.03\n"
-                       "segments 11/24 (table 17) objects 13/62\n"
-                       "off/bck/tny: % of tris off screen, culled by\n"
-                       "the GPU, under a pixel; over: screens covered\n");
+        bs_set_overlay(sTermKinds);
         save(dir, "2b_monitor_kinds");
-        bs_set_overlay("OBJECTS 3/3 FROZEN  tap: page\n"
-                       "a frame:     upd vis  tris  logic    bld    rdp\n"
-                       "racer          8   4   280   9.80   2.40   5.40\n"
-                       "scenery       22   5    30   1.20   0.60   2.30\n"
-                       "dino whale     1   1   166   0.90   0.30   0.90\n"
-                       "banana        14   0     0   1.10   0.00   0.00\n"
-                       "checkpoint    12   0     0   1.20   0.00   0.00\n"
-                       "weapon         3   2    18   0.60   0.30   0.40\n"
-                       "exit           2   1    24   0.40   0.10   0.50\n"
-                       "animator       6   3    40   0.30   0.20   0.35\n"
-                       "audio          9   0     0   0.20   0.00   0.00\n"
-                       "fish           5   5    20   0.10   0.10   0.15\n"
-                       "door           2   2    16   0.05   0.05   0.10\n"
-                       "fog changer    3   0     0   0.05   0.00   0.00\n");
+        bs_set_overlay(sTermObjects);
         save(dir, "2c_monitor_objects");
     } else {
         bs_set_overlay("PROFILER 1/5  tap: page\n"

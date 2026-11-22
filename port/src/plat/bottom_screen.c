@@ -504,6 +504,7 @@ static unsigned short *sImage;
 static int sClipTop, sClipEnd; /* The rows of the area being drawn. */
 static unsigned short sBackground[BS_WIDTH * BS_HEIGHT];
 static int sBackgroundMade;
+static unsigned sBackgroundGen; /* bumped each time the background is made: the panel cache's key (P59 A) */
 
 static unsigned short rgb565(int r, int g, int b) {
     return (unsigned short) (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
@@ -1574,6 +1575,7 @@ static void make_background(void) {
     }
     // No line above the status strip: it read as a stray line under the buttons and threw their alignment off.
     sBackgroundMade = 1;
+    sBackgroundGen++;
 }
 
 /* The look to draw in: 0 Classic, 1 Glass, 2 Broadcast, 3 Dock. Redraws everything. */
@@ -7045,12 +7047,113 @@ void bs_area_rows(int area, int *first, int *end) {
     *end = rows[area + 1];
 }
 
+/*
+ * P59 A, DKR_BS_PANEL_CACHE (default 1): the profiler's readout keeps its chrome (the background, the panels, the
+ * graph's dim fill and its labels: sGdebugPass 1) in a cache, and a redraw (a page flip, the once-a-second update)
+ * copies it and draws only the ink over it (pass 2). The panels' gradients were ~83% of a redraw's instructions. The
+ * cache is rebuilt whenever its key changes: the look, the grid, the graph shown or not, the background made again,
+ * the logo loaded. Only the terminal readout (DKR_PROF_TERM) on the grid takes this path; the rest draws as before.
+ *
+ * DKR_BS_PANEL_CACHE_CHECK=1: after each cached redraw, draws the same area the old way into a second image and
+ * counts the pixels that differ (logged once a second while any do, and added up for bs_panel_cache_stats).
+ */
+static unsigned short *sChrome, *sChromeCheck;
+static int sChromeRows;
+static unsigned sChromeKey, sChromeBuilds, sChromeChecks, sChromeWrong;
+static unsigned long long sChromeLoggedNs;
+
+void bs_panel_cache_stats(unsigned *builds, unsigned *checks, unsigned *wrong) {
+    *builds = sChromeBuilds;
+    *checks = sChromeChecks;
+    *wrong = sChromeWrong;
+}
+
+static unsigned panel_cache_key(const State *s) {
+    /* bit 31 set: never 0, so a cache that was never built (key 0) never matches */
+    return 0x80000000u | (unsigned) sStyle | (unsigned) sVariant << 2 | (unsigned) (sGrid != 0) << 5 |
+           (unsigned) (s->graphCount > 0) << 6 | (unsigned) (sLogo.rgba != NULL) << 7 |
+           (unsigned) (sClipEnd - sClipTop) << 8 | (sBackgroundGen & 0xFFFFu) << 16;
+}
+
+static void panel_cache_check(unsigned short *image, const State *s) {
+    int top = sClipTop, rows = sClipEnd - sClipTop, i, wrong = 0;
+    if (sChromeCheck == NULL) {
+        sChromeCheck = (unsigned short *) malloc((size_t) BS_WIDTH * BS_HEIGHT * sizeof(unsigned short));
+        if (sChromeCheck == NULL) {
+            return;
+        }
+    }
+    /* the old way: the background, then all of the readout (pass 0) */
+    sImage = sChromeCheck;
+    memcpy(sChromeCheck + top * BS_WIDTH, sBackground + top * BS_WIDTH, (size_t) rows * BS_WIDTH * sizeof(unsigned short));
+    gdebug(s);
+    sImage = image;
+    for (i = top * BS_WIDTH; i < (top + rows) * BS_WIDTH; i++) {
+        wrong += sChromeCheck[i] != image[i];
+    }
+    sChromeChecks++;
+    sChromeWrong += (unsigned) wrong;
+    if (wrong > 0) {
+        unsigned long long now = plat_time_ns();
+        gPlatCounters[PLAT_COUNTER_PANEL_CACHE_WRONG] += (unsigned) wrong;
+        if (sChromeLoggedNs == 0 || now - sChromeLoggedNs >= 1000000000ULL) {
+            sChromeLoggedNs = now;
+            plat_log("bottom screen panel cache: %d pixels differ (look %d)", wrong, sVariant > 0 ? 3 + sVariant : sStyle);
+        }
+    }
+}
+
+/* The profiler's readout from the cached chrome; 0 if this area doesn't take that path (it is then drawn as before). */
+static int panel_cache_draw(unsigned short *image, const State *s) {
+    int top = sClipTop, rows = sClipEnd - sClipTop;
+    unsigned key;
+    if (s->setupShown || s->menuShown || s->overlayLines == 0 || !sGrid || sLogo.rgba == NULL || !gterm_on() ||
+        sLogOn || plat_switch("DKR_BS_PANEL_CACHE", 1) == 0) {
+        return 0;
+    }
+#ifndef __3DS__
+    if (sGlyphSheet) {
+        return 0;
+    }
+#endif
+    if (sChrome == NULL || rows > sChromeRows) {
+        free(sChrome);
+        sChrome = (unsigned short *) malloc((size_t) rows * BS_WIDTH * sizeof(unsigned short));
+        sChromeRows = sChrome != NULL ? rows : 0;
+        sChromeKey = 0;
+        if (sChrome == NULL) {
+            return 0;
+        }
+    }
+    key = panel_cache_key(s);
+    if (key != sChromeKey) {
+        memcpy(image + top * BS_WIDTH, sBackground + top * BS_WIDTH, (size_t) rows * BS_WIDTH * sizeof(unsigned short));
+        sGdebugPass = 1;
+        gdebug(s);
+        memcpy(sChrome, image + top * BS_WIDTH, (size_t) rows * BS_WIDTH * sizeof(unsigned short));
+        sChromeKey = key;
+        sChromeBuilds++;
+    } else {
+        memcpy(image + top * BS_WIDTH, sChrome, (size_t) rows * BS_WIDTH * sizeof(unsigned short));
+    }
+    sGdebugPass = 2;
+    gdebug(s);
+    sGdebugPass = 0;
+    if (plat_switch("DKR_BS_PANEL_CACHE_CHECK", 0)) {
+        panel_cache_check(image, s);
+    }
+    return 1;
+}
+
 void bs_draw(unsigned short *image, int area) {
     if (!sBackgroundMade) {
         make_background();
     }
     sImage = image;
     bs_area_rows(area, &sClipTop, &sClipEnd);
+    if (area == BS_AREA_TOP && panel_cache_draw(image, &sDrawn)) {
+        return; /* the profiler's readout (draw_home's gdebug), from its cached chrome */
+    }
     memcpy(image + sClipTop * BS_WIDTH, sBackground + sClipTop * BS_WIDTH,
            (sClipEnd - sClipTop) * BS_WIDTH * sizeof(unsigned short));
     switch (area) {

@@ -621,6 +621,7 @@ static ProfStats sRaceStats;
 /* The sound's gap and drop counters when the race started (roadmap P9 is judged by them). */
 static unsigned int sWalkStart[4]; // gfxb_walk_coverage at the race start (pmu_cells)
 static u32 sAudioGapsStart, sAudioDropsStart, sFlashesStart, sAaFramesStart, sAaLowStart, sLateStart, sWakesStart;
+static u32 sLockWaitStart; /* P59 B: PLAT_COUNTER_SCREEN_LOCK_WAIT_US at the race's start */
 
 static s32 str_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
@@ -1570,7 +1571,8 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
                   "ceiling_fps,ceiling_low1pct_fps,ceiling_60fps_pct,ceiling_limit,start_mark,start_excess_ms,"
                   "start_worst_ms,pmu_mark,game_mcycles,game_ifstall_pct,game_pmn1_k,render_mcycles,render_ifstall_pct,"
                   "render_pmn1_k,pmn1_kind,shown_mark,replaced,longest_shown_gap_ms,sndcb_mark,sound_callback_ms,"
-                  "clk_mark,clock_reads,wv_mark,walk_draws,walk_left,walk_noroom\n",
+                  "clk_mark,clock_reads,wv_mark,walk_draws,walk_left,walk_noroom,scr_mark,screen_lock_wait_ms,"
+                  "screen_lock_wait_max_ms\n",
                   sModes[sMode].extraColumn ? "," : "", sModes[sMode].extraColumn ? sModes[sMode].extraColumn : "");
     if (stats == NULL) {
         bzero(&empty, sizeof(empty));
@@ -1662,6 +1664,17 @@ static void record_result(const char *outcome, s32 position, const ProfStats *st
     // Then (2026-11-19, P56) the CPU's own counters, the pictures shown, the sound callback and the clock reads, each
     // group led by its mark word as the race start's: pmu_cells says what they hold.
     pmu_cells(line + length, sizeof(line) - length, stats == &empty ? NULL : stats);
+    length = strlen(line);
+    if (length > 0 && line[length - 1] == '\n') {
+        length--;
+    }
+    // Then (2026-11-22, P59 B) the game's waits for the bottom screen's lock on the profiler's path: a game frame's
+    // mean and the longest, after the "scr" mark.
+    plat_snprintf(line + length, sizeof(line) - length, ",scr,%.3f,%.2f\n",
+                  stats == &empty || stats->gameFrames == 0
+                      ? 0.0
+                      : (gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US] - sLockWaitStart) / 1e3 / stats->gameFrames,
+                  plat_screen_lock_wait_max_us(1) / 1e3);
     append_file(results_file(), line, header);
     if (stats != &empty && cores.frames > 0) {
         record_cores(outcome, &cores, stats);
@@ -3599,6 +3612,8 @@ void port_autorun_frame(s32 updateRate) {
                 gfxb_walk_coverage(sWalkStart);
                 sLateStart = gPlatCounters[PLAT_COUNTER_LATE_RETRACES];
                 sWakesStart = gPlatCounters[PLAT_COUNTER_LATE_WAKES];
+                sLockWaitStart = gPlatCounters[PLAT_COUNTER_SCREEN_LOCK_WAIT_US];
+                plat_screen_lock_wait_max_us(1); /* the longest wait from here on */
                 {
                     char none[8];
                     rec_slow_take(none, sizeof(none)); // The slowest frames are listed from here, as worst_frame_ms

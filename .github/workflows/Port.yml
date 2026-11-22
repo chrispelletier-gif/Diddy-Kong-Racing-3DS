@@ -308,6 +308,14 @@ jobs:
       - name: Profiler pages fit the terminal font
         # every page of the bottom screen's profiler, with the longest bench row, fits 47 columns by 14 lines
         run: DKR_PROF_TERM_CHECK=1 port/build/host/dkr
+      - name: Profiler panel cache
+        # P59 A: the readout drawn from its cached panels (DKR_BS_PANEL_CACHE) matches the old way pixel for pixel, in
+        # every look, page and graph state, and a look change rebuilds the cache (host/bottom_preview.c)
+        run: |
+          mkdir -p "$RUNNER_TEMP/panel-cache"
+          DKR_BS_PANEL_CACHE_CHECK=1 DKR_DATA_DIR="$RUNNER_TEMP/rom" DKR_BOTTOM_PREVIEW="$RUNNER_TEMP/panel-cache" \
+            port/build/host/dkr | grep "panel cache"
+          test "${PIPESTATUS[0]}" -eq 0
       - name: Switch bench overrides all reach the game
         # every switch bench race of both consoles' lists sets its switches without overflowing the override table
         run: |
