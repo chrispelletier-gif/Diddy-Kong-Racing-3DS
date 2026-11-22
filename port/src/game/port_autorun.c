@@ -354,7 +354,10 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // P55 S3 / P60 F (gpu_raw.inc): the raw register words' self-check, one lap on top of the new defaults: each reused
     // block is made again through citro3d and compared. The results' checks columns (chk) must say 0 wrong, and the
     // log's "raw GPU words: ..." lines end "0 differ".
-    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, 0, 1, 1,
+    // Usual -1, not 0 (run 52 on 36913ec, proposals/3ds-switch-bench-36913ec-o3ds-results.md): every race first sets
+    // each row's variables to their usual setting, rows in order, so a usual 0 here turned DKR_RAW_REGS off in the
+    // usual races and every other row, and run 52 raced the new defaults without raw words.
+    { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
       1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
