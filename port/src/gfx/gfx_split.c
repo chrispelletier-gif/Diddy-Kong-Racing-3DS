@@ -124,6 +124,10 @@ static volatile unsigned long long sMixTicks[MIX_COUNT];
 static volatile unsigned int sMixFrames;
 static unsigned long long sMixReadTicks[2][MIX_COUNT];
 static unsigned int sMixReadFrames[2], sMixCount;
+static const char *const sMsplitNames[GFXB_MSPLIT_COUNT] = { "drain", "state", "settings twice", "uniforms", "copies",
+                                                             "indices", "draw", "other" };
+static unsigned long long sMsplitRead[2][GFXB_MSPLIT_COUNT];
+static unsigned int sMsplitReadDraws[2], sMsplitReadReads[2];
 static int sMixOn; // This frame is timed (decided at its OP_START)
 
 static int mix_kind(unsigned int op, const void *p) {
@@ -173,6 +177,35 @@ int gfx_split_backend_mix(int reader, char *out, int size) {
     }
     if (at < size) {
         at += plat_snprintf(out + at, size - at, " (%u frames timed)", frames);
+    }
+    {
+        // P61 M3: the model and mesh draws' parts (gfx_c3d.c), less the clock reads that timed them.
+        unsigned long long ticks[GFXB_MSPLIT_COUNT], readTicks;
+        unsigned int draws, reads, k2;
+        double msplit[GFXB_MSPLIT_COUNT], all = 0.0;
+        gfxb_model_split_totals(ticks, &draws, &reads);
+        readTicks = (unsigned long long) (reads - sMsplitReadReads[reader]) * prof_clock_read_cost() / 256;
+        for (k2 = 0; k2 < GFXB_MSPLIT_COUNT; k2++) {
+            msplit[k2] = (ticks[k2] - sMsplitRead[reader][k2]) * perTick;
+            all += msplit[k2];
+            sMsplitRead[reader][k2] = ticks[k2];
+        }
+        if (draws != sMsplitReadDraws[reader] && at < size) {
+            // The clock reads' cost comes off each part by its share.
+            double scale = all > 0.0 ? (all - readTicks * perTick) / all : 1.0;
+            scale = scale > 0.0 ? scale : 0.0;
+            at += plat_snprintf(out + at, size - at, "; backend model/mesh draws: %.1f a frame,",
+                                (double) (draws - sMsplitReadDraws[reader]) / frames);
+            for (k2 = 0; k2 < GFXB_MSPLIT_COUNT && at < size; k2++) {
+                at += plat_snprintf(out + at, size - at, "%s %s %.2f", k2 ? "," : "", sMsplitNames[k2],
+                                    msplit[k2] * scale / frames);
+            }
+            if (at < size) {
+                at += plat_snprintf(out + at, size - at, " ms");
+            }
+        }
+        sMsplitReadDraws[reader] = draws;
+        sMsplitReadReads[reader] = reads;
     }
     return at < size ? at : size - 1;
 }
@@ -275,6 +308,7 @@ static void backend_thread(void *arg) {
             if (op == OP_START) {
                 sMixOn = plat_switch("DKR_BACKEND_MIX", 1) && prof_enabled() &&
                          (!plat_old_3ds() || ++sMixCount % 8 == 0);
+                gGfxbModelSplitOn = sMixOn; // P61 M3: the model draws' parts too
             }
             mixStart = sMixOn ? plat_ticks() : 0;
             if (sBackendPrefetch && sTail + bytes != sHead) {
@@ -620,8 +654,9 @@ void gfx_split_draw_triangles(const GfxDrawState *state, const GfxVertex *verts,
     commit(d);
 }
 
-PLAT_HOT_GAME void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
-                            const unsigned short *indices, int numTriangles) {
+/* Out of line (P61 M2): with the walk's step marks around its two callers, LTO otherwise copied it into both. */
+PLAT_HOT_GAME PLAT_NOINLINE void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts,
+                                                        int numVerts, const unsigned short *indices, int numTriangles) {
     SplitDraw *d;
     unsigned int vertBytes = (unsigned int) numVerts * sizeof(GfxVertex);
     unsigned int indexBytes = (unsigned int) numTriangles * 3u * sizeof(unsigned short);

@@ -530,10 +530,65 @@ static unsigned long long sec_other_now(unsigned long long now) {
     return total;
 }
 
+/*
+ * P61 M1 (DKR_PMU 1-4): the CPU counters per game core section, on timed frames (sGameTimed: an Old 3DS's 1 in 8) with
+ * the counters on. A sample (three system calls) at each section change; what the game's core counted in between
+ * (the game, and an Old 3DS's walk and sound players there) goes to the section. The "top" section holds the walk, so
+ * walk, logic and scene build each get their own stall share and events. Whatever DKR_PMU kind is on is summed.
+ */
+static unsigned long long sSecPmu[PORT_SEC_COUNT][3], sSecPmuRun[PORT_SEC_COUNT][3];
+static u32 sSecPmuFrames, sSecPmuRunFrames;
+static s32 sSecPmuHave, sSecPmuKind;
+static PlatPmuSample sSecPmuLast;
+
+static PLAT_COLD void sec_pmu_sample(void) {
+    PlatPmuSample now;
+    plat_pmu_sample(&now);
+    // (A delta that went backwards, the counters reset by a change of kind, is dropped.)
+    if (now.cycles >= sSecPmuLast.cycles && now.pmn0 >= sSecPmuLast.pmn0 && now.pmn1 >= sSecPmuLast.pmn1) {
+        unsigned long long d[3] = {now.cycles - sSecPmuLast.cycles, now.pmn0 - sSecPmuLast.pmn0,
+                                   now.pmn1 - sSecPmuLast.pmn1};
+        s32 i;
+        for (i = 0; i < 3; i++) {
+            sSecPmu[sSecNow][i] += d[i];
+            sSecPmuRun[sSecNow][i] += d[i];
+        }
+    }
+    sSecPmuLast = now;
+}
+
+/* "top 2.41/18%/9.1k, logic ..." for sums over frames (the sections with 0.01 M cycles a frame or more). */
+static s32 sec_pmu_format(unsigned long long (*sum)[3], u32 frames, char *out, s32 size) {
+    s32 k, n = 0;
+    out[0] = '\0';
+    for (k = 0; k < PORT_SEC_COUNT && n < size - 48 && frames > 0; k++) {
+        if (sum[k][0] < 10000ULL * frames) {
+            continue;
+        }
+        n += plat_snprintf(out + n, size - n, "%s%s %.2f/%d%%/%.1fk", n ? ", " : "", sSecNames[k],
+                           sum[k][0] / 1e6 / frames, (int) (sum[k][1] * 100 / sum[k][0]), sum[k][2] / 1e3 / frames);
+    }
+    return n;
+}
+
+static const char *sec_pmu_kind_name(s32 kind) {
+    switch (kind) {
+        case 1:
+            return "M cycles/instruction fetch stall/k I-cache misses";
+        case 2:
+            return "M cycles/instruction fetch stall/k D-cache read misses";
+        default:
+            return "M cycles/PMN0 share/k PMN1 events";
+    }
+}
+
 void port_game_section(int section) {
     unsigned long long now, spent;
     if (sSecStartNs == 0) {
         return;
+    }
+    if (__builtin_expect(sSecPmuHave, 0)) {
+        sec_pmu_sample();
     }
     now = plat_time_ns();
     spent = now - sSecStartNs;
@@ -1618,6 +1673,14 @@ static void log_rest(int step) {
                         }
                         sSecOtherSumNs[k] = 0;
                     }
+                    if (sSecPmuFrames > 0) {
+                        if (sec_pmu_format(sSecPmu, sSecPmuFrames, line, sizeof(line)) > 0) {
+                            port_log("game core sections (PMU %d, %s a frame, %lu frames): %s", (int) sSecPmuKind,
+                                     sec_pmu_kind_name(sSecPmuKind), (unsigned long) sSecPmuFrames, line);
+                        }
+                        __builtin_memset(sSecPmu, 0, sizeof(sSecPmu));
+                        sSecPmuFrames = 0;
+                    }
                     port_log("of which the renderer's walk and the sound players on the game's core (ms a frame, 0.05 "
                              "or more): %s", n ? line : "none");
                     sSecFrames = 0;
@@ -1925,9 +1988,12 @@ static void show_overlay(void) {
                          s.renderedFrames ? s.counters[PROF_DRAWS] / s.renderedFrames : 0);
             }
             {
-                char mix[320];
+                char mix[640];
                 if (gfx_split_backend_mix(0, mix, sizeof(mix)) > 0) {
                     port_log("%s", mix); // P54 2b-A (DKR_BACKEND_MIX)
+                }
+                if (gfx_walk_steps(0, mix, sizeof(mix)) > 0) {
+                    port_log("%s", mix); // P61 M2 (DKR_WALK_STEPS)
                 }
             }
             sLogFrames = frames;
@@ -2010,6 +2076,8 @@ static s32 sCoreOn;
 /* The window's start for the breakdown's parts. */
 static unsigned long long sCoreSecStart[PORT_SEC_COUNT], sCoreSecOtherStart[PORT_SEC_COUNT], sCorePartStart[PROF_PART_COUNT];
 static u32 sCoreSecFramesStart, sCoreRenderedStart;
+static unsigned long long sCoreSecPmuStart[PORT_SEC_COUNT][3]; // P61 M1
+static u32 sCoreSecPmuFramesStart;
 
 void prof_core_window_start(void) {
     s32 i;
@@ -2027,6 +2095,9 @@ void prof_core_window_start(void) {
         sCorePartStart[i] = sPartNs[i];
     }
     sCoreSecFramesStart = sSecRunFrames;
+    __builtin_memcpy(sCoreSecPmuStart, sSecPmuRun, sizeof(sCoreSecPmuStart));
+    sCoreSecPmuFramesStart = sSecPmuRunFrames;
+    gfx_walk_steps(1, NULL, 0); // P61 M2 (from here)
     sCoreRenderedStart = sRenderedFrames;
     gfx_split_backend_mix(1, NULL, 0); // (from here)
     sCoreOn = TRUE;
@@ -2115,6 +2186,32 @@ int prof_core_breakdown(char *out, int size) {
         }
     } else {
         length += plat_snprintf(out, size, "game core sections: not timed (lean profiling)");
+    }
+    if (length < size && sSecPmuRunFrames != sCoreSecPmuFramesStart) {
+        /* P61 M1: the CPU counters per section (DKR_PMU) */
+        unsigned long long sum[PORT_SEC_COUNT][3];
+        char line[600];
+        s32 i;
+        for (k = 0; k < PORT_SEC_COUNT; k++) {
+            for (i = 0; i < 3; i++) {
+                sum[k][i] = sSecPmuRun[k][i] - sCoreSecPmuStart[k][i];
+            }
+        }
+        if (sec_pmu_format(sum, sSecPmuRunFrames - sCoreSecPmuFramesStart, line, sizeof(line)) > 0) {
+            length += plat_snprintf(out + length, size - length, "; game core sections (PMU %d, %s a frame): %s",
+                                    (int) sSecPmuKind, sec_pmu_kind_name(sSecPmuKind), line);
+        }
+    }
+    if (length < size - 2) {
+        /* P61 M2: the walk's steps (DKR_WALK_STEPS), all kinds */
+        s32 at = length;
+        length += plat_snprintf(out + length, size - length, "; ");
+        if (gfx_walk_steps(1, out + length, size - length) == 0) {
+            length = at;
+            out[length] = '\0';
+        } else {
+            length += (s32) strlen(out + length);
+        }
     }
     if (length < size && part[PROF_PART_WALK_COMMANDS] + part[PROF_PART_WALK_VERTICES] + part[PROF_PART_WALK_TRIANGLES] > 0.0) {
         length += plat_snprintf(out + length, size - length,
@@ -2252,6 +2349,14 @@ void prof_game_mark(int mark, int updateRate) {
             if (sSecStartNs != 0) {
                 port_game_section(PORT_SEC_TOP); // The last frame's code after its end
                 sec_frame_done();
+            }
+            // P61 M1: this frame's sections counted too (timed frames with DKR_PMU on).
+            sSecPmuKind = sGameTimed && !prof_lean_now() ? plat_pmu_on() : 0;
+            sSecPmuHave = sSecPmuKind != 0;
+            if (__builtin_expect(sSecPmuHave, 0)) {
+                plat_pmu_sample(&sSecPmuLast);
+                sSecPmuFrames++;
+                sSecPmuRunFrames++;
             }
             sSecStartNs = prof_enabled() && !prof_lean_now() ? now : 0;
             sSecOtherLast = sec_other_now(now);

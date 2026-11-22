@@ -7076,12 +7076,40 @@ static void model_draw_on_cpu(const GfxDrawState *state, const GfxModelParams *p
     gfxb_draw_indexed(state, sModelCpuVerts, numVerts, sModelCpuIndices, numTriangles);
 }
 
+/* P61 M3 (gfx_backend.h GFXB_MSPLIT_*): model and mesh draws' parts, on the backend mix's timed frames. */
+volatile int gGfxbModelSplitOn;
+static unsigned long long sMsplitTicks[GFXB_MSPLIT_COUNT];
+static unsigned int sMsplitDraws, sMsplitReads;
+
+/* The span since t (0: not timed) to the part; the new start. */
+static inline unsigned long long msplit(unsigned long long t, int part) {
+    unsigned long long now;
+    if (__builtin_expect(t == 0, 1)) {
+        return 0;
+    }
+    now = plat_ticks();
+    sMsplitTicks[part] += now - t;
+    sMsplitReads++;
+    return now;
+}
+
+void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsigned int *draws, unsigned int *reads) {
+    memcpy(ticks, sMsplitTicks, sizeof(sMsplitTicks)); // (another core's: a torn value is one rough frame)
+    *draws = sMsplitDraws;
+    *reads = sMsplitReads;
+}
+
 /* What a model or mesh draw does before its vertices: room, hang report, settings, uniforms. Returns FALSE if the draw
  * is to be left out (no room left in the frame). */
 static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *params, int vertBytes, int numIndices,
                             int numTriangles, HangDraw **hangDraw) {
     float su0, sv0, su1, sv1;
     int first;
+    unsigned long long t = gGfxbModelSplitOn ? plat_ticks() : 0;
+    if (t != 0) {
+        sMsplitDraws++;
+        sMsplitReads++;
+    }
     if (sVboUsed + 15 + vertBytes > VBO_BYTES || sIboUsed + numIndices > (IBO_BYTES / (int) sizeof(u16) - 8) ||
         gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
         if (sDrawsLeftOut++ < 5) {
@@ -7095,12 +7123,16 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
     if (first) {
         forget_gpu_state();
     }
+    t = msplit(t, GFXB_MSPLIT_DRAIN);
     set_all_state(state, &su0, &sv0, &su1, &sv1);
+    t = msplit(t, GFXB_MSPLIT_STATE);
     if (first) {
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+        t = msplit(t, GFXB_MSPLIT_TWICE);
     }
     set_model_uniforms(params, su0, sv0, su1, sv1);
     unif_write_twice();
+    msplit(t, GFXB_MSPLIT_UNIFORMS);
     return 1;
 }
 
@@ -7108,7 +7140,7 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
                      const unsigned short *indices, int numTriangles) {
     HangDraw *hangDraw;
     int vertex, i, count = numTriangles * 3, vertBytes = numVerts * (int) sizeof(GfxModelVertex);
-    unsigned long long t0;
+    unsigned long long t0, ts;
     u16 *ibo;
 
     if (skip_invisible(state)) {
@@ -7123,6 +7155,8 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
     if (!model_draw_begin(state, params, vertBytes, count, numTriangles, &hangDraw)) {
         return;
     }
+    ts = gGfxbModelSplitOn ? plat_ticks() : 0;
+    sMsplitReads += ts != 0;
     if (sStereo && !state->flat && sTuning[STEREO_AUTO]) {
         near_depth_note_model(params, verts, numVerts);
     }
@@ -7131,19 +7165,24 @@ void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, co
         sVfmtBound = -1;
         vertex = use_vertex_format(VFMT_MODEL);
     }
+    ts = msplit(ts, GFXB_MSPLIT_OTHER);
     memcpy(sVbo + sVboUsed, verts, vertBytes);
+    ts = msplit(ts, GFXB_MSPLIT_COPY);
     ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0; i < count; i++) {
         ibo[i] = (u16) (vertex + indices[i]);
     }
     sIboUsed += count;
+    ts = msplit(ts, GFXB_MSPLIT_INDICES);
     draw_prims(vertex, count, ibo);
+    ts = msplit(ts, GFXB_MSPLIT_DRAW);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }
     sVboUsed += vertBytes;
     sFrameTriangles += numTriangles;
+    msplit(ts, GFXB_MSPLIT_OTHER);
     if (t0 != 0) {
         draw_part(DRAW_PART_BACKEND, plat_ticks() - t0, 2);
         sDrawPartReads += 2;
@@ -7308,7 +7347,7 @@ static void delete_mesh(void *mesh) {
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts) {
     HangDraw *hangDraw;
-    unsigned long long t0;
+    unsigned long long t0, ts;
     int i, count = 0;
     u16 *ibo;
 
@@ -7355,6 +7394,8 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         sBufMesh = sMeshArena;
         sVfmtBound = -1;
     }
+    ts = gGfxbModelSplitOn ? plat_ticks() : 0; // P61 M3
+    sMsplitReads += ts != 0;
     ibo_align();
     ibo = sIbo + sIboUsed;
     for (i = 0, count = 0; i < numParts; i++) {
@@ -7363,7 +7404,9 @@ void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, c
         count += parts[i].numTriangles * 3;
     }
     sIboUsed += count;
+    ts = msplit(ts, GFXB_MSPLIT_COPY);
     draw_prims(0, count, ibo);
+    msplit(ts, GFXB_MSPLIT_DRAW);
     if (hangDraw != NULL) {
         hangDraw->cmdEnd = cmd_position();
     }

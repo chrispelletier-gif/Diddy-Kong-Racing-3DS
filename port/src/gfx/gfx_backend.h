@@ -284,6 +284,24 @@ void gfxb_gpu_kind_call(void *payload);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*
+ * P61 M3: the backend's model and mesh draws split into their parts (the 3DS backend; the PC's reports none), timed on
+ * the backend mix's timed frames (DKR_BACKEND_MIX: gfx_split.c sets gGfxbModelSplitOn at each frame's start). Totals
+ * since start-up, in clock ticks, with the draws counted and the clock reads made (whose cost the reader takes out).
+ */
+enum {
+    GFXB_MSPLIT_DRAIN,    // drain_before_draw (and the hang report's start)
+    GFXB_MSPLIT_STATE,    // set_all_state
+    GFXB_MSPLIT_TWICE,    // write_settings_twice
+    GFXB_MSPLIT_UNIFORMS, // set_model_uniforms and unif_write_twice
+    GFXB_MSPLIT_COPY,     // The vertex copy into the frame's vertex buffer (models) or the parts' index copies (meshes)
+    GFXB_MSPLIT_INDICES,  // The index rebase loop (models)
+    GFXB_MSPLIT_DRAW,     // draw_prims
+    GFXB_MSPLIT_OTHER,    // The rest: checks, vertex format, near depth note, bookkeeping
+    GFXB_MSPLIT_COUNT
+};
+extern volatile int gGfxbModelSplitOn;
+void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsigned int *draws, unsigned int *reads);
+/*
  * Meshes: model vertices copied once to memory the GPU reads, and drawn from there frame
  * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames
  * that use it. gfxb_draw_meshes draws parts of several meshes that share a state and parameters as one draw (a draw

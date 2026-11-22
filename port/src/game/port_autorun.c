@@ -318,10 +318,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // prewarm, SD writes and frees, NATIVE_REMOTE 3, STATE_CACHE 2, REWRITE 0, both WALK_VERTS rows and the three
     // NATIVE_GPU rows were settled or neutral, so their rows went (their switches untouched; port/docs/bench-history.md
     // keeps the earlier results). Run 45 had already settled the memo check, the old walk and the atlas.
-    // P57 B: the CPU counters on NATIVE_REMOTE 0, kept until P57 D has its before/after. PMU 1: I-cache misses;
-    // PMU 2: D-cache misses.
-    { "CPU counters, I-cache misses (PMU 1, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 1, 1, 1 },
-    { "CPU counters, D-cache misses (PMU 2, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 2, 1, 1 },
+    // P61 M (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): hardware truth for the game core's hot code.
+    // These replace the plain PMU 1 / PMU 2 rows (P57 B). Each measures, one lap: the CPU counters per game core
+    // section (log and autorun_cores.txt: "game core sections (PMU n, ...)": M cycles / fetch stall share / k misses
+    // a frame for top (the walk is inside it), logic, objects...) and the walk's steps (DKR_WALK_STEPS, any non-zero
+    // value: "walk steps (ms a frame, racers / track / objects / all)", one frame in 16). PMU 1: I-cache misses;
+    // PMU 2: D-cache read misses.
+    { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
+    { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
+    // P61 M3: the karts' vertex maths on the GPU (NATIVE_GPU 1: game core -3.7 ms in run 48, but the backend's
+    // "model/mesh" 4.9-12.7 ms a frame), raced again only for the backend's model draws split into their parts:
+    // "backend model/mesh draws: N a frame, drain, state, settings twice, uniforms, copies, indices, draw" beside the
+    // "backend records" part of the log and autorun_cores.txt. Input for P61 K / P60 F (Opus).
+    { "karts' vertex maths on the GPU, backend split (1 lap)", { "DKR_NATIVE_GPU", NULL, NULL }, 0, 1, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -1455,8 +1464,8 @@ static s32 sCoreLineCount;
 
 /* Each race's core times and game core breakdown, into CORES_FILE (and, for the usual and uncapped rows, the issue). */
 static void record_cores(const char *outcome, const ProfCoreStats *c, const ProfStats *stats) {
-    static char breakdown[1536];
-    static char text[2048];
+    static char breakdown[3072];
+    static char text[3584];
     Race *race = &sRaces[sNext];
     s32 config = is_bench() ? race->config : -1;
     prof_core_breakdown(breakdown, sizeof(breakdown));
