@@ -40,6 +40,7 @@ long port_autorun_enabled(void);
 void port_autorun_request(long start);
 long port_autorun_switch_count(void);
 long port_autorun_shelved_count(void);
+void gfxb_gs_ladder_arm(void);
 
 typedef struct MenuPage {
     const char *title;
@@ -441,15 +442,19 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its ten kinds. */
+/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the last row, the GS freeze test
+ * (gfx_c3d.c gs_ladder), restarts the game and runs before the title. */
+#define TEST_ROWS 12
+#define TEST_GS_LADDER 11
 static int test_count(void) {
-    return port_autorun_enabled() ? 1 : 11;
+    return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
 
 static const char *test_label(int i) {
-    static const char *const sStart[11] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
-                                            "Switch bench", "Whole game", "Whole game (short)", "Shelved switches",
-                                            "Lean switch bench", "Lean quick test", "Lean full test" };
+    static const char *const sStart[TEST_ROWS] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
+                                                   "Switch bench", "Whole game", "Whole game (short)",
+                                                   "Shelved switches", "Lean switch bench", "Lean quick test",
+                                                   "Lean full test", "GS freeze test" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
@@ -460,13 +465,15 @@ static void test_value(int i, char *out, int size) {
 }
 
 static const char *test_hint(int i) {
-    static const char *const sStart[11] = { "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
-                                            "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
-                                            NULL, "Every part of the game, ~5 hours",
-                                            "Every part, 1 lap each, ~1 hour", NULL,
-                                            "Switch bench, profiler off as in a player's build",
-                                            "Quick test, profiler off as in a player's build",
-                                            "Full test, profiler off as in a player's build" };
+    static const char *const sStart[TEST_ROWS] = {
+        "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
+        "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
+        NULL, "Every part of the game, ~5 hours",
+        "Every part, 1 lap each, ~1 hour", NULL,
+        "Switch bench, profiler off as in a player's build",
+        "Quick test, profiler off as in a player's build",
+        "Full test, profiler off as in a player's build",
+        "Restarts the game; ~1 min, may need power-offs" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -496,6 +503,14 @@ static void test_change(int i, int step) {
     (void) step;
     if (port_autorun_enabled()) {
         port_autorun_request(0);
+    } else if (i == TEST_GS_LADDER) {
+        // Armed on the SD card, so it also carries on after a power-off; a .cia starts again by itself, a .3dsx goes
+        // back to the Homebrew Launcher to be started again.
+        gfxb_gs_ladder_arm();
+        if (!envIsHomebrew()) {
+            aptSetChainloaderToSelf();
+        }
+        plat_request_quit();
     } else {
         // port_autorun_request: 1 the full run, 3 the quick test, 4 the boss fights, 2 the GPU benchmark, 5 the switch
         // bench, 6 the whole game run, 7 its short variant, 8 the shelved switches bench, 9-11 the lean switch bench,
