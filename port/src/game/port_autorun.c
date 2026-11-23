@@ -482,6 +482,9 @@ static const BenchSwitch sSwitches60[] = {
     { "settings written once (REWRITE 0)", { "DKR_REWRITE", NULL }, -1, 0, 1, 0 },
     { "state cache 2", { "DKR_STATE_CACHE", NULL }, -1, 2, 1, 0 },
     { "depth clear as a memory fill", { "DKR_DEPTH_FILL", NULL }, -1, 1, 1, 0 },
+    // Mega build (2026-11-23): the sprite table shader (P65 rank 1) has not run on hardware yet, so it is a row here
+    // and not in the 60 mode's defaults (plat_common.c s60Defaults) until the Old 3DS bench passes its self-check.
+    { "sprite table 1 at 60 (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL }, -1, 1, 1, 0 },
     // The 3D slider up drops the mode to 30 (DKR_STEREO3D=2: 3D whatever the slider says). Check: 30 fps, clean 3D.
     { "3D forced on: must run at 30 (1 lap)", { "DKR_STEREO3D", NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
