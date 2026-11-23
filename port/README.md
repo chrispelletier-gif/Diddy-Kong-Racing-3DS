@@ -247,7 +247,8 @@ controls) work there, as do these renderer switches:
 - `DKR_KART_BATCH` (roadmap P68, off by default; proposals/3ds-kart-draw-batching-plan.md): the karts' GPU-maths draws
   (`DKR_NATIVE_GPU`) batched on the CPU side. `1`: records that follow one another with the same material and one
   vertex load (a kart's batches of one texture) are drawn as one model draw, one box, check, state and params for the
-  run (opaque depth-tested states only). `2` (or `3`) adds slim records: each mesh's index lists for its two cull
+  run (opaque depth-tested states only, and a run stops before a record would put an uncull triangle after a culled
+  one, so the GPU gets the triangles in the same order). `2` (or `3`) adds slim records: each mesh's index lists for its two cull
   groups made once, the corners and indices written straight into the two-core renderer's queue as one record for both
   groups (`OP_MODEL2`), and the matrix, fog and light queued only when they differ from the last record's (the texture
   factors alone otherwise). Same draws, same frames. Logs `kart batching (DKR_KART_BATCH n): ...` every 600 frames

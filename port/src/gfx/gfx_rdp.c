@@ -6859,6 +6859,7 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
     u16 *idx[2], *ringIdx = NULL;
     s16 boxMin[3], boxMax[3];
     s32 i, k = 1, r, used = 2, verdict, corners, tris, n[2] = { 0, 0 }, slim = (sKartBatch & 2) != 0, sortable, brk = 0;
+    s32 late = 0; // A record so far has culled-group (1) triangles
     s32 check = PLAT_DEBUG_TOOLS ? sKartBatchCheck : 0;
     u32 ws, forgets = sNativeForgets;
 
@@ -6872,6 +6873,9 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
     rec[0].vtx = vtx, rec[0].mesh = mesh, rec[0].total = total, rec[0].count = count;
     corners = mesh->numCorners;
     tris = count;
+    for (i = 0; i < count; i++) {
+        late |= !mesh->backface[i]; // (culled group: drawn after the record's uncull group)
+    }
     if ((sKartBatch & 1) && sortable &&
         !(sKartSkipFrame == (u32) sFrameCount && dl > sKartSkipStart && dl < sKartSkipEnd)) {
         // The records that follow with the same tag (material) and one vertex load (see native_record_body).
@@ -6893,6 +6897,21 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
             if (m == NULL || m->maxVertex >= nv || m->numCorners > NATIVE_MAX_CORNERS ||
                 corners + m->numCorners > NATIVE_MAX_CORNERS) {
                 break;
+            }
+            {
+                // The merged draw has every record's group 0 before any group 1. That is the records' own order
+                // only while no record with group 1 triangles comes before one with group 0 triangles: a run stops
+                // there, so the GPU gets the triangles in exactly the order the one-by-one path gives (a depth tie
+                // on EverFrost Peak showed one pixel otherwise).
+                s32 g0 = 0, g1 = 0;
+                for (i = 0; i < cnt; i++) {
+                    g0 |= m->backface[i] != 0;
+                    g1 |= m->backface[i] == 0;
+                }
+                if (late && g0) {
+                    break;
+                }
+                late |= g1;
             }
             rec[k].vtx = (const Vertex *) seg_addr(t[1].words.w0);
             rec[k].mesh = m;
