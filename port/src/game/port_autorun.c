@@ -355,6 +355,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // went. This row races them off, to confirm the new default on every track. The TLB rows (candidate 3, large
     // pages) went too: ~1k main TLB misses a frame, far under the ~5k gate.
     { "native track off (the default before run 54)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1, 0, 1, 0 },
+    // P55 S1 (2026-11-23, proposals/3ds-track-bake-s1-plan.md): the native track's meshes made during the level load
+    // (DKR_TRACK_BAKE, gfx_rdp.c track_bake) instead of the first time each batch is seen. Read the race start (the
+    // results' start columns and autorun_hitches.txt: the first racing frames no longer build meshes), both cores'
+    // ms, and the log's "track bake (during the load ...)" lines (ms, KB, "0 out of room"). The self-check row hashes
+    // the baked meshes again as it races and must say 0 wrong (log: "track bake check: N compared, 0 differ").
+    { "native track built during the load (S1)", { "DKR_TRACK_BAKE", NULL, NULL }, 0, 1, 0, 0 },
+    { "native track built during the load, self-check (1 lap, chk: 0 wrong)",
+      { "DKR_TRACK_BAKE", "DKR_TRACK_BAKE_CHECK", NULL }, 0, 1, 1, 1 },
     // The split ring's position as a mask instead of a software divide (DKR_SPLIT_MASK, default 1 on every console:
     // proposals/3ds-arm11-c-tips-audit.md item 1, estimated -0.05..-0.25 ms game core). The same positions either way;
     // this row races the old divide, so the usual races against it say what the mask gained.

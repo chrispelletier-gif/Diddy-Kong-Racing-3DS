@@ -502,6 +502,44 @@ jobs:
             exit 1
           fi
 
+      - name: Track bake check
+        # P55 S1: DKR_TRACK_BAKE makes the native track's meshes during the level load, so the same build must draw
+        # identical frames with it on (the Old 3DS defaults have the native track on), with its self-check on
+        # (DKR_TRACK_BAKE_CHECK=1: baked meshes hashed again as the game runs) reporting 0 differ, and every batch
+        # baked (0 meshes made after the load). Mode 2 is the check broken on purpose (rule K6: the invalidation of a
+        # baked batch the game scrolls is dropped) and must report differences.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_TRACK_BAKE=1 \
+            --head-env DKR_TRACK_BAKE_CHECK=1 --out "$RUNNER_TEMP/track-bake" --max-images 0 --no-repeat-check \
+            --fail-on-diff
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_TRACK_BAKE=1 --head-env DKR_TRACK_BAKE_CHECK=2 --only levels \
+            --out "$RUNNER_TEMP/track-bake-broken" --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/track-bake/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/track-bake-broken/runs" -path "*/head/log.txt")
+          grep -h "track bake" $logs $broken | grep -v "^track bake (" | tail -n 8
+          if ! grep -q "^track bake (during the load, level load [0-9]*): [1-9][0-9]* batches" $logs; then
+            echo "::error::The track was never baked during a load (the switch never engaged)."
+            exit 1
+          fi
+          if grep -q "track bake check: a .* mesh differs" $logs; then
+            echo "::error::A baked track mesh no longer matches its batch (see the log line above)."
+            exit 1
+          fi
+          if grep "track bake check: [0-9]* compared" $logs | grep -qv " 0 meshes made after the load"; then
+            echo "::error::The bake missed track batches the game drew (meshes made after the load)."
+            exit 1
+          fi
+          if ! grep -q "track bake check: [1-9][0-9]* compared, 0 differ" $logs; then
+            echo "::error::The track bake check never compared a mesh."
+            exit 1
+          fi
+          if ! grep -q "track bake check: [0-9]* compared, [1-9][0-9]* differ" $broken; then
+            echo "::error::The track bake check broken on purpose (DKR_TRACK_BAKE_CHECK=2) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register
