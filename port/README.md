@@ -293,6 +293,21 @@ controls) work there, as do these renderer switches:
   shader's sums on its mesh and with the renderer's own CPU way (chk cells; logs `wave shader check: N vertices ...
   differ on 0 ..., the CPU way on 0`); `=2` is broken on purpose (rule K6: every index one step on; must report most
   vertices))
+- `DKR_FRAME_PARTS=1` (roadmap P57 E, on by default; Old 3DS two-core renderer with the profiler on): the backend's
+  "frame start/end" bucket of the `backend records` line timed in 15 named parts on the mix's timed frames (1 in 8 on
+  an Old 3DS), logged as `backend frame start/end (ms a frame): capture/screen, start GPU wait, set-up, texture
+  promote, start rest, end tallies, vertex flush, logs, end GPU wait, fills, command lists, present, screen watch,
+  C3D_FrameEnd, after` with the command list parts a frame, on its own log line and in `autorun_cores.txt`.
+  `DKR_FRAME_PARTS_CHECK=1` (default) checks the parts add up to the bucket within 5% (chk cells, `ok`/`WRONG`);
+  `=2` is broken on purpose (rule K6: the largest part left out of the sum; must report WRONG); `0` off
+- `DKR_FLAT_FRAME=1` (roadmap P55 S4 step 1, off by default: race frames on the flat dispatcher, `nframe.c`
+  `run_flat_frame`: the record dispatcher with the record tag tested first, state ops straight to `native_op` and the
+  record path built a second time without the step marks, census notes, kart counts and remote vertex maths
+  (`native_record_flat`). It runs only on frames that use none of those (no `DKR_WALK_STEPS` frame being timed, no
+  `DKR_WALK_CENSUS`, no `DKR_KART_COUNTS`, `DKR_NATIVE_REMOTE` 0); other frames take the record dispatcher. Same draws,
+  same frames, fewer instruction cache misses. `DKR_FLAT_FRAME_CHECK=1` (test builds) checks at every flat record that
+  those conditions still hold (chk cells; logs `flat frame: N frames flat, M not, K records checked, 0 wrong` every 600
+  frames); `=2` is broken on purpose (rule K6: turns the kart counts on mid-frame, so every later record is reported))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)

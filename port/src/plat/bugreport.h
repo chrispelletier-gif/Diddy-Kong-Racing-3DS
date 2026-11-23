@@ -11,8 +11,9 @@
 
 typedef struct BugReportFile {
     const char *name;
-    const unsigned char *data;
+    const unsigned char *data; /* The file's bytes, or NULL to read the first size bytes of path as it is sent. */
     unsigned int size;
+    const char *path; /* DKR_NET_STREAM: the file on the SD card, read and compressed a piece at a time. */
 } BugReportFile;
 
 typedef struct BugReportConfig {

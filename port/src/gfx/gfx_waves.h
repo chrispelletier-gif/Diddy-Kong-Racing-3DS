@@ -17,8 +17,8 @@
 #ifndef GFX_WAVES_H
 #define GFX_WAVES_H
 
-#define GFX_WAVE_TABLE_MAX 188 // Height table entries the shader's wtab[47] holds
-#define GFX_WAVE_SCALES 12     // Scale table entries (wsc[3])
+#define GFX_WAVE_TABLE_MAX 188 // Height table entries: stab rows 0..46 in waves.v.pica
+#define GFX_WAVE_SCALES 12     // Scale table entries: stab rows 47..49
 
 /* The scale table row selections of func_800BC6C8's nine rows (D_800E304C[row]), as (ai, aj, bi, bj); 100 stands for
  * "no limit" (clamped to 11, where the table holds 1.0). */

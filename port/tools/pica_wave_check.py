@@ -89,7 +89,7 @@ def game_vertex(T, i0, i1, mag, scale, c, unk44, temp, unk48, shade):
 def run(sim, argv):
     wave_i = None
     for i, d in enumerate(sim.dvles):
-        if not d.geo and "wavea" in d.uniforms:
+        if not d.geo and "stab" in d.uniforms and "mtx" in d.uniforms:  # the sprite table shader has no mtx
             wave_i = i
     if wave_i is None:
         print("wave shader: not in the blob")
@@ -126,11 +126,13 @@ def run(sim, argv):
                 "mtx": [(1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)],
                 "camoff": (0, 0, 0, 0),
                 "texa": (1, 1, 1, 1), "texb": (0, 0, 0, 0),
-                "wavea": ((off + 1) % S if broken else off, S, 1.0 / S, mag),
-                "waveb": (unk44, temp, unk48, shade / 128.0),
-                "wavec": (ai, aj, bi, bj),
-                "waved": (rng.randrange(0, 4096), rng.randrange(0, 4096), rng.randrange(1, 900), rng.randrange(1, 900)),
-                "wtab": wtab, "wsc": wsc,
+                # stab rows: the height table (0..46), the scale table (47..49), the tile's four (50..53)
+                "stab": wtab + wsc + [
+                    ((off + 1) % S if broken else off, S, 1.0 / S, mag),
+                    (unk44, temp, unk48, shade / 128.0),
+                    (ai, aj, bi, bj),
+                    (rng.randrange(0, 4096), rng.randrange(0, 4096), rng.randrange(1, 900), rng.randrange(1, 900)),
+                ] + [(0.0, 0.0, 0.0, 0.0)] * (75 - 54),
             }
             for i in range(sub + 1):
                 for j in range(sub + 1):
@@ -145,8 +147,8 @@ def run(sim, argv):
                     sy = int(round(pos[1]))
                     scol = tuple(int(round(v * 255.0)) for v in col)
                     uv = out[3]
-                    want_u = uniforms["waved"][0] + j * uniforms["waved"][2]
-                    want_v = uniforms["waved"][1] + i * uniforms["waved"][3]
+                    want_u = uniforms["stab"][53][0] + j * uniforms["stab"][53][2]
+                    want_v = uniforms["stab"][53][1] + i * uniforms["stab"][53][3]
                     total += 1
                     dy = abs(sy - y)
                     dc = max(abs(scol[k] - rgba[k]) for k in range(4))

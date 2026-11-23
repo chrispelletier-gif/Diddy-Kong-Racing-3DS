@@ -160,6 +160,26 @@ int port_native_particles(void);
  * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
  * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
 #define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* The 60 Hz picture (DKR_INTERP60, S8 / P39; port/src/gfx/gfx_interp.inc), only while that switch is on: whose
+ * matrices come next, so the renderer can find each thing's matrix of the last frame. PORT_IKEY_TAG | 1 | hash << 1
+ * (a 15-bit hash of the object) before an object's draws (render_object); PORT_IKEY_TAG alone before the world matrix
+ * (mtx_world_origin). One word, nothing after it. */
+#define PORT_IKEY_TAG 0x504B0000 /* "PK" */
+int port_interp_tags(void);
+#define port_ikey_object(dl, object)                                                                                   \
+    do {                                                                                                               \
+        if (port_interp_tags()) {                                                                                      \
+            unsigned int _h = (unsigned int) (unsigned long) (object);                                                 \
+            _h = (_h >> 3) * 0x9E3779B1u;                                                                              \
+            gDPNoOpTag((dl)++, PORT_IKEY_TAG | ((_h >> 17) << 1) | 1);                                                 \
+        }                                                                                                              \
+    } while (0)
+#define port_ikey_world(dl)                                                                                            \
+    do {                                                                                                               \
+        if (port_interp_tags()) {                                                                                      \
+            gDPNoOpTag((dl)++, PORT_IKEY_TAG);                                                                         \
+        }                                                                                                              \
+    } while (0)
 /* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
  * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
 void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);
@@ -259,6 +279,8 @@ void port_gpu_light_clear(const struct Vertex *verts);
 #else
 #define port_draw_tag(dl, kind)
 #define port_draw_tag_object(dl, kind, object)
+#define port_ikey_object(dl, object)
+#define port_ikey_world(dl)
 #define port_game_section(section) ((void) 0)
 #define PORT_PREFETCH_OBJS(list, i, end) ((void) 0)
 #define PORT_PREFETCH_OBJS_DOWN(list, i, start) ((void) 0)

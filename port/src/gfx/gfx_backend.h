@@ -277,6 +277,64 @@ static inline void gfx_sprite_expand(const GfxSpritePoint *pts, int n, GfxVertex
 int gfxb_sprite_points(void);
 void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints);
 /*
+ * Sprite table (roadmap P65 rank 1, DKR_SPRITE_TABLE, default off; proposals/3ds-sprite-table-plan.md). A billboard
+ * load's corners are an affine function of the game's own vertices (the billboard matrix, place_billboard's scale and
+ * anchor, the viewport fold), so the walk hands over the game's s16 vertices with one 4x4 matrix per load (a group)
+ * instead of working out every corner: the 3DS's vertex shader (sprite_table.v.pica) does the maths, reading its
+ * group's rows from a table of uniforms. Each triangle is three GfxTabVertex (no shared vertices, no indices). The
+ * group also holds the draw's first texture's axes, so a group is one load with one set of axes; up to
+ * GFX_TAB_GROUPS of them a draw. gfx_tab_expand makes the same corners on the CPU (the host's backend, the 3DS's
+ * fallback and the walk's self-check): position and texture coordinates as the shader does them, the fog factor as
+ * the walk's fog_factor does it.
+ */
+#define GFX_TAB_GROUPS 15
+#define GFX_TAB_ROWS 5 /* a group's uniform rows: the matrix's four, then the texture axes */
+#define GFX_TAB_MAX_VERTS (GFX_MAX_BATCH_TRIANGLES * 3)
+typedef struct GfxTabGroup {
+    float m[4][4];              /* rows: clip x, y, z, w = row . (x, y, z, 1), the viewport folded in */
+    float tex[4];               /* s = u * tex[0] - tex[1], t = v * tex[2] - tex[3] (u, v: the game's texture coordinates) */
+    short boxMin[3], boxMax[3]; /* the load's vertices' box, for the backend's guard band test */
+} GfxTabGroup;
+typedef struct GfxTabVertex {
+    short x, y, z, row;     /* the game's vertex; row: its group's first table row (group * GFX_TAB_ROWS) */
+    short u, v, fog, pad;   /* texture coordinates; fog 1: the alpha is the fog factor */
+    unsigned char r, g, b, a;
+} GfxTabVertex;
+typedef char gfx_tab_vertex_is_20_bytes[sizeof(GfxTabVertex) == 20 ? 1 : -1];
+
+/* Whether the backend takes sprite tables itself (gfxb_draw_sprite_table); 0: the frontend expands them. */
+int gfxb_sprite_table(void);
+void gfxb_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                            float fogOffset, const GfxTabVertex *verts, int numVerts);
+
+/* One corner as the table's shader makes it (in the walk's clip space, before the 3DS's screen mapping). */
+static inline void gfx_tab_corner(GfxVertex *o, const GfxTabVertex *s, const GfxTabGroup *gr, float fogMul,
+                                  float fogOffset) {
+    float x = s->x, y = s->y, z = s->z;
+    o->x = x * gr->m[0][0] + y * gr->m[0][1] + z * gr->m[0][2] + gr->m[0][3];
+    o->y = x * gr->m[1][0] + y * gr->m[1][1] + z * gr->m[1][2] + gr->m[1][3];
+    o->z = x * gr->m[2][0] + y * gr->m[2][1] + z * gr->m[2][2] + gr->m[2][3];
+    o->w = x * gr->m[3][0] + y * gr->m[3][1] + z * gr->m[3][2] + gr->m[3][3];
+    o->u0 = s->u * gr->tex[0] - gr->tex[1];
+    o->v0 = s->v * gr->tex[2] - gr->tex[3];
+    o->u1 = 0.0f, o->v1 = 0.0f;
+    o->r = s->r, o->g = s->g, o->b = s->b, o->a = s->a;
+    if (s->fog) {
+        float w = (o->w != 0.0f) ? o->w : 0.0001f, f = (o->z / w) * fogMul + fogOffset;
+        o->a = (f < 0.0f) ? 0 : (f > 255.0f) ? 255 : (unsigned char) f;
+    }
+}
+
+/* The table's triangles as gfxb_draw_indexed takes them: numVerts corners, indices 0 to numVerts - 1. */
+static inline void gfx_tab_expand(const GfxTabGroup *groups, float fogMul, float fogOffset, const GfxTabVertex *verts,
+                                  int numVerts, GfxVertex *out, unsigned short *indices) {
+    int i;
+    for (i = 0; i < numVerts; i++) {
+        gfx_tab_corner(&out[i], &verts[i], &groups[verts[i].row / GFX_TAB_ROWS], fogMul, fogOffset);
+        indices[i] = (unsigned short) i;
+    }
+}
+/*
  * GPU vertex maths. While the backend says so (gfxb_gpu_transform, at the start of each frame), the
  * frontend hands triangles over in the game's own model space where it can, with the draw's matrix, and the GPU
  * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes
@@ -335,6 +393,28 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
 int gfxb_gpu_kinds_frame(int frame);
 void gfxb_gpu_kind(int kind);
 void gfxb_gpu_kind_call(void *payload);
+
+/*
+ * The 60 Hz picture (DKR_INTERP60, S8 / P39; proposals/3ds-interp60-plan.md). In a frame the backend draws twice (the
+ * in-between picture, then the real one), the walk sends, in order with the draws (an OP_CALL record's payload, or a
+ * call at once), the delta in force for the draws after it: d maps a vertex's clip coordinates of this frame (as a
+ * row, GfxVertex's x y z w) to where it is in the in-between picture (clip' = clip d). Flat draws ignore it. Just
+ * before the frame ends, the walk's verdict: END_VALID (draw two pictures) or END_NOT (a camera cut, more than one
+ * viewport...: one picture). gfxb_interp_frame says whether the backend wants deltas this frame (0 no, 1 interpolate,
+ * 2 extrapolate); it is asked once at the walk's frame start.
+ */
+#define GFX_INTERP_DELTA 0
+#define GFX_INTERP_IDENTITY 1
+#define GFX_INTERP_END_VALID 2
+#define GFX_INTERP_END_NOT 3
+typedef struct GfxInterpCall {
+    float d[4][4];
+    int kind;
+    int pad;
+} GfxInterpCall;
+int gfxb_interp_frame(void);
+void gfxb_interp_call(void *payload);
+void gfxb_interp_check_counts(unsigned int *checked, unsigned int *wrong);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*
@@ -355,6 +435,33 @@ enum {
 };
 extern volatile int gGfxbModelSplitOn;
 void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsigned int *draws, unsigned int *reads);
+/*
+ * P57 E (DKR_FRAME_PARTS, default 1): the backend's frame start and end (gfxb_start_frame, gfxb_end_frame: the mix's
+ * "frame start/end", ~3.9 ms a frame on an Old 3DS) split into named parts, timed on the backend mix's timed frames
+ * (gfx_split.c sets gGfxbFramePartsOn at each timed frame's OP_START and clears it after its OP_END). Totals since
+ * start-up, in clock ticks, with the frames timed, the clock reads made and the command list parts handed over.
+ */
+enum {
+    GFXB_FPART_CAPTURE,    // capture_pending_frame, apply_screen_mode, adaptive_pick
+    GFXB_FPART_START_WAIT, // wait_for_gpu at the start (frames not built while the GPU draws)
+    GFXB_FPART_SETUP,      // The slot, read_switches, program, clears, target, viewport, band
+    GFXB_FPART_PROMOTE,    // promote_textures
+    GFXB_FPART_START_REST, // forget_gpu_state to raw_frame_start
+    GFXB_FPART_TALLIES,    // The end's test pattern, snapshot, draw parts, GPU kinds, stereo lists
+    GFXB_FPART_VERTICES,   // The vertex and index cache flushes
+    GFXB_FPART_LOGS,       // The frame, sprite and VRAM log lines
+    GFXB_FPART_END_WAIT,   // wait_for_gpu at the end (the last frame's GPU wait, its texture frees)
+    GFXB_FPART_FILLS,      // The memory fills (colour, depth) and their wait
+    GFXB_FPART_LISTS,      // The command list parts flushed and queued (GX_ProcessCommandList)
+    GFXB_FPART_PRESENT,    // adaptive_link, pace_frame, triple_choose, wait_for_present
+    GFXB_FPART_SCREEN,     // find_recent_screen, history_sample, watch_for_line, timeline_arm
+    GFXB_FPART_C3D_END,    // C3D_FrameEnd (the last list part, the screen copies, the GPU queue started)
+    GFXB_FPART_AFTER,      // history_note_copy, record_recent_frame, the park check
+    GFXB_FPART_COUNT
+};
+extern volatile int gGfxbFramePartsOn;
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts);
 /*
  * Meshes: model vertices copied once to memory the GPU reads, and drawn from there frame
  * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames

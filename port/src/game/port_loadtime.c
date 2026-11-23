@@ -127,6 +127,9 @@ void port_load_end(s32 levelId, const char *kind) {
         return;
     }
     port_load_step("rest");
+    if (kind[0] == 'g' && port_race_hud_loaded()) {
+        port_load_step("bests"); // P58: a time trial's best run read here, behind black
+    }
     prewarm_step(TRUE); // The uploads done too, so the first frame has none
     sActive = FALSE;
     now = plat_time_ns();
