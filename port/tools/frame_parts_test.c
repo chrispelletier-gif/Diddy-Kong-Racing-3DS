@@ -5,7 +5,7 @@
  * must both fail. Exit status 0 when all three come out as they should.
  */
 #include <stdio.h>
-#include "../src/gfx/gfx_frame_parts.h"
+#include "gfx/gfx_frame_parts.h"
 
 int main(void) {
     const unsigned long long ms = 268111ULL; // Old 3DS clock ticks a millisecond

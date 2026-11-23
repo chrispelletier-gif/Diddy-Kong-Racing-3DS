@@ -328,7 +328,7 @@ jobs:
       - name: Frame start/end parts check
         # P57 E (rule K6): the 3DS backend's frame start/end parts must add up to the mix's bucket; parts that add up
         # pass, the check broken on purpose (the largest part left out) and a part counted twice must fail
-        run: gcc -Wall -Werror -std=gnu99 -o "$RUNNER_TEMP/frame_parts_test" port/host/frame_parts_test.c && "$RUNNER_TEMP/frame_parts_test"
+        run: gcc -Wall -Werror -std=gnu99 -Iport/src -o "$RUNNER_TEMP/frame_parts_test" port/tools/frame_parts_test.c && "$RUNNER_TEMP/frame_parts_test"
       - name: Pictures shown logic
         # P56 K7: the replaced pictures and the longest gap between shown ones (port/src/plat/shown.h)
         run: gcc -Iport/src -o "$RUNNER_TEMP/shown_test" port/tools/shown_test.c && "$RUNNER_TEMP/shown_test"
