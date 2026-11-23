@@ -31,6 +31,8 @@
 #define gGfxbModelSplitOn gRefbModelSplitOn
 #define gfxb_sprite_points refb_sprite_points
 #define gfxb_draw_sprites refb_draw_sprites
+#define gfxb_sprite_table refb_sprite_table
+#define gfxb_draw_sprite_table refb_draw_sprite_table
 #define host_frames_rendered ref_frames_rendered
 #include <stdlib.h>
 // None of the host renderer's own debug settings apply here.

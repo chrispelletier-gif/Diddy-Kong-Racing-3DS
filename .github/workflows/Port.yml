@@ -592,6 +592,34 @@ jobs:
             exit 1
           fi
 
+      - name: Sprite table check
+        # P65 rank 1: DKR_SPRITE_TABLE hands billboard tiles over as the game's vertices with one matrix per load. Its
+        # self-check (DKR_SPRITE_TABLE_CHECK=1) makes every corner both ways (gfx_tab_corner, and the old way's
+        # load_vertices_core + sprite_corner) and must report 0 differ with the Old 3DS defaults. Mode 2 is the check
+        # broken on purpose (rule K6: the anchor's x left out of each group) and must report differences.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_SPRITE_TABLE=1 --head-env DKR_SPRITE_TABLE_CHECK=1 --only levels \
+            --out "$RUNNER_TEMP/sprite-table" --max-images 0 --no-repeat-check
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_SPRITE_TABLE=1 --head-env DKR_SPRITE_TABLE_CHECK=2 --only levels \
+            --out "$RUNNER_TEMP/sprite-table-broken" --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/sprite-table/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/sprite-table-broken/runs" -path "*/head/log.txt")
+          grep -h "sprite table" $logs $broken | tail -n 8
+          if grep -q "sprite table check: .*(DIFFER)" $logs; then
+            echo "::error::The sprite table's corners differ from the old way's (see the log lines above)."
+            exit 1
+          fi
+          if ! grep -q "sprite table check: [1-9][0-9]* corners compared, 0 differ" $logs; then
+            echo "::error::The sprite table check never compared a corner (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "sprite table check: .*(DIFFER)" $broken; then
+            echo "::error::The sprite table check broken on purpose (DKR_SPRITE_TABLE_CHECK=2) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

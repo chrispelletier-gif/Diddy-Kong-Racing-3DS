@@ -976,6 +976,56 @@ void gfx_split_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts
     gfx_split_call_commit(s);
 }
 
+/* P65 rank 1 (DKR_SPRITE_TABLE): a sprite table batch, as a call of the backend's in the queue (its groups, then its
+ * vertices), or expanded here into an indexed draw for a backend that doesn't take tables (the host's). */
+typedef struct SplitTable {
+    GfxDrawState state;
+    float fogMul, fogOffset;
+    int numGroups, numVerts;
+} SplitTable;
+
+static void table_call(void *payload) {
+    const SplitTable *s = (const SplitTable *) payload;
+    const GfxTabGroup *groups = (const GfxTabGroup *) (s + 1);
+    gfxb_draw_sprite_table(&s->state, groups, s->numGroups, s->fogMul, s->fogOffset,
+                           (const GfxTabVertex *) (groups + s->numGroups), s->numVerts);
+}
+
+void gfx_split_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                                 float fogOffset, const GfxTabVertex *verts, int numVerts) {
+    static GfxVertex sVerts[GFX_TAB_MAX_VERTS];
+    static unsigned short sIndices[GFX_TAB_MAX_VERTS];
+    unsigned int groupBytes, vertBytes;
+    SplitTable *s;
+    if (numVerts <= 0 || numGroups <= 0) {
+        return;
+    }
+    if (numVerts > GFX_TAB_MAX_VERTS) {
+        numVerts = GFX_TAB_MAX_VERTS - GFX_TAB_MAX_VERTS % 3;
+    }
+    if (!gfxb_sprite_table()) {
+        gfx_tab_expand(groups, fogMul, fogOffset, verts, numVerts, sVerts, sIndices);
+        gfx_split_draw_indexed(state, sVerts, numVerts, sIndices, numVerts / 3);
+        return;
+    }
+    groupBytes = (unsigned int) numGroups * sizeof(GfxTabGroup);
+    vertBytes = (unsigned int) numVerts * sizeof(GfxTabVertex);
+    s = gfx_split_call_reserve(table_call, sizeof(SplitTable) + groupBytes + vertBytes);
+    if (s == NULL) {
+        gfx_split_drain();
+        gfxb_draw_sprite_table(state, groups, numGroups, fogMul, fogOffset, verts, numVerts);
+        return;
+    }
+    s->state = *state;
+    s->fogMul = fogMul;
+    s->fogOffset = fogOffset;
+    s->numGroups = numGroups;
+    s->numVerts = numVerts;
+    memcpy(s + 1, groups, groupBytes);
+    memcpy((unsigned char *) (s + 1) + groupBytes, verts, vertBytes);
+    gfx_split_call_commit(s);
+}
+
 /*
  * P63 DKR_SPLIT_REF (gfx_split.h): the same as gfx_split_draw_indexed but for the copy, which the walk's bucket draws
  * spent ~1.2 ms a frame on in the Old 3DS's game core (run 50). The backend reads the walk's arrays inside

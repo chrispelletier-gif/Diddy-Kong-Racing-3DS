@@ -1,0 +1,75 @@
+; Vertex shader for sprite tables (roadmap P65 rank 1, DKR_SPRITE_TABLE; gfx_c3d.c draw_table_gpu,
+; proposals/3ds-sprite-table-plan.md). Billboard sprite tiles arrive as the game's own s16 vertices: each names its
+; group, the first of five rows of the uniform table stab (gfx_backend.h GfxTabGroup): four rows of the load's matrix,
+; already mapped to the 3DS screen's clip space (the billboard matrix, place_billboard's scale and anchor, the N64
+; viewport, then to_screen's quarter turn, 3D width and depth remap), and one row for the texture coordinates (the
+; tile's axes with the texture's padded size and flipped t folded in). The CPU no longer works out the corners.
+; Inputs: v0 (x, y, z, the group's first row), v1 (u, v, fog flag, 0), v2 the colour, bytes 0 to 255.
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register is written whole, once, with no
+; branches; intermediate results go to temporaries; inputs are copied to temporaries before two are combined. The one
+; mova (the picasso manual: two in a row freeze the PICA200) is followed by two other instructions before a0.x is read.
+; Its uniforms have names of their own, so picasso gives them registers apart from shader.v.pica's and
+; transform.v.pica's (globals of one blob never share registers unless they share a name): drawing with this program
+; leaves the other programs' uniforms as they were. 3D frames never come here (no eye offset).
+
+.entry stab_main
+
+; Uniforms
+.fvec stab[75] ; GFX_TAB_GROUPS (15) groups of GFX_TAB_ROWS (5) rows
+.fvec stfog    ; Fog factor = clamp(z / w * stfog.x + stfog.y, 0, 1), with z already (z - w) / 2 (as transform.v.pica)
+
+; Constants
+.constf stconsts(0.00392156862745098, 0.0, 1.0, 0.0001)
+.alias rgba_scale stconsts.xxxx
+.alias zeros stconsts.yyyy
+.alias ones stconsts.zzzz
+.alias tiny stconsts.wwww
+
+; Outputs
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.proc stab_main
+	; The group's first row, then the position (x, y, z, 1) and the texture inputs, before a0.x is read
+	mova a0.x, v0.wwww
+	mov r0, v0
+	mov r0.w, ones
+	mov r7, v1
+
+	; Position
+	dp4 r1.x, stab[a0.x], r0
+	dp4 r1.y, stab[a0.x+1], r0
+	dp4 r1.z, stab[a0.x+2], r0
+	dp4 r1.w, stab[a0.x+3], r0
+
+	; Texture coordinates: s = u * row.x + row.y, t = v * row.z + row.w
+	mov r6, stab[a0.x+4]
+	mul r8, r6.xzxz, r7.xyxy
+	add r8, r6.ywyw, r8
+
+	; Fog factor, from z before the depth clamp below
+	max r2, tiny, r1.wwww
+	rcp r2, r2.x
+	mul r2, r2, r1.zzzz
+	mul r2, stfog.xxxx, r2
+	add r2, stfog.yyyy, r2
+	max r2, zeros, r2
+	min r2, ones, r2
+
+	; Colour, the alpha replaced by the fog factor where the vertex's fog flag (v1.z) is 1
+	mul r3, rgba_scale, v2
+	add r4, r2, -r3.wwww
+	mul r4, r7.zzzz, r4
+	add r3.w, r3, r4
+
+	; The depth clamp (the N64 has no far plane)
+	min r1.z, zeros, r1
+
+	mov outpos, r1
+	mov outtc0, r8
+	mov outtc1, zeros
+	mov outclr, r3
+	end
+.end

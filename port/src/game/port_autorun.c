@@ -415,6 +415,20 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
     // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
     { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    // P65 rank 1 (2026-11-23, proposals/3ds-sprite-table-plan.md): billboard sprite tiles handed to the GPU as the
+    // game's own vertices with one matrix per load (DKR_SPRITE_TABLE), so the game core no longer works out their
+    // corners (run 54: sprite set-up + corners + tris 1.5-2.2 ms timed). 1: draws of one load by the frame's transform
+    // program (no program switch; most draws, as each tile has its own texture), the rest by sprite_table.v.pica (the
+    // uniform table); 2: every draw by sprite_table.v.pica (two program switches a draw). Judged on the game core
+    // (4-track mean, triangle-adjusted) with the GPU and renderer core within +0.5 ms. Placed before the GS rows: a
+    // lock leaves sprite_table.txt "testing" and the next start leaves the table shader off. The log's "sprite table"
+    // lines count tiles, draws and the routes; the self-check row must say 0 wrong (chk; log "0 differ").
+    { "sprite table, one-load draws by the transform program (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL, NULL }, -1, 1, 0,
+      0 },
+    { "sprite table, every draw by the table shader (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL, NULL }, -1, 2, 1, 0 },
+    { "sprite table, walk steps timed (1 lap)", { "DKR_SPRITE_TABLE=1", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
+    { "sprite table, self-check (1 lap, chk: 0 wrong)", { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", NULL }, 0, 1,
+      1, 1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
