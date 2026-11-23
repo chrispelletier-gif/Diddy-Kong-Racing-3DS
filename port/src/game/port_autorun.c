@@ -348,8 +348,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
     // P64 (2026-11-22, proposals/3ds-breakthrough-candidates.md). The walk steps rows above also split the sprites step
-    // in two (candidate 4): "sprites" (the record's checks, state and axes) and "sprite corners" (their vertex maths
-    // and drawing, what a vertex shader table of sprites would replace); under half the sprites time in corners, stop.
+    // (candidate 4; with P65's finer split): "sprites" (the record's checks, state and axes), "sprite corners" (their
+    // vertex maths) and "sprite tris" (their drawing): corners + tris is what a vertex shader table of sprites would
+    // replace; under half the sprites time in corners + tris, stop.
     // Candidate 1: the native track (NR4, DKR_NATIVE_TRACK: the track's vertices kept on the GPU, its vertex shader
     // doing the maths) lost in runs 45, 48 and 50, but always without raw register words, which turned the karts' GPU
     // maths from a renderer core loss into -3.6 ms. Raw words are the Old 3DS default now, so these rows race the track
@@ -404,6 +405,36 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // the walk's and must say 0 wrong (log: "split lines: N frames compared, 0 differ, 0 frame ends not handed over").
     { "split ring hand-off in batches", { "DKR_SPLIT_LINES", NULL, NULL }, 0, 1, 0, 0 },
     { "split ring hand-off, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_LINES_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P65 (2026-11-22, proposals/3ds-custom-shader-plan.md section 6, steps 0 and 1). The two walk steps rows above now
+    // also split the sprite tiles' step ("sprites" set-up, "sprite corners", "sprite tris") and time billboards apart
+    // ("billboard corners", "billboard tris", out of "other paths"): rank 1's uniform-table sprite shader goes ahead
+    // only if sprite + billboard corners and tris come to 0.6 ms or more on the game core.
+    // Step 0: the karts' light by transform.v.pica's light path (DKR_GPU_LIGHT, off since #406 and never raced with the
+    // karts on the GPU) on top of the defaults (NATIVE_GPU 1). Plan estimate: game core -0.1 to -0.4 ms.
+    { "karts lit by the GPU's vertex shader (GPU_LIGHT, karts on the GPU)", { "DKR_GPU_LIGHT", NULL, NULL }, 0, 1, 1, 0 },
+    // Step 0: why the native track lost on the Old 3DS GPU (+3-4 ms, #367): the GPU timed by draw kind (DKR_GPU_KINDS,
+    // off by default here: its cut frame is a hitch) with the track on the GPU's vertex maths and without. The track
+    // kind's GPU ms grows with its vertices (same pixels both ways), so the difference is the vertex cost a slimmer
+    // track shader could cut. Both are measurements (left out of the all-together race).
+    { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 0 },
+    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", NULL }, 0, 1, 1, 0 },
+    // Step 1, rank 2: the native kart batches by road (one load / two loads / dynamic / billboard / no tables), their
+    // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
+    // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
+    // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
+    { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
+    // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
+    // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
+    // 4, then every batch (run 50's row). One lap each: they answer "does it lock", not speed. Each cap has its own
+    // marker (sprite_gs_capN.txt, sprite_gs.txt for every batch): a lock in a row leaves "testing", and the next start
+    // logs that cap "LEFT OFF" and races it the first way. The log's "sprite points" lines say how many batches went
+    // through the geometry shader ("not GS: cap" for the rest). Watch the smoke, sparks and balloons for torn sprites.
+    { "sprite GS, first batch a frame only (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
+      0, 1, 1, 1 },
+    { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
+      0, 4, 1, 1 },
+    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, -1, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

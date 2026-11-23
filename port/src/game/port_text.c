@@ -130,6 +130,8 @@ static const PortText sFrench[] = {
     { "Lean switch bench", "Banc d'options allege" },
     { "Lean quick test", "Test rapide allege" },
     { "Lean full test", "Test complet allege" },
+    { "GS freeze test", "Test de gel GS" },
+    { "Restarts the game; ~1 min, may need power-offs", "Relance le jeu ; ~1 min, peut demander d'eteindre" },
     { "Switch bench, profiler off as in a player's build", "Banc d'options, profileur coupe comme chez un joueur" },
     { "Quick test, profiler off as in a player's build", "Test rapide, profileur coupe comme chez un joueur" },
     { "Full test, profiler off as in a player's build", "Test complet, profileur coupe comme chez un joueur" },

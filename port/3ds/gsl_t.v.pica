@@ -1,0 +1,26 @@
+; GS hang ladder (P65 rank 4, gfx_c3d.c gs_ladder): shader.v.pica's code with its four outputs as generic registers,
+; for the ladder's last steps, where the normal draws go through a pass-through geometry shader too (gsl_t.g.pica): the
+; workaround of citro3d issue #56 ("give dummy geo components to all shaders").
+
+.fvec eye
+
+.constf gslt_consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias gslt_scale gslt_consts.xxxx
+
+.out gslt0 dummy o0
+.out gslt1 dummy o1
+.out gslt2 dummy o2
+.out gslt3 dummy o3
+
+.entry gslt_vmain
+.proc gslt_vmain
+	mov r0, v0
+	mul r1, eye.xxxx, v0.wwww
+	add r1, eye.yyyy, r1
+	add r0.y, r0.y, r1.x
+	mov gslt0, r0
+	mov gslt1, v1
+	mov gslt2, v2
+	mul gslt3, gslt_scale, v3
+	end
+.end

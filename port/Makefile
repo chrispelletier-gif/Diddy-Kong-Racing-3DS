@@ -212,7 +212,7 @@ obj = $(BUILD_DIR)/obj/$(subst ../,,$(1:.c=.o))
 GAME_OBJS     := $(foreach f,$(GAME_SRC) $(LIBULTRA_SRC),$(call obj,$(f)))
 PORT_GAME_OBJS := $(foreach f,$(PORT_GAME_SRC),$(call obj,$(f)))
 PORT_SYS_OBJS := $(foreach f,$(PORT_SYS_SRC),$(call obj,$(f)))
-ALL_OBJS      := $(GAME_OBJS) $(PORT_GAME_OBJS) $(PORT_SYS_OBJS) $(SHADER_OBJS)
+ALL_OBJS      := $(GAME_OBJS) $(PORT_GAME_OBJS) $(PORT_SYS_OBJS) $(SHADER_OBJS) $(GSL_OBJ)
 
 .PHONY: all clean
 all: $(if $(filter 3ds,$(TARGET)),$(BUILD_DIR)/dkr.3dsx,$(EXE))

@@ -19,6 +19,8 @@
 #include "plat/settings.h"
 #include "plat/shown.h"
 #include "shader_shbin.h"
+#include "gsl_shbin.h"
+#include "gs_ladder.h"
 
 /* v28: textures in VRAM by default on the Old 3DS in the PICA_ALL build (benches #432/#436: steadier frames on
  * Whale Bay, even elsewhere); off elsewhere, as before. DKR_TEX_VRAM=0/1 still decides. */
@@ -87,9 +89,18 @@ typedef struct C3DVertexOld { // VFMT_OLD
 } C3DVertexOld;
 /* VFMT_MODEL is the game's own vertices for GPU vertex maths (P30, GfxModelVertex): s16 position and texture
  * coordinates and byte colours, 16 bytes; the second coordinates come from the fixed attribute. */
-enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_COUNT };
+/* VFMT_SPRITE is a sprite point for the geometry shader (P60 D, SpriteGpuPoint below): seven attributes, v0 to v6. */
+typedef struct SpriteGpuPoint {
+    float p[4], e1[4], e2[4]; // In the 3DS screen's clip space (to_screen's, z not yet pinned)
+    float tc[4];              // p's texture coordinates, then e1's
+    float tc2[4];             // e2's, then 0, 0
+    u8 color[4];              // The colour, with p's alpha
+    u8 alpha[4];              // q's, r's and d's alpha, then 0
+} SpriteGpuPoint;
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_SPRITE, VFMT_COUNT };
 static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld),
-                                             sizeof(GfxModelVertex) };
+                                             sizeof(GfxModelVertex), sizeof(SpriteGpuPoint) };
+_Static_assert(sizeof(SpriteGpuPoint) == 88, "the sprite point format's attributes must add up to its stride");
 _Static_assert(sizeof(GfxModelVertex) == 16, "the model vertex format's attributes must add up to its stride");
 static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
 static int sVfmtOld;       // DKR_VERTEX_FORMAT=48
@@ -568,6 +579,15 @@ PLAT_COLD static void init_vertex_formats(void) {
     for (i = 0; i < VFMT_COUNT; i++) {
         attr = &sVfmtAttr[i];
         AttrInfo_Init(attr);
+        if (i == VFMT_SPRITE) {
+            int k;
+            for (k = 0; k < 5; k++) {
+                AttrInfo_AddLoader(attr, k, GPU_FLOAT, 4);
+            }
+            AttrInfo_AddLoader(attr, 5, GPU_UNSIGNED_BYTE, 4);
+            AttrInfo_AddLoader(attr, 6, GPU_UNSIGNED_BYTE, 4);
+            continue;
+        }
         if (i == VFMT_MODEL) {
             AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
             AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);
@@ -611,8 +631,9 @@ static void __attribute__((noinline)) bind_vertex_format(int fmt) {
         sVfmtAttrSet = fmt;
     }
     BufInfo_Init(buf);
-    BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt], fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
-                fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+    BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt],
+                fmt == VFMT_SPRITE ? 7 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
+                fmt == VFMT_SPRITE ? 0x6543210 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
     sBufMesh = NULL;
     if (sVfmtBound >= 0) {
         sVfmtSwitches++;
@@ -647,6 +668,9 @@ static void write_eye(float mul, float add);
 static void hand_over_draw_parts(void);
 static void init_transform(void);
 static void transform_frame_drawn(int frame);
+static void sprite_gs_init(void);
+static void sprite_gs_frame_drawn(int frame);
+static void sprite_gs_log(void);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
@@ -887,6 +911,411 @@ PLAT_COLD static void gpu_self_test(void) {
 
     plat_status("GPU test passed");
     gpu_test_mark_passed();
+}
+
+/*
+ * GS hang ladder (roadmap P65 rank 4, DKR_GS_LADDER, default 0; proposals/3ds-custom-shader-plan.md section 3): which
+ * rule the sprite geometry shader (P60 D, DKR_SPRITE_GS=2) broke when it froze an Old 3DS in bench run 50. After
+ * Test run > GS freeze test (or with DKR_GS_LADDER=1 in env.txt), before the game starts, six steps of 30 frames each
+ * are drawn, one more risky than the one before, with shaders of their own blob (gsl_*.pica, the game's shader.shbin
+ * untouched):
+ *   1. the geometry shader's program alone, one GS triangle a frame and nothing else;
+ *   2. a GS draw, then ordinary indexed draws (citro3d issue #53's order that works);
+ *   3. ordinary draws, then a GS draw (#53's order that hung, with a hard power-off);
+ *   4. 20 switches a frame between the ordinary program and the GS one (our sprites' pattern);
+ *   5. control for 6: the ordinary draws through a pass-through geometry shader, no other program;
+ *   6. 20 switches a frame with that pass-through GS on the ordinary program too (citro3d issue #56's workaround).
+ * Each step's file (gs_ladder_N.txt) says "testing" before its first draw and "passed" after its last frame, so a
+ * freeze points to its step: the next start records "hung" for it and goes on with the steps after it, so every step
+ * gets an answer, one power-off per hang. A GPU stall the console survives is written "gpu-hung" by the watchdog. The
+ * answers are logged ("GS ladder: ...") and kept in gs_ladder.txt; a step already answered is not run again
+ * (DKR_GS_LADDER=2 runs them all again). If 3 or 4 hang while 5 and 6 pass, #56's cause is ours and fix (a) works.
+ * On the Old 3DS (b2096b8, 2026-11-23) all six passed, so GS freeze test 2 (plan section 3b) adds three steps that
+ * come closer to P60 D's real draw (DKR_SPRITE_GS=2, which froze run 50):
+ *   7. P60 D's own sprite shaders (sprite.v/g.pica: 7 outputs, stride-7 GS, 88-byte VFMT_SPRITE points), in the
+ *      ladder's blob, simple state, four points a frame and nothing else;
+ *   8. 20 switches a frame between those and the ladder's copy of the game's program, in a game-like state
+ *      (textured and combined, fog table on, alpha blend and alpha test, depth test and write, back faces culled);
+ *   9. step 8 with the game's own blob (shader.shbin's sProgram, transform.v.pica's program and P60 D's sprite GS
+ *      program, as draw_sprites_gs switches them), the eye uniform written back after each, as in a race.
+ * Step 10 (capped GS batches in a race) is the Old 3DS bench's sprite GS rows (DKR_SPRITE_GS_CAP).
+ */
+#define GS_LADDER_STEPS 9
+#define GS_LADDER_FRAMES 30
+#define GS_LADDER_SWITCHES 20
+static const char *const sGslNames[GS_LADDER_STEPS + 2] = {
+    "",
+    "GS program alone, one GS triangle a frame",
+    "a GS draw, then ordinary indexed draws",
+    "ordinary indexed draws, then a GS draw",
+    "20 switches a frame between the ordinary and GS programs",
+    "control: ordinary draws through a pass-through GS, no switches",
+    "20 switches a frame, pass-through GS on the ordinary program too",
+    "P60 D's sprite shaders (stride 7, VFMT_SPRITE) alone",
+    "20 switches a frame, sprite GS and ordinary program, game-like state",
+    "20 switches a frame in the game's own blob (game, transform, sprite GS)",
+    "restore of the game's program",
+};
+static DVLB_s *sGslDvlb;
+static shaderProgram_s sGslNormal, sGslPoint, sGslThrough, sGslSprite;
+static shaderProgram_s sProgramT, sProgramS; // The game's transform and sprite GS programs (defined below)
+static int sProgramTUsable, sSpriteGsUsable;
+static void forget_fog_lut(void);
+static int sGslEyeN = -1, sGslEyeT = -1, sGslStep, sGslIdx;
+
+static void gsl_marker_path(char *out, size_t size, int step) {
+    snprintf(out, size, "%s/gs_ladder_%d.txt", plat_data_dir(), step);
+}
+
+static void gsl_marker_write(int step, const char *what) {
+    char path[256], text[32];
+    gsl_marker_path(path, sizeof(path), step);
+    snprintf(text, sizeof(text), "%s %d\n", what, GS_LADDER_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+/* Waits for the GPU as gpu_test_wait does; a stall writes "gpu-hung" for the step and stops there. */
+static void gsl_wait(void) {
+    unsigned long long start = plat_time_ns();
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (plat_time_ns() - start > 2000000000ULL) {
+            gsl_marker_write(sGslStep, "gpu-hung");
+            plat_log("GS ladder step %d: the GPU hung, the console still runs (%s)", sGslStep, sGslNames[sGslStep]);
+            plat_status("GS ladder step %d hung the GPU: turn the console off and start again", sGslStep);
+            gPlatGfxStage = "GS ladder hung";
+            for (;;) {
+                plat_sleep_ns(1000000000ULL);
+            }
+        }
+        plat_sleep_ns(250000);
+    }
+    C3D_FrameEnd(0);
+}
+
+/* The self test's simplest state (its step 2), for every program of the ladder. */
+static void gsl_state(void) {
+    C3D_TexEnv *env;
+    int i;
+    C3D_TexBind(0, &sWhiteTex);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+}
+
+/* The ordinary program (or the one with the pass-through GS), set on the GPU now and its eye uniform written, as the
+ * sprite shader's draw went back to the game's program (P60 D draw_sprites_gs). */
+static void gsl_bind(int through) {
+    C3D_BindProgram(through ? &sGslThrough : &sGslNormal);
+    C3Di_UpdateContext();
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, through ? sGslEyeT : sGslEyeN, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+/* One white triangle drawn by index with the bound program (prim: GPU_GEOMETRY_PRIM through the pass-through GS). */
+static void gsl_ordinary_draw(GPU_Primitive_t prim) {
+    int first = gpu_test_triangle(-1), i;
+    u16 *idx = &sIbo[sGslIdx];
+    for (i = 0; i < 3; i++) {
+        idx[i] = (u16) (first + i);
+    }
+    gpu_flush(idx, 3 * sizeof(u16));
+    sGslIdx += 8; // 16 bytes apart
+    C3D_DrawElements(prim, 3, C3D_UNSIGNED_SHORT, idx);
+}
+
+/* One point through the GS program (a green triangle around the screen's middle). */
+static void gsl_point_draw(void) {
+    int first;
+    C3D_BindProgram(&sGslPoint);
+    first = gpu_test_triangle(-1); // Its first vertex is the point
+    C3D_DrawArrays(GPU_GEOMETRY_PRIM, first, 1);
+}
+
+/* A game-like draw state (GS freeze test 2, steps 8 and 9): the white texture combined with the vertex colour and a
+ * constant, the fog table on, alpha blend and alpha test, depth test and write, back faces culled, a scissor. */
+static void gsl_game_state(void) {
+    static C3D_FogLut sGslFog;
+    static int made;
+    C3D_TexEnv *env;
+    int i;
+    if (!made) {
+        float data[256];
+        for (i = 0; i < 128; i++) {
+            data[i] = 1.0f - i / 256.0f;
+            data[i + 128] = -1.0f / 256.0f;
+        }
+        FogLut_FromArray(&sGslFog, data);
+        made = 1;
+    }
+    C3D_TexBind(0, &sWhiteTex);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    env = C3D_GetTexEnv(1);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    C3D_TexEnvColor(env, 0xFFC0E0FF);
+    for (i = 2; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+    C3D_FogLutBind(&sGslFog);
+    C3D_FogColor(0x806040);
+    C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
+    C3D_AlphaTest(true, GPU_GREATER, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA,
+                   GPU_ONE_MINUS_SRC_ALPHA);
+    C3D_CullFace(GPU_CULL_BACK_CCW);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 8, 8, 232, 392);
+}
+
+/* Four sprite points (88-byte VFMT_SPRITE, as draw_sprites_gs writes them) through a sprite GS program: P60 D's
+ * sprite.v/g.pica, the ladder blob's copy (step 7, 8) or the game's (sProgramS, step 9). */
+static void gsl_sprite_draw(shaderProgram_s *prog) {
+    SpriteGpuPoint *o;
+    int first, i;
+    use_vertex_format(VFMT_SPRITE);
+    first = (sVboUsed - sVfmtBase) / (int) sizeof(SpriteGpuPoint);
+    o = (SpriteGpuPoint *) (sVbo + sVboUsed);
+    memset(o, 0, 4 * sizeof(SpriteGpuPoint));
+    for (i = 0; i < 4; i++) {
+        o[i].p[0] = -0.6f + 0.3f * i;
+        o[i].p[1] = -0.6f + 0.3f * i;
+        o[i].p[2] = -0.5f;
+        o[i].p[3] = 1.0f;
+        o[i].e1[0] = 0.2f;
+        o[i].e2[1] = 0.25f;
+        o[i].tc[1] = 1.0f;
+        o[i].tc[2] = 1.0f;
+        o[i].tc2[1] = -1.0f;
+        memset(o[i].color, 255, 4);
+        o[i].alpha[0] = o[i].alpha[1] = o[i].alpha[2] = 255;
+    }
+    sVboUsed += 4 * (int) sizeof(SpriteGpuPoint);
+    flush_new_vertices();
+    C3D_BindProgram(prog);
+    C3D_DrawArrays(GPU_GEOMETRY_PRIM, first, 4);
+}
+
+/* Step 9's game program: shader.shbin's sProgram set on the GPU and its eye uniform written, as draw_sprites_gs goes
+ * back to it. */
+static void gsl_bind_game(void) {
+    C3D_BindProgram(&sProgram);
+    C3Di_UpdateContext();
+    write_eye(0.0f, 0.0f);
+}
+
+static void gsl_run_step(int step) {
+    int f, k;
+    sGslStep = step;
+    gsl_marker_write(step, "testing");
+    plat_log("GS ladder step %d: %s: starting (a freeze from here is this step)", step, sGslNames[step]);
+    plat_status("GS ladder step %d of %d...", step, GS_LADDER_STEPS);
+    for (f = 0; f < GS_LADDER_FRAMES; f++) {
+        gsl_wait();
+        sVboUsed = 0;
+        sVfmtBound = -1;
+        sGslIdx = 0;
+        C3D_FrameBegin(0);
+        C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
+        C3D_FrameDrawOn(sTarget);
+        if (step == 8 || step == 9) {
+            gsl_game_state();
+        } else {
+            gsl_state();
+        }
+        switch (step) {
+            case 1:
+                gsl_point_draw();
+                break;
+            case 2:
+                gsl_point_draw();
+                gsl_bind(0);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                }
+                break;
+            case 3:
+                gsl_bind(0);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                }
+                gsl_point_draw();
+                gsl_bind(0);
+                break;
+            case 4:
+            case 6:
+                for (k = 0; k < GS_LADDER_SWITCHES; k++) {
+                    gsl_bind(step == 6);
+                    gsl_ordinary_draw(step == 6 ? GPU_GEOMETRY_PRIM : GPU_TRIANGLES);
+                    gsl_point_draw();
+                }
+                gsl_bind(step == 6);
+                break;
+            case 5:
+                gsl_bind(1);
+                for (k = 0; k < 8; k++) {
+                    gsl_ordinary_draw(GPU_GEOMETRY_PRIM);
+                }
+                break;
+            case 7:
+                gsl_sprite_draw(&sGslSprite);
+                break;
+            case 8:
+                for (k = 0; k < GS_LADDER_SWITCHES; k++) {
+                    gsl_bind(0);
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                    gsl_sprite_draw(&sGslSprite);
+                }
+                gsl_bind(0);
+                break;
+            default: // 9: the game's blob, as a race switches it
+                for (k = 0; k < GS_LADDER_SWITCHES; k++) {
+                    gsl_bind_game();
+                    gsl_ordinary_draw(GPU_TRIANGLES);
+                    if (sProgramTUsable) {
+                        C3D_BindProgram(&sProgramT);
+                        C3Di_UpdateContext();
+                    }
+                    if (sSpriteGsUsable) {
+                        gsl_sprite_draw(&sProgramS);
+                    }
+                }
+                gsl_bind_game();
+                break;
+        }
+        C3D_FrameEnd(0);
+    }
+    gsl_wait();
+    gsl_marker_write(step, "passed");
+    plat_log("GS ladder step %d: passed (%d frames)", step, GS_LADDER_FRAMES);
+}
+
+static void gsl_armed_path(char *out, size_t size) {
+    snprintf(out, size, "%s/gs_ladder_armed.txt", plat_data_dir());
+}
+
+/*
+ * The Test run page's GS freeze test button (menu_3ds.c): a fresh ladder (every step's file removed) armed on the SD
+ * card for the next start, which the button then makes. It stays armed until every step has an answer, so a start
+ * after a power-off carries on with the next step by itself, with no env.txt line.
+ */
+PLAT_COLD void gfxb_gs_ladder_arm(void) {
+    char path[256];
+    int step;
+    for (step = 1; step <= GS_LADDER_STEPS; step++) {
+        gsl_marker_path(path, sizeof(path), step);
+        remove(path);
+    }
+    gsl_armed_path(path, sizeof(path));
+    plat_save_file(path, "1\n", 2);
+    plat_log("GS ladder: armed by the Test run button, runs at the next start");
+}
+
+PLAT_COLD static void gs_ladder(void) {
+    const char *e = plat_getenv("DKR_GS_LADDER");
+    char summary[256], path[256], text[32];
+    int mode = e != NULL ? atoi(e) : 0, step, at, armed = 0;
+    if (!PLAT_DEBUG_TOOLS) {
+        return;
+    }
+    if (mode <= 0) {
+        gsl_armed_path(path, sizeof(path));
+        armed = plat_load_file_start(path, text, sizeof(text) - 1) > 0;
+        mode = armed;
+    }
+    if (mode <= 0) {
+        return;
+    }
+    sGslDvlb = DVLB_ParseFile((u32 *) gsl_shbin, gsl_shbin_size);
+    shaderProgramInit(&sGslNormal);
+    shaderProgramInit(&sGslPoint);
+    shaderProgramInit(&sGslThrough);
+    shaderProgramInit(&sGslSprite);
+    if (sGslDvlb == NULL || sGslDvlb->numDVLE < 7 || shaderProgramSetVsh(&sGslNormal, &sGslDvlb->DVLE[0]) != 0 ||
+        shaderProgramSetVsh(&sGslPoint, &sGslDvlb->DVLE[1]) != 0 ||
+        shaderProgramSetGsh(&sGslPoint, &sGslDvlb->DVLE[2], 1) != 0 ||
+        shaderProgramSetVsh(&sGslThrough, &sGslDvlb->DVLE[3]) != 0 ||
+        shaderProgramSetGsh(&sGslThrough, &sGslDvlb->DVLE[4], 12) != 0 ||
+        shaderProgramSetVsh(&sGslSprite, &sGslDvlb->DVLE[5]) != 0 ||
+        shaderProgramSetGsh(&sGslSprite, &sGslDvlb->DVLE[6], 7) != 0) {
+        plat_log("GS ladder: its shaders could not be set up, not run");
+        return;
+    }
+    sGslEyeN = shaderInstanceGetUniformLocation(sGslNormal.vertexShader, "eye");
+    sGslEyeT = shaderInstanceGetUniformLocation(sGslThrough.vertexShader, "eye");
+    plat_log("GS ladder (DKR_GS_LADDER=%d, version %d): %d steps of %d frames", mode, GS_LADDER_VERSION,
+             GS_LADDER_STEPS, GS_LADDER_FRAMES);
+    at = snprintf(summary, sizeof(summary), "GS ladder:");
+    for (step = 1; step <= GS_LADDER_STEPS; step++) {
+        int got, action;
+        const char *answer;
+        gsl_marker_path(path, sizeof(path), step);
+        got = plat_load_file_start(path, text, sizeof(text) - 1);
+        if (got > 0) {
+            text[got] = '\0';
+        }
+        action = gs_ladder_marker_action(got > 0 ? text : NULL, GS_LADDER_VERSION, mode == 2);
+        if (action == GSL_LOCKED_NOW) {
+            gsl_marker_write(step, "hung");
+            plat_log("GS ladder step %d: %s: LOCKED THE CONSOLE in the last start (left \"testing\")", step,
+                     sGslNames[step]);
+            answer = "HUNG (console)";
+        } else if (action == GSL_PASSED) {
+            answer = "passed";
+        } else if (action == GSL_HUNG) {
+            answer = strncmp(text, "gpu-hung", 8) == 0 ? "HUNG (GPU)" : "HUNG (console)";
+        } else {
+            gsl_run_step(step);
+            answer = "passed";
+        }
+        if (at < (int) sizeof(summary)) {
+            at += snprintf(summary + at, sizeof(summary) - at, " %d %s%s", step, answer,
+                           step < GS_LADDER_STEPS ? "," : "");
+        }
+    }
+    plat_log("%s", summary);
+    snprintf(path, sizeof(path), "%s/gs_ladder.txt", plat_data_dir());
+    plat_save_file(path, summary, strlen(summary));
+    if (armed) {
+        gsl_armed_path(path, sizeof(path));
+        remove(path); // Every step has its answer: the next start is a normal one
+    }
+    plat_status("%s", summary);
+    // Back to the game's program and state, inside a frame of its own: between frames citro3d has no command buffer
+    // (C3D_FrameEnd sets it to NULL), and a command written then (C3Di_UpdateContext, write_eye) stops the game with
+    // libctru's svcBreak(USERBREAK_PANIC). That froze the console after all six steps passed (Old 3DS, b2096b8, 2026-11-23).
+    // The switch from the ladder's GS program back to shader.shbin's program (another blob: the vertex code is sent
+    // again) is drawn here, so a hang in it is logged as the restore, not the game's first frame.
+    sGslStep = GS_LADDER_STEPS + 1;
+    plat_log("GS ladder: restoring the game's program (a freeze from here is the restore)");
+    gsl_wait();
+    sVboUsed = 0;
+    sVfmtBound = -1;
+    C3D_FrameBegin(0);
+    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
+    C3D_FrameDrawOn(sTarget);
+    gsl_state(); // Steps 8 and 9 left fog, depth, blending and the scissor on
+    gsl_bind_game();
+    C3D_FrameEnd(0);
+    gsl_wait();
+    forget_gpu_state(); // The game's own GPU state cache and fog table don't know what the ladder set
+    forget_fog_lut();
+    plat_log("GS ladder: the game's program is back");
+    sVboUsed = 0;
+    sVfmtBound = -1;
+    plat_sleep_ns(3000000000ULL); // The answers stay on the bottom screen a moment
 }
 
 static const char *aa_name(int aa) {
@@ -1509,6 +1938,7 @@ void gfxb_init(void) {
     C3D_BindProgram(&sProgram);
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
     init_transform();
+    sprite_gs_init();
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -1522,6 +1952,7 @@ void gfxb_init(void) {
 
     C3D_DepthMap(true, -1.0f, 0.0f);
     gpu_self_test();
+    gs_ladder();
 }
 
 /******************************** Frames ********************************/
@@ -3420,6 +3851,7 @@ static void wait_for_gpu(int measure) {
     }
     if (sOnGpu >= 0) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
+        sprite_gs_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
     timeline_take(sOnGpu); // gpu_cuts.inc
@@ -3468,8 +3900,7 @@ static void wait_for_gpu(int measure) {
 #define TRANSFORM_TEST_VERSION 2 /* 2: PICA_ALL test build, vertex lighting */
 #define TRANSFORM_TEST_FRAMES 30
 
-static shaderProgram_s sProgramT;
-static int sProgramTUsable;  // transform.v.pica's uniforms were all found
+// sProgramT and sProgramTUsable (transform.v.pica's uniforms were all found) are declared with the GS ladder
 static int sTransformHung;   // It hung the GPU in an earlier run (gpu_transform.txt)
 static int sTransformWanted; // DKR_GPU_TRANSFORM
 static int sTransformOn;     // This frame is drawn with transform.v.pica
@@ -4201,6 +4632,9 @@ void gfxb_end_frame(void) {
             plat_log("frame %d: %d triangles at %llu ms, command buffer %.0f%% (max %.0f%%), %d splits, %d KB of "
                      "vertices, %d format changes", sFrameCount, sFrameTriangles, plat_time_ns() / 1000000ULL,
                      usage * 100.0f, sMaxUsage * 100.0f, sDrainSplits, sVboUsed / 1024, sVfmtSwitches);
+        }
+        if (sFrameCount % 600 == 1) {
+            sprite_gs_log();
         }
         {
             static u32 sLoggedVramBytes;
@@ -4970,6 +5404,12 @@ static void __attribute__((noinline)) bind_fog_lut(const GfxDrawState *state) {
     sRawLutMul = 0x7FFF; // citro3d may write it: unknown to the raw path
     sLutMul = state->fogMul;
     sLutOffset = state->fogOffset;
+}
+
+/* The fog table bound is not known (the GS ladder bound its own): the next fogged draw makes and binds it again. */
+static void forget_fog_lut(void) {
+    sLutMul = 0x7FFFFFFF;
+    sRawLutMul = 0x7FFF;
 }
 
 PLAT_HOT static void apply_fog(const GfxDrawState *state) {
@@ -6556,6 +6996,264 @@ void gfxb_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int 
         }
     }
     gfxb_draw_indexed(state, verts, numTriangles * 3, sIdentity, numTriangles);
+}
+
+/******************************** Sprite points (P60 D) ********************************/
+
+/*
+ * Roadmap P60 D (DKR_SPRITE_GS, default off): the walk hands sprite tiles of the 3D world over as points
+ * (gfx_backend.h GfxSpritePoint), not as four vertices and two triangles, which saves the game's core the corners'
+ * bookkeeping and most of the bytes queued for this one. With DKR_SPRITE_GS=1 this backend makes the four vertices
+ * itself (gfx_sprite_expand) and draws them as any other draw; with 2 the GPU's geometry shader makes them
+ * (sprite.v.pica passes the point through, sprite.g.pica emits the two triangles): one 88-byte point written per tile
+ * instead of four converted vertices and six indices. Where the geometry shader can't take a batch (3D, GPU vertex
+ * maths on, the 48-byte vertex format, a corner past the guard band, no room) it is drawn the first way.
+ *
+ * The PICA's geometry shader has never run in this port on real hardware, and its first vertex shader hung a New 3DS
+ * that emulators ran (see the GPU vertex maths section). So it is watched the same way: sprite_gs.txt says "testing"
+ * from the first frame drawn with it until 600 frames have been drawn, then "passed"; a start that finds "testing"
+ * writes "hung" and leaves it off (the points still drawn the first way) until SPRITE_GS_TEST_VERSION changes.
+ *
+ * GS freeze test 2 (roadmap P65, proposals/3ds-custom-shader-plan.md section 3b, step 10): DKR_SPRITE_GS=2 froze an
+ * Old 3DS in bench run 50 while the GS hang ladder's six steps all passed. DKR_SPRITE_GS_CAP=N (default 0, every
+ * batch) draws only the first N sprite batches of a frame with the geometry shader and the rest the first way, so the
+ * Old 3DS bench rows (1, 4, then every batch, 1 lap each) separate "any GS draw in the real frame" from volume or one
+ * batch. Each cap has its own marker (sprite_gs_capN.txt; every batch: sprite_gs.txt), read when its row starts.
+ *
+ * Switching to the geometry program and back costs a program setting (both programs' code is one 109-word blob, under
+ * the 512 words at which citro3d would send the code again). The vertex units' uniform registers: sprite.v.pica has
+ * none, but the fourth unit runs the geometry shader with its own constants meanwhile, so the eye uniform is written
+ * again once the main program is back.
+ */
+#define SPRITE_GS_TEST_VERSION 2 // 2: GS freeze test 2 (a run 50 "hung 1" in sprite_gs.txt doesn't count)
+#define SPRITE_GS_TEST_FRAMES 600 // 20 s at 30 fps, so a freeze from volume is still caught by "testing"
+
+// sProgramS and sSpriteGsUsable (sprite.v.pica and sprite.g.pica were found and set up) are declared with the GS ladder
+
+static int sSpriteGsHung;      // It hung the GPU in an earlier run (sprite_gs.txt)
+static int sSpriteGsTestFrame = -1; // The first frame drawn with it this run, until it is known to work
+static int sSpriteGsEpoch = -1, sSpriteGsMode;
+static int sSpriteGsCap, sSpriteGsCapLoaded = -1; // DKR_SPRITE_GS_CAP (0 every batch), the cap whose marker is read
+static int sSpriteGsFrameSeen = -1, sSpriteGsFrameBatches; // GS batches drawn in that frame
+static unsigned long sSpriteGsStats[4]; // Batches by the geometry shader, points, batches drawn the first way, why not
+
+/* The marker of a cap (DKR_SPRITE_GS_CAP; 0, every batch: sprite_gs.txt, as P60 D's), so each bench row of GS freeze
+ * test 2 gets its own answer. */
+static void sprite_gs_marker_path(char *out, size_t size, int cap) {
+    char name[40];
+    sprite_gs_marker_name(name, sizeof(name), cap);
+    snprintf(out, size, "%s/%s", plat_data_dir(), name);
+}
+
+static void sprite_gs_marker_write(const char *what) {
+    char path[256], text[32];
+    sprite_gs_marker_path(path, sizeof(path), sSpriteGsCapLoaded);
+    snprintf(text, sizeof(text), "%s %d\n", what, SPRITE_GS_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+static PLAT_COLD void sprite_gs_init(void) {
+    shaderProgramInit(&sProgramS);
+    sSpriteGsUsable = sShaderDvlb->numDVLE >= 4 && shaderProgramSetVsh(&sProgramS, &sShaderDvlb->DVLE[2]) == 0 &&
+                      shaderProgramSetGsh(&sProgramS, &sShaderDvlb->DVLE[3], 7) == 0;
+    plat_log("sprite geometry shader: %s", sSpriteGsUsable ? "found" : "NOT usable");
+}
+
+/* The cap's marker, read when DKR_SPRITE_GS=2 first comes with that cap (a bench row's start): "testing" (the console
+ * locked in that row before) or "hung" leaves the geometry shader off for this cap; anything else tests it again. */
+static PLAT_COLD void sprite_gs_load_marker(int cap) {
+    char path[256], text[32];
+    int got;
+    sSpriteGsCapLoaded = cap;
+    sSpriteGsHung = 0;
+    sSpriteGsTestFrame = -1;
+    sprite_gs_marker_path(path, sizeof(path), cap);
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+    }
+    if (sprite_gs_marker_off(got > 0 ? text : NULL, SPRITE_GS_TEST_VERSION)) {
+        sSpriteGsHung = 1;
+        sprite_gs_marker_write("hung");
+    }
+    if (cap > 0) {
+        plat_log("sprite geometry shader, first %d batches a frame: %s", cap,
+                 sSpriteGsHung ? "LEFT OFF: the console locked with this cap in an earlier run" : "testing");
+    } else {
+        plat_log("sprite geometry shader, every batch: %s",
+                 sSpriteGsHung ? "LEFT OFF: the console locked with it in an earlier run (sprite_gs.txt)" : "testing");
+    }
+}
+
+static void sprite_gs_frame_drawn(int frame) {
+    if (sSpriteGsTestFrame >= 0 && frame >= sSpriteGsTestFrame + SPRITE_GS_TEST_FRAMES) {
+        sSpriteGsTestFrame = -2;
+        sprite_gs_marker_write("passed");
+        plat_log("sprite geometry shader: %d frames drawn, it works on this console", SPRITE_GS_TEST_FRAMES);
+    }
+}
+
+int gfxb_sprite_points(void) {
+    return 1;
+}
+
+/* A point's position, or an edge's (offset false: no w term in z, as the sum of the corners' own), in the 3DS screen's
+ * clip space, as to_screen_scaled does it but for pinning z (the geometry shader pins each corner's). */
+static inline void sprite_gpu_pos(float *out, const float *in, float scale3D) {
+    out[0] = in[1];
+    out[1] = -in[0] * scale3D;
+    out[2] = 0.5f * (in[2] - in[3]);
+    out[3] = in[3];
+}
+
+/* Whether every corner of the points lies inside the guard band (the CPU's cutting would leave them as they are). */
+static int sprite_points_in_band(const GfxSpritePoint *pts, int n) {
+    const float bandX = sBandX, bandY = sBandY;
+    int i, k;
+    for (i = 0; i < n; i++) {
+        const GfxSpritePoint *s = &pts[i];
+        for (k = 0; k < 4; k++) {
+            GfxVertex v;
+            v.x = s->p[0] + ((k & 1) ? s->e1[0] : 0.0f) + ((k & 2) ? s->e2[0] : 0.0f);
+            v.y = s->p[1] + ((k & 1) ? s->e1[1] : 0.0f) + ((k & 2) ? s->e2[1] : 0.0f);
+            v.w = s->p[3] + ((k & 1) ? s->e1[3] : 0.0f) + ((k & 2) ? s->e2[3] : 0.0f);
+            if (outside_band_of(&v, bandX, bandY)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* The batch drawn by the geometry shader; 0: it can't be (nothing done). */
+static int __attribute__((noinline)) draw_sprites_gs(const GfxDrawState *state, const GfxSpritePoint *pts, int n) {
+    HangDraw *hangDraw;
+    float su0, sv0, su1, sv1;
+    const float scale3D = sScale3D;
+    int first, vertex, i, why = 0;
+    SpriteGpuPoint *o;
+    if (sStereo) {
+        why = 1;
+    } else if (sTransformOn || sVfmtOld) {
+        why = 2;
+    } else if (sGuardBandFrame && !sprite_points_in_band(pts, n)) {
+        why = 3;
+    } else if (sVboUsed + 15 + n * (int) sizeof(SpriteGpuPoint) > VBO_BYTES ||
+               gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        why = 4;
+    }
+    if (why) {
+        sSpriteGsStats[3] |= 1u << why;
+        return 0;
+    }
+    dp_draw(state, n * 2, 0, NULL, 0);
+    texture_scales(state->textures[0], &su0, &sv0);
+    su1 = sv1 = 1.0f;
+    hangDraw = hang_draw_start(state, n * 2);
+    first = drain_before_draw(state, n * 2);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+    }
+    C3D_BindProgram(&sProgramS);
+    if (sVfmtBound != VFMT_SPRITE) {
+        bind_vertex_format(VFMT_SPRITE);
+    }
+    vertex = (sVboUsed - sVfmtBase) / (int) sizeof(SpriteGpuPoint);
+    o = (SpriteGpuPoint *) (sVbo + sVboUsed);
+    for (i = 0; i < n; i++) {
+        const GfxSpritePoint *s = &pts[i];
+        sprite_gpu_pos(o[i].p, s->p, scale3D);
+        sprite_gpu_pos(o[i].e1, s->e1, scale3D);
+        sprite_gpu_pos(o[i].e2, s->e2, scale3D);
+        o[i].tc[0] = s->uv[0] * su0;
+        o[i].tc[1] = 1.0f - s->uv[1] * sv0;
+        o[i].tc[2] = s->uv[2] * su0;
+        o[i].tc[3] = -s->uv[3] * sv0;
+        o[i].tc2[0] = s->uv[4] * su0;
+        o[i].tc2[1] = -s->uv[5] * sv0;
+        o[i].tc2[2] = 0.0f;
+        o[i].tc2[3] = 0.0f;
+        memcpy(o[i].color, s->rgba, 4);
+        memcpy(o[i].alpha, s->alpha, 4);
+    }
+    C3D_DrawArrays(GPU_GEOMETRY_PRIM, vertex, n);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += n * (int) sizeof(SpriteGpuPoint);
+    sFrameTriangles += n * 2;
+    // Back to the main program, set on the GPU now (the fourth vertex unit runs vertex shaders again from here), and
+    // its eye uniform written again (3D is never on here, so it is (0, 0)).
+    C3D_BindProgram(&sProgram);
+    C3Di_UpdateContext();
+    write_eye(0.0f, 0.0f);
+    sSpriteGsStats[0]++;
+    sSpriteGsStats[1] += (unsigned long) n;
+    if (sSpriteGsTestFrame == -1) {
+        sSpriteGsTestFrame = sFrameCount;
+        sprite_gs_marker_write("testing");
+    }
+    return 1;
+}
+
+/* A batch of sprite points (the walk's flush_point_batch). */
+void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints) {
+    static GfxVertex sVerts[GFX_MAX_SPRITE_POINTS * 4];
+    static u16 sIdx[GFX_MAX_SPRITE_POINTS * 6];
+    if (numPoints <= 0) {
+        return;
+    }
+    if (numPoints > GFX_MAX_SPRITE_POINTS) {
+        numPoints = GFX_MAX_SPRITE_POINTS;
+    }
+    if (sSpriteGsEpoch != gPlatSwitchEpoch) {
+        sSpriteGsEpoch = gPlatSwitchEpoch;
+        sSpriteGsMode = plat_switch("DKR_SPRITE_GS", 0);
+        sSpriteGsCap = plat_switch("DKR_SPRITE_GS_CAP", 0);
+        if (sSpriteGsCap < 0) {
+            sSpriteGsCap = 0;
+        }
+        if (sSpriteGsMode == 2 && sSpriteGsUsable && sSpriteGsCap != sSpriteGsCapLoaded) {
+            sprite_gs_load_marker(sSpriteGsCap);
+        }
+    }
+    if (sSpriteGsMode == 2 && sSpriteGsUsable && !sSpriteGsHung) {
+        if (sSpriteGsFrameSeen != sFrameCount) {
+            sSpriteGsFrameSeen = sFrameCount;
+            sSpriteGsFrameBatches = 0;
+        }
+        if (sSpriteGsCap == 0 || sSpriteGsFrameBatches < sSpriteGsCap) {
+            if (skip_invisible(state)) {
+                return;
+            }
+            if (draw_sprites_gs(state, pts, numPoints)) {
+                sSpriteGsFrameBatches++;
+                return;
+            }
+        } else {
+            sSpriteGsStats[3] |= 32;
+        }
+    }
+    sSpriteGsStats[2]++;
+    gfx_sprite_expand(pts, numPoints, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numPoints * 4, sIdx, numPoints * 2);
+}
+
+/* The profiler's log line (every 600 frames, from gfxb_end_frame's logs). */
+static PLAT_COLD void sprite_gs_log(void) {
+    if (sSpriteGsStats[0] + sSpriteGsStats[2] == 0) {
+        return;
+    }
+    plat_log("sprite points: %lu batches (%lu points) by the geometry shader, %lu by the CPU (not GS:%s%s%s%s%s%s)",
+             sSpriteGsStats[0], sSpriteGsStats[1], sSpriteGsStats[2],
+             sSpriteGsMode != 2 ? " mode" : "", (sSpriteGsStats[3] & 2) ? " 3D" : "",
+             (sSpriteGsStats[3] & 4) ? " GPU maths/format" : "", (sSpriteGsStats[3] & 8) ? " band" : "",
+             (sSpriteGsStats[3] & 16) ? " room" : "", (sSpriteGsStats[3] & 32) ? " cap" : "");
+    memset(sSpriteGsStats, 0, sizeof(sSpriteGsStats));
 }
 
 /*
