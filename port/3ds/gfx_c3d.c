@@ -1779,9 +1779,14 @@ static void apply_screen_mode(void) {
     if (stereo && slider <= 0.0f) {
         slider = 1.0f;
     }
-    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    // The Old 3DS 60 fps mode (plat.h plat_o3ds_60_live): its 60 fps frames drop anti-aliasing and 800 pixels
+    // (DKR_O3DS_60_AA=1, the 60 fps bench's row, keeps them, to measure what they cost); 3D frames run at 30.
+    int sixty;
+    gPlatStereoFrames = stereo;
+    sixty = plat_o3ds_60_mode() && plat_frame_retraces() == 1 && !plat_switch("DKR_O3DS_60_AA", 0);
+    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sixty && !sWideUnsupported;
     int depth24 = plat_switch("DKR_DEPTH24", 0) != 0;
-    int aa = stereo ? PLAT_AA_OFF : sWantedAa;
+    int aa = stereo || sixty ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;

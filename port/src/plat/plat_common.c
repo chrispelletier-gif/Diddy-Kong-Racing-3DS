@@ -350,6 +350,67 @@ static volatile struct {
 } sSwitchOverrides[MAX_SWITCH_OVERRIDES];
 volatile int gPlatSwitchEpoch;
 
+/*
+ * The Old 3DS 60 fps mode's defaults (P55, proposals/3ds-old3ds-60-mode-integration.md section 1): while DKR_O3DS_60
+ * is on, a switch with no bench override and no env.txt line takes its value here instead of its code's fallback, so
+ * one line turns a speed piece on for the 60 mode only (30 fps keeps the piece's own default). The mega test branch
+ * adds each piece's line as it merges (S1 track baked, S2 kart batches, S4 no walk, S6 sprite shader, ...), and a
+ * "piece off" row to the 60 fps bench (port_autorun.c sSwitches60). Rows of the 60 fps bench still win over these.
+ */
+typedef struct {
+    const char *name;
+    int value;
+} SwitchDefault;
+static const SwitchDefault s60Defaults[] = {
+    // (Speed pieces go here: { "DKR_...", 1 },)
+    { NULL, 0 },
+};
+/* DKR_O3DS_60_LOD (needs the owner's OK to ship): the other karts at 4-player model distances, not "always the best
+ * model" (objects.c: DKR_RACER_LOD_FAR 0 brings back the DKR_RACER_LOD row, 3 = the 4-player distances). */
+static const SwitchDefault s60LodDefaults[] = {
+    { "DKR_RACER_LOD_FAR", 0 },
+    { "DKR_RACER_LOD", 3 },
+    { NULL, 0 },
+};
+
+static int switch_read(const char *name, int fallback);
+static volatile int sO3ds60Setting = -1, sO3ds60LodSetting = -1;
+
+static void read_o3ds_60_settings(void) {
+    if (sO3ds60Setting < 0) {
+        sO3ds60LodSetting = settings_get("o3ds60lod", 0) != 0;
+        sO3ds60Setting = settings_get("o3ds60", 0) != 0;
+    }
+}
+
+/* Whether the 60 mode is on (switch_read: no cache, as it runs inside plat_switch's). */
+static int o3ds_60_on(void) {
+    read_o3ds_60_settings();
+    return plat_old_3ds() && switch_read("DKR_O3DS_60", sO3ds60Setting) != 0;
+}
+
+/* switch_read, for a switch nothing has set: its 60-mode default in *value, if the mode gives it one. */
+static int o3ds_60_default(const char *name, int *value) {
+    const SwitchDefault *table;
+    int t;
+    if (name[0] != 'D' || strncmp(name, "DKR_O3DS_60", 11) == 0 || !o3ds_60_on()) {
+        return 0;
+    }
+    for (t = 0; t < 2; t++) {
+        table = t == 0 ? s60Defaults : s60LodDefaults;
+        if (t == 1 && switch_read("DKR_O3DS_60_LOD", sO3ds60LodSetting) == 0) {
+            break;
+        }
+        for (; table->name != NULL; table++) {
+            if (strcmp(table->name, name) == 0) {
+                *value = table->value;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int switch_read(const char *name, int fallback) {
     const char *env;
     int i;
@@ -372,6 +433,9 @@ static int switch_read(const char *name, int fallback) {
             if (strcmp(sOn[i], name) == 0) {
                 return 1;
             }
+        }
+        if (o3ds_60_default(name, &fallback)) {
+            return fallback;
         }
     }
     return env != NULL ? atoi(env) : fallback;
@@ -626,7 +690,53 @@ int plat_frame_retraces(void) {
     if (pinned == 20 || pinned == 30 || pinned == 60) {
         return 60 / pinned;
     }
+    if (plat_o3ds_60_mode()) {
+        return plat_o3ds_60_live() ? 1 : 2;
+    }
     return sFps60 ? 1 : sFps20 ? 3 : 2;
+}
+
+/* The Old 3DS 60 fps mode (plat.h). */
+volatile int gPlatStereoFrames;
+extern int get_number_of_active_players(void) __attribute__((weak)); // The game's (src/menu.c); absent in tools
+
+int plat_o3ds_60_mode(void) {
+    read_o3ds_60_settings();
+    return plat_old_3ds() && plat_switch("DKR_O3DS_60", sO3ds60Setting) != 0;
+}
+
+/* 60 only in 2D with one player (route plan section 5: 3D and multiplayer stay 30). */
+int plat_o3ds_60_live(void) {
+    if (!plat_o3ds_60_mode() || gPlatStereoFrames) {
+        return 0;
+    }
+    return get_number_of_active_players == NULL || get_number_of_active_players() <= 1;
+}
+
+int plat_o3ds_60_setting(void) {
+    read_o3ds_60_settings();
+    return sO3ds60Setting;
+}
+
+void plat_set_o3ds_60_setting(int on) {
+    read_o3ds_60_settings();
+    sO3ds60Setting = on != 0;
+    settings_set("o3ds60", sO3ds60Setting);
+    gPlatSwitchEpoch++; // The 60-mode defaults change every switch's answer
+    plat_log("Old 3DS 60 fps mode: %s", on ? "on" : "off");
+}
+
+int plat_o3ds_60_lod_setting(void) {
+    read_o3ds_60_settings();
+    return sO3ds60LodSetting;
+}
+
+void plat_set_o3ds_60_lod_setting(int on) {
+    read_o3ds_60_settings();
+    sO3ds60LodSetting = on != 0;
+    settings_set("o3ds60lod", sO3ds60LodSetting);
+    gPlatSwitchEpoch++;
+    plat_log("Old 3DS 60 fps mode, far karts simpler: %s", on ? "on" : "off");
 }
 
 int plat_frame_rate_setting(void) {

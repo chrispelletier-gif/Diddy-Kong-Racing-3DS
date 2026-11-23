@@ -454,13 +454,43 @@ static const BenchSwitch sSwitchesShelved[] = {
     { "texture hashes checked every 8 frames", { "DKR_TEX_REHASH", NULL }, 1, 8, 0 },
     { NULL, { NULL, NULL, NULL }, 0, 0 },
 };
-static s32 sShort; // (Defined again below: the whole game run's short variant, or the shelved switches bench)
-#define sSwitches (plat_old_3ds() ? sSwitchesOld3ds : sShort ? sSwitchesShelved : sSwitchesNew3ds)
+/*
+ * Old 3DS: the 60 fps bench ("60 fps bench" in the Test run menu, the row that is "Shelved switches" on a New 3DS; P55,
+ * proposals/3ds-old3ds-60-mode-integration.md section 2). The switch bench with the Old 3DS 60 fps mode (DKR_O3DS_60)
+ * on in every race and no frame rate pin, so the mode decides (60, or 30 with the 3D slider up). Every race records
+ * each core's ms and the no-vsync ceiling (autorun_cores.txt and the issue's ceiling columns): the usual races are the
+ * route plan's go / no-go gates. Each speed piece merged into the mode (plat_common.c s60Defaults) adds a "piece off"
+ * row here. Performance rows race full laps, checks one.
+ */
+static const BenchSwitch sSwitches60[] = {
+    // The same build at the Old 3DS's 30 fps, mode defaults kept: what 60 costs, frame for frame.
+    { "30 fps cap, same defaults", { "DKR_FPS_PIN", NULL }, -1, 30, 1, 0 },
+    // What anti-aliasing (the bench's 2x) costs at 60: gate 0 needs the GPU with it off at 8 ms or less.
+    { "anti-aliasing 2x kept at 60", { "DKR_O3DS_60_AA", NULL }, 0, 1, 1, 0 },
+    // The other karts at 4-player model distances in the 60 mode (brings back the swap #548 fixed: owner's call).
+    { "far karts simpler (owner's OK)", { "DKR_O3DS_60_LOD", NULL }, 0, 1, 1, 0 },
+    // Where each core's time goes at 60 (the parts' timing costs fps, so one lap and left out of nothing else).
+    { "walk/draw parts timed (1 lap)", { "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 1, 1, 1 },
+    // Rows dropped as "the renderer core is not the limit", which holds at 30 only
+    // (proposals/3ds-perf-audit-2026-11-23.md).
+    { "settings written once (REWRITE 0)", { "DKR_REWRITE", NULL }, -1, 0, 1, 0 },
+    { "state cache 2", { "DKR_STATE_CACHE", NULL }, -1, 2, 1, 0 },
+    { "depth clear as a memory fill", { "DKR_DEPTH_FILL", NULL }, -1, 1, 1, 0 },
+    // The 3D slider up drops the mode to 30 (DKR_STEREO3D=2: 3D whatever the slider says). Check: 30 fps, clean 3D.
+    { "3D forced on: must run at 30 (1 lap)", { "DKR_STEREO3D", NULL }, 0, 2, 1, 1 },
+    { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
+};
+static s32 sShort; // (Defined again below: the whole game run's short variant, the shelved switches bench (New 3DS)
+                   // or the 60 fps bench (Old 3DS))
+#define sSwitches                                                                                                      \
+    (plat_old_3ds() ? (sShort ? sSwitches60 : sSwitchesOld3ds) : sShort ? sSwitchesShelved : sSwitchesNew3ds)
 // The usual settings, then each switch flipped
 #define SWITCH_CONFIGS                                                                                                 \
-    (plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitchesOld3ds)                                                               \
+    (plat_old_3ds() ? (sShort ? (s32) ARRAY_COUNT(sSwitches60) : (s32) ARRAY_COUNT(sSwitchesOld3ds))                   \
      : sShort       ? (s32) ARRAY_COUNT(sSwitchesShelved)                                                              \
                     : (s32) ARRAY_COUNT(sSwitchesNew3ds))
+/* Whether this switch bench run is the Old 3DS 60 fps bench. */
+#define BENCH_60 (plat_old_3ds() && sShort)
 /* With two switches or more (not counting the cost rows), a last race flips them all together: gains don't always add
  * up. */
 static s32 switch_all_config(void) {
@@ -594,7 +624,9 @@ static void apply_config(s32 config) {
         }
         // The bench's own frame rate cap, after the usual settings (the uncapped rows share its variable), so that only
         // those rows' test setting changes it.
-        plat_override_switch("DKR_FPS_PIN", plat_old_3ds() ? 30 : 60);
+        // The 60 fps bench: the Old 3DS 60 fps mode on and no pin (0), so the mode sets the rate (60, or 30 in 3D).
+        plat_override_switch("DKR_FPS_PIN", BENCH_60 ? 0 : plat_old_3ds() ? 30 : 60);
+        plat_override_switch("DKR_O3DS_60", BENCH_60 ? 1 : 0);
         for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
             if (config == i + 1 || (config == SWITCH_ALL && !sSwitches[i].alone)) {
                 for (k = 0; k < BENCH_SWITCH_VARS && sSwitches[i].env[k] != NULL; k++) {
@@ -1956,7 +1988,7 @@ s32 port_autorun_enabled(void) {
             const char *env = plat_getenv(sModes[mode].env);
             if (env != NULL && env[0] != '0') {
                 sMode = mode;
-                sShort = (mode == MODE_WHOLE || (mode == MODE_SWITCH && !plat_old_3ds())) && env[0] == '2';
+                sShort = (mode == MODE_WHOLE || mode == MODE_SWITCH) && env[0] == '2';
             }
         }
         for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
@@ -2004,7 +2036,7 @@ static void init(void) {
             hash_text(plat_getenv(benchNames[i]));
         }
     } else if (sMode == MODE_SWITCH) {
-        hash_text(sShort ? "shelved switches" : "switch bench");
+        hash_text(BENCH_60 ? "60 fps bench" : sShort ? "shelved switches" : "switch bench");
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
@@ -2152,9 +2184,9 @@ s32 port_autorun_switch_count(void) {
     return SWITCH_CONFIGS - 1;
 }
 
-/* The shelved switches bench's switches (a New 3DS only; 0 on an Old 3DS, where the button has nothing to run). */
+/* The shelved switches bench's switches on a New 3DS; on an Old 3DS, the same button's 60 fps bench's rows. */
 s32 port_autorun_shelved_count(void) {
-    return plat_old_3ds() ? 0 : (s32) ARRAY_COUNT(sSwitchesShelved) - 1;
+    return plat_old_3ds() ? (s32) ARRAY_COUNT(sSwitches60) - 1 : (s32) ARRAY_COUNT(sSwitchesShelved) - 1;
 }
 
 /*
@@ -2613,7 +2645,7 @@ static void status_text(char *text, s32 size, const char *mode, s32 next, s32 co
 
 static const char *mode_name(void) {
     return sMode == MODE_BENCH    ? "GPU BENCH"
-           : sMode == MODE_SWITCH ? (sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
+           : sMode == MODE_SWITCH ? (BENCH_60 ? "60 FPS BENCH" : sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
            : sMode == MODE_QUICK  ? "QUICK TEST"
            : sMode == MODE_BOSS   ? "BOSS FIGHTS"
            : sMode == MODE_WHOLE  ? (sShort ? "WHOLE GAME (SHORT)" : "WHOLE GAME")
@@ -2710,6 +2742,9 @@ int port_autorun_longest_status(int which, int sample, char *text, int size) {
             name = "all switches together (not the cost rows)";
             for (k = 0; sSwitchesShelved[k].name != NULL; k++) {
                 name = longest_name(name, sSwitchesShelved[k].name);
+            }
+            for (k = 0; sSwitches60[k].name != NULL; k++) { // (The Old 3DS 60 fps bench: same button, same mode name width)
+                name = longest_name(name, sSwitches60[k].name);
             }
             break;
         case 2:
@@ -3594,7 +3629,7 @@ static void send_results(const char *why) {
     io_flush(); // The summaries and the attached files read the results back.
     plat_snprintf(title, sizeof(title), "[3DS test run] %s%srun %d: %d of %d races, %d problems (%s)",
                   sLeanRun ? "lean " : "", sMode == MODE_BENCH    ? "GPU benchmark "
-                  : sMode == MODE_SWITCH ? (sShort ? "shelved switches " : "switch bench ")
+                  : sMode == MODE_SWITCH ? (BENCH_60 ? "60 fps bench " : sShort ? "shelved switches " : "switch bench ")
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
                   : sMode == MODE_WHOLE ? (sShort ? "whole game (short) " : "whole game ")
@@ -3605,7 +3640,7 @@ static void send_results(const char *why) {
                            "%s %d %s after %d of %d races: %d finished, %d with problems.\n"
                            "Average frame rate of the races finished since the game started: %.1f fps (%d races).\n",
                            sMode == MODE_BENCH    ? "GPU benchmark run"
-                           : sMode == MODE_SWITCH ? (sShort ? "Shelved switches bench run" : "Switch bench run")
+                           : sMode == MODE_SWITCH ? (BENCH_60 ? "Old 3DS 60 fps bench run" : sShort ? "Shelved switches bench run" : "Switch bench run")
                            : sMode == MODE_QUICK  ? "Quick test run"
                            : sMode == MODE_BOSS  ? "Boss fights run"
                            : sMode == MODE_WHOLE ? "Whole game run"
@@ -3778,12 +3813,9 @@ static void handle_request(void) {
                   : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK
                   : request == REQUEST_FULL_LEAN  ? REQUEST_START
                                                   : request;
-        sShort = request == REQUEST_WHOLE_SHORT || (request == REQUEST_SWITCH_SHELVED && !plat_old_3ds());
+        // On an Old 3DS the shelved switches button is the 60 fps bench (sSwitches60).
+        sShort = request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_SHELVED;
         if (request == REQUEST_SWITCH_SHELVED) {
-            if (plat_old_3ds()) {
-                plat_status("Shelved switches: a New 3DS bench");
-                return;
-            }
             request = REQUEST_SWITCH;
         }
         if (request == REQUEST_SWITCH && SWITCH_CONFIGS == 1 && !sLeanRun) { // (The lean one races the usual settings)
@@ -4150,37 +4182,66 @@ s32 port_sweep_level_vertex(const void *vertices) {
  */
 int port_autorun_override_check(char *report, int size) {
     s32 config, k, at = 0, failures = 0, configs;
-    s32 savedMode = sMode;
+    s32 savedMode = sMode, pass, rows = 0, races = 0;
     sMode = MODE_SWITCH;
-    sShort = 0;
-    configs = config_count();
-    for (config = 0; config < configs; config++) {
-        unsigned int dropped = gPlatOverridesDropped;
-        apply_config(config);
-        if (gPlatOverridesDropped != dropped) {
-            failures++;
-            at += plat_snprintf(report + at, size - at, "race %d (%s): %u switch overrides NOT applied (table full)\n",
-                                (int) config, config_name(config), gPlatOverridesDropped - dropped);
-        }
-        if (config >= 1 && config < SWITCH_CONFIGS) {
-            const BenchSwitch *row = &sSwitches[config - 1];
-            for (k = 0; k < BENCH_SWITCH_VARS && row->env[k] != NULL; k++) {
-                s32 fixed, want, value;
-                const char *name = bench_var(row->env[k], &fixed);
-                want = fixed != BENCH_VAR_PLAIN ? fixed : row->test;
-                value = plat_switch(name, -12345);
-                if (value != want) {
+    // An Old 3DS's two lists: the switch bench's, then the 60 fps bench's (sShort; the Shelved switches button).
+    for (pass = 0; pass < (plat_old_3ds() ? 2 : 1); pass++) {
+        sShort = pass;
+        configs = config_count();
+        rows += SWITCH_CONFIGS - 1;
+        races += configs;
+        for (config = 0; config < configs; config++) {
+            unsigned int dropped = gPlatOverridesDropped;
+            apply_config(config);
+            if (gPlatOverridesDropped != dropped) {
+                failures++;
+                at += plat_snprintf(report + at, size - at, "race %d (%s): %u switch overrides NOT applied (table full)\n",
+                                    (int) config, config_name(config), gPlatOverridesDropped - dropped);
+            }
+            if (BENCH_60) {
+                // The 60 fps bench: the mode's own settings reach the game (plat_common.c s60Defaults and
+                // s60LodDefaults): 60 fps unless a row pins 30 or forces 3D (the renderer's flag stands in for the
+                // slider), and the other karts' far-model scale 0 (4-player distances) only in the LOD row.
+                s32 lod = config >= 1 && config < SWITCH_CONFIGS &&
+                          bench_same_name(sSwitches[config - 1].env[0], "DKR_O3DS_60_LOD");
+                s32 pinned30 = config >= 1 && config < SWITCH_CONFIGS &&
+                               bench_same_name(sSwitches[config - 1].env[0], "DKR_FPS_PIN");
+                s32 stereo = config >= 1 && config < SWITCH_CONFIGS &&
+                             bench_same_name(sSwitches[config - 1].env[0], "DKR_STEREO3D");
+                s32 lodFar = plat_switch("DKR_RACER_LOD_FAR", 255), retraces;
+                gPlatStereoFrames = stereo;
+                retraces = plat_frame_retraces();
+                gPlatStereoFrames = 0;
+                if (!plat_o3ds_60_mode() || lodFar != (lod ? 0 : 255) || retraces != (pinned30 || stereo ? 2 : 1)) {
                     failures++;
-                    at += plat_snprintf(report + at, size - at, "race %d (%s): %s reads %d, not its test setting %d\n",
-                                        (int) config, row->name, name, (int) value, (int) want);
+                    at += plat_snprintf(report + at, size - at,
+                                        "60 fps bench race %d (%s): mode %d, DKR_RACER_LOD_FAR %d (want %d), %d "
+                                        "retraces a frame (want %d)\n",
+                                        (int) config, config_name(config), plat_o3ds_60_mode(), (int) lodFar,
+                                        lod ? 0 : 255, (int) retraces, pinned30 || stereo ? 2 : 1);
                 }
             }
+            if (config >= 1 && config < SWITCH_CONFIGS) {
+                const BenchSwitch *row = &sSwitches[config - 1];
+                for (k = 0; k < BENCH_SWITCH_VARS && row->env[k] != NULL; k++) {
+                    s32 fixed, want, value;
+                    const char *name = bench_var(row->env[k], &fixed);
+                    want = fixed != BENCH_VAR_PLAIN ? fixed : row->test;
+                    value = plat_switch(name, -12345);
+                    if (value != want) {
+                        failures++;
+                        at += plat_snprintf(report + at, size - at, "race %d (%s): %s reads %d, not its test setting %d\n",
+                                            (int) config, row->name, name, (int) value, (int) want);
+                    }
+                }
+            }
+            if (at >= size - 1) {
+                at = size - 1;
+            }
         }
-        if (at >= size - 1) {
-            at = size - 1;
-        }
+        apply_config(-1);
     }
-    apply_config(-1);
+    sShort = 0;
     {
         // Rows silently replacing each other's settings (bench_conflicts): this console's lists, then a planted list
         // that must report its three conflicts (rule K6: the check is shown to catch them in every CI run).
@@ -4196,9 +4257,7 @@ int port_autorun_override_check(char *report, int size) {
         const BenchSwitch *lists[2];
         s32 count = 0;
         lists[count++] = plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds;
-        if (!plat_old_3ds()) {
-            lists[count++] = sSwitchesShelved;
-        }
+        lists[count++] = plat_old_3ds() ? sSwitches60 : sSwitchesShelved;
         for (l = 0; l < count; l++) {
             n = bench_conflicts(lists[l], plat_old_3ds(), lines, (s32) sizeof(lines));
             at += plat_snprintf(report + at, size - at, "%s", lines);
@@ -4216,7 +4275,7 @@ int port_autorun_override_check(char *report, int size) {
         }
     }
     at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
-                        plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) configs, (int) (SWITCH_CONFIGS - 1), (int) failures);
+                        plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) races, (int) rows, (int) failures);
     sMode = savedMode;
     return failures;
 }

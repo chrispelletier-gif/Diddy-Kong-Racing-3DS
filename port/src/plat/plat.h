@@ -374,6 +374,23 @@ void plat_step_diff(int updateRate, void (*step)(long), void (*reinput)(long), i
 void plat_set_60fps(int on);
 int plat_60fps_setting(void);
 void plat_set_60fps_setting(int on);
+/*
+ * The Old 3DS 60 fps mode (P55, proposals/3ds-old3ds-60-mode-integration.md): switch DKR_O3DS_60, its default the
+ * Test run row's saved choice (settings.txt "o3ds60"). While on (an Old 3DS only): 60 fps cap, anti-aliasing and 800
+ * pixels off (unless DKR_O3DS_60_AA), back to 30 with the 3D slider up or more than one player, and the 60-mode
+ * defaults table (plat_common.c s60Defaults) gives the speed pieces' switches their 60 fps defaults.
+ * DKR_O3DS_60_LOD (Test run row, settings "o3ds60lod", default off; needs the owner's OK to ship): the other karts at
+ * 4-player model distances in the 60 mode (brings back the swap #548 fixed).
+ * plat_o3ds_60_live: the mode is on and this frame may run at 60 (not 3D, one player).
+ */
+int plat_o3ds_60_mode(void);
+int plat_o3ds_60_live(void);
+int plat_o3ds_60_setting(void);
+void plat_set_o3ds_60_setting(int on);
+int plat_o3ds_60_lod_setting(void);
+void plat_set_o3ds_60_lod_setting(int on);
+/* Set by the renderer (gfx_c3d.c apply_screen_mode) to whether the frames now drawn are in 3D. */
+extern volatile int gPlatStereoFrames;
 /* The Frame rate row: 30, 60 or the steady 20 (an Old 3DS's choice; three retraces a frame). */
 int plat_frame_rate_setting(void);
 void plat_set_frame_rate_setting(int fps);
