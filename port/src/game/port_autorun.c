@@ -622,7 +622,7 @@ static s32 switch_all_config(void) {
  */
 #define BENCH_VAR_PLAIN (-32768)
 static const char *bench_var(const char *entry, s32 *fixed) {
-    static char sNames[8][40];
+    static char sNames[32][40]; // (11 names in use 2026-11-23: room for the lists to grow)
     const char *eq = strchr(entry, '=');
     s32 i, n;
     *fixed = BENCH_VAR_PLAIN;
@@ -654,7 +654,7 @@ static const char *bench_var(const char *entry, s32 *fixed) {
             }
         }
     }
-    return entry; /* (more than 8 names: a list to fix; the override check reports it) */
+    return entry; /* (more than 32 names: a list to fix; the override check reports it) */
 }
 
 /* Laps for a switch bench race in config (0 = the usual settings): one for a bug check row, and for the usual races
