@@ -300,6 +300,10 @@ void port_race_hud_frame(s32 updateRate);
 void port_race_hud_map(void *model, s32 spriteIndex);
 s32 port_race_hud_hides(s32 element);
 s32 port_race_hud_setting(void);
+/* P58 (DKR_TTBEST_INDEX): the time trial bests index read at boot, and a time trial's best run read at the end of its
+ * level load (FALSE when the load is not a time trial's). */
+void port_race_hud_boot(void);
+s32 port_race_hud_loaded(void);
 void port_set_race_hud_setting(s32 value);
 
 /*
