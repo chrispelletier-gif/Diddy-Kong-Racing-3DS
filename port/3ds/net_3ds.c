@@ -82,10 +82,14 @@ int net_3ds_begin(char *error, size_t errorSize) {
         plat_3ds_hold_sleep(1);
     }
     LightLock_Unlock(&sLock);
+    if (status == 0) {
+        plat_3ds_hold_game_for_net(1); // Old 3DS: the game waits while the transfer runs (DKR_NET_HOLD)
+    }
     return status;
 }
 
 void net_3ds_end(void) {
+    plat_3ds_hold_game_for_net(0);
     LightLock_Lock(&sLock);
     if (sUsers > 0 && --sUsers == 0) {
         sslcExit();
