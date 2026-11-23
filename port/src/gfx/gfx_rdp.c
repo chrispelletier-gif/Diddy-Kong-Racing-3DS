@@ -2846,7 +2846,11 @@ static COLD void read_switches_now(void) {
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     // The native track (NR4) turns the backend's GPU vertex maths on for itself: the other kinds stay on the CPU
     // path unless DKR_GPU_TRANSFORM is on too.
-    sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+    // On by default on an Old 3DS (switch bench run 54, b2096b8, 2026-11-23): with raw register words the native track
+    // took ~0.6 ms off the game core and ~0.9 ms off the renderer core (three rows agreed, triangle-adjusted;
+    // proposals/3ds-switch-bench-b2096b8-o3ds-results.md). The frame's fills are waited for with it (DKR_FILL_WAIT,
+    // gfx_c3d.c), the Jungle Falls tunnel fix (T1). Off on a New 3DS, which is GPU-bound.
+    sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0;
     // Karts' vertex maths on the GPU (1) is the Old 3DS default together with raw register words (DKR_RAW_REGS): bench
     // run 50 on 62ac36e, game core -4.3 ms and renderer core -3.6 ms. Alone it only moves the work to the renderer's
     // core; 2 (objects too) was no better. Read the same way in gfx_c3d.c (sTransformWanted) and host/gfx_soft.c.

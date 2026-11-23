@@ -745,7 +745,7 @@ int port_native_track(void) {
     static int epoch = -1, on;
     if (epoch != gPlatSwitchEpoch) {
         epoch = gPlatSwitchEpoch;
-        on = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+        on = plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0; // Old 3DS default: run 54, see gfx_rdp.c
     }
     return on;
 }
