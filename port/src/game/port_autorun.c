@@ -363,6 +363,22 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (guess 0-0.5 ms)? The usual races are 2x (the bench's own setting); this row races without it, full laps. The
     // picture trade-off is the owner's call, whatever it gains.
     { "usual, anti-aliasing off", { "BENCH_AA", NULL, NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    // P55 gates 0 and 3 (proposals/3ds-perf-audit-2026-11-23.md item 1): the Old 3DS ceiling on today's defaults. The
+    // plain uncapped row went in #561, before raw words, karts on the GPU, the vertex loop, fog skip and the native
+    // track, so 60 fps was never measured with them. Full laps; the results' ceiling columns are the answer. The AA
+    // row's cap is "NAME=value" (the bench's own 30 cap is set after the rows, so the other races keep it); BENCH_AA
+    // can't be: an unset "NAME=value" would take the bench's own 2x away in every other race.
+    { "uncapped (60 cap), usual", { "DKR_FPS_PIN", NULL, NULL }, -1, 60, 1, 0 },
+    { "uncapped (60 cap), anti-aliasing off", { "BENCH_AA", "DKR_FPS_PIN=60", NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    // G5g (audit item 2): stereo 3D at 30 on the Old 3DS, never benched (code on master since #487). DKR_STEREO3D=2
+    // draws in 3D whatever the slider says (no anti-aliasing in 3D); then the stereo frame recorded once for both
+    // eyes (DKR_STEREO_ONCE), then with the walk's culling kept for both eyes (DKR_STEREO_CULL). The two extra
+    // switches are "NAME=value", so every other race keeps its own default. Full laps.
+    { "3D at 30 fps", { "DKR_STEREO3D", "DKR_STEREO_ONCE=0", "DKR_STEREO_CULL=0", NULL }, 0, 2, 1, 0 },
+    { "3D at 30 fps, recorded once for both eyes", { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=0", NULL },
+      0, 2, 1, 0 },
+    { "3D at 30 fps, recorded once, culled in the walk",
+      { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=1", NULL }, 0, 2, 1, 0 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
