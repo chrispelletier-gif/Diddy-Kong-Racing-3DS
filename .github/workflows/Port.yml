@@ -423,6 +423,34 @@ jobs:
             exit 1
           fi
 
+      - name: Split ref check
+        # P63: DKR_SPLIT_REF hands the opaque buckets to the two-core renderer's backend by pointer, so the same build
+        # must draw identical frames with its self-check on (DKR_SPLIT_REF_CHECK=2: every hand-off compared by the
+        # backend with a queued copy, returned blocks filled with 0xA5), with the Old 3DS defaults, and report 0 differ.
+        # Mode 3 is the check broken on purpose (rule K6: blocks returned one draw early) and must report differences.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_SPLIT_REF_CHECK=2 \
+            --out "$RUNNER_TEMP/split-ref" --max-images 0 --no-repeat-check --fail-on-diff
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_SPLIT_REF_CHECK=3 --only levels \
+            --out "$RUNNER_TEMP/split-ref-broken" --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/split-ref/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/split-ref-broken/runs" -path "*/head/log.txt")
+          grep -h "split ref:" $logs $broken | tail -n 8
+          if grep -q "split ref: first difference" $logs; then
+            echo "::error::A handed-over bucket block changed before the backend drew it (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "split ref: [1-9][0-9]* handed over, .* [1-9][0-9]* compared, 0 differ" $logs; then
+            echo "::error::The split ref check never compared a hand-off (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "split ref: first difference" $broken; then
+            echo "::error::The split ref check broken on purpose (DKR_SPLIT_REF_CHECK=3) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

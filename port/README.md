@@ -236,6 +236,13 @@ controls) work there, as do these renderer switches:
   `DKR_RAW_REGS_CHECK=1` compares every reuse with citro3d), `DKR_NATIVE_GPU` (1: the karts' vertex maths on the GPU;
   2 adds the objects) and `DKR_VERTEX_ASM` (the native draws' vertex passes as one VFP loop; `DKR_VERTEX_ASM_CHECK=1`
   compares it with the C). The checks count in the test run results' chk cells.
+- `DKR_SPLIT_REF=1` (roadmap P63, off by default: the walk's opaque buckets go to the two-core renderer's backend by
+  pointer instead of being copied into its queue; the bucket takes a fresh block from a pool of
+  `DKR_SPLIT_REF_BLOCKS` (default 16, ~29 KB each) and gets the old one back once the backend has drawn it; with no
+  free block it is copied as before. Same draws, same frames. Logs `split ref: N handed over, M fallbacks` every 600
+  frames. `DKR_SPLIT_REF_CHECK=1` (implies the switch) queues a copy of each handed block for the backend to compare
+  before drawing (chk cells, `0 differ` expected), `=2` also fills returned blocks with 0xA5, `=3` is mode 2 broken on
+  purpose (blocks returned one draw early; it must report differences))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
