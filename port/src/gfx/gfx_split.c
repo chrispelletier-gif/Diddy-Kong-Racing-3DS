@@ -677,6 +677,46 @@ PLAT_HOT_GAME PLAT_NOINLINE void gfx_split_draw_indexed(const GfxDrawState *stat
     commit(d);
 }
 
+/* P60 D (DKR_SPRITE_GS): a batch of sprite points, as a call of the backend's in the queue, or expanded here into an
+ * indexed draw for a backend that doesn't take points (the host's). */
+typedef struct SplitSprites {
+    GfxDrawState state;
+    int numPoints, pad;
+} SplitSprites;
+
+static void sprites_call(void *payload) {
+    const SplitSprites *s = (const SplitSprites *) payload;
+    gfxb_draw_sprites(&s->state, (const GfxSpritePoint *) (s + 1), s->numPoints);
+}
+
+void gfx_split_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints) {
+    static GfxVertex sVerts[GFX_MAX_SPRITE_POINTS * 4];
+    static unsigned short sIndices[GFX_MAX_SPRITE_POINTS * 6];
+    SplitSprites *s;
+    if (numPoints <= 0) {
+        return;
+    }
+    if (numPoints > GFX_MAX_SPRITE_POINTS) {
+        numPoints = GFX_MAX_SPRITE_POINTS;
+    }
+    if (!gfxb_sprite_points()) {
+        gfx_sprite_expand(pts, numPoints, sVerts, sIndices);
+        gfx_split_draw_indexed(state, sVerts, numPoints * 4, sIndices, numPoints * 2);
+        return;
+    }
+    s = gfx_split_call_reserve(sprites_call, sizeof(SplitSprites) + (unsigned int) numPoints * sizeof(GfxSpritePoint));
+    if (s == NULL) {
+        gfx_split_drain();
+        gfxb_draw_sprites(state, pts, numPoints);
+        return;
+    }
+    s->state = *state;
+    s->numPoints = numPoints;
+    s->pad = 0;
+    memcpy(s + 1, pts, (unsigned int) numPoints * sizeof(GfxSpritePoint));
+    gfx_split_call_commit(s);
+}
+
 static void texture_op(unsigned int op, GfxTexture *tex, const GfxTexture *src) {
     SplitTexture *t = reserve(op, sizeof(SplitTexture));
     t->tex = tex;
