@@ -274,6 +274,15 @@ controls) work there, as do these renderer switches:
   C3D_FrameEnd, after` with the command list parts a frame, on its own log line and in `autorun_cores.txt`.
   `DKR_FRAME_PARTS_CHECK=1` (default) checks the parts add up to the bucket within 5% (chk cells, `ok`/`WRONG`);
   `=2` is broken on purpose (rule K6: the largest part left out of the sum; must report WRONG); `0` off
+- `DKR_FE_FLUSH`, `DKR_FE_PRESENT_EVENT`, `DKR_FE_QUEUE_HELPER` (roadmap P57 E step 2, all off by default; 3DS
+  backend): cuts for the frame start/end parts. `DKR_FE_FLUSH=1` writes the frame's command list parts and the rest of
+  the list (split off by the backend instead of `C3D_FrameEnd`, so the GSP service doesn't flush it) out of the data
+  cache with one system call over their span; `=2` cleans only (`svcStoreProcessDataCache`), vertices and indices
+  too. `DKR_FE_PRESENT_EVENT=1` waits for a pending top screen swap on the VBlank event instead of 0.5 ms polling
+  sleeps. `DKR_FE_QUEUE_HELPER=1` (`=2`) hands `C3D_FrameEnd`'s GPU queue start to a thread on the game core above
+  (below) the game; the queue's wait, stop and clear are wrapped to wait for it (3 ms, then the renderer starts it).
+  Self-checks `DKR_FE_FLUSH_CHECK`, `DKR_FE_PRESENT_CHECK`, `DKR_FE_QUEUE_CHECK` (1 default, `=2` broken on purpose,
+  rule K6, `0` off), on the `frame start/end cuts:` log line (and `autorun_cores.txt`) and in the chk cells
 - `DKR_FLAT_FRAME=1` (roadmap P55 S4 step 1, off by default: race frames on the flat dispatcher, `nframe.c`
   `run_flat_frame`: the record dispatcher with the record tag tested first, state ops straight to `native_op` and the
   record path built a second time without the step marks, census notes, kart counts and remote vertex maths
