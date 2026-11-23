@@ -294,9 +294,16 @@ typedef struct GfxModelParams {
     float texOffset[4];
     short fogMul, fogOffset; // With fog, the alpha is the fog factor clamp(z / w * fogMul + fogOffset, 0, 255)
     unsigned char fog;
-    unsigned char pad[3];   // pad[0]: lit (GPU vertex lighting): the colours are normals, lit with light
+    unsigned char pad[3];   // pad[0]: lit (GPU vertex lighting): the colours are normals, lit with light;
+                            // pad[1]: a slimmer vertex shader the draw may use (GFX_MODEL_PROG_*, P65)
     float light[4];         // Light direction (x, y, z, over 127-unit normals) and ambient, as gfx_light_shade takes them
 } GfxModelParams;
+/* GfxModelParams.pad[1] (custom shader plan P65): which vertex shader may draw a model draw. ANY: transform.v.pica.
+ * TRACK: the native track's batches (never lit, texc 0), which DKR_TRACK_SLIM draws with track.v.pica. WAVES: a wave
+ * tile (gfxb_draw_waves), drawn only with waves.v.pica. */
+#define GFX_MODEL_PROG_ANY 0
+#define GFX_MODEL_PROG_TRACK 1
+#define GFX_MODEL_PROG_WAVES 2
 
 /* GPU vertex lighting: the grey of a vertex whose colour holds its normal (signed bytes). */
 static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
@@ -363,6 +370,24 @@ void *gfxb_mesh_create(const GfxModelVertex *verts, int numVerts, const unsigned
 void gfxb_mesh_free(void *mesh);
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts);
+
+/*
+ * Wave tiles drawn by waves.v.pica (P65 rank 3, DKR_WAVE_SHADER; gfx_waves.h): a draw whose GfxModelParams.pad[1] is
+ * GFX_MODEL_PROG_WAVES takes the tile's values from the last gfxb_wave_tile and the tables from the last
+ * gfxb_wave_table (count height entries, at most GFX_WAVE_TABLE_MAX, then 12 scale entries). Both copy what they are
+ * given. The _call forms take the same as a queued call's payload (gfx_split_call_reserve): GfxWaveTable, or the 16
+ * floats.
+ */
+typedef struct GfxWaveTable {
+    int count;
+    float scales[12];
+    float heights[188];
+} GfxWaveTable;
+void gfxb_wave_table(const GfxWaveTable *table);
+void gfxb_wave_table_call(void *payload);
+void gfxb_wave_tile(const float unif[16]);
+void gfxb_wave_tile_call(void *payload);
+int gfxb_wave_shader_ok(void); // The wave program can draw (found in the blob, not hung the GPU in an earlier run)
 
 /* A model vertex the way the CPU path makes it, for backends without GPU vertex maths and for comparisons. */
 static inline void gfx_model_to_vertex(GfxVertex *out, const GfxModelVertex *in, const GfxModelParams *p) {

@@ -14,6 +14,7 @@
 
 #include "gfx/gfx_backend.h"
 #include "gfx/gfx_split.h"
+#include "gfx/gfx_waves.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
 #include "plat/settings.h"
@@ -230,6 +231,8 @@ static const struct RawBlock *sRawLast; // The block the GPU has from the last d
 static int raw_set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1);
 static int raw_again(void);
 static void raw_emit_uniforms(unsigned changed);
+static void init_model_programs(void);            // P65 slim programs (below, with model_program)
+static void model_programs_frame_drawn(int frame); // Their hang markers: a frame drawn with them
 static void raw_draw_elements(int count, const u16 *indices);
 static void raw_frame_start(void);
 static void raw_read_switches(void);
@@ -1938,6 +1941,7 @@ void gfxb_init(void) {
     C3D_BindProgram(&sProgram);
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
     init_transform();
+    init_model_programs();
     sprite_gs_init();
 
     init_vertex_formats();
@@ -3851,6 +3855,7 @@ static void wait_for_gpu(int measure) {
     }
     if (sOnGpu >= 0) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
+        model_programs_frame_drawn(sSlots[sOnGpu].frame);
         sprite_gs_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
@@ -4022,7 +4027,12 @@ static inline void unif_write_twice(void) {
 }
 
 /* The uniforms for a draw the CPU transformed: the shader passes it through, as shader.v.pica does. */
+static void model_program(int prog);
+static int sProgCur;
 static void PLAT_COLD set_cpu_uniforms_now(void) {
+    if (sProgCur != 0) { // A slim program (P65) drew the last model draw: transform.v.pica again
+        model_program(0);
+    }
     set_unif(UNIF_MTX + 0, 1.0f, 0.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 1, 0.0f, 1.0f, 0.0f, 0.0f);
     set_unif(UNIF_MTX + 2, 0.0f, 0.0f, 1.0f, 0.0f);
@@ -4207,6 +4217,256 @@ static void transform_frame_drawn(int frame) {
     }
 }
 
+/*
+ * Slimmer vertex shaders for some kinds of model draws (custom shader plan P65, proposals/3ds-custom-shader-plan.md
+ * 5b and rank 3). Both are in the game's blob next to transform.v.pica and share its uniforms (picasso gives uniforms
+ * of the same name the same registers), so a switch between them keeps every uniform the GPU has:
+ *  - track.v.pica (DVLE 4, DKR_TRACK_SLIM): the native track's batches (gfx_rdp.c native_track marks them
+ *    GFX_MODEL_PROG_TRACK) without the light path and second texture factor the track never uses: 26 instructions of
+ *    the 39, the same results bit for bit (port/tools/pica_sim.py checks it in CI);
+ *  - waves.v.pica (DVLE 5, DKR_WAVE_SHADER): wave tiles' heights and colours worked out on the GPU (gfxb_draw_waves).
+ * The program is switched only where the kind of draw changes: the sorted opaque track is drawn as a run of buckets,
+ * and the waves as a run of tiles, so a frame has a few switches. Each switch is written twice (the GPU misses some
+ * settings written right after a draw, see drain_before_draw) and its draw's settings and uniforms too.
+ * Each shader is watched like transform.v.pica: track_slim.txt / wave_shader.txt say "testing" from its first draw
+ * until 30 frames with it have been drawn, then "passed"; a start that finds "testing" (the console hung) writes
+ * "hung" and leaves that shader off until its version below changes.
+ */
+#define SLIM_TEST_VERSION 1
+#define WAVE_TEST_VERSION 1
+enum { PROG_T, PROG_K, PROG_W };
+typedef struct ShaderTest {
+    const char *file, *what;
+    int version, hung, testFrame; // testFrame: the first frame drawn with it, -1 before, -2 once it passed
+} ShaderTest;
+static ShaderTest sSlimTest = { "track_slim.txt", "slim track shader", SLIM_TEST_VERSION, 0, -1 };
+static ShaderTest sWaveTest = { "wave_shader.txt", "wave shader", WAVE_TEST_VERSION, 0, -1 };
+static shaderProgram_s sProgramK, sProgramW;
+static int sProgramKUsable, sProgramWUsable;
+static int sProgCur = PROG_T;  // The model program citro3d has bound while sTransformOn
+static int sSlimWanted;        // DKR_TRACK_SLIM
+static int sSlimOn;            // This frame's
+static int sProgFirst;         // The program was just switched: the draw's settings and uniforms are written twice
+static unsigned int sProgStats[4]; // Switches, slim draws, wave draws, slim draws declined (not marked unlit)
+
+static void shader_test_write(const ShaderTest *t, const char *what) {
+    char path[256], text[32];
+    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file);
+    snprintf(text, sizeof(text), "%s %d\n", what, t->version);
+    plat_save_file(path, text, strlen(text));
+}
+
+static void PLAT_COLD shader_test_read(ShaderTest *t) {
+    char path[256], text[32];
+    int got;
+    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file);
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+        if ((strncmp(text, "testing ", 8) == 0 && atoi(text + 8) == t->version) ||
+            (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == t->version)) {
+            t->hung = 1;
+            shader_test_write(t, "hung");
+            plat_log("%s: left off, the GPU hung with it in an earlier run (%s)", t->what, t->file);
+        }
+    }
+}
+
+static inline void shader_test_used(ShaderTest *t) {
+    if (__builtin_expect(t->testFrame == -1, 0)) {
+        t->testFrame = sFrameCount;
+        shader_test_write(t, "testing");
+        plat_log("%s: first drawn (frame %d)", t->what, sFrameCount);
+    }
+}
+
+static void shader_test_drawn(ShaderTest *t, int frame) {
+    if (t->testFrame >= 0 && frame >= t->testFrame + TRANSFORM_TEST_FRAMES) {
+        t->testFrame = -2;
+        shader_test_write(t, "passed");
+        plat_log("%s: %d frames drawn, the shader works on this console", t->what, TRANSFORM_TEST_FRAMES);
+    }
+}
+
+static void model_programs_frame_drawn(int frame) {
+    shader_test_drawn(&sSlimTest, frame);
+    shader_test_drawn(&sWaveTest, frame);
+}
+
+/* Whether a program of the blob has transform.v.pica's uniforms at transform.v.pica's registers. */
+static int PLAT_COLD same_uniforms(shaderProgram_s *p) {
+    static const char *const sNames[] = { "eye", "mtx", "camoff", "texa", "texc", "texb", "fogp" };
+    int i;
+    for (i = 0; i < (int) (sizeof(sNames) / sizeof(sNames[0])); i++) {
+        int a = shaderInstanceGetUniformLocation(sProgramT.vertexShader, sNames[i]);
+        int b = shaderInstanceGetUniformLocation(p->vertexShader, sNames[i]);
+        if (a < 0 || a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * The wave shader's uniforms (waves.v.pica: wavea..waved, wtab, wsc; gfx_backend.h gfxb_wave_*). Only that program reads
+ * them, at registers no other program of the blob uses (picasso gives every name its own), so they are written as words
+ * when a wave tile is drawn: the tile's four each wave draw, the tables at the first wave draw of a frame (and when
+ * they change), each twice, as the other uniforms are (unif_write_twice). citro3d's copy is kept for after the HOME
+ * menu but not marked.
+ */
+static int sWaveLocTile = -1, sWaveLocTab = -1, sWaveLocSc = -1;
+static C3D_FVec sWaveTileVec[4], sWaveTabVec[GFX_WAVE_TABLE_MAX / 4], sWaveScVec[GFX_WAVE_SCALES / 4];
+static int sWaveTileNew, sWaveTabFrame = -1, sWaveTabGiven;
+
+static void PLAT_COLD wave_init_uniforms(void) {
+    sWaveLocTile = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wavea");
+    sWaveLocTab = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wtab");
+    sWaveLocSc = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wsc");
+    if (sWaveLocTile < 0 || sWaveLocTab < 0 || sWaveLocSc < 0 ||
+        shaderInstanceGetUniformLocation(sProgramW.vertexShader, "waved") != sWaveLocTile + 3) {
+        sProgramWUsable = 0;
+    }
+    plat_log("wave shader: uniforms wavea %d wtab %d wsc %d", sWaveLocTile, sWaveLocTab, sWaveLocSc);
+}
+
+static void wave_vecs(C3D_FVec *out, const float *in, int count) {
+    int i;
+    for (i = 0; i < count; i++) {
+        out[i].x = in[i * 4 + 0];
+        out[i].y = in[i * 4 + 1];
+        out[i].z = in[i * 4 + 2];
+        out[i].w = in[i * 4 + 3];
+    }
+}
+
+void gfxb_wave_table(const GfxWaveTable *table) {
+    float h[GFX_WAVE_TABLE_MAX];
+    int n = table->count < GFX_WAVE_TABLE_MAX ? table->count : GFX_WAVE_TABLE_MAX;
+    memset(h, 0, sizeof(h));
+    memcpy(h, table->heights, (size_t) (n > 0 ? n : 0) * sizeof(float));
+    wave_vecs(sWaveTabVec, h, GFX_WAVE_TABLE_MAX / 4);
+    wave_vecs(sWaveScVec, table->scales, GFX_WAVE_SCALES / 4);
+    sWaveTabFrame = -1;
+    sWaveTabGiven = 1;
+}
+
+void gfxb_wave_table_call(void *payload) {
+    gfxb_wave_table((const GfxWaveTable *) payload);
+}
+
+void gfxb_wave_tile(const float unif[16]) {
+    wave_vecs(sWaveTileVec, unif, 4);
+    sWaveTileNew = 1;
+}
+
+void gfxb_wave_tile_call(void *payload) {
+    gfxb_wave_tile((const float *) payload);
+}
+
+int gfxb_wave_shader_ok(void) {
+    return sProgramWUsable && !sWaveTest.hung;
+}
+
+/* Uniform vectors as words: the start register, then their values (the order citro3d's C3D_FVec keeps). */
+static void wave_unif_words(int loc, const C3D_FVec *v, int count) {
+    int i;
+    for (i = 0; i < count; i++) {
+        C3D_FVUnif[GPU_VERTEX_SHADER][loc + i] = v[i];
+    }
+    GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | (u32) loc);
+    GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, (const u32 *) v, (u32) count * 4);
+}
+
+/* Before a wave draw (model_program_for, the wave program bound): what it needs that the GPU doesn't have yet. */
+static void PLAT_COLD wave_uniforms_write(void) {
+    int t, tab = sWaveTabFrame != sFrameCount && sWaveTabGiven;
+    if (!tab && !sWaveTileNew) {
+        return;
+    }
+    C3Di_UpdateContext(); // citro3d's waiting settings first, so the words land after them
+    for (t = 0; t < 2; t++) {
+        if (tab) {
+            wave_unif_words(sWaveLocTab, sWaveTabVec, GFX_WAVE_TABLE_MAX / 4);
+            wave_unif_words(sWaveLocSc, sWaveScVec, GFX_WAVE_SCALES / 4);
+        }
+        if (sWaveTileNew) {
+            wave_unif_words(sWaveLocTile, sWaveTileVec, 4);
+        }
+    }
+    if (tab) {
+        sWaveTabFrame = sFrameCount;
+    }
+    sWaveTileNew = 0;
+}
+
+/* At start-up, after init_transform: the slim programs, and what happened with them in earlier runs. */
+static void PLAT_COLD init_model_programs(void) {
+    shaderProgramInit(&sProgramK);
+    shaderProgramInit(&sProgramW);
+    sProgramKUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 5 &&
+                      shaderProgramSetVsh(&sProgramK, &sShaderDvlb->DVLE[4]) == 0 && same_uniforms(&sProgramK);
+    sProgramWUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 6 &&
+                      shaderProgramSetVsh(&sProgramW, &sShaderDvlb->DVLE[5]) == 0 && same_uniforms(&sProgramW);
+    if (sProgramWUsable) {
+        wave_init_uniforms();
+    }
+    plat_log("slim shaders: track %s, waves %s", sProgramKUsable ? "found" : "NOT usable",
+             sProgramWUsable ? "found" : "NOT usable");
+    shader_test_read(&sSlimTest);
+    shader_test_read(&sWaveTest);
+}
+
+/* Binds a model program now, inside the frame being built, and writes its settings twice. */
+static void PLAT_COLD model_program(int prog) {
+    C3D_BindProgram(prog == PROG_K ? &sProgramK : prog == PROG_W ? &sProgramW : &sProgramT);
+    C3Di_UpdateContext();
+    __C3D_Context.flags |= 1u << 8; // citro3d's C3DiF_Program: the program's settings (not its code) once more
+    C3Di_UpdateContext();
+    sProgCur = prog;
+    sProgFirst = 1;
+    sProgStats[0]++;
+}
+
+/* The program a model draw uses (model_draw_begin), bound if it isn't. */
+static inline void model_program_for(const GfxModelParams *params) {
+    int want = PROG_T;
+    if (__builtin_expect(params->pad[1] != GFX_MODEL_PROG_ANY, 0)) {
+        if (params->pad[1] == GFX_MODEL_PROG_WAVES) {
+            want = PROG_W;
+            sProgStats[2]++;
+            shader_test_used(&sWaveTest);
+        } else if (sSlimOn && !params->pad[0]) {
+            want = PROG_K;
+            sProgStats[1]++;
+            shader_test_used(&sSlimTest);
+        } else if (sSlimOn) {
+            sProgStats[3]++;
+        }
+    }
+    if (__builtin_expect(want != sProgCur, 0)) {
+        model_program(want);
+    }
+    if (__builtin_expect(want == PROG_W, 0)) {
+        wave_uniforms_write();
+    }
+}
+
+/* At the start of a frame (with transform_frame_start): transform.v.pica bound again, this frame's slim switch, and
+ * the counts every 600 frames. */
+static void model_programs_frame_start(void) {
+    if (sTransformOn && sProgCur != PROG_T) {
+        C3D_BindProgram(&sProgramT);
+    }
+    sProgCur = PROG_T;
+    sSlimOn = sSlimWanted && sProgramKUsable && !sSlimTest.hung && sTransformOn;
+    if (sFrameCount % 600 == 0 && (sProgStats[0] | sProgStats[1] | sProgStats[2]) != 0) {
+        plat_log("slim shaders: %u program switches, %u slim track draws, %u wave draws, %u track draws lit (left to "
+                 "the transform shader), in 600 frames",
+                 sProgStats[0], sProgStats[1], sProgStats[2], sProgStats[3]);
+        memset(sProgStats, 0, sizeof(sProgStats));
+    }
+}
+
 /* Whether the frame may be in 3D: the setting on (or forced by DKR_STEREO3D=2, the switch bench's 3D races) and the
  * slider up. */
 static int stereo_wanted(float slider) {
@@ -4325,8 +4585,10 @@ static void read_switches(void) {
     // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
                        plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
-                       plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0;
+                       plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 ||
+                       plat_switch("DKR_WAVE_SHADER", 0) != 0; // P65 rank 3: wave tiles need it too
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
+    sSlimWanted = plat_switch("DKR_TRACK_SLIM", 0) != 0; // P65 5b: the native track's slim shader (model_program_for)
     raw_read_switches(); // DKR_RAW_REGS, DKR_RAW_REGS_CHECK
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
 #ifdef PICA_ALL
@@ -4412,6 +4674,7 @@ void gfxb_start_frame(void) {
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
     read_switches();
     transform_frame_start();
+    model_programs_frame_start();
     sOnceFrame = sStereo && sStereoOnce && sSplitMode == 0;
     if (!sStereo) {
         write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays), or each eye's pass (stereo_once_lists).
@@ -7893,8 +8156,14 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
         }
         return 0;
     }
+    model_program_for(params); // P65: the slim programs (before the draw's settings, which come after the switch)
     *hangDraw = hang_draw_start(state, numTriangles);
     first = drain_before_draw(state, numTriangles);
+    if (__builtin_expect(sProgFirst, 0)) {
+        first = 1; // A program switch: this draw's settings and uniforms written twice too
+        sProgFirst = 0;
+        sUnifKnown = 0;
+    }
     if (first) {
         forget_gpu_state();
     }

@@ -3,7 +3,10 @@
 ifeq ($(TARGET),3ds)
 
 TOOLS_BIN   := $(DEVKITPRO)/tools/bin
-SHADER_SRC  := 3ds/shader.v.pica 3ds/transform.v.pica 3ds/sprite.v.pica 3ds/sprite.g.pica
+# The order is the DVLE order gfx_c3d.c expects: 0 pass-through, 1 transform, 2-3 sprite GS, 4 slim track (P65 5b),
+# 5 waves (P65 rank 3).
+SHADER_SRC  := 3ds/shader.v.pica 3ds/transform.v.pica 3ds/sprite.v.pica 3ds/sprite.g.pica 3ds/track.v.pica \
+               3ds/waves.v.pica
 SHADER_BIN  := $(BUILD_DIR)/shader/shader.shbin
 SHADER_ASM  := $(BUILD_DIR)/shader/shader_shbin.s
 SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h

@@ -433,6 +433,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P65 5b and rank 3 (2026-11-23, proposals/3ds-custom-shader-plan.md). First the measurement the slim track
+    // shader's worth rests on: the native track's GPU time by kind again with anti-aliasing off (BENCH_AA_OFF), so a
+    // quarter of the pixels. Against "GPU time by kind, native track on the GPU": the track kind's GPU ms barely
+    // moving means its cost is the vertices (the slim shader's 26 instructions instead of 39 can help); dropping a lot
+    // means pixels (the shader can't). Then the slim shader itself (DKR_TRACK_SLIM, log "slim shaders: ... slim track
+    // draws"), timed the same way. Both measurements.
+    { "GPU time by kind, native track, anti-aliasing off (P65 5b: vertices or pixels)",
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0 },
+    { "GPU time by kind, native track with the slim track shader (P65 5b)",
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM" }, 0, 1, 1, 0 },
+    // Rank 3: the see-through water's heights and colours worked out by waves.v.pica (DKR_WAVE_SHADER), the game's
+    // per-vertex loop gone from the game core for tiles the GPU draws (log "wave shader: N tiles drawn by the GPU").
+    // Then its self-check (DKR_WAVE_SHADER_CHECK): every tile the CPU way, compared with the shader's sums; the log line
+    // "wave shader check" must say "differ on 0" and "the CPU way on 0". The first race with the wave shader writes
+    // wave_shader.txt ("testing", then "passed"); a lock there leaves it off in later runs.
+    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", NULL, NULL }, 0, 1, 0, 0 },
+    { "water waves, self-check (1 lap, chk: differ on 0)", { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", NULL }, 0, 1, 1,
+      1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
@@ -613,6 +631,9 @@ static void apply_config(s32 config) {
                     plat_override_switch(name, fixed != BENCH_VAR_PLAIN ? fixed : sSwitches[i].test);
                 }
             }
+        }
+        if (plat_switch("BENCH_AA_OFF", 0)) {
+            plat_override_switch("BENCH_AA", PLAT_AA_OFF); // A row's own anti-aliasing off (P65 5b's measurement)
         }
         if (plat_switch("BENCH_400", 0)) {
             plat_override_switch("BENCH_WIDE800", 0);

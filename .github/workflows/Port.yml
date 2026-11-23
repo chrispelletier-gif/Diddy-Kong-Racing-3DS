@@ -515,6 +515,19 @@ jobs:
           python3 port/tools/backend_replay.py ci --deps "$RUNNER_TEMP/replay-deps" --exe port/build/host/dkr \
             --rom "$RUNNER_TEMP/rom/baserom.z64" --work "$RUNNER_TEMP/replay" $base
 
+      # P65 (proposals/3ds-custom-shader-plan.md): the shader blob run on a simulated PICA200 (port/tools/pica_sim.py,
+      # 24-bit floats): the slim track shader (track.v.pica) must give the same outputs as transform.v.pica for unlit
+      # draws, and the wave shader (waves.v.pica) the game's own sums for a wave vertex (port/tools/pica_wave_check.py).
+      # Each check is also run broken on purpose and must then report (rule K6). Uses the replay's picasso. anim.v.pica
+      # (keyframe blending, not in the game's blob until karts keep their meshes on the GPU) is checked here too.
+      - name: Shader checks
+        if: ${{ !cancelled() }}
+        run: |
+          picasso="$RUNNER_TEMP/replay-deps/picasso/picasso"
+          srcs=$(sed -n '/^SHADER_SRC/,/[^\\]$/p' port/3ds/rules.mk | sed 's/^SHADER_SRC *:=//; s/\\//g') 3ds/anim.v.pica
+          (cd port && "$picasso" -o "$RUNNER_TEMP/shader-check.shbin" $srcs)
+          python3 port/tools/pica_sim.py check "$RUNNER_TEMP/shader-check.shbin"
+
       - name: Upload the backend replay's report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

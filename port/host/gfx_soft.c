@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "gfx/gfx_waves.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
 
@@ -991,7 +992,8 @@ float gfxb_cpu_cull_margin(void) {
 
 int gfxb_gpu_transform(void) {
     return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
-           plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0; // as gfx_rdp.c's sNativeGpuSwitch
+           plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 || // as gfx_rdp.c's sNativeGpuSwitch
+           plat_switch("DKR_WAVE_SHADER", 0) != 0;
 }
 
 /* No guard band to keep to here; DKR_HOST_BAND (a band in screen widths, e.g. 1.5) makes one up the way the 3DS's
@@ -1075,12 +1077,64 @@ void gfxb_mesh_free(void *mesh) {
     }
 }
 
+/* P65 rank 3 (DKR_WAVE_SHADER): the wave shader's values, its sums done here in C (gfx_waves.h gfx_wave_eval). */
+static GfxWaveTable sWaveTable;
+static float sWaveTile[16];
+
+void gfxb_wave_table(const GfxWaveTable *table) {
+    sWaveTable = *table;
+}
+
+void gfxb_wave_table_call(void *payload) {
+    gfxb_wave_table((const GfxWaveTable *) payload);
+}
+
+void gfxb_wave_tile(const float unif[16]) {
+    memcpy(sWaveTile, unif, sizeof(sWaveTile));
+}
+
+void gfxb_wave_tile_call(void *payload) {
+    gfxb_wave_tile((const float *) payload);
+}
+
+int gfxb_wave_shader_ok(void) {
+    return 1;
+}
+
+/* A wave tile's mesh vertices as waves.v.pica makes them: height and colour worked out, texture coordinates from the
+ * column and row. */
+static void wave_mesh_vertices(GfxModelVertex *out, const GfxModelVertex *in, int numVerts) {
+    int i;
+    for (i = 0; i < numVerts; i++) {
+        short y;
+        unsigned char rgba[4];
+        int j = in[i].u, row = in[i].v;
+        gfx_wave_eval(in[i].x, in[i].y, in[i].one, j, row, in[i].r, sWaveTile, sWaveTable.heights,
+                      sWaveTable.scales, &y, rgba);
+        out[i] = in[i];
+        out[i].y = y;
+        out[i].one = 1;
+        out[i].u = (short) (sWaveTile[12] + (float) j * sWaveTile[14]);
+        out[i].v = (short) (sWaveTile[13] + (float) row * sWaveTile[15]);
+        out[i].r = rgba[0];
+        out[i].g = rgba[1];
+        out[i].b = rgba[2];
+        out[i].a = rgba[3];
+    }
+}
+
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts) {
+    static GfxModelVertex sWaveVerts[GFX_MAX_BATCH_VERTICES];
     int i;
     for (i = 0; i < numParts; i++) {
         const SoftMesh *m = parts[i].mesh;
-        gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
+        const GfxModelVertex *v = m->verts;
+        if (params->pad[1] == GFX_MODEL_PROG_WAVES && m->numVerts <= GFX_MAX_BATCH_VERTICES) {
+            wave_mesh_vertices(sWaveVerts, m->verts, m->numVerts);
+            v = sWaveVerts;
+        }
+        gfxb_draw_model(state, params, v, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
     }
 }
 

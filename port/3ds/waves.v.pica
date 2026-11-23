@@ -1,0 +1,192 @@
+; Vertex shader for wave tiles (custom shader plan P65 rank 3, DKR_WAVE_SHADER; gfx_rdp.c native_wave, gfx_c3d.c
+; gfxb_wave_*). The game works out each wave vertex's height and colour every frame on the CPU (waves.c
+; func_800B92F4) and the walk then transforms it. Here the vertices stay in GPU memory, made once per tile (a mesh of
+; the level), and this shader does both: the same sums the game does, from the game's own tables in uniforms.
+;
+; A vertex (the model vertex format, 16 bytes, gfx_waves.h GfxWaveVertex):
+;   v0 = (x, a0, z, a1): the grid position, and the tile's two height table indices as the level started
+;   v1 = (j, i): the vertex's column and row in the tile
+;   v3.x = the colour table's byte for the vertex (0 to 255, not scaled)
+; Per tile (uniforms):
+;   wavea = (off, S, 1/S, magnitude): every index has moved on by off since the level started (they all move by the
+;           same step, waves_update), modulo the table's size S
+;   waveb = (unk44, (1 - unk44) / 255, unk48, shade / 128)
+;   wavec = (ai, aj, bi, bj): the scale table row's index is min(i * ai + bi, j * aj + bj), clamped to 0..11
+;   waved = (u base, v base, u step, v step): the texture coordinates in the game's units
+;   wtab[47]: the height table, four entries a row; wsc[3]: the scale table (sp34 in func_800BC6C8), four a row
+; The game's sums (waves.c, xlu water, no wave generators):
+;   y = (T[i0] + T[i1]) * magnitude * scale;  v = c * 2;  if v < 255: y *= unk44 + v * (1 - unk44) / 255
+;   v += trunc(y * unk48), clamped to 0..255;  v += (255 - v) * shade >> 7
+;   rgb = v < 192 ? 255 : (255 - v) * 4;  a = v < 64 ? v * 4 : 255;  the vertex's y = trunc(y) (an s16)
+; Then the position goes through the model matrix like transform.v.pica (no fog: the see-through water turns it off,
+; native_wave only sends unfogged tiles; no light).
+; Table reads: one mova sets a0.x and a0.y for the two height rows, another later a0.x for the scale row, never two
+; mova in a row (picasso manual: that freezes the PICA200); each row is then dotted with a one-hot mask of its column.
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register written whole, once, no branches.
+; Checked on the PC against the game's own C sums by port/tools/pica_sim.py (CI "Shader checks").
+
+.entry waves_main
+
+; Uniforms: transform.v.pica's first (same names, so the same registers in every program of the blob), then the waves'
+.fvec eye
+.fvec mtx[4]
+.fvec camoff
+.fvec texa
+.fvec texc
+.fvec texb
+.fvec fogp
+.fvec lightv
+.fvec wavea
+.fvec waveb
+.fvec wavec
+.fvec waved
+.fvec wtab[47]
+.fvec wsc[3]
+
+; Constants
+.constf wk0(0.00392156862745098, 0.0, 1.0, 0.5)
+.constf wk1(0.25, 4.0, 2.0, 255.0)
+.constf wk2(-0.5, 0.5, 1.5, 2.5)
+.constf wk3(0.5, 1.5, 2.5, 3.5)
+.constf wk4(254.5, 191.5, 63.5, 11.0)
+.alias w_rgba_scale wk0.xxxx
+.alias w_zeros wk0.yyyy
+.alias w_ones wk0.zzzz
+.alias w_half wk0.wwww
+.alias w_quarter wk1.xxxx
+.alias w_four wk1.yyyy
+.alias w_two wk1.zzzz
+.alias w_255 wk1.wwww
+
+; Outputs (transform.v.pica's)
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.proc waves_main
+	; Height table indices now: (a + off) modulo S, for both (x: a0, y: a1)
+	add r0.xy, wavea.xx, v0.yw
+	add r1.xy, w_half, r0
+	mul r1.xy, wavea.zz, r1
+	flr r1.xy, r1
+	mul r1.xy, wavea.yy, r1
+	add r0.xy, r0, -r1
+
+	; Their rows (index / 4) and columns
+	mul r2.xy, w_quarter, r0
+	flr r2.xy, r2
+	mul r3.xy, w_four, r2
+	add r3.xy, r0, -r3
+	mova a0.xy, r2.xy
+
+	; One-hot masks of the columns (the column c is in 0..3: (k - 0.5 < c) - (k + 0.5 < c) is 1 for k = c)
+	slt r4, wk2, r3.xxxx
+	slt r5, wk3, r3.xxxx
+	add r4, r4, -r5
+	slt r5, wk2, r3.yyyy
+	slt r6, wk3, r3.yyyy
+	add r5, r5, -r6
+
+	; The two heights, their sum times the magnitude
+	dp4 r7.x, wtab[a0.x], r4
+	dp4 r7.y, wtab[a0.y], r5
+	add r7.x, r7.x, r7.y
+	mul r7.x, wavea.wwww, r7.x
+
+	; The scale table's index: min(i * ai + bi, j * aj + bj) clamped to 0..11, its row and column
+	mul r8.xy, wavec.xy, v1.yx
+	add r8.xy, wavec.zw, r8
+	min r8.x, r8.x, r8.y
+	max r8.x, w_zeros, r8.x
+	min r8.x, wk4.wwww, r8.x
+	mul r9.x, w_quarter, r8.x
+	flr r9.x, r9.x
+	mul r10.x, w_four, r9.x
+	add r10.x, r8.x, -r10.x
+	mova a0.x, r9.x
+	slt r11, wk2, r10.xxxx
+	slt r12, wk3, r10.xxxx
+	add r11, r11, -r12
+	dp4 r8.x, wsc[a0.x], r11
+	mul r7.x, r7.x, r8.x
+
+	; v = c * 2; below 255 the height is also scaled by unk44 + v * (1 - unk44) / 255
+	mul r9.x, w_two, v3.x
+	mul r10.x, waveb.yyyy, r9.x
+	add r10.x, waveb.xxxx, r10.x
+	add r10.x, -w_ones, r10.x
+	slt r11.x, wk4.xxxx, r9.x
+	add r11.x, w_ones, -r11.x
+	mul r10.x, r10.x, r11.x
+	add r10.x, w_ones, r10.x
+	mul r7.x, r7.x, r10.x
+
+	; v += trunc(y * unk48) (toward zero: the floor of the size, the sign put back), clamped to 0..255
+	mul r12.x, waveb.zzzz, r7.x
+	max r13.x, r12.x, -r12.x
+	flr r13.x, r13.x
+	slt r14.x, w_zeros, -r12.x
+	mul r14.x, r14.x, r13.x
+	mul r14.x, w_two, r14.x
+	add r13.x, r13.x, -r14.x
+	add r9.x, r9.x, r13.x
+	max r9.x, w_zeros, r9.x
+	min r9.x, w_255, r9.x
+
+	; v += (255 - v) * shade >> 7 (waveb.w is shade / 128)
+	add r10.x, w_255, -r9.x
+	mul r10.x, waveb.wwww, r10.x
+	flr r10.x, r10.x
+	add r9.x, r9.x, r10.x
+
+	; rgb = v < 192 ? 255 : (255 - v) * 4; a = v < 64 ? v * 4 : 255; scaled to 0..1
+	add r10.x, w_255, -r9.x
+	mul r10.x, w_four, r10.x
+	add r10.x, -w_255, r10.x
+	slt r11.x, wk4.yyyy, r9.x
+	mul r10.x, r10.x, r11.x
+	add r10.x, w_255, r10.x
+	mul r12.x, w_four, r9.x
+	add r13.x, w_255, -r12.x
+	slt r11.x, wk4.zzzz, r9.x
+	mul r13.x, r13.x, r11.x
+	add r12.x, r12.x, r13.x
+	mov r15.xyz, r10.xxx
+	mov r15.w, r12.x
+	mul r15, w_rgba_scale, r15
+
+	; The vertex's height as the game stores it: trunc(y) (an s16)
+	max r13.x, r7.x, -r7.x
+	flr r13.x, r13.x
+	slt r14.x, w_zeros, -r7.x
+	mul r14.x, r14.x, r13.x
+	mul r14.x, w_two, r14.x
+	add r13.x, r13.x, -r14.x
+
+	; Position (x, trunc(y), z, 1) through the model matrix, as transform.v.pica
+	mov r0, v0
+	mov r0.y, r13.x
+	mov r0.w, w_ones
+	add r0, -camoff, r0
+	dp4 r1.x, mtx[0], r0
+	dp4 r1.y, mtx[1], r0
+	dp4 r1.z, mtx[2], r0
+	dp4 r1.w, mtx[3], r0
+	mul r5, eye.xxxx, r1.wwww
+	add r5, eye.yyyy, r5
+	add r1.y, r1, r5
+	min r1.z, w_zeros, r1
+
+	; Texture coordinates: (u base + j * u step, v base + i * v step), then as transform.v.pica
+	mul r6.xy, waved.zw, v1.xy
+	add r6.xy, waved.xy, r6
+	mul r7, texa, r6.xyxy
+	add r7, texb, r7
+
+	mov outpos, r1
+	mov outtc0, r7
+	mov outtc1, r7.zwzw
+	mov outclr, r15
+	end
+.end
