@@ -27,6 +27,17 @@
  * an Old 3DS, where a crowded frame queues about 200 KB and the heap is tight. Set before the queue is allocated. */
 static unsigned int sRingBytes = 2u * 1024u * 1024u;
 #define SPLIT_RING_BYTES sRingBytes
+/*
+ * DKR_SPLIT_MASK (default 1): a position in the ring as head & (size - 1) instead of head % size. sRingBytes is a
+ * variable (1 or 2 MB by console), so the compiler made every % a call to the ARM11's software divide
+ * (__aeabi_uidivmod, ~30-50 cycles), once per record on the walk and twice on the backend
+ * (proposals/3ds-arm11-c-tips-audit.md item 1; estimated -0.05..-0.25 ms Old 3DS game core). The ring is always a
+ * power of two, so both give the same position. Read at each frame's start on the walk's thread; the backend uses
+ * whichever it last saw, which is safe because the two agree.
+ */
+static unsigned int sRingMask;          // sRingBytes - 1
+static volatile int sRingMaskOn;        // DKR_SPLIT_MASK
+#define RING_AT(pos) (sRingMaskOn ? (pos) & sRingMask : (pos) % SPLIT_RING_BYTES)
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {
@@ -345,7 +356,7 @@ static void wait_for_room(unsigned int bytes) {
 /* Room for a record of payload bytes, at a position that doesn't wrap; its payload. */
 static void *reserve(unsigned int op, unsigned int payload) {
     unsigned int bytes = sizeof(SplitRecord) + round8(payload);
-    unsigned int at = sWalk.head % SPLIT_RING_BYTES;
+    unsigned int at = RING_AT(sWalk.head);
     SplitRecord *rec;
     if (at + bytes > SPLIT_RING_BYTES) {
         unsigned int rest = SPLIT_RING_BYTES - at;
@@ -443,7 +454,7 @@ static void backend_thread(void *arg) {
             unsigned long long mixStart;
             int mixKind = MIX_OTHER;
             void *p;
-            rec = (SplitRecord *) (sRing + tail % SPLIT_RING_BYTES);
+            rec = (SplitRecord *) (sRing + RING_AT(tail));
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
@@ -456,7 +467,7 @@ static void backend_thread(void *arg) {
             if (sBackendPrefetch && tail + bytes != head) {
                 // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
                 // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
-                const unsigned char *next = (const unsigned char *) sRing + (tail + bytes) % SPLIT_RING_BYTES;
+                const unsigned char *next = (const unsigned char *) sRing + RING_AT(tail + bytes);
                 int k;
                 for (k = 0; k < 256; k += 32) {
                     __builtin_prefetch(next + k);
@@ -626,6 +637,7 @@ static int start_backend(void) {
         return FALSE;
     }
     sRingBytes = plat_old_3ds() ? 1024u * 1024u : 2u * 1024u * 1024u;
+    sRingMask = sRingBytes - 1u; // Used only while sRingBytes is a power of two (split_frame_start)
     sRing = plat_malloc(SPLIT_RING_BYTES);
     if (sRing == NULL) {
         plat_log("two-core renderer: no memory for its queue");
@@ -739,6 +751,7 @@ static void lines_frame_start(void) {
         sLinesCheck = check;
     }
     sLines = check != 0 || plat_switch("DKR_SPLIT_LINES", 0) != 0;
+    sRingMaskOn = (sRingBytes & (sRingBytes - 1u)) == 0 && plat_switch("DKR_SPLIT_MASK", 1) != 0;
     sPublishBytes = (unsigned int) plat_switch("DKR_SPLIT_PUBLISH_KB", 2) * 1024u;
     if (!sLinesCheck) {
         return;
