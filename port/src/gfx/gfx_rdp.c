@@ -8757,10 +8757,32 @@ static inline void native_particle_end(u32 w1) {
  * own. dl is the word after the tag, remaining the words left in the list from there. Returns the words the tag used
  * after itself. Shared by the walk (run_command_list) and the record dispatcher (nframe.c, through gfx_frame_tag).
  */
+static COLD NOINLINE void hidden_check_send(u32 on) {
+    // P67 DKR_HIDDEN_SKIP_CHECK (PORT_HCHECK_TAG): the draws so far (the opaque track, sorted or batched, and the
+    // held-back opaque buckets) reach the backend first, then the check's on or off, in order with them.
+    int *p;
+    if (sTrackPending) {
+        track_flush();
+    }
+    flush_batch();
+    OPAQUE_FLUSH();
+    p = gfx_split_call_reserve(gfxb_hidden_check_call, sizeof(int) * 2);
+    if (p == NULL) {
+        // Not queued (no split, or its queue is full): made once the backend has drawn what is queued before it
+        gfx_split_drain();
+        gfxb_hidden_check((int) on);
+        return;
+    }
+    *p = (int) on;
+    gfx_split_call_commit(p);
+}
+
 static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth) {
     const Gfx *start = dl;
     if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
         kind_switch(w1);
+    } else if (UNLIKELY((w1 & 0xFFFF0000) == PORT_HCHECK_TAG)) {
+        hidden_check_send(w1 & 0xF);
     } else if (w1 == PORT_NATIVE_TAG) {
         s32 used = native_mesh(dl, remaining);
         dl += used;

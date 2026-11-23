@@ -197,6 +197,9 @@ ifneq ($(TARGET),3ds)
   # The hidden track batch count (port/host/occl_count.c, DKR_OCCL_COUNT): host only.
   GAME_DEFINES += -DPORT_OCCL_COUNT=1
   SYS_CFLAGS += -DPORT_OCCL_COUNT=1
+  # P67's pose log, bake and table override (port/host/hidden_poses.c, hidden_bake.c; hidden_skip.c): host only.
+  GAME_DEFINES += -DPORT_HIDDEN_BAKE=1
+  SYS_CFLAGS += -DPORT_HIDDEN_BAKE=1
 endif
 
 GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \

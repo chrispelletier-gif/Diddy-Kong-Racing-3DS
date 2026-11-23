@@ -328,6 +328,15 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
 int gfxb_gpu_kinds_frame(int frame);
 void gfxb_gpu_kind(int kind);
 void gfxb_gpu_kind_call(void *payload);
+/*
+ * P67 DKR_HIDDEN_SKIP_CHECK (PORT_HCHECK_TAG): while on, draws write no colour and no depth, and the pixels that pass
+ * the depth test are counted; at the frame's end each table's count goes to port_hidden_check_pixels (hidden_skip.c). The host
+ * renderer counts; the 3DS's stencil count is P67 PR 2 (until then it logs that the check is not available there).
+ * gfxb_hidden_check_call takes the value as an OP_CALL record's payload on the two-core renderer.
+ */
+void gfxb_hidden_check(int value); /* bit 0: on; bits 1-3: which table (the host's cell size evaluation) */
+void gfxb_hidden_check_call(void *payload);
+void port_hidden_check_pixels(int table, unsigned int pixels);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*

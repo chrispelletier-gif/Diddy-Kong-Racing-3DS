@@ -1872,6 +1872,15 @@ void set_anti_aliasing(s32 setting) {
  */
 #ifdef TARGET_PORT
 static s32 sPortSegmentsAllowed;
+// P67 (port/src/game/hidden_skip.c): DKR_HIDDEN_SKIP leaves out the track batches the baked table says no camera in
+// this camera cell can see. sPortHiddenOn: this frame's batches are tested (the switch is on).
+static s32 sPortHiddenOn;
+s32 port_hidden_frame(const Camera *cam);
+s32 port_hidden_batch(s32 bit, s32 numTris);
+s32 port_hidden_first_batch(s32 seg);
+s32 port_hidden_check_begin(s32 k);
+void port_hidden_check_end(void);
+void port_hidden_level_load(LevelModel *model, s32 courseId);
 #endif
 #ifdef PORT_OCCL_COUNT
 extern MtxF gViewProjMatrixF;
@@ -1923,6 +1932,9 @@ void render_level_geometry_and_objects(void) {
     port_occl_frame(&gViewProjMatrixF[0][0], gSceneActiveCamera->cameraSegmentID, gCurrentLevelModel,
                     get_settings()->courseId);
 #endif
+#ifdef TARGET_PORT
+    sPortHiddenOn = port_hidden_frame(gSceneActiveCamera); // DKR_HIDDEN_SKIP: this camera cell's row
+#endif
     for (i = 1; i <= gCurrentLevelModel->numberOfSegments; i++) {
         objectsVisible[i] = FALSE; // why not a bzero?
     }
@@ -1935,6 +1947,27 @@ void render_level_geometry_and_objects(void) {
             objectsVisible[segmentIds[i] + 1] = TRUE;
         }
     }
+#ifdef TARGET_PORT
+    if (gDrawLevelSegments && sPortHiddenOn) {
+        // DKR_HIDDEN_SKIP_CHECK: the batches the row left out, drawn over the opaque track with colour and depth
+        // writes off; the renderer counts the pixels that pass the depth test (must be none). One pass a table (the
+        // host's cell size evaluation checks several at once; the game has one).
+        s32 k, check;
+        for (k = 0; (check = port_hidden_check_begin(k)) >= 0; k++) {
+            if (check == 0) {
+                continue;
+            }
+            gDPNoOpTag(gTrackDL++, PORT_HCHECK_TAG | 1 | (k << 1));
+            for (i = 0; i < numberOfSegments; i++) {
+                render_level_segment(segmentIds[i], FALSE);
+                render_level_segment(segmentIds[i], TRUE);
+            }
+            port_hidden_check_end();
+            gDPNoOpTag(gTrackDL++, PORT_HCHECK_TAG | 0 | (k << 1));
+            port_draw_tag(gTrackDL++, PORT_DRAW_TRACK);
+        }
+    }
+#endif
 
     if (gCurrentLevelModel->numberOfSegments < 2) {
         objectsVisible[1] = TRUE;
@@ -2145,6 +2178,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         startPos = 0;
         endPos = segment->numberofOpaqueBatches;
     }
+#ifdef TARGET_PORT
+    s32 portHiddenFirst = sPortHiddenOn ? port_hidden_first_batch(segmentId) : 0;
+#endif
     for (i = startPos; i < endPos; i++) {
         batchInfo = &segment->batches[i];
         textureFlags = RENDER_NONE;
@@ -2176,6 +2212,12 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         if (!renderBatch) {
             continue;
         }
+#ifdef TARGET_PORT
+        // DKR_HIDDEN_SKIP: no pixel of this batch from this camera cell (or, in the check pass, only those)
+        if (sPortHiddenOn && port_hidden_batch(portHiddenFirst + i, (batchInfo + 1)->facesOffset - batchInfo->facesOffset)) {
+            continue;
+        }
+#endif
         numberTriangles = batchInfo->facesOffset;
         do { // Fakematch
             numberVertices = (batchInfo + 1)->verticesOffset - batchInfo->verticesOffset;
@@ -3285,6 +3327,7 @@ void generate_track(s32 modelId) {
     }
 #ifdef TARGET_PORT
     port_cells_build(gCurrentLevelModel);
+    port_hidden_level_load(gCurrentLevelModel, get_settings()->courseId); // DKR_HIDDEN_SKIP's table
 #endif
     temp_s4 = j - (s32) gCurrentLevelModel;
     if (temp_s4 > LEVEL_MODEL_MAX_SIZE) {
