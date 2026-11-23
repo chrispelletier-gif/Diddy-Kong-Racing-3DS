@@ -2805,6 +2805,9 @@ static s32 sKartResident;      // DKR_KART_RESIDENT (P68 step 4): unchanged kart
 static s32 sKartResidentCheck; // DKR_KART_RESIDENT_CHECK (test builds): 1 the check, 2 and 3 broken on purpose (K6)
 static u32 sKartResStats[6];   // Records drawn from kept meshes, meshes made, dropped (changed), no slot, check runs, wrong
 static void kart_res_drop_all(void);
+static s32 sKartMtx2;          // DKR_KART_MTX2 (P68 step 5): two-load kart batches by the two-matrix shader
+static s32 sKartMtx2Check;     // DKR_KART_MTX2_CHECK (test builds): 1 the check, 2 broken on purpose (K6)
+static u32 sKartMtx2Stats[6];  // Drawn, left out, left to the CPU (box past the band), declined (lit, 60 Hz), checked, wrong
 static u32 sKartResUsed;      // DKR_KART_RESIDENT slots handed out (in order; all are dropped together)
 static u8 *sKartResPool;      // Their shadows (and the check's copies)
 static u32 sKartResPoolUsed;
@@ -2922,6 +2925,14 @@ static COLD void read_switches_now(void) {
     if (!sKartResident) {
         kart_res_drop_all(); // (a bench race before had them: their arena room goes back)
     }
+    // P68 step 5: kart batches of two vertex loads (two matrices) drawn by transform2.v.pica instead of the CPU path.
+    sKartMtx2 = plat_switch("DKR_KART_MTX2", 0) != 0;
+#if PLAT_DEBUG_TOOLS
+    sKartMtx2Check = plat_switch("DKR_KART_MTX2_CHECK", 0); // 2: broken on purpose (native_gpu_draw2)
+    if (sKartMtx2Check != 0) {
+        sKartMtx2 = 1;
+    }
+#endif
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
@@ -4732,6 +4743,17 @@ static COLD void frame_logs_600(void) {
                      (int) sKartBatch, (unsigned) sKartRunStats[0], (unsigned) (sKartRunStats[0] + sKartRunStats[1]),
                      (unsigned) sKartRunStats[2], (unsigned) sKartRunStats[3], rec, slim);
             __builtin_memset(sKartRunStats, 0, sizeof(sKartRunStats));
+        }
+        if (sKartMtx2) {
+            plat_log("two-matrix kart draws (DKR_KART_MTX2): %u drawn, %u left out, %u left to the CPU (box past the "
+                     "guard band), %u declined (lit or 60 Hz picture)",
+                     (unsigned) sKartMtx2Stats[0], (unsigned) sKartMtx2Stats[1], (unsigned) sKartMtx2Stats[2],
+                     (unsigned) sKartMtx2Stats[3]);
+            if (sKartMtx2Check) {
+                plat_log("kart two-matrix check: %u draws compared, %u wrong", (unsigned) sKartMtx2Stats[4],
+                         (unsigned) sKartMtx2Stats[5]);
+            }
+            __builtin_memset(sKartMtx2Stats, 0, sizeof(sKartMtx2Stats[0]) * 4);
         }
         if (sKartResident) {
             plat_log("kart pieces kept on the GPU (DKR_KART_RESIDENT): %u records drawn from kept meshes, %u meshes made, "
@@ -7309,6 +7331,138 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
 }
 
 /*
+ * P68 step 5 (DKR_KART_MTX2, default 0): a kart batch of two vertex loads (render_mesh's vertOverride: vertices
+ * 0..start-1 with the object's matrix, start..total-1 with matrix index 2, the racer's head turned apart from the body)
+ * drawn by the GPU with transform2.v.pica (GFX_MODEL_PROG_MTX2) instead of the CPU path: each corner's `one` says which
+ * load (1 or 2) its vertex came from, and the second matrix goes ahead of the draw as a queued call
+ * (gfxb_model_mtx2_call). About 6 a frame. Each load's box is checked with its own matrix: both inside the guard band
+ * or wholly off the screen, else left to the CPU path. Declined while the vertices are lit on the GPU (the light is in
+ * the first load's space) and on 60 Hz picture frames (interp.v.pica has no second matrix).
+ * DKR_KART_MTX2_CHECK (test builds, rule K6): every corner made again from its own load's matrix (the way a one-load
+ * draw would make it, gfx_model_to_vertex) and compared with what the picked matrix gives; =2 puts one corner on the
+ * other matrix once, which must be reported.
+ */
+static s32 sKartMtx2BreakArmed = TRUE;
+static u32 sKartMtx2Shown;
+
+static NOINLINE COLD void kart_mtx2_check(const GfxModelParams *params, float (*mtx2)[4], const Vertex *vtx,
+                                          s32 start, const NativeMesh *mesh, const GfxModelVertex *verts) {
+    GfxModelParams first = *params, second = *params;
+    GfxVertex a, b;
+    s32 i, wrong = 0;
+    __builtin_memcpy(second.mtx, mtx2, sizeof(second.mtx));
+    for (i = 0; i < (s32) mesh->numCorners; i++) {
+        s32 slot = mesh->cornerVertex[i];
+        GfxModelVertex ref;
+        native_gpu_corner(&ref, &vtx[slot], mesh->cornerUv[i]);
+        gfx_model_to_vertex(&a, &ref, slot < start ? &first : &second);
+        gfx_model_to_vertex(&b, &verts[i], verts[i].one == 2 ? &second : &first);
+        wrong |= __builtin_memcmp(&a, &b, sizeof(a)) != 0 || (verts[i].one != 1 && verts[i].one != 2);
+    }
+    sKartMtx2Stats[4]++;
+    sKartMtx2Stats[5] += (u32) wrong;
+    plat_check_report("kart two matrices", wrong); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
+    if (wrong && sKartMtx2Shown < 5) {
+        sKartMtx2Shown++;
+        plat_log("kart two-matrix check: a draw (%d corners, loads split at vertex %d) differs from its corners made "
+                 "with their own load's matrix", (int) mesh->numCorners, (int) start);
+    }
+}
+
+static NOINLINE s32 native_gpu_draw2(NMat *mat, s32 textured, const Vertex *vtx, s32 total, s32 start, s32 count,
+                                     const NativeMesh *mesh, s32 matrix0, s32 matrix1, u8 frontCull) {
+    GfxDrawState state;
+    GfxModelParams params, second;
+    s16 boxMin[2][3], boxMax[2][3];
+    s32 i, k, n[2] = { 0, 0 }, verdict[2], seen[2] = { 0, 0 };
+    u32 numCorners = mesh->numCorners;
+    float *m2;
+
+    if (numCorners > NATIVE_MAX_CORNERS || count > MAX_BATCH_TRIANGLES || start <= 0 || start >= total) {
+        return FALSE;
+    }
+    if (sLightOn || sIkeyOn || !gfxb_model_mtx2_ok()) {
+        sKartMtx2Stats[3]++;
+        return FALSE;
+    }
+    for (i = 0; i < total; i++) {
+        s32 l = i >= start;
+        s16 c[3] = { vtx[i].x, vtx[i].y, vtx[i].z };
+        if (!seen[l]) {
+            seen[l] = 1;
+            for (k = 0; k < 3; k++) {
+                boxMin[l][k] = boxMax[l][k] = c[k];
+            }
+        }
+        for (k = 0; k < 3; k++) {
+            boxMin[l][k] = c[k] < boxMin[l][k] ? c[k] : boxMin[l][k];
+            boxMax[l][k] = c[k] > boxMax[l][k] ? c[k] : boxMax[l][k];
+        }
+    }
+    model_params_matrix(g.matrices[matrix0], &params);
+    model_params_matrix(g.matrices[matrix1], &second);
+    verdict[0] = gfxb_model_check(params.mtx, boxMin[0], boxMax[0]);
+    verdict[1] = gfxb_model_check(second.mtx, boxMin[1], boxMax[1]);
+    if (verdict[0] == GFX_MODEL_CPU || verdict[1] == GFX_MODEL_CPU) {
+        sKartMtx2Stats[2]++;
+        return FALSE;
+    }
+    if (verdict[0] == GFX_MODEL_HIDDEN && verdict[1] == GFX_MODEL_HIDDEN) {
+        sKartMtx2Stats[1]++;
+        sNGpuStats[1]++;
+        return TRUE;
+    }
+    native_gpu_params(mat, textured, &state, &params);
+    params.pad[1] = GFX_MODEL_PROG_MTX2;
+    for (i = 0; i < (s32) numCorners; i++) {
+        native_gpu_corner(&sNGpuVerts[i], &vtx[mesh->cornerVertex[i]], mesh->cornerUv[i]);
+        sNGpuVerts[i].one = mesh->cornerVertex[i] < start ? 1 : 2;
+    }
+    if (PLAT_DEBUG_TOOLS && sKartMtx2Check == 2 && sKartMtx2BreakArmed) {
+        sKartMtx2BreakArmed = FALSE; // Rule K6's break: one corner on the other load's matrix, once
+        sNGpuVerts[0].one = (s16) (3 - sNGpuVerts[0].one);
+    }
+    if (UNLIKELY(sKartMtx2Check)) {
+        kart_mtx2_check(&params, second.mtx, vtx, start, mesh, sNGpuVerts);
+    }
+    for (i = 0; i < count; i++) {
+        s32 group = mesh->backface[i] ? 0 : 1;
+        u16 *out = &sNGpuIndices[group][n[group] * 3];
+        out[0] = mesh->triCorners[i * 3];
+        out[1] = mesh->triCorners[i * 3 + 1];
+        out[2] = mesh->triCorners[i * 3 + 2];
+        n[group]++;
+    }
+    if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+        flush_batch(); // What the CPU path left waiting came first
+    }
+    if (!opaque_sortable(&state)) {
+        OPAQUE_FLUSH(); // Its order matters: after the held opaque draws, as the CPU path would be
+    }
+    m2 = (float *) remote_begin(gfxb_model_mtx2_call, sizeof(float) * 16);
+    if (m2 == NULL) {
+        sKartMtx2Stats[3]++;
+        return FALSE;
+    }
+    __builtin_memcpy(m2, second.mtx, sizeof(float) * 16);
+    remote_end(m2);
+    for (k = 0; k < 2; k++) {
+        if (n[k] > 0) {
+            state.cullMode = k == 0 ? 0 : frontCull;
+            gfx_split_draw_model(&state, &params, sNGpuVerts, (int) numCorners, sNGpuIndices[k], n[k]);
+            prof_count(PROF_TRIANGLES, n[k]);
+            prof_count(PROF_DRAWS, 1);
+            sMix.kinds[sDrawKind].draws++;
+            sMix.kinds[sDrawKind].tris += (unsigned long) n[k];
+        }
+    }
+    sKartMtx2Stats[0]++;
+    sNGpuStats[0]++;
+    sTriStateValid = FALSE;
+    return TRUE;
+}
+
+/*
  * P68 (DKR_KART_BATCH, default 0; proposals/3ds-kart-draw-batching-plan.md): the GPU-maths draws above, batched on
  * the CPU side. A kart's batches of one texture follow one another as records with the same material and matrix
  * (the game splits a texture's triangles into batches of up to 32 vertices), and each cost a draw: the box, the
@@ -8409,6 +8563,17 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
         !REF_ACTIVE() && !UNLIKELY(sTracing) &&
         native_gpu_draw(mat, textured, vtx, total, count, mesh, loads[0].matrix, frontCull)) {
+        g.curMatrix = cur;
+        g.vertexIndex = 0;
+        g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));
+        sMix.kinds[sDrawKind].verts += (unsigned long) total;
+        sObjTris[sDrawObj] += count;
+        sNDrawStats[0]++;
+        return 2;
+    }
+    if (UNLIKELY(sKartMtx2) && sNativeGpuSwitch && sGpuTransform && numLoads == 2 && !dynamic && !g.billboard &&
+        sDrawKind == PORT_DRAW_RACERS && !REF_ACTIVE() && !UNLIKELY(sTracing) &&
+        native_gpu_draw2(mat, textured, vtx, total, start, count, mesh, loads[0].matrix, loads[1].matrix, frontCull)) {
         g.curMatrix = cur;
         g.vertexIndex = 0;
         g.flatVerts &= ~(((total >= 64) ? ~0ULL : ((1ULL << total) - 1)));

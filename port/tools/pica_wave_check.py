@@ -91,6 +91,7 @@ def run(sim, argv):
     for i, d in enumerate(sim.dvles):
         if not d.geo and "stab" in d.uniforms and "mtx" in d.uniforms:  # the sprite table shader has no mtx
             wave_i = i
+            break  # (the first: transform2.v.pica, P68 step 5, comes after it with the same uniforms)
     if wave_i is None:
         print("wave shader: not in the blob")
         return True

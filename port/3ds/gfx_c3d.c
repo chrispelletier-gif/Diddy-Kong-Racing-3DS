@@ -4111,6 +4111,14 @@ static inline void set_cpu_uniforms(void) {
  * matrix takes to x = y = w = 0) is taken off each vertex first, which is exact for whole numbers this size, and the
  * matrix only keeps what is left of its offset.
  */
+/* P68 step 5 (transform2.v.pica, GFX_MODEL_PROG_MTX2): the second matrix as given (gfxb_model_mtx2), where its four
+ * uniform rows go (stab rows 54..57: the waves use 0..53, and the sprite table program rewrites all of stab on its own
+ * draws, so they are written before every two-matrix draw), and the camera offset the last model draw's matrix was
+ * given (set_model_uniforms), which the second matrix shares. */
+static float sMtx2[4][4];
+static int sMtx2Loc = -1;
+static double sLastCam[3];
+
 static void set_model_uniforms(const GfxModelParams *p, float su0, float sv0, float su1, float sv1) {
 #ifdef PICA_ALL
     // PICA_ALL: the camera solve in single precision (the camera is rounded to whole numbers anyway, and only the
@@ -4217,6 +4225,7 @@ rest:
         set_unif(UNIF_MTX + k, (float) rows[k][0], (float) rows[k][1], (float) rows[k][2], (float) t);
     }
 #endif
+    sLastCam[0] = cam[0], sLastCam[1] = cam[1], sLastCam[2] = cam[2]; // (P68 step 5: the second matrix's too)
     set_unif(UNIF_CAMOFF, (float) cam[0], (float) cam[1], (float) cam[2], 0.0f);
     set_unif(UNIF_TEXA, p->texScale[0] * su0, -p->texScale[1] * sv0, p->texScale[2] * su1, -p->texScale[3] * sv1);
     set_unif(UNIF_TEXC, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -4288,20 +4297,22 @@ static void transform_frame_drawn(int frame) {
  */
 #define SLIM_TEST_VERSION 1
 #define WAVE_TEST_VERSION 1
-enum { PROG_T, PROG_K, PROG_W };
+#define MTX2_TEST_VERSION 1
+enum { PROG_T, PROG_K, PROG_W, PROG_2 };
 typedef struct ShaderTest {
     const char *file, *what;
     int version, hung, testFrame; // testFrame: the first frame drawn with it, -1 before, -2 once it passed
 } ShaderTest;
 static ShaderTest sSlimTest = { "track_slim.txt", "slim track shader", SLIM_TEST_VERSION, 0, -1 };
 static ShaderTest sWaveTest = { "wave_shader.txt", "wave shader", WAVE_TEST_VERSION, 0, -1 };
-static shaderProgram_s sProgramK, sProgramW;
-static int sProgramKUsable, sProgramWUsable;
+static ShaderTest sMtx2Test = { "kart_mtx2.txt", "two-matrix shader", MTX2_TEST_VERSION, 0, -1 };
+static shaderProgram_s sProgramK, sProgramW, sProgram2;
+static int sProgramKUsable, sProgramWUsable, sProgram2Usable;
 static int sProgCur = PROG_T;  // The model program citro3d has bound while sTransformOn
 static int sSlimWanted;        // DKR_TRACK_SLIM
 static int sSlimOn;            // This frame's
 static int sProgFirst;         // The program was just switched: the draw's settings and uniforms are written twice
-static unsigned int sProgStats[4]; // Switches, slim draws, wave draws, slim draws declined (not marked unlit)
+static unsigned int sProgStats[5]; // Switches, slim draws, wave draws, slim draws declined (not marked unlit), two-matrix draws
 
 static void shader_test_write(const ShaderTest *t, const char *what) {
     char path[256], text[32];
@@ -4345,6 +4356,7 @@ static void shader_test_drawn(ShaderTest *t, int frame) {
 static void model_programs_frame_drawn(int frame) {
     shader_test_drawn(&sSlimTest, frame);
     shader_test_drawn(&sWaveTest, frame);
+    shader_test_drawn(&sMtx2Test, frame);
 }
 
 /* Whether a program of the blob has transform.v.pica's uniforms at transform.v.pica's registers. */
@@ -4465,15 +4477,64 @@ static void PLAT_COLD init_model_programs(void) {
     if (sProgramWUsable) {
         wave_init_uniforms();
     }
-    plat_log("slim shaders: track %s, waves %s", sProgramKUsable ? "found" : "NOT usable",
-             sProgramWUsable ? "found" : "NOT usable");
+    shaderProgramInit(&sProgram2);
+    sProgram2Usable = sProgramTUsable && sShaderDvlb->numDVLE >= 9 &&
+                      shaderProgramSetVsh(&sProgram2, &sShaderDvlb->DVLE[8]) == 0 && same_uniforms(&sProgram2);
+    if (sProgram2Usable) {
+        int stab = shaderInstanceGetUniformLocation(sProgram2.vertexShader, "stab");
+        sMtx2Loc = stab < 0 ? -1 : stab + 54;
+        if (sMtx2Loc < 0 || sMtx2Loc + 4 > 96) {
+            sProgram2Usable = 0;
+        }
+    }
+    plat_log("slim shaders: track %s, waves %s, two matrices %s (stab row %d)", sProgramKUsable ? "found" : "NOT usable",
+             sProgramWUsable ? "found" : "NOT usable", sProgram2Usable ? "found" : "NOT usable", sMtx2Loc);
     shader_test_read(&sSlimTest);
     shader_test_read(&sWaveTest);
+    shader_test_read(&sMtx2Test);
+}
+
+void gfxb_model_mtx2(const float m[4][4]) {
+    memcpy(sMtx2, m, sizeof(sMtx2));
+}
+
+void gfxb_model_mtx2_call(void *payload) {
+    gfxb_model_mtx2((const float(*)[4]) payload);
+}
+
+int gfxb_model_mtx2_ok(void) {
+    return sProgram2Usable && !sMtx2Test.hung;
+}
+
+/* Before a two-matrix draw (model_draw_begin, after set_model_uniforms gave the camera offset): the second matrix's
+ * four rows, mapped to the 3DS screen and moved by the same camera offset as the first (set_model_uniforms), written
+ * twice as the other uniforms are. */
+static void PLAT_COLD mtx2_uniforms_write(void) {
+    C3D_FVec v[4];
+    double rows[4][4];
+    int r, k, t;
+    for (r = 0; r < 4; r++) {
+        rows[0][r] = sMtx2[r][1];
+        rows[1][r] = -(double) sMtx2[r][0] * sScale3D;
+        rows[2][r] = 0.5 * ((double) sMtx2[r][2] - sMtx2[r][3]);
+        rows[3][r] = sMtx2[r][3];
+    }
+    for (k = 0; k < 4; k++) {
+        double tr = rows[k][3] + sLastCam[0] * rows[k][0] + sLastCam[1] * rows[k][1] + sLastCam[2] * rows[k][2];
+        v[k].x = (float) rows[k][0];
+        v[k].y = (float) rows[k][1];
+        v[k].z = (float) rows[k][2];
+        v[k].w = (float) tr;
+    }
+    C3Di_UpdateContext(); // citro3d's waiting settings first, so the words land after them
+    for (t = 0; t < 2; t++) {
+        wave_unif_words(sMtx2Loc, v, 4);
+    }
 }
 
 /* Binds a model program now, inside the frame being built, and writes its settings twice. */
 static void PLAT_COLD model_program(int prog) {
-    C3D_BindProgram(prog == PROG_K ? &sProgramK : prog == PROG_W ? &sProgramW : &sProgramT);
+    C3D_BindProgram(prog == PROG_K ? &sProgramK : prog == PROG_W ? &sProgramW : prog == PROG_2 ? &sProgram2 : &sProgramT);
     C3Di_UpdateContext();
     __C3D_Context.flags |= 1u << 8; // citro3d's C3DiF_Program: the program's settings (not its code) once more
     C3Di_UpdateContext();
@@ -4490,6 +4551,10 @@ static inline void model_program_for(const GfxModelParams *params) {
             want = PROG_W;
             sProgStats[2]++;
             shader_test_used(&sWaveTest);
+        } else if (params->pad[1] == GFX_MODEL_PROG_MTX2) {
+            want = PROG_2;
+            sProgStats[4]++;
+            shader_test_used(&sMtx2Test);
         } else if (sSlimOn && !params->pad[0]) {
             want = PROG_K;
             sProgStats[1]++;
@@ -4516,8 +4581,8 @@ static void model_programs_frame_start(void) {
     sSlimOn = sSlimWanted && sProgramKUsable && !sSlimTest.hung && sTransformOn;
     if (sFrameCount % 600 == 0 && (sProgStats[0] | sProgStats[1] | sProgStats[2]) != 0) {
         plat_log("slim shaders: %u program switches, %u slim track draws, %u wave draws, %u track draws lit (left to "
-                 "the transform shader), in 600 frames",
-                 sProgStats[0], sProgStats[1], sProgStats[2], sProgStats[3]);
+                 "the transform shader), %u two-matrix kart draws, in 600 frames",
+                 sProgStats[0], sProgStats[1], sProgStats[2], sProgStats[3], sProgStats[4]);
         memset(sProgStats, 0, sizeof(sProgStats));
     }
 }
@@ -8533,8 +8598,16 @@ static void model_draw_on_cpu(const GfxDrawState *state, const GfxModelParams *p
         !grow((void **) &sModelCpuIndices, &sModelCpuIndexCapacity, numTriangles * 3, sizeof(u16))) {
         return;
     }
-    for (i = 0; i < numVerts; i++) {
-        gfx_model_to_vertex(&sModelCpuVerts[i], &verts[i], params);
+    if (__builtin_expect(params->pad[1] == GFX_MODEL_PROG_MTX2, 0)) {
+        GfxModelParams second = *params;
+        memcpy(second.mtx, sMtx2, sizeof(sMtx2));
+        for (i = 0; i < numVerts; i++) {
+            gfx_model_to_vertex(&sModelCpuVerts[i], &verts[i], verts[i].one == 2 ? &second : params);
+        }
+    } else {
+        for (i = 0; i < numVerts; i++) {
+            gfx_model_to_vertex(&sModelCpuVerts[i], &verts[i], params);
+        }
     }
     for (i = 0; i < numTriangles * 3; i++) {
         sModelCpuIndices[i] = (u16) (indices[i] - base);
@@ -8604,6 +8677,9 @@ static int model_draw_begin(const GfxDrawState *state, const GfxModelParams *par
     }
     set_model_uniforms(params, su0, sv0, su1, sv1);
     unif_write_twice();
+    if (__builtin_expect(sProgCur == PROG_2, 0)) {
+        mtx2_uniforms_write(); // P68 step 5: the second matrix, with this draw's camera offset
+    }
     msplit(t, GFXB_MSPLIT_UNIFORMS);
     return 1;
 }

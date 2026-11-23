@@ -381,6 +381,33 @@ def check_anim(sim, transform_i, anim_i, count, break_it=False):
     return differ
 
 
+def check_mtx2(sim, transform_i, mtx2_i, count, break_it=False):
+    """transform2.v.pica (P68 step 5: the vertex's w, 1 or 2, picks mtx or stab rows 54..57) against transform.v.pica
+    given the picked matrix as mtx: every output identical, for vertices of both loads. break_it (rule K6): the vertex
+    asks for the other matrix than the one transform.v.pica is given, so the check must report."""
+    rng = random.Random(2468)
+    differ = 0
+    for n in range(count):
+        u = random_model_uniforms(rng, lit=rng.random() < 0.5, texc=rng.random() < 0.5)
+        second = random_model_uniforms(rng, lit=False, texc=False)["mtx"]
+        ins = random_model_inputs(rng)
+        pick = 1 + (n & 1)
+        got = dict(ins)
+        got[0] = (ins[0][0], ins[0][1], ins[0][2], (3 - pick) if break_it else pick)
+        want_u = dict(u)
+        if pick == 2:
+            want_u["mtx"] = second
+        u2 = {k: u[k] for k in u if k in sim.dvles[mtx2_i].uniforms}
+        u2["stab"] = [(0, 0, 0, 0)] * 54 + [tuple(row) for row in second] + [(0, 0, 0, 0)] * 17
+        x = sim.run(transform_i, ins, want_u)
+        y = sim.run(mtx2_i, got, u2)
+        if x != y:
+            differ += 1
+            if differ <= 3 and not break_it:
+                print("  vertex %d (matrix %d) differs:\n    transform  %s\n    transform2 %s" % (n, pick, x, y))
+    return differ
+
+
 def main(argv):
     if len(argv) < 3 or argv[1] != "check":
         print(__doc__)
@@ -415,6 +442,19 @@ def main(argv):
         failed |= differ != 0
         broken = check_anim(sim, transform_i, anim_i, 200, break_it=True)
         print("  broken on purpose (K6: frac one step on): %d of 200 differ" % broken)
+        failed |= broken < 100
+    # P68 step 5: transform2.v.pica, the blob's second program with transform's uniforms and stab (the waves' is the
+    # first, pica_wave_check)
+    with_stab = [i for i, d in enumerate(sim.dvles) if not d.geo and "stab" in d.uniforms and "mtx" in d.uniforms and
+                 "lightv" in d.uniforms]
+    if len(with_stab) >= 2:
+        mtx2_i = with_stab[-1]
+        differ = check_mtx2(sim, transform_i, mtx2_i, 2000)
+        print("two-matrix shader (DVLE %d) against transform (DVLE %d) given the picked matrix: 2000 vertices, %d differ"
+              % (mtx2_i, transform_i, differ))
+        failed |= differ != 0
+        broken = check_mtx2(sim, transform_i, mtx2_i, 200, break_it=True)
+        print("  broken on purpose (K6: each vertex picks the other matrix): %d of 200 differ" % broken)
         failed |= broken < 100
     try:
         import pica_wave_check

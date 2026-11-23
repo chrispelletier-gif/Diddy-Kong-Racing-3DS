@@ -768,6 +768,31 @@ jobs:
             exit 1
           fi
 
+      - name: Kart two-matrix check
+        # P68 step 5: DKR_KART_MTX2 draws two-load kart batches with the two-matrix shader; its self-check makes every
+        # corner again with its own load's matrix (DKR_KART_MTX2_CHECK=1) and must report 0 wrong with the Old 3DS
+        # defaults. Mode 2 is the check broken on purpose (rule K6: one corner on the other matrix) and must report it.
+        run: |
+          for m in 1 2; do
+            DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+              --head port/build/host/dkr --head-env DKR_KART_MTX2_CHECK=$m --only levels \
+              --out "$RUNNER_TEMP/kart-mtx2-$m" --max-images 0 --no-repeat-check
+          done
+          logs=$(find "$RUNNER_TEMP/kart-mtx2-1/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/kart-mtx2-2/runs" -path "*/head/log.txt")
+          grep -h "two-matrix kart\|kart two-matrix check" $logs | tail -n 2
+          if grep -q "kart two-matrix check: a draw" $logs; then
+            echo "::error::A two-matrix kart draw differs from its corners made with their own load's matrix."
+            exit 1
+          fi
+          if ! grep -q "kart two-matrix check: [1-9][0-9]* draws compared, 0 wrong" $logs; then
+            echo "::error::The kart two-matrix check never compared a draw (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "kart two-matrix check: a draw" $broken; then
+            echo "::error::The kart two-matrix check broken on purpose (DKR_KART_MTX2_CHECK=2) reported nothing."
+            exit 1
+          fi
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register
