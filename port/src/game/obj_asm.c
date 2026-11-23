@@ -926,3 +926,14 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 use
         batch++;
     } while (batch < batchEnd);
 }
+
+/* DKR_INTERP60 (S8 / P39): whether the game tags whose matrices come next (port_drawtag.h PORT_IKEY_TAG). Read again
+ * when a switch changes (the Test run page's "60 Hz picture" row). */
+int port_interp_tags(void) {
+    static int sEpoch = -1, sOn;
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sOn = plat_switch("DKR_INTERP60", 0) != 0;
+    }
+    return sOn;
+}

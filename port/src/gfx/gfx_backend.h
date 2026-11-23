@@ -386,6 +386,28 @@ int gfxb_model_check(const float mtx[4][4], const short boxMin[3], const short b
 int gfxb_gpu_kinds_frame(int frame);
 void gfxb_gpu_kind(int kind);
 void gfxb_gpu_kind_call(void *payload);
+
+/*
+ * The 60 Hz picture (DKR_INTERP60, S8 / P39; proposals/3ds-interp60-plan.md). In a frame the backend draws twice (the
+ * in-between picture, then the real one), the walk sends, in order with the draws (an OP_CALL record's payload, or a
+ * call at once), the delta in force for the draws after it: d maps a vertex's clip coordinates of this frame (as a
+ * row, GfxVertex's x y z w) to where it is in the in-between picture (clip' = clip d). Flat draws ignore it. Just
+ * before the frame ends, the walk's verdict: END_VALID (draw two pictures) or END_NOT (a camera cut, more than one
+ * viewport...: one picture). gfxb_interp_frame says whether the backend wants deltas this frame (0 no, 1 interpolate,
+ * 2 extrapolate); it is asked once at the walk's frame start.
+ */
+#define GFX_INTERP_DELTA 0
+#define GFX_INTERP_IDENTITY 1
+#define GFX_INTERP_END_VALID 2
+#define GFX_INTERP_END_NOT 3
+typedef struct GfxInterpCall {
+    float d[4][4];
+    int kind;
+    int pad;
+} GfxInterpCall;
+int gfxb_interp_frame(void);
+void gfxb_interp_call(void *payload);
+void gfxb_interp_check_counts(unsigned int *checked, unsigned int *wrong);
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles);
 /*

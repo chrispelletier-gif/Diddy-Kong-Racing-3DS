@@ -456,6 +456,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
+    // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
+    // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
+    // GPU ms (two pictures a frame: expect about twice), both cores (should not move: the walk's extra work is a
+    // matrix inverse per moving thing) and the 1% low, and the log's "60 Hz picture" lines (frames as two pictures /
+    // as one; walk: matched, new, not sane). The self-check row checks every delta the walk makes (C D against C')
+    // and the backend's conversion of it to the 3DS screen (CSV chk: 0 wrong). Normal laps for the first, one lap for
+    // the check. Off by default; tried in play from Test run > 60 Hz picture.
+    { "60 Hz picture, interpolated (S8 / P39)", { "DKR_INTERP60", NULL, NULL }, 0, 1, 1, 0 },
+    { "60 Hz picture, self-check (1 lap, chk: 0 wrong)", { "DKR_INTERP60", "DKR_INTERP60_CHECK", NULL }, 0, 1, 1, 1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
@@ -520,6 +530,11 @@ static const BenchSwitch sSwitches60[] = {
     // Mega build (2026-11-23): the sprite table shader (P65 rank 1) has not run on hardware yet, so it is a row here
     // and not in the 60 mode's defaults (plat_common.c s60Defaults) until the Old 3DS bench passes its self-check.
     { "sprite table 1 at 60 (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL }, -1, 1, 1, 0 },
+    // S8 / P39 (proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation, the route plan's fallback if the
+    // mode can't hold 60: the game at the 30 cap, each frame's GPU commands run twice (a picture every retrace). It
+    // only works at the 30 cap, so the row pins it. Read the GPU ms (about twice), both cores (should not move) and the
+    // log's "60 Hz picture" lines. A row, not a mode default, until the Old 3DS has run it.
+    { "60 Hz picture at the 30 cap (S8 / P39)", { "DKR_FPS_PIN", "DKR_INTERP60=1", NULL }, -1, 30, 1, 0 },
     // The 3D slider up drops the mode to 30 (DKR_STEREO3D=2: 3D whatever the slider says). Check: 30 fps, clean 3D.
     { "3D forced on: must run at 30 (1 lap)", { "DKR_STEREO3D", NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },

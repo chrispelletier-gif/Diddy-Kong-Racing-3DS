@@ -1137,6 +1137,9 @@ void mtx_world_origin(Gfx **dList, Mtx **mtx) {
     mtxf_mul(gModelMatrixF[gModelMatrixStackPos], &gViewProjMatrixF, &gCurrentModelMatrixF);
     CAM_MTX_STORE(&gCurrentModelMatrixF, *mtx);
     gModelMatrix[gModelMatrixStackPos] = *mtx;
+#ifdef TARGET_PORT
+    port_ikey_world(*dList); // DKR_INTERP60: the world matrix comes next
+#endif
     CAM_MTX_LOAD(dList, (*mtx)++, gMtxOriginID);
 }
 
