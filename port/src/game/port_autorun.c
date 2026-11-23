@@ -423,6 +423,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
     // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
     { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
+    // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
+    // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
+    // GPU ms (two pictures a frame: expect about twice), both cores (should not move: the walk's extra work is a
+    // matrix inverse per moving thing) and the 1% low, and the log's "60 Hz picture" lines (frames as two pictures /
+    // as one; walk: matched, new, not sane). The self-check row checks every delta the walk makes (C D against C')
+    // and the backend's conversion of it to the 3DS screen (CSV chk: 0 wrong). Normal laps for the first, one lap for
+    // the check. Off by default; tried in play from Test run > 60 Hz picture.
+    { "60 Hz picture, interpolated (S8 / P39)", { "DKR_INTERP60", NULL, NULL }, 0, 1, 1, 0 },
+    { "60 Hz picture, self-check (1 lap, chk: 0 wrong)", { "DKR_INTERP60", "DKR_INTERP60_CHECK", NULL }, 0, 1, 1, 1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first

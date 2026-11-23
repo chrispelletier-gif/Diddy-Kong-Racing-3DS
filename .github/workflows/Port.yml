@@ -496,6 +496,52 @@ jobs:
             exit 1
           fi
 
+      - name: 60 Hz picture check
+        # S8 / P39 (proposals/3ds-interp60-plan.md): DKR_INTERP60=1 on two races (Whale Bay, then the desert track;
+        # the attract demo before them). The host draws each frame's in-between picture from the walk's deltas
+        # (gfx_soft.c); it must lie between the real pictures before and after it in at least 90% of the frames that
+        # move, the walk's self-check (C D against C') and the 3DS backend's conversion check (gfx_interp_math.h) must
+        # say 0 wrong, and most frames must be drawn as two pictures. Rule K6: DKR_INTERP60_CHECK=2 (S^-1 left out of
+        # the backend's conversion) and 3 (the walk's C^-1 P transposed) are the checks broken on purpose; each must
+        # report wrong deltas (2026-11-23: 7822 of 7822 and 2539 of 3450, and the broken walk put 3 of 427 moving
+        # frames between their neighbours).
+        run: |
+          d="$RUNNER_TEMP/interp60"
+          mkdir -p "$d"
+          ln -sf "$RUNNER_TEMP/rom/baserom.z64" "$d/baserom.z64"
+          for m in 1 2 3; do
+            DKR_LOCKSTEP=1 DKR_DATA_DIR="$d" DKR_FRAMES=750 DKR_WARP=13,16 DKR_WARP_SECONDS=4 DKR_INTERP60=1 \
+              DKR_INTERP60_CHECK=$m timeout 600 port/build/host/dkr > "$d/log$m.txt" 2>&1
+            grep "60 Hz picture" "$d/log$m.txt" | tail -n 5
+          done
+          last() { grep "$1" "$d/log$2.txt" | tail -n 1; }
+          host=$(last "60 Hz picture host check" 1)
+          between=$(echo "$host" | sed -n 's/.*; \([0-9]*\) of \([0-9]*\) moving.*/\1 \2/p')
+          set -- $between
+          if [ -z "$2" ] || [ "$2" -lt 100 ] || [ $(( $1 * 10 )) -lt $(( $2 * 9 )) ]; then
+            echo "::error::Too few in-between pictures lie between their neighbours: $host"
+            exit 1
+          fi
+          two=$(echo "$host" | sed -n 's/.*check: \([0-9]*\) frames as two pictures, \([0-9]*\) as one.*/\1 \2/p')
+          set -- $two
+          if [ -z "$2" ] || [ "$1" -lt $(( $2 * 10 )) ]; then
+            echo "::error::Too few frames drawn as two pictures: $host"
+            exit 1
+          fi
+          if ! last "60 Hz picture walk check" 1 | grep -q "[1-9][0-9]* deltas checked, 0 wrong" ||
+             ! last "60 Hz picture backend check" 1 | grep -q "[1-9][0-9]* deltas checked, 0 wrong"; then
+            echo "::error::The 60 Hz picture's self-checks found wrong deltas (or never ran)."
+            exit 1
+          fi
+          if last "60 Hz picture backend check" 2 | grep -q " 0 wrong"; then
+            echo "::error::The backend check broken on purpose (DKR_INTERP60_CHECK=2) reported nothing."
+            exit 1
+          fi
+          if last "60 Hz picture walk check" 3 | grep -q " 0 wrong"; then
+            echo "::error::The walk check broken on purpose (DKR_INTERP60_CHECK=3) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

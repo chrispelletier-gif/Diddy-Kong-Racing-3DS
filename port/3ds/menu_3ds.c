@@ -442,10 +442,12 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the last row, the GS freeze test
- * (gfx_c3d.c gs_ladder), restarts the game and runs before the title. */
-#define TEST_ROWS 12
+/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the GS freeze test row
+ * (gfx_c3d.c gs_ladder) restarts the game and runs before the title. The last row is a setting, not a run: the 60 Hz
+ * picture (DKR_INTERP60, S8 / P39, gpu_interp.inc), tried in play from here (left / right), never an env.txt line. */
+#define TEST_ROWS 13
 #define TEST_GS_LADDER 11
+#define TEST_INTERP60 12
 static int test_count(void) {
     return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
@@ -454,13 +456,25 @@ static const char *test_label(int i) {
     static const char *const sStart[TEST_ROWS] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
                                                    "Switch bench", "Whole game", "Whole game (short)",
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
-                                                   "Lean full test", "GS freeze test" };
+                                                   "Lean full test", "GS freeze test", "60 Hz picture" };
     return port_autorun_enabled() ? "Stop the test run" : sStart[i];
 }
 
+/* The 60 Hz picture row's value: DKR_INTERP60 (0 off, 1 interpolated, 2 extrapolated), with DKR_INTERP60_CHECK. */
+static int test_interp60_value(void) {
+    int mode = plat_switch("DKR_INTERP60", 0);
+    if (mode == 1 && plat_switch("DKR_INTERP60_CHECK", 0) == 1) {
+        return 3;
+    }
+    return mode == 1 || mode == 2 ? mode : 0;
+}
+
 static void test_value(int i, char *out, int size) {
-    (void) i;
-    (void) size;
+    static const char *const sInterp[4] = { "Off", "Smooth", "Ahead", "Smooth + check" };
+    if (i == TEST_INTERP60 && !port_autorun_enabled()) {
+        snprintf(out, size, "%s", port_text(sInterp[test_interp60_value()]));
+        return;
+    }
     out[0] = '\0';
 }
 
@@ -473,7 +487,8 @@ static const char *test_hint(int i) {
         "Switch bench, profiler off as in a player's build",
         "Quick test, profiler off as in a player's build",
         "Full test, profiler off as in a player's build",
-        "Restarts the game; ~1 min, may need power-offs" };
+        "Restarts the game; ~1 min, may need power-offs",
+        "Old 3DS at 30 fps, 3D off: a picture every retrace" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -500,6 +515,13 @@ static const char *test_hint(int i) {
 }
 
 static void test_change(int i, int step) {
+    if (i == TEST_INTERP60 && !port_autorun_enabled()) {
+        // Off, Smooth, Ahead, Smooth + check (the self-check's counts go to log.txt every 10 s).
+        int v = (test_interp60_value() + (step < 0 ? 3 : 1)) % 4;
+        plat_override_switch("DKR_INTERP60", v == 3 ? 1 : v);
+        plat_override_switch("DKR_INTERP60_CHECK", v == 3 ? 1 : -1);
+        return; // A setting: the menu stays open
+    }
     (void) step;
     if (port_autorun_enabled()) {
         port_autorun_request(0);
