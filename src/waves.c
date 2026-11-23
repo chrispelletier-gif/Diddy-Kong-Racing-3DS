@@ -16,6 +16,7 @@
 #ifdef TARGET_PORT
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #endif
 #include "port_drawtag.h"
 static void port_wave_snapshot(void);
