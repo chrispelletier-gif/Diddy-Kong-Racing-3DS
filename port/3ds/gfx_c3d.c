@@ -911,7 +911,7 @@ PLAT_COLD static void gpu_self_test(void) {
 #define GS_LADDER_STEPS 6
 #define GS_LADDER_FRAMES 30
 #define GS_LADDER_SWITCHES 20
-static const char *const sGslNames[GS_LADDER_STEPS + 1] = {
+static const char *const sGslNames[GS_LADDER_STEPS + 2] = {
     "",
     "GS program alone, one GS triangle a frame",
     "a GS draw, then ordinary indexed draws",
@@ -919,6 +919,7 @@ static const char *const sGslNames[GS_LADDER_STEPS + 1] = {
     "20 switches a frame between the ordinary and GS programs",
     "control: ordinary draws through a pass-through GS, no switches",
     "20 switches a frame, pass-through GS on the ordinary program too",
+    "restore of the game's program",
 };
 static DVLB_s *sGslDvlb;
 static shaderProgram_s sGslNormal, sGslPoint, sGslThrough;
@@ -1113,10 +1114,25 @@ PLAT_COLD static void gs_ladder(void) {
     snprintf(path, sizeof(path), "%s/gs_ladder.txt", plat_data_dir());
     plat_save_file(path, summary, strlen(summary));
     plat_status("%s", summary);
-    // Back to the game's program and state, as the self test leaves them.
+    // Back to the game's program and state, inside a frame of its own: between frames citro3d has no command buffer
+    // (C3D_FrameEnd sets it to NULL), and a command written then (C3Di_UpdateContext, write_eye) stops the game with
+    // libctru's svcBreak(USERBREAK_PANIC). That froze the console after all six steps passed (Old 3DS, b2096b8, 2026-11-23).
+    // The switch from the ladder's GS program back to shader.shbin's program (another blob: the vertex code is sent
+    // again) is drawn here, so a hang in it is logged as the restore, not the game's first frame.
+    sGslStep = GS_LADDER_STEPS + 1;
+    plat_log("GS ladder: restoring the game's program (a freeze from here is the restore)");
+    gsl_wait();
+    sVboUsed = 0;
+    sVfmtBound = -1;
+    C3D_FrameBegin(0);
+    C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, CLEAR_BLACK, 0);
+    C3D_FrameDrawOn(sTarget);
     C3D_BindProgram(&sProgram);
     C3Di_UpdateContext();
     write_eye(0.0f, 0.0f);
+    C3D_FrameEnd(0);
+    gsl_wait();
+    plat_log("GS ladder: the game's program is back");
     sVboUsed = 0;
     sVfmtBound = -1;
     plat_sleep_ns(3000000000ULL); // The answers stay on the bottom screen a moment
