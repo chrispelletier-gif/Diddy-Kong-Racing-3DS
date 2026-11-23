@@ -113,7 +113,6 @@ static void PLAT_COLD timeline_init(void) {
     gspSetEventCallback(GSPGPU_EVENT_P3D, timeline_event, (void *) (u32) GSPGPU_EVENT_P3D, false);
 }
 
-void __real_gxCmdQueueRun(gxCmdQueue_s *queue);
 /* citro3d's C3D_FrameEnd starts the frame's queue here. */
 __attribute__((used)) void __wrap_gxCmdQueueRun(gxCmdQueue_s *queue) {
     if (sTlArmed == 1) {
@@ -121,6 +120,9 @@ __attribute__((used)) void __wrap_gxCmdQueueRun(gxCmdQueue_s *queue) {
         sTlStart = svcGetSystemTick();
         __sync_synchronize();
         sTlArmed = 2;
+    }
+    if (fe_take_run(queue)) {
+        return; // DKR_FE_QUEUE_HELPER: started by the game core's helper (gfx_c3d.c)
     }
     __real_gxCmdQueueRun(queue);
 }

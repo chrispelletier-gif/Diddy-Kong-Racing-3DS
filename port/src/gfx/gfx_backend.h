@@ -434,6 +434,12 @@ extern volatile int gGfxbFramePartsOn;
 void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
                              unsigned int *listParts);
 /*
+ * P57 E step 2: the frame start/end cuts (DKR_FE_FLUSH, DKR_FE_PRESENT_EVENT, DKR_FE_QUEUE_HELPER) and their self-checks,
+ * as one line, counted since this reader (0 the log, 1 the race's core window, which reports the checks) last read.
+ * Returns the length written, 0 when no cut is on (or the backend has none).
+ */
+int gfxb_frame_cuts_line(int reader, char *out, int size);
+/*
  * Meshes: model vertices copied once to memory the GPU reads, and drawn from there frame
  * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames
  * that use it. gfxb_draw_meshes draws parts of several meshes that share a state and parameters as one draw (a draw

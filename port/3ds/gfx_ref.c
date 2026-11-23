@@ -30,6 +30,7 @@
 #define gfxb_model_split_totals refb_model_split_totals
 #define gGfxbModelSplitOn gRefbModelSplitOn
 #define gfxb_frame_parts_totals refb_frame_parts_totals
+#define gfxb_frame_cuts_line refb_frame_cuts_line
 #define gGfxbFramePartsOn gRefbFramePartsOn
 #define gfxb_sprite_points refb_sprite_points
 #define gfxb_draw_sprites refb_draw_sprites

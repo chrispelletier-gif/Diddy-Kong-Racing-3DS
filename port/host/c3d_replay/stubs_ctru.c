@@ -242,6 +242,12 @@ Result svcFlushProcessDataCache(Handle process, u32 addr, u32 size) {
     (void) size;
     return 0;
 }
+Result svcStoreProcessDataCache(Handle process, u32 addr, u32 size) { // P57 E step 2 (DKR_FE_FLUSH=2)
+    (void) process;
+    (void) addr;
+    (void) size;
+    return 0;
+}
 Result svcInvalidateProcessDataCache(Handle process, u32 addr, u32 size) {
     (void) process;
     (void) addr;

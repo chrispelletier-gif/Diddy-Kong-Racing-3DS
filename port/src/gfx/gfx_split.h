@@ -79,6 +79,7 @@ int gfx_split_backend_mix(int reader, char *out, int size);
 /* P57 E DKR_FRAME_PARTS: the backend's frame start/end split into parts (ms a timed frame since this reader last asked)
  * and their self-check (DKR_FRAME_PARTS_CHECK), as one line; returns its length (0: no frame timed). */
 int gfx_split_frame_parts(int reader, char *out, int size);
+int gfx_split_frame_cuts(int reader, char *out, int size); // P57 E step 2 (DKR_FE_*), 0 when no cut is on
 /* P61 M2 DKR_WALK_STEPS (gfx_rdp.c): the walk's ms a timed frame by step since this reader (0 the log: racers / track /
  * objects / all kinds; 1 the core window: all kinds) last asked, as one line; returns its length (0: none timed). */
 int gfx_walk_steps(int reader, char *out, int size);

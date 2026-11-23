@@ -1055,6 +1055,14 @@ void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigne
     *frames = *reads = *listParts = 0;
 }
 
+int gfxb_frame_cuts_line(int reader, char *out, int size) { // P57 E step 2: the 3DS backend's; none here
+    (void) reader;
+    if (size > 0) {
+        out[0] = '\0';
+    }
+    return 0;
+}
+
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles) {
     static GfxVertex sConverted[GFX_MAX_BATCH_VERTICES];

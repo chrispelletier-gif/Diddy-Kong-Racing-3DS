@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "gfx/gfx_frame_cuts.h"
 #include "gfx/gfx_split.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
@@ -328,6 +329,44 @@ static void gpu_flush(const void *data, u32 size) {
 }
 
 /*
+ * P57 E step 2 (proposals/3ds-old3ds-frame-start-end-plan.md): cuts for the parts of the backend's frame start and end
+ * (GFXB_FPART_*), each behind its own switch (read_switches), default off until the Old 3DS switch bench picks them:
+ *  - DKR_FE_FLUSH (vertex flush, command lists, C3D_FrameEnd): the frame's command list parts and the rest of the list
+ *    (split off here instead of in C3D_FrameEnd, so the GSP service no longer flushes it in its own process) written
+ *    out of the data cache by one system call over the span they share in the slot's buffer, not one per part.
+ *    1 = clean and invalidate (svcFlushProcessDataCache, as now); 2 = clean only (svcStoreProcessDataCache: the GPU
+ *    only reads these, so nothing needs dropping from the cache), for the vertices and indices too.
+ *    DKR_FE_FLUSH_CHECK (1 default, 2 broken on purpose: the merged range left out of the check, rule K6): every list
+ *    handed to the GPU lies inside a flushed range (gfx_frame_cuts.h).
+ *  - DKR_FE_PRESENT_EVENT (present): a frame whose screen swap is still pending waits for the top screen's VBlank
+ *    event instead of polling in 0.5 ms sleeps (each of which can cost the system core's time slice).
+ *    DKR_FE_PRESENT_CHECK (1 default, 2 broken on purpose: counted before the wait): the swap is shown after it.
+ *  - DKR_FE_QUEUE_HELPER (C3D_FrameEnd): the GPU queue's start (its first jobs' submission and the GSP request) handed
+ *    to a thread on the game core, 1 above the game (as libctru's GSP event thread), 2 below it (the game's idle time).
+ *    The queue is only waited on, stopped or cleared once that thread (or, after 3 ms, the renderer itself) started
+ *    it. DKR_FE_QUEUE_CHECK (1 default, 2 broken on purpose: one job more counted): every clear finds the queue done.
+ * gfxb_frame_cuts_line reports them (the log and autorun_cores.txt) and puts the checks in the results' chk cells.
+ */
+static int sFeFlush, sFeFlushCheck = 1, sFePresent, sFePresentCheck = 1, sFeHelper, sFeQueueCheck = 1;
+static unsigned int sFeFlushFrames, sFeFlushCalls, sFeFlushLists, sFeFlushMissing, sFeFlushChecked;
+static unsigned long long sFeFlushBytes;
+static unsigned int sFePresentWaits, sFePresentStill;
+static volatile unsigned int sFeHanded, sFeByHelper, sFeBySelf, sFeClears, sFeClearsWrong;
+
+/* DKR_FE_FLUSH: a range written out for the GPU, by one system call (clean only with 2). */
+static void fe_store(const void *data, u32 size) {
+    sLastFlushData = data;
+    sLastFlushSize = size;
+    if (sFeFlush == 2) {
+        svcStoreProcessDataCache(CUR_PROCESS_HANDLE, (u32) data, size);
+    } else {
+        svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32) data, size);
+    }
+    sFeFlushCalls++;
+    sFeFlushBytes += size;
+}
+
+/*
  * Textures in VRAM (roadmap item P17). Every texture used to live in the linear heap in main memory, so the GPU
  * fetched its texels over the bus the CPU uses too; VRAM is the GPU's own. The CPU may not write VRAM (a write there
  * is a data abort, bug report #172), so with DKR_TEX_VRAM=1 a texture is still made and written in the linear heap,
@@ -488,6 +527,24 @@ static void flush_new_vertices(void) {
     }
     if (sIboUsed > sIboFlushed && sIbo != NULL) {
         gpu_flush(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
+    }
+    sIboFlushed = sIboUsed;
+}
+
+/* DKR_FE_FLUSH: flush_new_vertices by system call (clean only with 2), whatever DKR_SVC_FLUSH says. */
+static void fe_flush_new_vertices(void) {
+    if (sVboFlushed > sVboUsed) {
+        sVboFlushed = 0;
+    }
+    if (sVboUsed > sVboFlushed) {
+        fe_store(sVbo + sVboFlushed, sVboUsed - sVboFlushed);
+    }
+    sVboFlushed = sVboUsed;
+    if (sIboFlushed > sIboUsed) {
+        sIboFlushed = 0;
+    }
+    if (sIboUsed > sIboFlushed && sIbo != NULL) {
+        fe_store(sIbo + sIboFlushed, (sIboUsed - sIboFlushed) * sizeof(u16));
     }
     sIboFlushed = sIboUsed;
 }
@@ -2224,6 +2281,15 @@ static void wait_for_present(void) {
     }
     sPresentWaits++;
     start = plat_time_ns();
+    if (sFePresent) {
+        // DKR_FE_PRESENT_EVENT (P57 E step 2): woken by the VBlank that shows it, not by polling in short sleeps.
+        gspWaitForEvent(GSPGPU_EVENT_VBlank0, true);
+        sFePresentWaits++;
+        if (sFePresentCheck != 0) {
+            // Broken on purpose (2, rule K6): counted as still pending, as it was before the wait.
+            sFePresentStill += sFePresentCheck == 2 || gspIsPresentPending(GSP_SCREEN_TOP);
+        }
+    }
     // Polled, at most two refreshes: the next VBlank shows it.
     for (i = 0; i < 70 && gspIsPresentPending(GSP_SCREEN_TOP); i++) {
         svcSleepThread(500 * 1000);
@@ -3366,6 +3432,120 @@ static void split_command_list(void) {
     }
 }
 
+/*
+ * DKR_FE_QUEUE_HELPER (P57 E step 2, see fe_store): C3D_FrameEnd's start of the GPU queue (gxCmdQueueRun: the first
+ * jobs written to the GSP's shared memory and, for the first, the request to the GSP service) run by a thread on the
+ * game core, so that the system core's renderer goes on at once. libctru's queue may not be waited on, stopped or
+ * cleared before it has been started (a clear while it runs is a panic), so those calls are wrapped
+ * (-Wl,--wrap=gxCmdQueueWait/Stop/Clear in port/Makefile, DKR_FE_QUEUE_WRAPS) to first wait for the hand-off: up to
+ * FE_GRACE_NS for the helper, then the renderer starts the queue itself. Who starts it is decided by one atomic swap
+ * (sFeState 1 -> 2), so it is started once. Built only where the wraps are (not in the backend replay).
+ */
+void __real_gxCmdQueueRun(gxCmdQueue_s *queue);
+#if DKR_FE_QUEUE_WRAPS
+#define FE_GRACE_NS 3000000LL
+bool __real_gxCmdQueueWait(gxCmdQueue_s *queue, s64 timeout);
+void __real_gxCmdQueueStop(gxCmdQueue_s *queue);
+void __real_gxCmdQueueClear(gxCmdQueue_s *queue);
+static volatile int sFeState; // 0 nothing handed over, 1 handed over, 2 being started
+static gxCmdQueue_s *volatile sFeQueue;
+static LightEvent sFeGo, sFeDone;
+static int sFeHelperUp, sFeHelperPrio; // 1 running (at sFeHelperPrio), -1 couldn't be started
+static Thread sFeThread;
+static int sFeHandOff;                 // Set around C3D_FrameEnd: its queue start may be handed over
+
+static void fe_helper(void *arg) {
+    (void) arg;
+    for (;;) {
+        LightEvent_Wait(&sFeGo);
+        if (__sync_bool_compare_and_swap(&sFeState, 1, 2)) {
+            __real_gxCmdQueueRun(sFeQueue);
+            sFeByHelper++;
+            __atomic_store_n(&sFeState, 0, __ATOMIC_RELEASE);
+            LightEvent_Signal(&sFeDone);
+        }
+    }
+}
+
+/* Before anything else touches the queue: it has been started (by the helper, or here after FE_GRACE_NS). */
+static void fe_queue_sync(void) {
+    unsigned long long start;
+    if (__atomic_load_n(&sFeState, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+    start = plat_time_ns();
+    while (__atomic_load_n(&sFeState, __ATOMIC_ACQUIRE) == 1 && plat_time_ns() - start < (unsigned long long) FE_GRACE_NS) {
+        LightEvent_WaitTimeout(&sFeDone, 500000);
+    }
+    if (__sync_bool_compare_and_swap(&sFeState, 1, 2)) {
+        __real_gxCmdQueueRun(sFeQueue); // The helper is late: started here, as without it
+        sFeBySelf++;
+        __atomic_store_n(&sFeState, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&sFeState, __ATOMIC_ACQUIRE) != 0) {
+        LightEvent_WaitTimeout(&sFeDone, 500000); // The helper is starting it now
+    }
+}
+
+/* From __wrap_gxCmdQueueRun (gpu_cuts.inc): TRUE when the start was handed to the helper. */
+static int fe_take_run(gxCmdQueue_s *queue) {
+    if (!sFeHandOff || !sFeHelper) {
+        fe_queue_sync(); // (Nothing should start a queue while one waits for the helper, but never twice.)
+        return 0;
+    }
+    if (sFeHelperUp == 0) {
+        LightEvent_Init(&sFeGo, RESET_ONESHOT);
+        LightEvent_Init(&sFeDone, RESET_ONESHOT);
+        sFeHelperPrio = sFeHelper == 1 ? 0x1A : 0x3E;
+        sFeThread = threadCreate(fe_helper, NULL, 8 * 1024, sFeHelperPrio, 0, true);
+        sFeHelperUp = sFeThread != NULL ? 1 : -1;
+        plat_log("frame end: GPU queue start helper on the game core %s (priority 0x%X)",
+                 sFeHelperUp > 0 ? "started" : "NOT started", sFeHelperPrio);
+    } else if (sFeHelperUp > 0 && sFeHelperPrio != (sFeHelper == 1 ? 0x1A : 0x3E)) {
+        // The switch bench moved it to the other setting: its priority follows.
+        sFeHelperPrio = sFeHelper == 1 ? 0x1A : 0x3E;
+        svcSetThreadPriority(threadGetHandle(sFeThread), sFeHelperPrio);
+        plat_log("frame end: GPU queue start helper now at priority 0x%X", sFeHelperPrio);
+    }
+    if (sFeHelperUp <= 0) {
+        return 0;
+    }
+    sFeQueue = queue;
+    __atomic_store_n(&sFeState, 1, __ATOMIC_RELEASE);
+    sFeHanded++;
+    LightEvent_Signal(&sFeGo);
+    return 1;
+}
+
+__attribute__((used)) bool __wrap_gxCmdQueueWait(gxCmdQueue_s *queue, s64 timeout) {
+    fe_queue_sync();
+    return __real_gxCmdQueueWait(queue, timeout);
+}
+
+__attribute__((used)) void __wrap_gxCmdQueueStop(gxCmdQueue_s *queue) {
+    fe_queue_sync();
+    __real_gxCmdQueueStop(queue);
+}
+
+__attribute__((used)) void __wrap_gxCmdQueueClear(gxCmdQueue_s *queue) {
+    fe_queue_sync();
+    if (sFeHelper && sFeQueueCheck != 0 && queue->numEntries > 0) {
+        // DKR_FE_QUEUE_CHECK: every job the queue held was done before it is cleared (2: broken on purpose, K6).
+        sFeClears++;
+        sFeClearsWrong += gfx_fc_clear_wrong(queue->lastEntry, queue->numEntries, sFeQueueCheck == 2);
+    }
+    __real_gxCmdQueueClear(queue);
+}
+#else
+static inline void fe_queue_sync(void) {
+}
+static inline int fe_take_run(gxCmdQueue_s *queue) {
+    (void) queue;
+    return 0;
+}
+#endif
+
 #include "gpu_cuts.inc"
 
 /******************************** Stereo ********************************/
@@ -4314,6 +4494,20 @@ static void read_switches(void) {
     sCheckBandSafe = plat_switch("DKR_CHECK_BAND", 1) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
+    // P57 E step 2: the frame start/end cuts (see fe_store)
+    sFeFlush = plat_switch("DKR_FE_FLUSH", 0);
+    sFeFlushCheck = plat_switch("DKR_FE_FLUSH_CHECK", 1);
+    sFePresent = plat_switch("DKR_FE_PRESENT_EVENT", 0) != 0;
+    sFePresentCheck = plat_switch("DKR_FE_PRESENT_CHECK", 1);
+    sFeHelper = plat_switch("DKR_FE_QUEUE_HELPER", 0);
+    sFeQueueCheck = plat_switch("DKR_FE_QUEUE_CHECK", 1);
+    if (sFeFlush || sFePresent || sFeHelper) {
+        plat_log("frame start/end cuts: flush %s, present wait %s, queue start %s",
+                 sFeFlush == 2 ? "merged, clean only" : sFeFlush ? "merged" : "per part",
+                 sFePresent ? "on the VBlank event" : "polled",
+                 sFeHelper == 1 ? "game core helper above the game" : sFeHelper ? "game core helper below the game"
+                                                                       : "renderer");
+    }
     sColourFill = -1; // gpu_cuts.inc: DKR_COLOUR_FILL, DKR_GPU_TIMELINE, DKR_GPU_KINDS and DKR_FB_VRAM read again
     sTimeline = -1;
     sGpuKinds = -1;
@@ -4639,6 +4833,125 @@ static void fill_wait(void) {
     }
 }
 
+/*
+ * DKR_FE_FLUSH (see fe_store): the frame's command list parts queued for the GPU, with the rest of the list split off
+ * here (what C3D_FrameEnd's C3D_FrameSplit would do: the same words, as nothing writes commands in between) and queued
+ * after them, all written out of the cache by one system call over their span in the slot's buffer (and one for any
+ * list outside it). C3D_FrameEnd then finds nothing left to split, so the GSP service doesn't flush it.
+ */
+static void fe_hand_over_lists(FrameSlot *slot) {
+    GfxFcRange lists[MAX_LIST_PARTS + 1], ranges[MAX_LIST_PARTS + 2];
+    u32 *tailAddr = NULL, tailWords = 0;
+    int i, n = 0, count;
+    if (!C3Di_SplitFrame(&tailAddr, &tailWords)) {
+        tailAddr = NULL;
+    }
+    for (i = 0; i < slot->numParts; i++) {
+        lists[n].lo = (unsigned long) slot->partAddr[i];
+        lists[n].hi = lists[n].lo + slot->partWords[i] * 4;
+        n++;
+    }
+    if (tailAddr != NULL) {
+        lists[n].lo = (unsigned long) tailAddr;
+        lists[n].hi = lists[n].lo + tailWords * 4;
+        n++;
+    }
+    count = gfx_fc_merge(lists, n, (unsigned long) slot->cmd, (unsigned long) (slot->cmd + sCmdWords), ranges,
+                         MAX_LIST_PARTS + 2);
+    for (i = 0; i < count; i++) {
+        fe_store((const void *) ranges[i].lo, (u32) (ranges[i].hi - ranges[i].lo));
+    }
+    if (sFeFlushCheck != 0) {
+        // Every list inside a flushed range; 2 leaves the merged range out (broken on purpose, rule K6).
+        sFeFlushMissing += gfx_fc_uncovered(ranges, count, lists, n, sFeFlushCheck == 2 ? 0 : -1);
+        sFeFlushChecked += n;
+    }
+    for (i = 0; i < slot->numParts; i++) {
+        GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
+        probe_after_part(i);
+    }
+    if (tailAddr != NULL) {
+        GX_ProcessCommandList(tailAddr, tailWords * 4, 0);
+    }
+    sFeFlushLists += n;
+    sFeFlushFrames++;
+}
+
+/*
+ * P57 E step 2: the frame start/end cuts' counts since this reader last read (0 the log, 1 the race's core window,
+ * which also puts the switched-on cuts' self-checks in the results' chk cells). Returns the length written, 0 when no
+ * cut is on.
+ */
+int gfxb_frame_cuts_line(int reader, char *out, int size) {
+    static unsigned int sRead[2][11];
+    unsigned int now[11], d[11];
+    static unsigned long long sReadBytes[2];
+    unsigned long long bytes = sFeFlushBytes - sReadBytes[reader & 1];
+    int k, at = 0;
+    now[0] = sFeFlushFrames;
+    now[1] = sFeFlushCalls;
+    now[2] = sFeFlushLists;
+    now[3] = sFeFlushMissing;
+    now[4] = sFeFlushChecked;
+    now[5] = sFePresentWaits;
+    now[6] = sFePresentStill;
+    now[7] = sFeHanded;
+    now[8] = sFeByHelper;
+    now[9] = sFeBySelf;
+    now[10] = sFeClearsWrong;
+    for (k = 0; k < 11; k++) {
+        d[k] = now[k] - sRead[reader & 1][k];
+        sRead[reader & 1][k] = now[k];
+    }
+    sReadBytes[reader & 1] = sFeFlushBytes;
+    if (size <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (!sFeFlush && !sFePresent && !sFeHelper) {
+        return 0;
+    }
+    at = plat_snprintf(out, size, "frame start/end cuts:");
+    if (sFeFlush && at < size) {
+        at += plat_snprintf(out + at, size - at, " flush %s: %.1f calls, %.1f lists, %.0f KB a frame",
+                            sFeFlush == 2 ? "merged, clean only" : "merged", d[0] ? (double) d[1] / d[0] : 0.0,
+                            d[0] ? (double) d[2] / d[0] : 0.0, d[0] ? bytes / 1024.0 / d[0] : 0.0);
+        if (sFeFlushCheck != 0 && at < size) {
+            at += plat_snprintf(out + at, size - at, ", check%s: %u of %u lists not flushed, %s",
+                                sFeFlushCheck == 2 ? " (broken on purpose)" : "", d[3], d[4], d[3] ? "WRONG" : "ok");
+            if (reader == 1 && d[4] > 0) {
+                plat_check_report("frame end flush", d[3] != 0);
+            }
+        }
+        at += at < size ? plat_snprintf(out + at, size - at, ";") : 0;
+    }
+    if (sFePresent && at < size) {
+        at += plat_snprintf(out + at, size - at, " present: %u VBlank waits", d[5]);
+        if (sFePresentCheck != 0 && at < size) {
+            // The swap may be applied just after the VBlank event wakes this thread: wrong only if most still wait.
+            int wrong = d[5] > 0 && d[6] * 2 > d[5];
+            at += plat_snprintf(out + at, size - at, ", check%s: %u still pending after it, %s",
+                                sFePresentCheck == 2 ? " (broken on purpose)" : "", d[6], wrong ? "WRONG" : "ok");
+            if (reader == 1 && d[5] > 0) {
+                plat_check_report("present event", wrong);
+            }
+        }
+        at += at < size ? plat_snprintf(out + at, size - at, ";") : 0;
+    }
+    if (sFeHelper && at < size) {
+        at += plat_snprintf(out + at, size - at, " queue start: %u handed over, %u by the helper, %u by the renderer",
+                            d[7], d[8], d[9]);
+        if (sFeQueueCheck != 0 && at < size) {
+            at += plat_snprintf(out + at, size - at, ", check%s: %u clears before the queue was done, %s",
+                                sFeQueueCheck == 2 ? " (broken on purpose)" : "", d[10], d[10] ? "WRONG" : "ok");
+            if (reader == 1 && d[7] > 0) {
+                plat_check_report("queue helper", d[10] != 0);
+            }
+        }
+    }
+    return at < size ? at : size - 1;
+}
+
 void gfxb_end_frame(void) {
     if (sFpOn) {
         // The span since the start's last mark is the frame's draws (other records): not a part of the start or end.
@@ -4684,6 +4997,8 @@ void gfxb_end_frame(void) {
             if (sIboUsed > 0) {
                 gpu_flush(sIbo, sIboUsed * sizeof(u16));
             }
+        } else if (sFeFlush && sFlushTest == 0 && !sOnceFrame) {
+            fe_flush_new_vertices(); // DKR_FE_FLUSH
         } else {
             flush_new_vertices();
         }
@@ -4740,14 +5055,18 @@ void gfxb_end_frame(void) {
         if (sFpOn) {
             sFpListParts += slot->numParts;
         }
-        for (i = 0; i < slot->numParts; i++) {
-            if (sSvcFlush) {
-                gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
-                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
-            } else {
-                GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+        if (sFeFlush && !sFull && sFlushTest == 0 && !sOnceFrame) {
+            fe_hand_over_lists(slot); // DKR_FE_FLUSH: one flush, the rest of the list with them
+        } else {
+            for (i = 0; i < slot->numParts; i++) {
+                if (sSvcFlush) {
+                    gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
+                    GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
+                } else {
+                    GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+                }
+                probe_after_part(i);
             }
-            probe_after_part(i);
         }
         fpart(GFXB_FPART_LISTS);
         adaptive_link(slot);
@@ -4784,7 +5103,13 @@ void gfxb_end_frame(void) {
             }
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         } else {
+#if DKR_FE_QUEUE_WRAPS
+            sFeHandOff = 1; // DKR_FE_QUEUE_HELPER: the queue's start may go to the game core's helper
+#endif
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
+#if DKR_FE_QUEUE_WRAPS
+            sFeHandOff = 0;
+#endif
         }
         fpart(GFXB_FPART_C3D_END);
         sTripleGet = 0;

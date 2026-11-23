@@ -2023,6 +2023,9 @@ static void show_overlay(void) {
                 if (gfx_split_frame_parts(0, mix, sizeof(mix)) > 0) {
                     port_log("%s", mix); // P57 E (DKR_FRAME_PARTS), its own line: the log cuts lines at 512
                 }
+                if (gfx_split_frame_cuts(0, mix, sizeof(mix)) > 0) {
+                    port_log("%s", mix); // P57 E step 2 (DKR_FE_*): only when a cut is on
+                }
                 if (gfx_walk_steps(0, mix, sizeof(mix)) > 0) {
                     // P61 M2 (DKR_WALK_STEPS). P65 added steps, so the line is cut after a step where it would pass the
                     // log's 512 characters; the rest follows on "walk steps (more):" lines.
@@ -2146,6 +2149,7 @@ void prof_core_window_start(void) {
     sCoreRenderedStart = sRenderedFrames;
     gfx_split_backend_mix(1, NULL, 0); // (from here)
     gfx_split_frame_parts(1, NULL, 0);
+    gfx_split_frame_cuts(1, NULL, 0);
     sCoreOn = TRUE;
 }
 
@@ -2295,6 +2299,17 @@ int prof_core_breakdown(char *out, int size) {
         s32 at = length;
         length += plat_snprintf(out + length, size - length, "; ");
         if (gfx_split_frame_parts(1, out + length, size - length) == 0) {
+            length = at;
+            out[length] = '\0';
+        } else {
+            length += (s32) strlen(out + length);
+        }
+    }
+    if (length < size - 2) {
+        /* P57 E step 2: the frame start/end cuts and their checks (DKR_FE_*), when one is on */
+        s32 at = length;
+        length += plat_snprintf(out + length, size - length, "; ");
+        if (gfx_split_frame_cuts(1, out + length, size - length) == 0) {
             length = at;
             out[length] = '\0';
         } else {

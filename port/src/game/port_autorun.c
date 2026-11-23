@@ -471,6 +471,34 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // out of the sum): its chk must say 1 wrong and the line "check (broken on purpose): ... WRONG".
     { "frame parts check broken on purpose (K6, 1 lap)", { "DKR_FRAME_PARTS_CHECK", NULL, NULL },
       -1, 2, 1, 1 },
+    // P57 E step 2 (2026-11-23, same plan): cuts for the frame start/end parts, each off by default until this bench
+    // picks it. Compare the row's renderer core ms and its "backend frame start/end" parts with the usual race's (the
+    // part named in brackets should drop), and the fps; the flashes column must not change. The log's "frame
+    // start/end cuts:" line has each cut's counts and self-check (chk: 0 wrong).
+    //  - merged flush (vertex flush, command lists, C3D_FrameEnd): one system call over the frame's lists instead of
+    //    one per part, the rest of the list no longer flushed by the GSP service; 2 = clean only, vertices too;
+    //  - present wait on the VBlank event (present): no 0.5 ms polling sleeps on the system core;
+    //  - queue start on a game core helper (C3D_FrameEnd): above the game (1) or in its idle time (2); "by the
+    //    renderer" counts the starts the helper was 3 ms late for;
+    //  - all three together; then each self-check broken on purpose (rule K6, 1 lap): chk must say 1 wrong.
+    { "frame end: merged cache flush (P57 E step 2)", { "DKR_FE_FLUSH", NULL, NULL }, -1, 1, 1, 0 },
+    { "frame end: merged cache flush, clean only (P57 E step 2)", { "DKR_FE_FLUSH", NULL, NULL }, -1, 2, 0, 0 },
+    { "frame end: present wait on the VBlank event (P57 E step 2)", { "DKR_FE_PRESENT_EVENT", NULL, NULL }, -1, 1, 0,
+      0 },
+    { "frame end: GPU queue started by a game core helper, above the game (P57 E step 2)",
+      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 1, 0, 0 },
+    { "frame end: GPU queue started by a game core helper, in the game's idle time (P57 E step 2)",
+      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 2, 1, 0 },
+    { "frame end: all three cuts (clean-only flush, VBlank wait, helper above the game)",
+      { "DKR_FE_FLUSH=2", "DKR_FE_PRESENT_EVENT", "DKR_FE_QUEUE_HELPER", NULL }, -1, 1, 1, 0 },
+    { "frame end flush check broken on purpose (K6, 1 lap)", { "DKR_FE_FLUSH=1", "DKR_FE_FLUSH_CHECK", NULL }, -1, 2,
+      1, 1 },
+    // (At the 60 cap, so that frames come fast enough for a swap to be pending at all: with no present wait in the race
+    // the line says 0 VBlank waits and the check isn't counted.)
+    { "present event check broken on purpose (K6, 1 lap)",
+      { "DKR_FE_PRESENT_EVENT=1", "DKR_FPS_PIN=60", "DKR_FE_PRESENT_CHECK", NULL }, -1, 2, 1, 1 },
+    { "queue helper check broken on purpose (K6, 1 lap)", { "DKR_FE_QUEUE_HELPER=1", "DKR_FE_QUEUE_CHECK", NULL }, -1,
+      2, 1, 1 },
     { "sprite GS, first batch a frame only (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
       0, 1, 1, 1 },
     { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },

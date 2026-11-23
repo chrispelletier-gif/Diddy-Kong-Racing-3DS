@@ -169,9 +169,12 @@ ifeq ($(TARGET),3ds)
   PORT_BUILD_COMMIT := $(shell $(GIT) rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \
                 -DPORT_VERSION=\"$(PORT_VERSION)\" -DPORT_BUILD_VERSION=\"$(PORT_BUILD_VERSION)\" \
-                -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\"
+                -DPORT_BUILD_COMMIT=\"$(PORT_BUILD_COMMIT)\" -DDKR_FE_QUEUE_WRAPS=1
   GAME_SYSINC := -nostdinc -isystem $(shell $(CC) -print-file-name=include)
   LDFLAGS   := -specs=3dsx.specs $(ARCH) -L$(PORTLIBS)/lib -L$(CTRULIB)/lib -Wl,-Map,$(BUILD_DIR)/dkr.map -Wl,--no-enum-size-warning -Wl,--wrap=gfxScreenSwapBuffers -Wl,--wrap=gfxGetFramebuffer -Wl,--wrap=gxCmdQueueRun -Wl,--wrap=C3Di_UpdateContext -Wl,--wrap=threadCreate
+  # P57 E step 2 (DKR_FE_QUEUE_HELPER, gfx_c3d.c DKR_FE_QUEUE_WRAPS): the GPU queue's wait, stop and clear first wait
+  # for a queue start handed to the game core's helper.
+  LDFLAGS   += -Wl,--wrap=gxCmdQueueWait -Wl,--wrap=gxCmdQueueStop -Wl,--wrap=gxCmdQueueClear
   # One link-time partition, so that the renderer's per-draw functions (plat.h PLAT_HOT) come out in one .text.hot
   # section: with several, each partition's .text.hot lands among the others' cold code (roadmap O9).
   LDFLAGS   += $(if $(filter 1,$(LTO)),-flto-partition=one)

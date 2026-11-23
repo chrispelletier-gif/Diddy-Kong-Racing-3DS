@@ -372,6 +372,11 @@ int gfx_split_frame_parts(int reader, char *out, int size) {
     return at < size ? at : size - 1;
 }
 
+/* P57 E step 2: the frame start/end cuts' line (gfxb_frame_cuts_line, the backend's). */
+int gfx_split_frame_cuts(int reader, char *out, int size) {
+    return gfxb_frame_cuts_line(reader, out, size);
+}
+
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
