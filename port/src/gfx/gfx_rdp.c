@@ -2785,6 +2785,8 @@ static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and fla
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
+static s32 sTrackBakeSwitch;  // DKR_TRACK_BAKE (P55 S1), see track_bake
+static s32 sTrackBakeCheck;   // DKR_TRACK_BAKE_CHECK: 1 the self-check, 2 the check broken on purpose (rule K6)
 static s32 sNativeGpuSwitch;   // DKR_NATIVE_GPU (core balance 2b-B): native kart (1) and object (2) draws, GPU maths
 static u32 sNGpuStats[3];      // native_gpu_draw's draws by the GPU, left out, left to the CPU
 static s32 sKartCounts;        // DKR_KART_COUNTS (P65 rank 2): the native kart batches counted (kart_count)
@@ -2889,6 +2891,9 @@ static COLD void read_switches_now(void) {
     // proposals/3ds-switch-bench-b2096b8-o3ds-results.md). The frame's fills are waited for with it (DKR_FILL_WAIT,
     // gfx_c3d.c), the Jungle Falls tunnel fix (T1). Off on a New 3DS, which is GPU-bound.
     sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0;
+    // P55 S1 (track_bake): the native track's meshes made during the level load, not the first time each is seen.
+    sTrackBakeSwitch = plat_switch("DKR_TRACK_BAKE", 0) != 0;
+    sTrackBakeCheck = plat_switch("DKR_TRACK_BAKE_CHECK", 0);
     // Karts' vertex maths on the GPU (1) is the Old 3DS default together with raw register words (DKR_RAW_REGS): bench
     // run 50 on 62ac36e, game core -4.3 ms and renderer core -3.6 ms. Alone it only moves the work to the renderer's
     // core; 2 (objects too) was no better. Read the same way in gfx_c3d.c (sTransformWanted) and host/gfx_soft.c.
@@ -4011,7 +4016,9 @@ typedef struct TrackMesh {
     u8 numVerts, failed;
     u8 numRuns;
     u8 changed; // The game changes these triangles in place (port_tris_changed): left to the walk for the level
+    u8 baked;   // Made by track_bake during the level load
     s16 boxMin[3], boxMax[3];
+    u32 hash; // DKR_TRACK_BAKE_CHECK: mesh_hash of the triangles and vertices it was made from
     void *mesh;
     MeshRun runs[MESH_MAX_RUNS];
 } TrackMesh;
@@ -4031,6 +4038,14 @@ static s32 sTrackBucketCount;
 static TrackBucket sTrackLate[TRACK_LATE]; // In order, one part each unless merged with the one before
 static s32 sTrackLateCount;
 static u32 sTrackStats[5]; // Batches drawn by the GPU, left out, left to the CPU, meshes made, draws
+static u32 sTrackBakedLoads = ~0u; // The gPortLevelLoads track_bake made this table for (~0: none)
+static u32 sTrisLevelNop = ~0u;    // PORT_NATIVE_OPS: the level port_nop_static_forget last ran for
+static s32 sTrackBaking;           // track_bake is filling the table
+static u32 sTrackBakeTrisHead;     // gPortTrisHead when track_bake began (native_tris_take reads the ring from it)
+static u32 sTrackNoRoom;           // Meshes left to the walk for the level: the arena was full (baked table)
+static u32 sTrackAfterLoad;        // Meshes made after the bake, in this level (DKR_TRACK_BAKE_CHECK's log)
+static u32 sTrackRemade;           // Of those, made again because the batch's first words changed (stale)
+static u32 sTrackCheckCursor, sTrackCheckCompared, sTrackCheckDiffer, sTrackCheckLogged;
 
 /* Whether a native track bucket still waiting to be drawn (track_flush) uses either texture (texture_in_use). */
 static s32 track_buckets_use(const GfxTexture *a, const GfxTexture *b) {
@@ -4066,6 +4081,9 @@ static void track_tris_mark(const void *tris) {
     for (i = 0; i < TRACK_PROBES; i++) {
         TrackMesh *c = &sTrackMeshes[(h + i) & (TRACK_TABLE_SIZE - 1)];
         if (c->tris == tris) {
+            if (UNLIKELY(sTrackBakeCheck == 2) && c->baked) {
+                return; // Rule K6: the check broken on purpose (this invalidation dropped), which it must report
+            }
             if (c->mesh != NULL) {
                 gfx_split_mesh_free(c->mesh);
                 c->mesh = NULL;
@@ -4226,6 +4244,9 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
                 return c->failed ? NULL : c;
             }
             e = c; // Stale (memory reused): made again
+            if (!sTrackBaking && sTrackBakedLoads == gPortLevelLoads) {
+                sTrackRemade++; // (counted again below as made after the load)
+            }
             if (e->mesh != NULL) {
                 gfx_split_mesh_free(e->mesh);
                 e->mesh = NULL;
@@ -4268,9 +4289,22 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
     }
     e->mesh = gfxb_mesh_create(sModelVerts, corners, sModelIndices, count * 3);
     if (e->mesh == NULL) {
+        if (sTrackBaking || sTrackBakedLoads == gPortLevelLoads) {
+            // A baked table: out of room is left to the walk for the level (failed), not tried again at every
+            // sight, each try a mesh_build for nothing (a lead for #367's long Windmill frames).
+            sTrackNoRoom++;
+            return NULL;
+        }
         e->tris = NULL; // Out of room: tried again later
         sTrackMeshCount--;
         return NULL;
+    }
+    e->baked = (u8) sTrackBaking;
+    if (sTrackBakeCheck) {
+        e->hash = mesh_hash(tris, count, src, numVerts);
+    }
+    if (!sTrackBaking && sTrackBakedLoads == gPortLevelLoads) {
+        sTrackAfterLoad++;
     }
     sTrackBytes += corners * sizeof(GfxModelVertex) + count * 3 * sizeof(u16);
     e->numRuns = built.numRuns;
@@ -4288,6 +4322,128 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
     e->failed = FALSE;
     sTrackStats[3]++;
     return e;
+}
+
+/*
+ * Roadmap P55 S1 (DKR_TRACK_BAKE, proposals/3ds-track-bake-s1-plan.md): the native track's meshes made once, during the
+ * level load, instead of the first time each batch is seen (P64 candidate 1: until now every batch's mesh_build and
+ * arena copy landed in the race's first frames, the race start's hitch, and again each time a new part of the track
+ * came into view). Run on the renderer thread between frames (port_gfx_textures_between_frames at the load's end,
+ * where every frame handed over is done and the game thread waits), or at the first frame of a level whose load
+ * didn't (a background load from the tracks menu, DKR_LOAD_PREWARM 0). Every batch render_level_segment can draw is
+ * made, keyed exactly as native_track looks them up (the batch's triangles), so the walk then only finds them: each
+ * frame a batch costs its box test and an index range in a bucket (track_part), never a build. The vertices stay
+ * s16 world positions in the one mesh arena; the camera's whole-number offset (transform.v.pica camoff) keeps the
+ * GPU's float24 maths exact. With a baked table a mesh the arena has no room for is left to the walk for the level
+ * (failed), instead of being built and thrown away again at every sight.
+ *
+ * DKR_TRACK_BAKE_CHECK=1 (self-check): each mesh keeps the hash of the triangles and vertices it was made from; every
+ * frame 16 of them (in turn) are hashed again, and any that differ (the game changed a batch in place without
+ * port_tris_changed, so the GPU draws an old copy) are counted and logged ("track bake check: ..."). It also counts
+ * the meshes made after the bake (batches it missed). DKR_TRACK_BAKE_CHECK=2 breaks it on purpose (rule K6): the
+ * invalidation of a baked batch the game scrolls (track_tris_mark) is dropped, which the check must report.
+ */
+#define TRACK_CHECK_PER_FRAME 16
+#define BAKE_RENDER_HIDDEN (1 << 8) // textures_sprites.h RENDER_HIDDEN (not included here)
+
+static COLD void track_bake(const char *when) {
+    unsigned long long start;
+    u32 made0, batches = 0, left = 0, seg, i;
+    if (!plat_switch("DKR_TRACK_BAKE", 0) || !plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) ||
+        gCurrentLevelModel == NULL || sTrackBakedLoads == gPortLevelLoads || !gfxb_gpu_transform()) {
+        return;
+    }
+    start = plat_time_ns();
+    sTrackBakeCheck = plat_switch("DKR_TRACK_BAKE_CHECK", 0);
+    if (sTrackMeshCount > 0) {
+        gfx_split_drain(); // Frees go through the backend's frame slot (as track_frame_start)
+        track_drop_all();
+    }
+    if (sModelCount > 0) {
+        flush_model_batch(); // Never expected between frames; mesh_build works in the model batch's arrays
+    }
+    // The changes the game reports from here on reach the baked meshes (native_tris_take); those before are in them.
+    sTrackBakeTrisHead = gPortTrisHead;
+    __sync_synchronize();
+    made0 = sTrackStats[3];
+    sTrackNoRoom = 0;
+    sTrackAfterLoad = 0;
+    sTrackRemade = 0;
+    sTrackCheckCursor = sTrackCheckCompared = sTrackCheckDiffer = sTrackCheckLogged = 0;
+    sTrackBaking = TRUE;
+    for (seg = 0; seg < (u32) gCurrentLevelModel->numberOfSegments; seg++) {
+        const LevelModelSegment *segment = &gCurrentLevelModel->segments[seg];
+        if (segment->batches == NULL) {
+            continue;
+        }
+        for (i = 0; i < (u32) segment->numberOfBatches; i++) {
+            const TriangleBatchInfo *b = &segment->batches[i];
+            s32 numVerts = (b + 1)->verticesOffset - b->verticesOffset;
+            s32 count = (b + 1)->facesOffset - b->facesOffset;
+            const Vertex *src;
+            const Triangle *tris;
+            // As render_level_segment: hidden batches are never drawn. Water is made too, even where the block makes
+            // waves: render_level_segment still draws it when waves_block_hq says the block is drawn without them.
+            if (b->flags & BAKE_RENDER_HIDDEN) {
+                continue;
+            }
+            if (count <= 0 || numVerts <= 0) {
+                continue;
+            }
+            // The pointers as the batch's commands carry them (render_level_segment's OS_K0_TO_PHYSICAL, seg_addr).
+            src = (const Vertex *) seg_addr(OS_K0_TO_PHYSICAL(&segment->vertices[b->verticesOffset]));
+            tris = (const Triangle *) seg_addr(OS_K0_TO_PHYSICAL(&segment->triangles[b->facesOffset]));
+            batches++;
+            if (track_find(tris, count, src, numVerts) == NULL) {
+                left++;
+            }
+        }
+    }
+    sTrackBaking = FALSE;
+    sTrackBakedLoads = gPortLevelLoads;
+    sTrackLoads = gPortLevelLoads; // track_frame_start: this level's table, not to be emptied
+    plat_log("track bake (%s, level load %u): %u batches, %u meshes made, %u left to the walk (%u out of room), "
+             "%u KB in %u meshes, %.1f ms", when, (unsigned) gPortLevelLoads, (unsigned) batches,
+             (unsigned) (sTrackStats[3] - made0), (unsigned) left, (unsigned) sTrackNoRoom,
+             (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (plat_time_ns() - start) / 1e6);
+}
+
+/* Called at the end of a level load, on the renderer thread between frames (port_gfx_textures_between_frames). */
+static void track_bake_at_load(void) {
+    track_bake("during the load");
+}
+
+/* DKR_TRACK_BAKE_CHECK, at a frame's start: TRACK_CHECK_PER_FRAME baked meshes hashed again (see track_bake). */
+static NOINLINE COLD void track_bake_check_frame(void) {
+    u32 looked, compared = 0, differ = 0;
+    for (looked = 0; looked < TRACK_TABLE_SIZE && compared < TRACK_CHECK_PER_FRAME; looked++) {
+        TrackMesh *e = &sTrackMeshes[sTrackCheckCursor];
+        sTrackCheckCursor = (sTrackCheckCursor + 1) & (TRACK_TABLE_SIZE - 1);
+        if (e->tris == NULL || e->mesh == NULL || e->changed || e->failed || e->hash == 0) {
+            continue;
+        }
+        compared++;
+        if (mesh_hash(e->tris, e->numTris, e->src, e->numVerts) != e->hash) {
+            differ++;
+            if (sTrackCheckLogged < 4) {
+                sTrackCheckLogged++;
+                plat_log("track bake check: a %s mesh differs from its batch (%u triangles, %u vertices, frame %d)",
+                         e->baked ? "baked" : "later", (unsigned) e->numTris, (unsigned) e->numVerts,
+                         (int) sFrameCount);
+            }
+            e->hash = 0; // Reported once
+        }
+    }
+    if (compared > 0) {
+        sTrackCheckCompared += compared;
+        sTrackCheckDiffer += differ;
+        plat_check_report("track bake", differ != 0);
+    }
+    if (sFrameCount % 600 == 0) {
+        plat_log("track bake check: %u compared, %u differ, %u meshes made after the load (%u of them made again: "
+                 "their first words changed)", (unsigned) sTrackCheckCompared, (unsigned) sTrackCheckDiffer,
+                 (unsigned) sTrackAfterLoad, (unsigned) sTrackRemade);
+    }
 }
 
 /*
@@ -4532,17 +4688,30 @@ static COLD void frame_env_switches(void) {
 }
 
 static void track_frame_start(void) {
+    u32 baked = sTrackBakedLoads == gPortLevelLoads; // track_bake made this level's table during its load
     sNativeTrack = sNativeTrackSwitch && sGpuTransform;
-    if (sTrackMeshCount > 0 && (!sNativeTrack || sTrackLoads != gPortLevelLoads)) {
+    if (sTrackMeshCount > 0 && (!sNativeTrack || (sTrackLoads != gPortLevelLoads && !baked))) {
         gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
         track_drop_all();
+        if (!sNativeTrack) {
+            sTrackBakedLoads = ~0u;
+            baked = FALSE;
+        }
     }
 #ifdef PORT_NATIVE_OPS
-    if (sTrackLoads != gPortLevelLoads) {
+    if (sTrisLevelNop != gPortLevelLoads) {
+        sTrisLevelNop = gPortLevelLoads;
         port_nop_static_forget();
     }
 #endif
+    if (sTrackBakeSwitch && sNativeTrack && !baked && sTrackLoads != gPortLevelLoads) {
+        track_bake("at the level's first frame"); // Its load didn't (a background load): the first frame does it
+        baked = sTrackBakedLoads == gPortLevelLoads;
+    }
     sTrackLoads = gPortLevelLoads;
+    if (UNLIKELY(sTrackBakeCheck) && baked) {
+        track_bake_check_frame();
+    }
     if (UNLIKELY(sOpCountOn < 0 || sCensusOn < 0)) {
         frame_env_switches();
     }
@@ -5116,6 +5285,20 @@ static NOINLINE void native_tris_take(void) {
     if (sTrisLevel != gPortLevelLoads || sTrisEpochSeen != gPortTrisEpoch || head - start > PORT_TRIS_RING) {
         if (sTrisLevel == gPortLevelLoads && head - start > PORT_TRIS_RING) {
             track_drop_all(); // Which track batches changed is lost: all are made again from what they hold now
+        } else if (sTrackBakedLoads == gPortLevelLoads) {
+            // P55 S1: a table baked during the load (track_bake) was made from the triangles as they were then, so the
+            // changes reported since (texture scrolls in the level's first game frames, before its first walked
+            // frame) must still reach it, or it keeps drawing the old ones (found by DKR_TRACK_BAKE_CHECK). On a new
+            // level the ring is read from where it stood at the bake; with only the epoch changed, from the tail.
+            u32 from = sTrisLevel != gPortLevelLoads ? sTrackBakeTrisHead : start;
+            if (head - from > PORT_TRIS_RING) {
+                track_drop_all(); // Lost: made again from what they hold now, at first sight
+                sTrackBakedLoads = ~0u;
+            } else {
+                for (; from != head; from++) {
+                    track_tris_mark((const Triangle *) gPortTrisRing[from % PORT_TRIS_RING]);
+                }
+            }
         }
         sTrisLevel = gPortLevelLoads;
         sTrisEpochSeen = gPortTrisEpoch;
@@ -10018,6 +10201,7 @@ void port_gfx_textures_between_frames(int drain) {
         if (sLoadDecoded + sLoadFreed >= 16) {
             swept = sweep_stale_textures();
         }
+        track_bake_at_load(); // P55 S1 (DKR_TRACK_BAKE): the native track's meshes, while the screen is black
         sweepNs = plat_time_ns() - mark;
         if (sLoadDecoded + sLoadFreed > 0) {
             plat_log("textures before the first frame: %d decoded, %d freed, %d stale dropped in %.1f ms during the "
