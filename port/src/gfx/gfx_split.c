@@ -51,6 +51,18 @@ typedef struct SplitRecord {
     unsigned int op, bytes; // bytes: of the whole record, header included, a multiple of 8
 } SplitRecord;
 
+/* OP_START's payload: the walk's DKR_SPLIT_LINES settings for the backend, in step with the records. */
+typedef struct SplitStart {
+    int lines, check, reset; // reset: the check's counts start again with this record
+    unsigned int publishBytes;
+} SplitStart;
+
+/* OP_END's payload: the frame's step, and (DKR_SPLIT_LINES_CHECK) the walk's record count and sum up to this record. */
+typedef struct SplitEnd {
+    int step;
+    unsigned int records, sum;
+} SplitEnd;
+
 typedef struct SplitClear {
     short rect[4];
     unsigned char rgba[4];
@@ -104,17 +116,49 @@ static void (*sCloseFn)(void);
 static void (*sKeepFn)(void *);
 
 static unsigned char *sRing;
-static volatile unsigned int sHead, sTail; // Bytes written and read so far (they wrap together)
-static PlatSem *sData;                      // A record (or a wake-up) for the backend thread (the owner's)
+/*
+ * P66 DKR_SPLIT_LINES (proposals/3ds-perf-guide-audit.md 1.1): the counters the two cores share sit on 32-byte cache
+ * lines of their own (the ARM11's line), so a write by one core no longer takes the other's line away from it:
+ * the walk's line holds what the walk writes and the backend reads (the head it hands over, its waiting flag), the
+ * backend's line what the backend writes and the walk reads (the tail, its idle flag), and the walk's own counters
+ * (its write position, its copy of the tail) a third line that the backend never touches. The layout is always so;
+ * the switch changes how often each side writes and reads the other's line (see commit and backend_thread).
+ */
+typedef struct __attribute__((aligned(32))) {
+    volatile unsigned int head; // Bytes handed over to the backend so far (the head and tail wrap together)
+    volatile int walkWaiting;   // The walk waits on sSpace for room (or for the ring to empty)
+} SplitWalkShared;
+typedef struct __attribute__((aligned(32))) {
+    volatile unsigned int tail; // Bytes the backend is done with
+    volatile int backendIdle;   // The backend thread caught up and waits (or is about to) on sData
+} SplitBackendShared;
+typedef struct __attribute__((aligned(32))) {
+    unsigned int head;       // Bytes written, handed over or not (sHead lags it while DKR_SPLIT_LINES is on)
+    unsigned int cachedTail; // The tail when the walk last read it (DKR_SPLIT_LINES: read again only when short of room)
+    unsigned int refBytes;   // P63's by-pointer bytes since the head was last handed over (count toward handing over)
+    unsigned int records, sum; // DKR_SPLIT_LINES_CHECK: records written and a sum of their ops and sizes
+} SplitWalkOwn;
+static SplitWalkShared sWalkShared;
+static SplitBackendShared sBackendShared;
+static SplitWalkOwn sWalk;
+#define sHead sWalkShared.head
+#define sTail sBackendShared.tail
+#define sWalkWaiting sWalkShared.walkWaiting
+#define sBackendIdle sBackendShared.backendIdle
+static int sLines;                // DKR_SPLIT_LINES (read at each frame's start on the walk's thread)
+static unsigned int sPublishBytes; // DKR_SPLIT_PUBLISH_KB: unhanded bytes that make the walk hand the head over
+static int sLinesCheck;           // DKR_SPLIT_LINES_CHECK: 1 the check, 2 and 3 broken on purpose (rule K6)
+static int sLinesBreakArmed;      // The break (modes 2 and 3) happens once
+static volatile unsigned int sLinesFrames, sLinesDiffer; // The backend's frames compared and those that differed
+static unsigned int sLinesUnpublished, sLinesDifferSeen, sLinesLoggedFrame, sLinesFrame;
+static PlatSem *sData;                     // A record (or a wake-up) for the backend thread (the owner's)
 static PlatSem *sDataSems[2];               // Each backend thread's: [0] on the game's core, [1] on the system core
 static volatile int sOwner;                 // Which backend thread takes the queue (gfx_split_frame_start)
 static volatile int sParked[2];             // That thread saw it isn't the owner and waits to be one again
 static int sMade[2];                        // That thread exists
 static PlatSem *sSpace;                     // The backend thread moved on while the walk waited for it
 static PlatSem *sFrameSlots;                // Frames the walk may still start ahead of the backend
-static volatile int sWalkWaiting;           // The walk waits on sSpace for room (or for the ring to empty)
 static volatile int sStarted, sActive;      // The backend thread exists; this frame's calls are queued
-static volatile int sBackendIdle;           // The backend thread caught up and waits (or is about to) on sData
 static unsigned int sWakeBytes;             // Queued bytes that wake an idle backend thread (DKR_SPLIT_WAKE_KB)
 static int sFailed;
 
@@ -231,12 +275,59 @@ static inline unsigned int round8(unsigned int n) {
     return (n + 7u) & ~7u;
 }
 
+/* DKR_SPLIT_LINES_CHECK: the record sum both sides keep (an op and a size per record). */
+static inline unsigned int lines_sum(unsigned int sum, unsigned int op, unsigned int bytes) {
+    return sum * 31u + (op << 24) + bytes;
+}
+
+/*
+ * Hands what the walk has written over to the backend thread: the record bytes reach memory before the head that
+ * covers them, and the head before the walk looks at the backend's idle flag (the backend sets the flag before it
+ * looks at the head, so one of them sees the other).
+ */
+static inline void head_publish(void) {
+    __sync_synchronize(); // The records are written before the head moves past them.
+    sHead = sWalk.head;
+    sWalk.refBytes = 0;
+    __sync_synchronize();
+}
+
+/*
+ * Waking the backend is a system call on both cores, and the backend, being quicker, would sleep and be woken for
+ * nearly every draw; so an idle backend is woken only once sWakeBytes are queued, or at the frame's end
+ * (DKR_SPLIT_WAKE_KB=0 = every record, as before).
+ */
+/* P63: bytes the walk's OP_INDEXED_REF records hand over by pointer since the backend was last woken, counted as
+ * queued for the wake-up (a by-pointer draw would otherwise leave the backend asleep, and the walk's blocks unreturned,
+ * until 16 KB of other records came). */
+static unsigned int sRefWakeBytes;
+
+static inline void wake_backend(unsigned int op) {
+    if (sBackendIdle && (op == OP_END || sHead - sTail + sRefWakeBytes >= sWakeBytes)) {
+        sBackendIdle = 0;
+        sRefWakeBytes = 0;
+        plat_sem_post(sData);
+    }
+}
+
 /* Waits until the ring has room for bytes more (SPLIT_RING_BYTES: until it is empty). */
 static void wait_for_room(unsigned int bytes) {
-    while (SPLIT_RING_BYTES - (sHead - sTail) < bytes) {
+    if (sLines && SPLIT_RING_BYTES - (sWalk.head - sWalk.cachedTail) >= bytes) {
+        return; // DKR_SPLIT_LINES: room by the tail last read, without reading the backend's line
+    }
+    sWalk.cachedTail = sTail;
+    if (SPLIT_RING_BYTES - (sWalk.head - sWalk.cachedTail) >= bytes) {
+        return;
+    }
+    if (sHead != sWalk.head) {
+        // The backend can only make room out of what it was given: everything goes over before the walk waits.
+        head_publish();
+        wake_backend(OP_END);
+    }
+    while (SPLIT_RING_BYTES - (sWalk.head - sTail) < bytes) {
         sWalkWaiting = 1;
         __sync_synchronize();
-        if (SPLIT_RING_BYTES - (sHead - sTail) >= bytes) {
+        if (SPLIT_RING_BYTES - (sWalk.head - sTail) >= bytes) {
             sWalkWaiting = 0;
             break;
         }
@@ -248,12 +339,13 @@ static void wait_for_room(unsigned int bytes) {
             sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
         }
     }
+    sWalk.cachedTail = sTail;
 }
 
 /* Room for a record of payload bytes, at a position that doesn't wrap; its payload. */
 static void *reserve(unsigned int op, unsigned int payload) {
     unsigned int bytes = sizeof(SplitRecord) + round8(payload);
-    unsigned int at = sHead % SPLIT_RING_BYTES;
+    unsigned int at = sWalk.head % SPLIT_RING_BYTES;
     SplitRecord *rec;
     if (at + bytes > SPLIT_RING_BYTES) {
         unsigned int rest = SPLIT_RING_BYTES - at;
@@ -261,8 +353,15 @@ static void *reserve(unsigned int op, unsigned int payload) {
         rec = (SplitRecord *) (sRing + at);
         rec->op = OP_WRAP;
         rec->bytes = rest;
-        __sync_synchronize();
-        sHead += rest;
+        sWalk.head += rest;
+        if (sLinesCheck) {
+            sWalk.records++;
+            sWalk.sum = lines_sum(sWalk.sum, OP_WRAP, rest);
+        }
+        if (!sLines) {
+            __sync_synchronize();
+            sHead = sWalk.head; // (DKR_SPLIT_LINES: handed over with the records after it)
+        }
         at = 0;
     }
     wait_for_room(bytes);
@@ -273,32 +372,51 @@ static void *reserve(unsigned int op, unsigned int payload) {
 }
 
 /*
- * Hands the record reserve gave over to the backend thread. Waking the backend is a system call on both cores, and
- * the backend, being quicker, would sleep and be woken for nearly every draw; so an idle backend is woken only once
- * sWakeBytes are queued, or at the frame's end (DKR_SPLIT_WAKE_KB=0 = every record, as before). The head is moved
- * before the flag is read, and the backend sets the flag before it looks at the head, so one of them sees the other.
+ * Hands the record reserve gave over to the backend thread. With DKR_SPLIT_LINES the head is handed over (a barrier,
+ * the store to the walk's shared line and a look at the backend's) only once DKR_SPLIT_PUBLISH_KB are written, at the
+ * frame's end, before the walk waits for room (wait_for_room) and on a drain or kick; else for every record, as before.
  */
-/* P63: bytes the walk's OP_INDEXED_REF records hand over by pointer since the backend was last woken, counted as
- * queued for the wake-up (a by-pointer draw would otherwise leave the backend asleep, and the walk's blocks unreturned,
- * until 16 KB of other records came). */
-static unsigned int sRefWakeBytes;
-
 static void commit(void *payload) {
     SplitRecord *rec = (SplitRecord *) payload - 1;
     unsigned int op = rec->op;
-    __sync_synchronize(); // The record is written before the head moves past it.
-    sHead += rec->bytes;
-    __sync_synchronize();
-    if (sBackendIdle && (op == OP_END || sHead - sTail + sRefWakeBytes >= sWakeBytes)) {
-        sBackendIdle = 0;
-        sRefWakeBytes = 0;
-        plat_sem_post(sData);
+    if (sLinesCheck) {
+        if (op == OP_END) {
+            SplitEnd *e = payload;
+            e->records = sWalk.records; // The records before this one
+            e->sum = sWalk.sum;
+        }
+        sWalk.records++;
+        sWalk.sum = lines_sum(sWalk.sum, op, rec->bytes);
+        if (sLinesBreakArmed && sLinesCheck == 2 && (op == OP_TRIANGLES || op == OP_INDEXED)) {
+            // Rule K6's break (mode 2): a draw counted but lost, once (the next record is written over it).
+            sLinesBreakArmed = 0;
+            return;
+        }
     }
+    sWalk.head += rec->bytes;
+    if (sLines && op != OP_END && sWalk.head - sHead + sWalk.refBytes < sPublishBytes) {
+        return;
+    }
+    if (sLines && op == OP_END && sLinesBreakArmed && sLinesCheck == 3) {
+        sLinesBreakArmed = 0; // Rule K6's break (mode 3): a frame's end not handed over, once
+        return;
+    }
+    head_publish();
+    wake_backend(op);
 }
+
+/* The backend's DKR_SPLIT_LINES settings (from the OP_START records) and the check's records run and their sum: shared
+ * by both backend threads, as the queue (and the counting) is handed from one to the other (choose_backend). */
+static int sBackendLines, sBackendCheck;
+static unsigned int sBackendPublishBytes, sBackendRecords, sBackendSum;
 
 static void backend_thread(void *arg) {
     int self = (int) (long) arg;
+    // P66 DKR_SPLIT_LINES (as the walk's OP_START records set it): the backend reads the walk's head again only when it
+    // has run everything up to the copy it last read, and hands its tail back once DKR_SPLIT_PUBLISH_KB are done, at a
+    // frame's end, when the walk waits, and before it reads the head again or sleeps; else both for every record.
     for (;;) {
+        unsigned int tail, head;
         if (sOwner != self) {
             // Another backend thread has the queue (it was handed over with the queue empty): wait to have it again.
             sParked[self] = 1;
@@ -316,14 +434,16 @@ static void backend_thread(void *arg) {
             sBackendWakes++;
         }
         sBackendIdle = 0;
-        while (sTail != sHead) {
+        tail = sTail; // (the tail is handed back before the backend sleeps or reads the head again)
+        while (tail != (head = sHead)) {
+          __sync_synchronize(); // The records are read after the head that covers them.
+          do {
             SplitRecord *rec;
             unsigned int op, bytes;
             unsigned long long mixStart;
             int mixKind = MIX_OTHER;
             void *p;
-            __sync_synchronize(); // The record is read after the head that covers it.
-            rec = (SplitRecord *) (sRing + sTail % SPLIT_RING_BYTES);
+            rec = (SplitRecord *) (sRing + tail % SPLIT_RING_BYTES);
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
@@ -333,10 +453,10 @@ static void backend_thread(void *arg) {
                 gGfxbModelSplitOn = sMixOn; // P61 M3: the model draws' parts too
             }
             mixStart = sMixOn ? plat_ticks() : 0;
-            if (sBackendPrefetch && sTail + bytes != sHead) {
+            if (sBackendPrefetch && tail + bytes != head) {
                 // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
                 // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
-                const unsigned char *next = (const unsigned char *) sRing + (sTail + bytes) % SPLIT_RING_BYTES;
+                const unsigned char *next = (const unsigned char *) sRing + (tail + bytes) % SPLIT_RING_BYTES;
                 int k;
                 for (k = 0; k < 256; k += 32) {
                     __builtin_prefetch(next + k);
@@ -354,7 +474,16 @@ static void backend_thread(void *arg) {
                 mixKind = mix_kind(op, p); // (before the record runs: an OP_CALL's payload is the walk's after)
             }
             switch (op) {
-                case OP_START:
+                case OP_START: {
+                    const SplitStart *st = p;
+                    sBackendLines = st->lines;
+                    sBackendCheck = st->check;
+                    sBackendPublishBytes = st->publishBytes;
+                    if (st->reset) {
+                        sBackendRecords = 0;
+                        sBackendSum = 0;
+                    }
+                }
                     sBackendPrefetch = plat_switch("DKR_BACKEND_PREFETCH", plat_old_3ds()) != 0;
                     sBackendFrameStart = plat_time_ns();
                     sBackendWaitNs = 0;
@@ -362,7 +491,16 @@ static void backend_thread(void *arg) {
                     break;
                 case OP_END: {
                     unsigned long long now;
-                    plat_set_frame_step(*(int *) p);
+                    const SplitEnd *e = p;
+                    if (sBackendCheck) {
+                        if (e->records != sBackendRecords || e->sum != sBackendSum) {
+                            sLinesDiffer++;
+                            sBackendRecords = e->records; // In step again, so one loss counts once
+                            sBackendSum = e->sum;
+                        }
+                        sLinesFrames++;
+                    }
+                    plat_set_frame_step(((SplitEnd *) p)->step);
                     gfxb_end_frame();
                     now = plat_time_ns();
                     sBackendBusyNs += now - sBackendFrameStart - sBackendWaitNs;
@@ -453,9 +591,16 @@ static void backend_thread(void *arg) {
                     sMixOn = 0;
                 }
             }
-            // Done with the record before the walk may write over it (op and bytes were read before, as locals).
-            __sync_synchronize();
-            sTail += bytes;
+            if (sBackendCheck) {
+                sBackendRecords++;
+                sBackendSum = lines_sum(sBackendSum, op, bytes);
+            }
+            tail += bytes;
+            if (!sBackendLines || tail == head || op == OP_END || tail - sTail >= sBackendPublishBytes || sWalkWaiting) {
+                // Done with the records before the walk may write over them (op and bytes were read before, as locals).
+                __sync_synchronize();
+                sTail = tail;
+            }
             if (op == OP_END) {
                 plat_sem_post(sFrameSlots);
             }
@@ -463,6 +608,7 @@ static void backend_thread(void *arg) {
                 sWalkWaiting = 0;
                 plat_sem_post(sSpace);
             }
+          } while (sBackendLines && tail != head);
         }
         if (sWalkWaiting) {
             sWalkWaiting = 0;
@@ -554,7 +700,7 @@ void gfx_split_drain(void) {
         commit(c);
     }
     sDrains++;
-    if (sStarted && sHead != sTail) {
+    if (sStarted && sWalk.head != sTail) {
         unsigned long long start = plat_time_ns();
         wait_for_room(SPLIT_RING_BYTES);
         sDrainNs += plat_time_ns() - start;
@@ -564,6 +710,9 @@ void gfx_split_drain(void) {
 /* P53: between frames (a level load's texture uploads), wakes an idle backend thread for what is queued, which
  * commit would otherwise leave until 16 KB or a frame's end are queued. Records outside a frame are run in order. */
 void gfx_split_kick(void) {
+    if (sStarted && sHead != sWalk.head) {
+        head_publish(); // DKR_SPLIT_LINES: what the walk wrote and hasn't handed over yet
+    }
     if (sStarted && sBackendIdle && sHead != sTail) {
         sBackendIdle = 0;
         plat_sem_post(sData);
@@ -571,6 +720,42 @@ void gfx_split_kick(void) {
 }
 
 static int sCoresHeld; // A solo frame (holdCores) keeps the system core's share raised
+
+/*
+ * P66 DKR_SPLIT_LINES at each queued frame's start (the walk's thread; the backend reads its own copy at OP_START):
+ * the switches, and DKR_SPLIT_LINES_CHECK's result for the race's checks (chk cell "split lines") and a log line every
+ * 600 frames. The check: the backend counts the records it runs and sums their ops and sizes, and at each OP_END
+ * compares them with the walk's, which the record carries (a lost, torn or doubled record differs); and the walk
+ * counts frame ends it left without handing over (the backend would draw that frame late).
+ */
+static int sLinesReset;
+
+static void lines_frame_start(void) {
+    int check = plat_switch("DKR_SPLIT_LINES_CHECK", 0);
+    unsigned int differ;
+    if (check != sLinesCheck) {
+        sLinesBreakArmed = check >= 2;
+        sLinesReset = check != 0 && sLinesCheck == 0; // Both sides start counting at this frame's OP_START
+        sLinesCheck = check;
+    }
+    sLines = check != 0 || plat_switch("DKR_SPLIT_LINES", 0) != 0;
+    sPublishBytes = (unsigned int) plat_switch("DKR_SPLIT_PUBLISH_KB", 2) * 1024u;
+    if (!sLinesCheck) {
+        return;
+    }
+    differ = sLinesDiffer;
+    plat_check_report("split lines", differ + sLinesUnpublished != sLinesDifferSeen);
+    if (differ + sLinesUnpublished != 0 && sLinesDifferSeen == 0) {
+        plat_log("split lines: first difference by frame %u (%u frames differ, %u frame ends not handed over)",
+                 sLinesFrame, differ, sLinesUnpublished);
+    }
+    sLinesDifferSeen = differ + sLinesUnpublished;
+    if (sLinesFrame++ - sLinesLoggedFrame >= 600) {
+        sLinesLoggedFrame = sLinesFrame;
+        plat_log("split lines: %u frames compared, %u differ, %u frame ends not handed over (publish every %u KB)",
+                 sLinesFrames, differ, sLinesUnpublished, sPublishBytes / 1024u);
+    }
+}
 
 int gfx_split_frame_start(int direct, int holdCores) {
     int want = !direct && plat_switch("DKR_SPLIT_RENDER", 1) != 0;
@@ -612,26 +797,42 @@ int gfx_split_frame_start(int direct, int holdCores) {
     choose_backend();
     plat_split_backend_priority();
     sWakeBytes = (unsigned int) plat_switch("DKR_SPLIT_WAKE_KB", 16) * 1024u;
+    lines_frame_start();
     if (!plat_sem_try_wait(sFrameSlots)) {
         unsigned long long start = plat_time_ns();
         plat_sem_wait(sFrameSlots);
         sWalkWaitNs += plat_time_ns() - start;
             sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
     }
-    commit(reserve(OP_START, 0));
+    {
+        SplitStart *st = reserve(OP_START, sizeof(SplitStart));
+        st->lines = sLines;
+        st->check = sLinesCheck != 0;
+        st->reset = sLinesReset;
+        st->publishBytes = sPublishBytes;
+        if (sLinesReset) {
+            sWalk.records = 0; // (after a wrap reserve may have written, before this record is counted)
+            sWalk.sum = 0;
+            sLinesReset = 0;
+        }
+        commit(st);
+    }
     gfxb_walk_frame_start(); // DKR_WALK_VERTS: the walk's copy of the frame's settings (after the start record)
     return TRUE;
 }
 
 void gfx_split_frame_end(void) {
-    int *step;
+    SplitEnd *e;
     if (!sActive) {
         gfxb_end_frame();
         return;
     }
-    step = reserve(OP_END, sizeof(int));
-    *step = plat_frame_step();
-    commit(step);
+    e = reserve(OP_END, sizeof(SplitEnd));
+    e->step = plat_frame_step();
+    commit(e);
+    if (sLinesCheck && sHead != sWalk.head) {
+        sLinesUnpublished++; // DKR_SPLIT_LINES_CHECK: the backend would not see this frame's end until more came
+    }
 }
 
 int gfx_split_active(void) {
@@ -799,7 +1000,11 @@ PLAT_HOT_GAME PLAT_NOINLINE int gfx_split_draw_indexed_ref(const GfxDrawState *s
         memcpy(r + 1, verts, (size_t) numVerts * sizeof(GfxVertex));
         memcpy((GfxVertex *) (r + 1) + numVerts, indices, (size_t) numTriangles * 3u * sizeof(short));
     }
-    sRefWakeBytes += (unsigned int) numVerts * sizeof(GfxVertex) + (unsigned int) numTriangles * 3u * sizeof(short);
+    {
+        unsigned int refBytes = (unsigned int) numVerts * sizeof(GfxVertex) + (unsigned int) numTriangles * 3u * sizeof(short);
+        sRefWakeBytes += refBytes;
+        sWalk.refBytes += refBytes; // DKR_SPLIT_LINES: the block comes back sooner if its draw is handed over sooner
+    }
     commit(r);
     *ticket = sRefTicket;
     return SPLIT_REF_QUEUED;

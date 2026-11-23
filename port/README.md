@@ -244,6 +244,15 @@ controls) work there, as do these renderer switches:
   frames. `DKR_SPLIT_REF_CHECK=1` (implies the switch) queues a copy of each handed block for the backend to compare
   before drawing (chk cells, `0 differ` expected), `=2` also fills returned blocks with 0xA5, `=3` is mode 2 broken on
   purpose (blocks returned one draw early; it must report differences))
+- `DKR_SPLIT_LINES=1` (roadmap P66, off by default: the two-core renderer's queue hands its head to the backend every
+  `DKR_SPLIT_PUBLISH_KB` (default 2; 0 = every record, as before) instead of after every record, the walk reads the
+  backend's tail only when its copy says the queue is short of room, and the backend reads the head only when it has
+  run everything it saw and hands its tail back in the same batches. The two sides' counters sit on separate 32-byte
+  cache lines in every build. Same draws, same frames. `DKR_SPLIT_LINES_CHECK=1` (implies the switch) has the backend
+  count each frame's records and sum their ops and sizes, and compare them with the walk's at the frame's end
+  (chk cells; logs `split lines: N frames compared, 0 differ, 0 frame ends not handed over` every 600 frames). `=2`
+  and `=3` are broken on purpose (rule K6): 2 loses one draw record (must report 1 differ), 3 leaves one frame's end
+  not handed over (must report 1 frame end))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)

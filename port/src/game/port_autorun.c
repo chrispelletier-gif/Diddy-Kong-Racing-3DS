@@ -397,6 +397,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "buckets handed over, walk steps timed (PMU 4, 1 lap)", { "DKR_SPLIT_REF", "DKR_WALK_STEPS", "DKR_PMU", NULL },
       0, 4, 1, 1 },
     { "buckets handed over, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_REF_CHECK", NULL, NULL }, 0, 2, 1, 1 },
+    // P66 (2026-11-22, proposals/3ds-perf-guide-audit.md 1.1): the split ring's hand-off made cheaper (DKR_SPLIT_LINES:
+    // the head is handed over every 2 KB instead of every record, each side reads the other's counter only when it
+    // must, and the tail comes back in batches; the counters already sit on separate cache lines in every build).
+    // Estimated -0.2..-1.2 ms game core, unmeasured; judged on both cores together (game core and renderer core ms,
+    // 4-track mean) against the usual races. The self-check row compares every frame's records on the backend with
+    // the walk's and must say 0 wrong (log: "split lines: N frames compared, 0 differ, 0 frame ends not handed over").
+    { "split ring hand-off in batches", { "DKR_SPLIT_LINES", NULL, NULL }, 0, 1, 0, 0 },
+    { "split ring hand-off, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_LINES_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     // P65 (2026-11-22, proposals/3ds-custom-shader-plan.md section 6, steps 0 and 1). The two walk steps rows above now
     // also split the sprite tiles' step ("sprites" set-up, "sprite corners", "sprite tris") and time billboards apart
     // ("billboard corners", "billboard tris", out of "other paths"): rank 1's uniform-table sprite shader goes ahead
