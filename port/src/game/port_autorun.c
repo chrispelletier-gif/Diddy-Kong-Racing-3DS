@@ -429,10 +429,17 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // renderer core (host model; unmeasured). Host, Whale Bay: 135 kart records a frame drawn in 91 draws. The walk
     // steps row splits "other paths" into "kart set-up", "kart corners" and "kart queue"; the self-check row (which
     // turns the batching on itself) must say 0 wrong.
-    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 0, 0 },
+    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 },
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P68 step 4 (2026-11-23, plan section 8): kart pieces whose vertices haven't changed for 4 frames are drawn from
+    // meshes kept on the GPU (DKR_KART_RESIDENT): no box loop, corner repack, index copy or vertices through the queue.
+    // Host, Whale Bay: about 40% of kart records drawn so. Est. -0.2..-0.6 ms game core (unmeasured). Alone and on top
+    // of slim runs (value 2 sets both); the self-check row must say 0 wrong (log "kart resident check").
+    { "kart pieces kept on the GPU (P68 4)", { "DKR_KART_RESIDENT", NULL, NULL }, 0, 1, 1, 0 },
+    { "kart pieces kept on the GPU + slim runs (P68 2+4)", { "DKR_KART_BATCH", "DKR_KART_RESIDENT", NULL }, 0, 2, 0, 0 },
+    { "kart pieces kept, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_RESIDENT_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     // P65 5b and rank 3 (2026-11-23, proposals/3ds-custom-shader-plan.md). First the measurement the slim track
     // shader's worth rests on: the native track's GPU time by kind again with anti-aliasing off (BENCH_AA_OFF), so a
     // quarter of the pixels. Against "GPU time by kind, native track on the GPU": the track kind's GPU ms barely

@@ -2759,6 +2759,13 @@ static s32 sKartCounts;        // DKR_KART_COUNTS (P65 rank 2): the native kart 
 static s32 sKartBatch;         // DKR_KART_BATCH (P68): 1 same-material runs as one draw, 2 slim records (native_gpu_run)
 static s32 sKartBatchCheck;    // DKR_KART_BATCH_CHECK (test builds): 1 the check, 2-4 broken on purpose (rule K6)
 static u32 sKartRunStats[4];   // Runs of 2+ records made, records merged into them, runs left (box past the band), slim
+static s32 sKartResident;      // DKR_KART_RESIDENT (P68 step 4): unchanged kart pieces drawn from meshes kept on the GPU
+static s32 sKartResidentCheck; // DKR_KART_RESIDENT_CHECK (test builds): 1 the check, 2 and 3 broken on purpose (K6)
+static u32 sKartResStats[6];   // Records drawn from kept meshes, meshes made, dropped (changed), no slot, check runs, wrong
+static void kart_res_drop_all(void);
+static u32 sKartResUsed;      // DKR_KART_RESIDENT slots handed out (in order; all are dropped together)
+static u8 *sKartResPool;      // Their shadows (and the check's copies)
+static u32 sKartResPoolUsed;
 static void kart_counts_log(void);
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 // DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
@@ -2861,6 +2868,18 @@ static COLD void read_switches_now(void) {
     }
 #endif
     sKartBatch = sKartBatch >= 2 ? 3 : sKartBatch & 1;
+    // P68 step 4: kart pieces whose vertices haven't changed for KART_RES_AFTER frames are drawn from a mesh kept on
+    // the GPU (kart_res_look). Off until an Old 3DS bench has raced it; the picture is the same either way.
+    sKartResident = plat_switch("DKR_KART_RESIDENT", 0) != 0;
+#if PLAT_DEBUG_TOOLS
+    sKartResidentCheck = plat_switch("DKR_KART_RESIDENT_CHECK", 0); // 2 and 3: broken on purpose (kart_res_check)
+    if (sKartResidentCheck != 0) {
+        sKartResident = 1;
+    }
+#endif
+    if (!sKartResident) {
+        kart_res_drop_all(); // (a bench race before had them: their arena room goes back)
+    }
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
@@ -4488,6 +4507,17 @@ static COLD void frame_logs_600(void) {
                      (unsigned) sKartRunStats[2], (unsigned) sKartRunStats[3], rec, slim);
             __builtin_memset(sKartRunStats, 0, sizeof(sKartRunStats));
         }
+        if (sKartResident) {
+            plat_log("kart pieces kept on the GPU (DKR_KART_RESIDENT): %u records drawn from kept meshes, %u meshes made, "
+                     "%u dropped (changed), %u records with no slot; %u slots, %u KB of shadows",
+                     (unsigned) sKartResStats[0], (unsigned) sKartResStats[1], (unsigned) sKartResStats[2],
+                     (unsigned) sKartResStats[3], (unsigned) sKartResUsed, (unsigned) (sKartResPoolUsed / 1024));
+            if (sKartResidentCheck) {
+                plat_log("kart resident check: %u kept draws compared, %u wrong", (unsigned) sKartResStats[4],
+                         (unsigned) sKartResStats[5]);
+            }
+            __builtin_memset(sKartResStats, 0, sizeof(sKartResStats[0]) * 4); // (the check's counts add up)
+        }
     }
     if (UNLIKELY(sKartCounts)) {
         kart_counts_log();
@@ -4860,6 +4890,8 @@ typedef struct NativeMesh {
     u16 *gpuIdx;  // P68 (DKR_KART_BATCH bit 2): the corner triples, cull group 0's then 1's (kart_gpu_idx), or NULL
     u16 gpuN[2];  // Their triangles in each group
     u8 gpuOk;     // gpuIdx holds these tables' lists (cleared when native_build remakes them)
+    u8 resGen;    // DKR_KART_RESIDENT: goes up whenever the tables change (a kept GPU mesh made before is stale)
+    u16 resSlot;  // DKR_KART_RESIDENT: its slot in sKartRes plus 1, or 0 (checked against the slot's owner)
 } __attribute__((aligned(32))) NativeMesh;
 _Static_assert(sizeof(NativeMesh) == 96 || sizeof(void *) != 4, "a NativeMesh is three 32-byte lines");
 
@@ -4897,8 +4929,11 @@ static COLD NOINLINE void native_unshare(void) {
 
 static u32 sNativeForgets; // native_forget_all's calls (native_gpu_run's guard)
 
+static void kart_res_drop_all(void);
+
 static COLD void native_forget_all(void) {
     sNativeForgets++;
+    kart_res_drop_all(); // Every slot's owner is about to be emptied
     if (sNativeShared) {
         native_unshare();
     }
@@ -5005,6 +5040,7 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     e->checkedFrame = (u32) sFrameCount;
     e->boxSrc = NULL;
     e->gpuOk = 0;
+    e->resGen++;
     if (!reuse) {
         e->gpuIdx = NULL; // (made again for capTris when needed)
     }
@@ -5052,6 +5088,7 @@ static s32 native_uv_update(NativeMesh *e, const Triangle *tris, s32 count) {
         sNativeCopies++;
     }
     e->changes = 1;
+    e->resGen++; // (corners' texture coordinates rewritten below)
     ++sNativeStamp;
     for (i = 0; i < (u32) count; i++) {
         const TexCoords *c = &tris[i].uv0;
@@ -6815,6 +6852,278 @@ static inline s32 native_find_room(s32 count) {
            sNativePoolUsed + (u32) count * (sizeof(Triangle) + 40u) + 64u <= NATIVE_POOL_LIMIT;
 }
 
+/*
+ * P68 step 4 (DKR_KART_RESIDENT, default 0): kart pieces kept on the GPU. About 40% of the GPU-maths kart batches
+ * (host, the 4 bench tracks) have vertices that haven't changed for 4 frames or more: the parts the animation doesn't
+ * move, unlit by a changing light. Each is drawn from a mesh kept in the GPU's memory (gfxb_mesh_create: its corners
+ * and both cull groups' index lists, made once), with this frame's matrix, texture factors, fog and light: no box loop,
+ * no corner repack, no index copy and no vertices through the split ring (one OP_MESHES record of parts for a run).
+ *  - A mesh (its tables, NativeMesh) gets a slot here the first time it is drawn this way: a copy of the game's
+ *    vertices it was drawn from (the shadow) with their box, and how many frames in a row they were the same.
+ *  - Each draw compares the vertices with the shadow (the same reads as the box loop). Different: the shadow is
+ *    taken again and a kept mesh is freed (gfx_split_mesh_free: in order, and only once the GPU is done with it).
+ *    The same for KART_RES_AFTER frames: the record is drawn the usual way once more, and its corners (just written)
+ *    are kept as a GPU mesh (at most KART_RES_MAKES a frame). From then on, drawn from the mesh.
+ *  - The tables changing (native_build, native_uv_update: resGen) or being forgotten (native_forget_all) drops it.
+ * A run (DKR_KART_BATCH bit 1) only merges records that are all kept or all not, so the triangle order is the same.
+ */
+#define KART_RES_SLOTS 512
+#define KART_RES_AFTER 4
+#define KART_RES_MAKES 8
+#define KART_RES_POOL (160 * 1024)
+
+typedef struct KartRes {
+    NativeMesh *owner; // NULL: free
+    Vertex *shadow;    // The game's vertices last seen (cap of them)
+    void *gpu;         // The kept mesh, or NULL
+    u32 frame;         // The frame the streak last went up in
+    u16 cap, numCorners;
+    u16 checkCorners, checkIdxCap; // Room in checkVerts and checkIdx
+    u8 total, streak, gen, pad;
+    u16 n[2];          // The kept mesh's triangles in each cull group
+    s16 boxMin[3], boxMax[3];
+    GfxModelVertex *checkVerts; // DKR_KART_RESIDENT_CHECK: the kept corners and lists as made (pool), or NULL
+    u16 *checkIdx;
+} KartRes;
+
+static KartRes sKartRes[KART_RES_SLOTS];
+static u32 sKartResMakeFrame, sKartResMakes, sKartResLevel;
+static s32 sKartResBreakArmed = TRUE; // DKR_KART_RESIDENT_CHECK 2 and 3 break once
+static u32 sKartResCheckShown;
+
+static void kart_res_drop_all(void) {
+    u32 i;
+    for (i = 0; i < sKartResUsed; i++) {
+        KartRes *s = &sKartRes[i];
+        if (s->gpu != NULL) {
+            gfx_split_mesh_free(s->gpu);
+        }
+        if (s->owner != NULL && s->owner->resSlot == i + 1) {
+            s->owner->resSlot = 0;
+        }
+    }
+    if (sKartResUsed != 0) {
+        __builtin_memset(sKartRes, 0, sizeof(sKartRes[0]) * sKartResUsed);
+    }
+    sKartResUsed = 0;
+    sKartResPoolUsed = 0;
+}
+
+static void *kart_res_alloc(u32 bytes) {
+    void *p;
+    bytes = (bytes + 7) & ~7u;
+    if (sKartResPool == NULL) {
+        sKartResPool = (u8 *) plat_malloc(KART_RES_POOL);
+        if (sKartResPool == NULL) {
+            return NULL;
+        }
+    }
+    if (sKartResPoolUsed + bytes > KART_RES_POOL) {
+        return NULL;
+    }
+    p = sKartResPool + sKartResPoolUsed;
+    sKartResPoolUsed += bytes;
+    return p;
+}
+
+static inline void kart_res_free_gpu(KartRes *s) {
+    if (s->gpu != NULL) {
+        gfx_split_mesh_free(s->gpu);
+        s->gpu = NULL;
+        sKartResStats[2]++;
+    }
+}
+
+/* The shadow taken again from vtx, with its box. FALSE when there is no room for it. */
+static COLD NOINLINE s32 kart_res_reshadow(KartRes *s, const Vertex *vtx, s32 total) {
+    s32 i, k;
+    if (total > s->cap) {
+        Vertex *p = (Vertex *) kart_res_alloc((u32) total * sizeof(Vertex));
+        if (p == NULL) {
+            s->total = 0; // Never the same as a record's: tried again at each draw, counted as no slot
+            sKartResStats[3]++;
+            return FALSE;
+        }
+        s->shadow = p;
+        s->cap = (u16) total;
+    }
+    __builtin_memcpy(s->shadow, vtx, (u32) total * sizeof(Vertex));
+    s->total = (u8) total;
+    s->boxMin[0] = s->boxMax[0] = vtx[0].x;
+    s->boxMin[1] = s->boxMax[1] = vtx[0].y;
+    s->boxMin[2] = s->boxMax[2] = vtx[0].z;
+    for (i = 1; i < total; i++) {
+        s16 c[3] = { vtx[i].x, vtx[i].y, vtx[i].z };
+        for (k = 0; k < 3; k++) {
+            s->boxMin[k] = c[k] < s->boxMin[k] ? c[k] : s->boxMin[k];
+            s->boxMax[k] = c[k] > s->boxMax[k] ? c[k] : s->boxMax[k];
+        }
+    }
+    return TRUE;
+}
+
+/*
+ * The record's slot, its vertices compared with the shadow. Returns the slot when the record is drawn from its kept
+ * mesh, else NULL; *make is set to the slot when the record, drawn the usual way, should have its corners kept
+ * (kart_res_make), else NULL.
+ */
+static NOINLINE KartRes *kart_res_look(NativeMesh *m, const Vertex *vtx, s32 total, KartRes **make) {
+    KartRes *s;
+    *make = NULL;
+    if (UNLIKELY(sKartResLevel != gPortLevelLoads)) {
+        kart_res_drop_all(); // Another level: its karts' slots start again (else old levels' fill the table)
+        sKartResLevel = gPortLevelLoads;
+    }
+    if (total <= 0 || total > MAX_VERTICES) {
+        return NULL;
+    }
+    s = m->resSlot != 0 ? &sKartRes[m->resSlot - 1] : NULL;
+    if (s == NULL || s->owner != m) {
+        if (sKartResUsed >= KART_RES_SLOTS) {
+            sKartResStats[3]++;
+            return NULL;
+        }
+        s = &sKartRes[sKartResUsed++];
+        __builtin_memset(s, 0, sizeof(*s));
+        s->owner = m;
+        s->gen = m->resGen;
+        m->resSlot = (u16) sKartResUsed;
+        kart_res_reshadow(s, vtx, total);
+        return NULL;
+    }
+    if (s->gen != m->resGen || s->total != (u8) total) {
+        kart_res_free_gpu(s);
+        s->gen = m->resGen;
+        s->streak = 0;
+        kart_res_reshadow(s, vtx, total);
+        return NULL;
+    }
+    if (__builtin_memcmp(s->shadow, vtx, (u32) total * sizeof(Vertex)) != 0) {
+        if (PLAT_DEBUG_TOOLS && sKartResidentCheck == 2 && s->gpu != NULL && sKartResBreakArmed) {
+            sKartResBreakArmed = FALSE; // Rule K6's break (2): changed vertices taken as unchanged, once
+            return s;
+        }
+        kart_res_free_gpu(s);
+        s->streak = 0;
+        kart_res_reshadow(s, vtx, total);
+        return NULL;
+    }
+    if (s->frame != (u32) sFrameCount) {
+        s->frame = (u32) sFrameCount;
+        s->streak += s->streak < 255;
+    }
+    if (s->gpu != NULL) {
+        if (PLAT_DEBUG_TOOLS && sKartResidentCheck == 3 && sKartResBreakArmed && s->boxMax[0] > s->boxMin[0]) {
+            sKartResBreakArmed = FALSE; // Rule K6's break (3): the kept box made too small, once
+            s->boxMax[0] = s->boxMin[0];
+        }
+        return s;
+    }
+    if (s->streak >= KART_RES_AFTER) {
+        if (sKartResMakeFrame != (u32) sFrameCount) {
+            sKartResMakeFrame = (u32) sFrameCount;
+            sKartResMakes = 0;
+        }
+        if (sKartResMakes < KART_RES_MAKES) {
+            *make = s;
+        }
+    }
+    return NULL;
+}
+
+/* The record's corners (just written at verts, numCorners of them) and its mesh's lists made once (gpuIdx) kept as a
+ * GPU mesh. */
+static COLD NOINLINE void kart_res_make(KartRes *s, const NativeMesh *m, const GfxModelVertex *verts) {
+    u32 numIdx = ((u32) m->gpuN[0] + m->gpuN[1]) * 3u;
+    if (s->owner != m || s->gpu != NULL || numIdx == 0) {
+        return;
+    }
+    sKartResMakes++;
+    s->gpu = gfxb_mesh_create(verts, (int) m->numCorners, m->gpuIdx, (int) numIdx);
+    if (s->gpu == NULL) {
+        s->streak = 0; // No room in the arena: tried again after another KART_RES_AFTER frames
+        return;
+    }
+    s->n[0] = m->gpuN[0];
+    s->n[1] = m->gpuN[1];
+    s->numCorners = m->numCorners;
+    sKartResStats[1]++;
+    if (PLAT_DEBUG_TOOLS && sKartResidentCheck) {
+        // The copies' room is the slot's from then on (remade meshes of the same size use it again)
+        if (s->checkCorners < m->numCorners) {
+            s->checkVerts = (GfxModelVertex *) kart_res_alloc((u32) m->numCorners * sizeof(GfxModelVertex));
+            s->checkCorners = s->checkVerts != NULL ? m->numCorners : 0;
+        }
+        if (s->checkIdxCap < numIdx) {
+            s->checkIdx = (u16 *) kart_res_alloc(numIdx * sizeof(u16));
+            s->checkIdxCap = s->checkIdx != NULL ? (u16) numIdx : 0;
+        }
+        if (s->checkVerts == NULL || s->checkIdx == NULL) {
+            s->checkCorners = s->checkIdxCap = 0;
+            s->checkVerts = NULL;
+            s->checkIdx = NULL;
+        } else {
+            __builtin_memcpy(s->checkVerts, verts, (u32) m->numCorners * sizeof(GfxModelVertex));
+            __builtin_memcpy(s->checkIdx, m->gpuIdx, numIdx * sizeof(u16));
+        }
+    }
+}
+
+/*
+ * DKR_KART_RESIDENT_CHECK (test builds, rule K6): a record drawn from its kept mesh is made again the usual way and
+ * compared: the game's vertices with the shadow (the unchanged decision against a full compare), the box with the kept
+ * box, and each triangle's corners (from the tables, by cull group in order) with the kept mesh's (the copy taken when
+ * it was made). Breaks: 2 takes changed vertices as unchanged once, 3 makes one kept box too small once.
+ */
+static NOINLINE COLD void kart_res_check(const KartRes *s, const NativeMesh *m, const Vertex *vtx, s32 total,
+                                         s32 count) {
+    s16 boxMin[3], boxMax[3];
+    s32 i, c, k, group, wrong = 0, at[2] = { 0, 0 };
+    wrong |= __builtin_memcmp(s->shadow, vtx, (u32) total * sizeof(Vertex)) != 0;
+    boxMin[0] = boxMax[0] = vtx[0].x;
+    boxMin[1] = boxMax[1] = vtx[0].y;
+    boxMin[2] = boxMax[2] = vtx[0].z;
+    for (i = 1; i < total; i++) {
+        s16 v[3] = { vtx[i].x, vtx[i].y, vtx[i].z };
+        for (k = 0; k < 3; k++) {
+            boxMin[k] = v[k] < boxMin[k] ? v[k] : boxMin[k];
+            boxMax[k] = v[k] > boxMax[k] ? v[k] : boxMax[k];
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        wrong |= boxMin[k] != s->boxMin[k] || boxMax[k] != s->boxMax[k];
+    }
+    if (s->checkVerts != NULL && s->numCorners == m->numCorners) {
+        for (i = 0; i < count && !wrong; i++) {
+            group = m->backface[i] ? 0 : 1;
+            if (at[group] >= s->n[group]) {
+                wrong = 1;
+                break;
+            }
+            for (c = 0; c < 3; c++) {
+                GfxModelVertex ref;
+                u32 corner = m->triCorners[i * 3 + c];
+                u32 kept = s->checkIdx[(group == 0 ? 0u : (u32) s->n[0] * 3u) + (u32) at[group] * 3u + (u32) c];
+                native_gpu_corner(&ref, &vtx[m->cornerVertex[corner]], m->cornerUv[corner]);
+                wrong |= kept >= s->numCorners ||
+                         __builtin_memcmp(&ref, &s->checkVerts[kept], sizeof(GfxModelVertex)) != 0;
+            }
+            at[group]++;
+        }
+        wrong |= at[0] != s->n[0] || at[1] != s->n[1];
+    } else {
+        wrong |= s->numCorners != m->numCorners;
+    }
+    sKartResStats[4]++;
+    sKartResStats[5] += (u32) wrong;
+    plat_check_report("kart resident", wrong); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
+    if (wrong && sKartResCheckShown < 5) {
+        sKartResCheckShown++;
+        plat_log("kart resident check: a kept mesh (%d corners, %d + %d triangles) differs from the record drawn the "
+                 "usual way", (int) s->numCorners, (int) s->n[0], (int) s->n[1]);
+    }
+}
+
 /* Rule K6 / DKR_KART_BATCH_CHECK: the draw as the old path makes it for each record (corners repacked on their own,
  * group indices from the backface flags, the state and params made afresh), compared triangle by triangle, each
  * corner resolved to its model vertex, with the merged draw's two groups. */
@@ -6868,6 +7177,8 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
                                    s32 total, s32 count, NativeMesh *mesh, s32 matrix, u8 frontCull) {
     KartRec rec[KART_RUN_MAX];
     u8 made[KART_RUN_MAX]; // Bit 2: the record's mesh has its lists made once (kart_gpu_idx)
+    KartRes *res[KART_RUN_MAX], *make[KART_RUN_MAX]; // DKR_KART_RESIDENT: drawn from its kept mesh; to be kept
+    s32 kept = 0, anyMake = 0, resOn = sKartResident;
     GfxDrawState state;
     GfxModelParams params;
     GfxModelVertex *verts;
@@ -6888,6 +7199,12 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
     rec[0].vtx = vtx, rec[0].mesh = mesh, rec[0].total = total, rec[0].count = count;
     corners = mesh->numCorners;
     tris = count;
+    res[0] = make[0] = NULL;
+    if (resOn) {
+        res[0] = kart_res_look(mesh, vtx, total, &make[0]);
+        kept = res[0] != NULL;
+        anyMake = make[0] != NULL;
+    }
     for (i = 0; i < count; i++) {
         late |= !mesh->backface[i]; // (culled group: drawn after the record's uncull group)
     }
@@ -6926,6 +7243,16 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
                 if (late && g0) {
                     break;
                 }
+                if (resOn) {
+                    // Kept and not kept records aren't merged: a run is one OP_MESHES record or one model draw
+                    res[k] = kart_res_look(m, (const Vertex *) seg_addr(t[1].words.w0), nv, &make[k]);
+                    if ((res[k] != NULL) != kept) {
+                        break;
+                    }
+                    anyMake |= make[k] != NULL;
+                } else {
+                    res[k] = make[k] = NULL;
+                }
                 late |= g1;
             }
             rec[k].vtx = (const Vertex *) seg_addr(t[1].words.w0);
@@ -6938,14 +7265,27 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
             used += 3;
         }
     }
-    if (k == 1 && !slim) {
+    if (k == 1 && !slim && !kept && !anyMake) {
         walk_step(ws);
         return 0; // native_gpu_draw as before
     }
     boxMin[0] = boxMax[0] = vtx[0].x;
     boxMin[1] = boxMax[1] = vtx[0].y;
     boxMin[2] = boxMax[2] = vtx[0].z;
-    for (r = 0; r < k; r++) {
+    if (kept) {
+        // The kept boxes (the vertices are the shadows')
+        for (i = 0; i < 3; i++) {
+            boxMin[i] = res[0]->boxMin[i];
+            boxMax[i] = res[0]->boxMax[i];
+        }
+        for (r = 1; r < k; r++) {
+            for (i = 0; i < 3; i++) {
+                boxMin[i] = res[r]->boxMin[i] < boxMin[i] ? res[r]->boxMin[i] : boxMin[i];
+                boxMax[i] = res[r]->boxMax[i] > boxMax[i] ? res[r]->boxMax[i] : boxMax[i];
+            }
+        }
+    }
+    for (r = 0; r < (kept ? 0 : k); r++) {
         const Vertex *v = rec[r].vtx;
         for (i = 0; i < rec[r].total; i++) {
             s16 c0 = v[i].x, c1 = v[i].y, c2 = v[i].z;
@@ -6970,13 +7310,56 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
         walk_step(ws);
         return 0;
     }
-    if (verdict != GFX_MODEL_HIDDEN) {
+    if (verdict != GFX_MODEL_HIDDEN && kept) {
+        GfxMeshPart parts[2][KART_RUN_MAX];
+        s32 np[2] = { 0, 0 };
+        native_gpu_params(mat, textured, &state, &params);
+        walk_step(WS_KART_QUEUE);
+        for (r = 0; r < k; r++) {
+            const KartRes *kr = res[r];
+            if (UNLIKELY(sKartResidentCheck)) {
+                kart_res_check(kr, rec[r].mesh, rec[r].vtx, rec[r].total, rec[r].count);
+            }
+            if (kr->n[0] > 0) {
+                parts[0][np[0]].mesh = kr->gpu;
+                parts[0][np[0]].firstIndex = 0;
+                parts[0][np[0]].numTriangles = kr->n[0];
+                n[0] += kr->n[0];
+                np[0]++;
+            }
+            if (kr->n[1] > 0) {
+                parts[1][np[1]].mesh = kr->gpu;
+                parts[1][np[1]].firstIndex = (int) kr->n[0] * 3;
+                parts[1][np[1]].numTriangles = kr->n[1];
+                n[1] += kr->n[1];
+                np[1]++;
+            }
+        }
+        if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+            flush_batch(); // What the CPU path left waiting came first
+        }
+        if (!sortable) {
+            OPAQUE_FLUSH(); // Its order matters: after the held opaque draws, as the CPU path would be
+        }
+        for (i = 0; i < 2; i++) {
+            if (np[i] > 0) {
+                state.cullMode = i == 0 ? 0 : frontCull;
+                gfx_split_draw_meshes(&state, &params, parts[i], np[i]);
+                prof_count(PROF_TRIANGLES, n[i]);
+                prof_count(PROF_DRAWS, 1);
+                sMix.kinds[sDrawKind].draws++;
+                sMix.kinds[sDrawKind].tris += (unsigned long) n[i];
+            }
+        }
+        sTriStateValid = FALSE;
+        sKartResStats[0] += (u32) k;
+    } else if (verdict != GFX_MODEL_HIDDEN) {
         native_gpu_params(mat, textured, &state, &params);
         walk_step(WS_KART_LOOPS);
         // The group sizes, and with bit 2 each mesh's lists made once.
         for (r = 0; r < k; r++) {
             NativeMesh *m = rec[r].mesh;
-            made[r] = slim && (m->gpuOk || kart_gpu_idx(m));
+            made[r] = (slim || make[r] != NULL) && (m->gpuOk || kart_gpu_idx(m));
             if (made[r]) {
                 n[0] += m->gpuN[0];
                 n[1] += m->gpuN[1];
@@ -7026,6 +7409,9 @@ static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 r
                 u32 nc = m->numCorners;
                 for (i = 0; i < (s32) nc; i++) {
                     native_gpu_corner(&verts[base + i], &v[m->cornerVertex[i]], m->cornerUv[i]);
+                }
+                if (UNLIKELY(make[r] != NULL) && made[r] && brk == 0) {
+                    kart_res_make(make[r], m, &verts[base]); // Kept from the next frame on
                 }
                 if (brk == 2 && r == k - 1) {
                     // (the break: none of its triangles)
@@ -7484,7 +7870,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     }
     if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
         (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
-        !REF_ACTIVE() && !UNLIKELY(sTracing) && UNLIKELY(sKartBatch)) {
+        !REF_ACTIVE() && !UNLIKELY(sTracing) && UNLIKELY(sKartBatch | sKartResident)) {
         s32 runUsed = native_gpu_run(mat, textured, dl, remaining, vtx, total, count, mesh, loads[0].matrix, frontCull);
         if (runUsed != 0) {
             return runUsed; // P68: this record and any merged with it, done
