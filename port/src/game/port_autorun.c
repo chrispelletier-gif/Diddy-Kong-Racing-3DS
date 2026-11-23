@@ -860,24 +860,83 @@ static u32 sIoHeld;
 static s32 sQuiet;
 static unsigned long long sQuietUntilNs;
 
+/*
+ * P58 S2 (DKR_AUTORUN_PROBE_ONCE, default 1; 2026-11-23, proposals/3ds-sd-access-vs-kohjoh-pak.md): an append with a
+ * header first read one byte of its file to see whether the header was needed, and on the SD card that read costs the
+ * open (74-99 ms each in run 45's recorder, several per race and 8 on one menu frame). The writer now remembers the
+ * files it has seen with something in them, or written something to, and probes each only once per launch of a run
+ * (init forgets them: sIoKnownEpoch). A replace job writes the file whole, so after it the file is known when it is
+ * not empty. 0 = probe every time (the old way).
+ */
+#define IO_KNOWN 32
+static u32 sIoKnown[IO_KNOWN]; // The writer's: hashes of the paths known to hold something
+static s32 sIoKnownCount, sIoKnownSeen;
+static volatile s32 sIoKnownEpoch; // Moved on by init: the writer forgets what it knew
+static s32 sIoProbeOnce = 1;
+
+static u32 io_path_hash(const char *path) {
+    u32 hash = 2166136261u;
+    for (; *path; path++) {
+        hash = (hash ^ (u8) *path) * 16777619u;
+    }
+    return hash;
+}
+
+static s32 io_known(u32 hash) {
+    s32 i;
+    if (sIoKnownSeen != sIoKnownEpoch) {
+        sIoKnownSeen = sIoKnownEpoch;
+        sIoKnownCount = 0;
+    }
+    for (i = 0; i < sIoKnownCount; i++) {
+        if (sIoKnown[i] == hash) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void io_set_known(u32 hash, s32 known) {
+    s32 i;
+    if (io_known(hash) == known) {
+        return;
+    }
+    if (known) {
+        if (sIoKnownCount < IO_KNOWN) {
+            sIoKnown[sIoKnownCount++] = hash;
+        }
+        return;
+    }
+    for (i = 0; i < sIoKnownCount; i++) {
+        if (sIoKnown[i] == hash) {
+            sIoKnown[i] = sIoKnown[--sIoKnownCount];
+            return;
+        }
+    }
+}
+
 static void io_thread(UNUSED void *arg) {
     for (;;) {
         IoJob *job;
         unsigned long long start;
+        u32 hash;
         plat_sem_wait(sIoWake);
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         job = &sIoJobs[sIoDone % IO_JOBS];
         start = plat_time_ns();
+        hash = io_path_hash(job->path);
         if (job->append) {
-            if (job->header != NULL) {
+            if (job->header != NULL && !(sIoProbeOnce && io_known(hash))) {
                 char probe[1];
                 if (plat_load_file_start(job->path, probe, sizeof(probe)) <= 0) { // Missing, or emptied for a new run
                     plat_append_file(job->path, job->header, strlen(job->header));
                 }
             }
             plat_append_file(job->path, job->text, strlen(job->text));
+            io_set_known(hash, TRUE);
         } else {
             plat_save_file(job->path, job->text, strlen(job->text));
+            io_set_known(hash, job->text[0] != '\0');
         }
         rec_event("autorun SD job %s: queued at %llu, ran %llu..%llu", job->path, job->queuedNs / 1000000ULL,
                   start / 1000000ULL, plat_time_ns() / 1000000ULL);
@@ -2015,6 +2074,8 @@ static void init(void) {
     sLastReportNs = plat_time_ns();
 
     io_flush(); // A run that just ended may still be writing its state.
+    sIoProbeOnce = plat_switch("DKR_AUTORUN_PROBE_ONCE", 1) != 0; // P58 S2 (the writer is idle: just flushed)
+    sIoKnownEpoch++;
     make_path(path, sizeof(path), state_file());
     state = plat_load_file(path, &size);
     if (state != NULL && plat_getenv("DKR_AUTORUN_RESTART") == NULL) {
