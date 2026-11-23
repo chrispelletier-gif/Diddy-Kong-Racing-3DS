@@ -252,15 +252,201 @@ static long post_comment(const BugReportConfig *config, const char *commentsPath
     return status;
 }
 
+/* Posts one comment of a file's attachment: text is that part's base64 (a whole number of 4-character groups but the
+ * last). Returns 0, or -1 with result saying why. */
+static int post_part(const BugReportConfig *config, const char *commentsPath, const BugReportFile *file, int part,
+                     int parts, const char *text, size_t length, BugReportProgress progress, char *result,
+                     size_t resultSize) {
+    StrBuf comment = { 0 };
+    char line[256];
+    size_t offset;
+
+    if (progress != NULL) {
+        snprintf(line, sizeof(line), "Sending %s (%d of %d)", file->name, part + 1, parts);
+        progress(line);
+    }
+    snprintf(line, sizeof(line),
+             "<details><summary>Attachment %s, part %d of %d</summary>\n\n"
+             "<!-- dkr-attachment name=%s part=%d parts=%d size=%u encoding=gzip+base64 -->\n\n```\n",
+             file->name, part + 1, parts, file->name, part + 1, parts, file->size);
+    sb_add(&comment, line);
+    for (offset = 0; offset < length; offset += BASE64_LINE) {
+        size_t n = (length - offset < BASE64_LINE) ? length - offset : BASE64_LINE;
+        sb_add_n(&comment, text + offset, n);
+        sb_add(&comment, "\n");
+    }
+    sb_add(&comment, "```\n\n</details>\n");
+    if (comment.failed || post_comment(config, commentsPath, comment.data, result, resultSize) != 201) {
+        if (comment.failed) {
+            snprintf(result, resultSize, "out of memory");
+        }
+        sb_free(&comment);
+        return -1;
+    }
+    sb_free(&comment);
+    return 0;
+}
+
+/*
+ * DKR_NET_STREAM (default 1): a file attached by its path is read from the SD card and compressed a piece at a time,
+ * so a report never holds a whole file, its gzip copy and its base64 copy at once. On an Old 3DS after a long switch
+ * bench the heap has about 2 MB free in pieces: the results files (350-550 KB each) could not be loaded, and the
+ * network's own buffer (net_3ds_begin, 256 KB to 1 MB) did not fit after them, so the whole report failed (runs 52
+ * and 54). The file is compressed twice: once to count its parts (each comment's header says how many), then again
+ * to send them. zlib gives the same bytes both times; only the first size bytes are read, so a log that grows
+ * meanwhile still matches. A smaller window (8 KB, about 50 KB of zlib state instead of about 260 KB) costs a little
+ * compression.
+ */
+#define STREAM_IN 16384
+#define PACKED_PER_COMMENT (BASE64_PER_COMMENT / 4 * 3) /* Whole 3-byte groups, so the parts' base64 joins up. */
+
+typedef struct Packer {
+    z_stream z;
+    FILE *file;
+    unsigned int left; /* Bytes of the file still to read. */
+    int done;
+    unsigned char in[STREAM_IN];
+} Packer;
+
+static int packer_open(Packer *p, const BugReportFile *file) {
+    memset(&p->z, 0, sizeof(p->z));
+    p->left = file->size;
+    p->done = 0;
+    p->file = fopen(file->path, "rb");
+    if (p->file == NULL) {
+        return -1;
+    }
+    if (deflateInit2(&p->z, 6, Z_DEFLATED, 13 + 16, 6, Z_DEFAULT_STRATEGY) != Z_OK) {
+        fclose(p->file);
+        p->file = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void packer_close(Packer *p) {
+    if (p->file != NULL) {
+        deflateEnd(&p->z);
+        fclose(p->file);
+        p->file = NULL;
+    }
+}
+
+/* Fills out with the next compressed bytes (fewer only at the end); *got is how many. -1 if the file can't be read. */
+static int packer_read(Packer *p, unsigned char *out, unsigned int outSize, unsigned int *got) {
+    p->z.next_out = out;
+    p->z.avail_out = outSize;
+    while (p->z.avail_out > 0 && !p->done) {
+        int status;
+        if (p->z.avail_in == 0 && p->left > 0) {
+            size_t want = p->left < STREAM_IN ? p->left : STREAM_IN;
+            if (fread(p->in, 1, want, p->file) != want) {
+                return -1; // The file got shorter
+            }
+            p->left -= (unsigned int) want;
+            p->z.next_in = p->in;
+            p->z.avail_in = (uInt) want;
+        }
+        status = deflate(&p->z, p->left == 0 && p->z.avail_in == 0 ? Z_FINISH : Z_NO_FLUSH);
+        if (status == Z_STREAM_END) {
+            p->done = 1;
+        } else if (status != Z_OK && status != Z_BUF_ERROR) {
+            return -1;
+        }
+    }
+    *got = outSize - p->z.avail_out;
+    return 0;
+}
+
+/* Returns as post_file does. */
+static int post_file_streamed(const BugReportConfig *config, const char *commentsPath, const BugReportFile *file,
+                              unsigned int *budget, BugReportProgress progress, char *result, size_t resultSize) {
+    Packer *packer = malloc(sizeof(Packer));
+    unsigned char *packed = malloc(PACKED_PER_COMMENT);
+    unsigned int packedSize = 0, got = 0, sent = 0;
+    int parts, part, outcome = 0;
+
+    if (packer == NULL || packed == NULL) {
+        free(packer);
+        free(packed);
+        snprintf(result, resultSize, "out of memory");
+        return -1;
+    }
+    // First pass: the compressed size, for the budget and the number of parts.
+    if (packer_open(packer, file) != 0) {
+        outcome = 1;
+        goto out;
+    }
+    do {
+        if (packer_read(packer, packed, PACKED_PER_COMMENT, &got) != 0) {
+            packer_close(packer);
+            outcome = 1;
+            goto out;
+        }
+        packedSize += got;
+    } while (got == PACKED_PER_COMMENT);
+    packer_close(packer);
+    if (packedSize > *budget) {
+        outcome = 1;
+        goto out;
+    }
+    *budget -= packedSize;
+    parts = (int) ((packedSize + PACKED_PER_COMMENT - 1) / PACKED_PER_COMMENT);
+    if (parts == 0) {
+        parts = 1;
+    }
+    // Second pass: each comment's share, compressed again and sent.
+    if (packer_open(packer, file) != 0) {
+        snprintf(result, resultSize, "could not open %s again", file->name);
+        outcome = -1;
+        goto out;
+    }
+    for (part = 0; part < parts; part++) {
+        size_t textLength = 0;
+        char *text;
+        if (packer_read(packer, packed, PACKED_PER_COMMENT, &got) != 0 ||
+            (part + 1 < parts && got != PACKED_PER_COMMENT)) {
+            snprintf(result, resultSize, "%s changed while it was sent", file->name);
+            outcome = -1;
+            break;
+        }
+        sent += got;
+        text = base64(packed, got, &textLength);
+        if (text == NULL) {
+            snprintf(result, resultSize, "out of memory");
+            outcome = -1;
+            break;
+        }
+        outcome = post_part(config, commentsPath, file, part, parts, text, textLength, progress, result, resultSize);
+        free(text);
+        if (outcome != 0) {
+            break;
+        }
+    }
+    if (outcome == 0 && sent != packedSize) {
+        snprintf(result, resultSize, "%s changed while it was sent", file->name);
+        outcome = -1;
+    }
+    packer_close(packer);
+out:
+    free(packer);
+    free(packed);
+    return outcome;
+}
+
 /* Posts one file as comments. Returns 0 on success, 1 if it was too big, -1 if posting failed (result says why). */
 static int post_file(const BugReportConfig *config, const char *commentsPath, const BugReportFile *file,
                      unsigned int *budget, BugReportProgress progress, char *result, size_t resultSize) {
     unsigned int packedSize = 0;
-    unsigned char *packed = gzip(file->data, file->size, &packedSize);
+    unsigned char *packed;
     size_t textLength = 0, offset;
     char *text;
     int parts, part;
 
+    if (file->data == NULL) {
+        return post_file_streamed(config, commentsPath, file, budget, progress, result, resultSize);
+    }
+    packed = gzip(file->data, file->size, &packedSize);
     if (packed == NULL) {
         return 1;
     }
@@ -279,37 +465,16 @@ static int post_file(const BugReportConfig *config, const char *commentsPath, co
         parts = 1;
     }
     for (part = 0, offset = 0; part < parts; part++) {
-        StrBuf comment = { 0 };
-        char line[256];
         size_t end = offset + BASE64_PER_COMMENT;
         if (end > textLength) {
             end = textLength;
         }
-        if (progress != NULL) {
-            snprintf(line, sizeof(line), "Sending %s (%d of %d)", file->name, part + 1, parts);
-            progress(line);
-        }
-        snprintf(line, sizeof(line),
-                 "<details><summary>Attachment %s, part %d of %d</summary>\n\n"
-                 "<!-- dkr-attachment name=%s part=%d parts=%d size=%u encoding=gzip+base64 -->\n\n```\n",
-                 file->name, part + 1, parts, file->name, part + 1, parts, file->size);
-        sb_add(&comment, line);
-        for (; offset < end; offset += BASE64_LINE) {
-            size_t n = (end - offset < BASE64_LINE) ? end - offset : BASE64_LINE;
-            sb_add_n(&comment, text + offset, n);
-            sb_add(&comment, "\n");
-        }
-        offset = end;
-        sb_add(&comment, "```\n\n</details>\n");
-        if (comment.failed || post_comment(config, commentsPath, comment.data, result, resultSize) != 201) {
-            if (comment.failed) {
-                snprintf(result, resultSize, "out of memory");
-            }
-            sb_free(&comment);
+        if (post_part(config, commentsPath, file, part, parts, text + offset, end - offset, progress, result,
+                      resultSize) != 0) {
             free(text);
             return -1;
         }
-        sb_free(&comment);
+        offset = end;
     }
     free(text);
     return 0;
@@ -387,7 +552,7 @@ static int send_report(const BugReportConfig *config, const char *issue, const c
 attach:
     for (i = 0; i < fileCount; i++) {
         int outcome;
-        if (files[i].data == NULL) {
+        if (files[i].data == NULL && files[i].path == NULL) {
             continue;
         }
         outcome = post_file(config, path, &files[i], &budget, progress, result, resultSize);

@@ -990,7 +990,7 @@ float gfxb_cpu_cull_margin(void) {
 }
 
 int gfxb_gpu_transform(void) {
-    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
+    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
            plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0; // as gfx_rdp.c's sNativeGpuSwitch
 }
 

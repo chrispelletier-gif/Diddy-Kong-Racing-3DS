@@ -363,7 +363,7 @@ static int switch_read(const char *name, int fallback) {
     env = plat_getenv(name);
     // The GPU route's switches default on unless env.txt or the switch bench says otherwise.
     if (env == NULL) {
-        // GPU vertex maths (DKR_GPU_TRANSFORM, NATIVE_TRACK, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
+        // GPU vertex maths (DKR_GPU_TRANSFORM, GPU_LIGHT) off: it lost on the Old 3DS (issue #406), and
         // the user wants it off by default with one bench row turning it on (2026-11-05).
         // DKR_TEX_VRAM is not here: its default is the backend's own (tex_vram_default in port/3ds/gfx_c3d.c: on for
         // the Old 3DS since v28, benches #432/#436, after the race-start stalls of issues #406/#407; off elsewhere).

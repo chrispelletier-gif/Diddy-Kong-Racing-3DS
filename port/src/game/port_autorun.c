@@ -335,10 +335,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // are the Old 3DS defaults now, and the P61 W cuts stay on (old way +0.2 ms). Their rows went, with the settled
     // ones: VFP RunFast (already on), PMU 3/4, the vertex loop and material-once self-checks, the depth fill and
     // native track rows (kept off), two of the three page flip rows, NATIVE_GPU alone and raw with objects on the GPU.
-    // None of the four winners were raced together in run 50, so this bench confirms them: the usual races (new
-    // defaults) against the previous defaults on every track.
-    { "previous defaults (raw words, karts on the GPU, vertex loop, fog skip off)",
-      { "DKR_RAW_REGS", "DKR_NATIVE_GPU", "DKR_VERTEX_ASM", "DKR_FOG_SKIP", NULL }, -1, 0, 0, 0 },
+    // Run 54 (b2096b8) confirmed them on every track (the previous defaults +2.7 ms game core, +3.1 ms renderer), so
+    // that row went too.
     // P61 M (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): hardware truth for the game core's hot code,
     // kept until P61 has its before/after. Each measures, one lap: the CPU counters per game core section (log and
     // autorun_cores.txt: "game core sections (PMU n, ...)": M cycles / fetch stall share / k misses a frame for top
@@ -351,22 +349,36 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (candidate 4; with P65's finer split): "sprites" (the record's checks, state and axes), "sprite corners" (their
     // vertex maths) and "sprite tris" (their drawing): corners + tris is what a vertex shader table of sprites would
     // replace; under half the sprites time in corners + tris, stop.
-    // Candidate 1: the native track (NR4, DKR_NATIVE_TRACK: the track's vertices kept on the GPU, its vertex shader
-    // doing the maths) lost in runs 45, 48 and 50, but always without raw register words, which turned the karts' GPU
-    // maths from a renderer core loss into -3.6 ms. Raw words are the Old 3DS default now, so these rows race the track
-    // with them, alone and with the frame's fills finished first (DKR_FILL_WAIT, the Jungle Falls tunnel fix, T1).
-    // Read both cores and the race start (meshes are still made the first time a batch is seen): if both cores drop,
-    // the next step is building them during the level load.
-    { "native track with raw words (P64 1)", { "DKR_NATIVE_TRACK", NULL, NULL }, -1, 1, 1, 0 },
-    { "native track with raw words, fills finished first (P64 1)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1,
-      1, 1, 0 },
-    // Candidate 3: page lookups. PMU 5 counts the data micro TLB misses and PMU 6 the instruction ones, both with the
-    // main TLB misses (the log's "TLB misses a frame" line; the results' pmn1 column, thousands a frame, and the CPU
-    // cell marked T / I for the micro ones). Their first frame logs a "TLB probe" line: main TLB misses a pass over
-    // 1 MB of the heap (the game's pool) and of linear memory, ~256 for 4 KB pages, a few for large ones. Gate: over
-    // about 5k main TLB misses a frame on the game core, and linear memory in large pages, plan moving the pool there.
-    { "TLB misses, data micro + main (PMU 5, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 5, 1, 1 },
-    { "TLB misses, instruction micro + main (PMU 6, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 6, 1, 1 },
+    // Run 54 (b2096b8, 2026-11-23, proposals/3ds-switch-bench-b2096b8-o3ds-results.md): the native track with raw
+    // words (P64 candidate 1, DKR_NATIVE_TRACK) won on both cores in three rows (-0.6 ms game, -0.9 ms renderer;
+    // with the fills finished first, DKR_FILL_WAIT, -0.7 / -1.0), so both are the Old 3DS default now and their rows
+    // went. This row races them off, to confirm the new default on every track. The TLB rows (candidate 3, large
+    // pages) went too: ~1k main TLB misses a frame, far under the ~5k gate.
+    { "native track off (the default before run 54)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1, 0, 1, 0 },
+    // The split ring's position as a mask instead of a software divide (DKR_SPLIT_MASK, default 1 on every console:
+    // proposals/3ds-arm11-c-tips-audit.md item 1, estimated -0.05..-0.25 ms game core). The same positions either way;
+    // this row races the old divide, so the usual races against it say what the mask gained.
+    { "split ring position by divide (the old way)", { "DKR_SPLIT_MASK", NULL, NULL }, -1, 0, 1, 0 },
+    // Anti-aliasing off (2026-11-23): does 2x anti-aliasing's GPU memory traffic slow the game core's cache misses
+    // (guess 0-0.5 ms)? The usual races are 2x (the bench's own setting); this row races without it, full laps. The
+    // picture trade-off is the owner's call, whatever it gains.
+    { "usual, anti-aliasing off", { "BENCH_AA", NULL, NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    // P55 gates 0 and 3 (proposals/3ds-perf-audit-2026-11-23.md item 1): the Old 3DS ceiling on today's defaults. The
+    // plain uncapped row went in #561, before raw words, karts on the GPU, the vertex loop, fog skip and the native
+    // track, so 60 fps was never measured with them. Full laps; the results' ceiling columns are the answer. The AA
+    // row's cap is "NAME=value" (the bench's own 30 cap is set after the rows, so the other races keep it); BENCH_AA
+    // can't be: an unset "NAME=value" would take the bench's own 2x away in every other race.
+    { "uncapped (60 cap), usual", { "DKR_FPS_PIN", NULL, NULL }, -1, 60, 1, 0 },
+    { "uncapped (60 cap), anti-aliasing off", { "BENCH_AA", "DKR_FPS_PIN=60", NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    // G5g (audit item 2): stereo 3D at 30 on the Old 3DS, never benched (code on master since #487). DKR_STEREO3D=2
+    // draws in 3D whatever the slider says (no anti-aliasing in 3D); then the stereo frame recorded once for both
+    // eyes (DKR_STEREO_ONCE), then with the walk's culling kept for both eyes (DKR_STEREO_CULL). The two extra
+    // switches are "NAME=value", so every other race keeps its own default. Full laps.
+    { "3D at 30 fps", { "DKR_STEREO3D", "DKR_STEREO_ONCE=0", "DKR_STEREO_CULL=0", NULL }, 0, 2, 1, 0 },
+    { "3D at 30 fps, recorded once for both eyes", { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=0", NULL },
+      0, 2, 1, 0 },
+    { "3D at 30 fps, recorded once, culled in the walk",
+      { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=1", NULL }, 0, 2, 1, 0 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -388,36 +400,16 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // usual races and every other row, and run 52 raced the new defaults without raw words.
     { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
       1 },
-    // P63 (2026-11-22, proposals/3ds-old3ds-bucket-handoff-plan.md): the opaque buckets handed to the backend by pointer
-    // instead of copied into the split ring on the game core (DKR_SPLIT_REF; estimated -0.4..-0.7 ms game core, judged
-    // on the 4-track mean; the renderer core should not move). The log's "split ref: N handed over, M fallbacks" lines
-    // say how often the pool ran dry. The timed row's "split copy" step and write misses (PMU 4: the load/store unit
-    // stall and D-cache write misses) read against the walk steps rows above; the self-check row must say 0 wrong.
-    { "buckets handed over without copying", { "DKR_SPLIT_REF", NULL, NULL }, 0, 1, 0, 0 },
-    { "buckets handed over, walk steps timed (PMU 4, 1 lap)", { "DKR_SPLIT_REF", "DKR_WALK_STEPS", "DKR_PMU", NULL },
-      0, 4, 1, 1 },
-    { "buckets handed over, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_REF_CHECK", NULL, NULL }, 0, 2, 1, 1 },
-    // P66 (2026-11-22, proposals/3ds-perf-guide-audit.md 1.1): the split ring's hand-off made cheaper (DKR_SPLIT_LINES:
-    // the head is handed over every 2 KB instead of every record, each side reads the other's counter only when it
-    // must, and the tail comes back in batches; the counters already sit on separate cache lines in every build).
-    // Estimated -0.2..-1.2 ms game core, unmeasured; judged on both cores together (game core and renderer core ms,
-    // 4-track mean) against the usual races. The self-check row compares every frame's records on the backend with
-    // the walk's and must say 0 wrong (log: "split lines: N frames compared, 0 differ, 0 frame ends not handed over").
-    { "split ring hand-off in batches", { "DKR_SPLIT_LINES", NULL, NULL }, 0, 1, 0, 0 },
-    { "split ring hand-off, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_LINES_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // Run 54 settled P63 (buckets handed over without copying, DKR_SPLIT_REF: -0.04 ms game core, expected -0.4) and
+    // P66 (the split ring's hand-off in batches, DKR_SPLIT_LINES: -0.3 ms, inside the noise); both self-checks said 0
+    // wrong. Their five rows went; the switches stay, default off.
     // P65 (2026-11-22, proposals/3ds-custom-shader-plan.md section 6, steps 0 and 1). The two walk steps rows above now
     // also split the sprite tiles' step ("sprites" set-up, "sprite corners", "sprite tris") and time billboards apart
     // ("billboard corners", "billboard tris", out of "other paths"): rank 1's uniform-table sprite shader goes ahead
     // only if sprite + billboard corners and tris come to 0.6 ms or more on the game core.
-    // Step 0: the karts' light by transform.v.pica's light path (DKR_GPU_LIGHT, off since #406 and never raced with the
-    // karts on the GPU) on top of the defaults (NATIVE_GPU 1). Plan estimate: game core -0.1 to -0.4 ms.
-    { "karts lit by the GPU's vertex shader (GPU_LIGHT, karts on the GPU)", { "DKR_GPU_LIGHT", NULL, NULL }, 0, 1, 1, 0 },
-    // Step 0: why the native track lost on the Old 3DS GPU (+3-4 ms, #367): the GPU timed by draw kind (DKR_GPU_KINDS,
-    // off by default here: its cut frame is a hitch) with the track on the GPU's vertex maths and without. The track
-    // kind's GPU ms grows with its vertices (same pixels both ways), so the difference is the vertex cost a slimmer
-    // track shader could cut. Both are measurements (left out of the all-together race).
-    { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 0 },
-    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", NULL }, 0, 1, 1, 0 },
+    // Step 0 settled in run 54: the karts lit by the GPU (DKR_GPU_LIGHT) gained nothing (-0.04 ms game core), and the
+    // GPU time by kind rows (DKR_GPU_KINDS) showed the GPU at ~10 ms a frame with the track on it, far from limiting.
+    // Their rows went.
     // Step 1, rank 2: the native kart batches by road (one load / two loads / dynamic / billboard / no tables), their
     // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.

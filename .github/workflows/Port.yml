@@ -287,7 +287,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib python3-pil gcc-arm-none-eabi qemu-user
+          sudo apt-get install -y gcc-multilib python3-pil gcc-arm-none-eabi qemu-user zlib1g-dev
 
       - name: Download include/asset_enums.h
         uses: actions/download-artifact@v4
@@ -338,6 +338,12 @@ jobs:
           # GS freeze test 2: every sprite GS cap sharing one marker file (a lock in one bench row would leave all off)
           gcc -Wall -DGS_CAP_BREAK -Iport/3ds -o "$RUNNER_TEMP/gs_cap_break" port/tools/gs_ladder_test.c
           if "$RUNNER_TEMP/gs_cap_break"; then echo "the broken cap test passed"; exit 1; fi
+      - name: Bug report attachments from memory and streamed from the SD card
+        # DKR_NET_STREAM: both come back intact through bugreport_fetch.py's joining, a growing file included
+        run: |
+          gcc -Iport/tools/stub_curl -Iport/src/plat -o "$RUNNER_TEMP/bugreport_stream_test" \
+            port/tools/bugreport_stream_test.c port/src/plat/bugreport.c -lz
+          cd "$RUNNER_TEMP" && ./bugreport_stream_test
       - name: Fused VFP vertex loop matches the C
         # P60 B: gfx_vertex_asm (DKR_VERTEX_ASM) against native_record's C passes on random vertices in an ARM11, with
         # the 3DS hot files' flags; then broken on purpose (rule K6: the C leaves the fog out), which must fail. Linked at

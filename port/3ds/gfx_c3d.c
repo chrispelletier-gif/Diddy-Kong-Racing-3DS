@@ -4291,7 +4291,9 @@ static void read_switches(void) {
     // Off on an Old 3DS: switch bench run 22 (v46) counted no Jungle Falls tunnel flashes in two races with the depth
     // clear drawn, 5-11 in every other pair (#306: walls and ceiling missing for a frame or two).
     sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
-    sFillWait = plat_switch("DKR_FILL_WAIT", 0) != 0;
+    // On by default on an Old 3DS, where the native track is (gfx_rdp.c; run 54: with it, -0.7 ms game core and -1.0 ms
+    // renderer core against the usual races, the best of the native track rows).
+    sFillWait = plat_switch("DKR_FILL_WAIT", plat_old_3ds()) != 0;
     sCheckBandSafe = plat_switch("DKR_CHECK_BAND", 1) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
@@ -4324,7 +4326,7 @@ static void read_switches(void) {
     // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
     // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
-                       plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
+                       plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
                        plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0;
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     raw_read_switches(); // DKR_RAW_REGS, DKR_RAW_REGS_CHECK
