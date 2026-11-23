@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "gfx/gfx_backend.h"
+#include "gfx/gfx_waves.h"
 #include "plat/plat.h"
 #include "plat/profile.h"
 
@@ -67,6 +68,11 @@ int host_frames_rendered(void) {
 
 static void read_upgrade_settings(void);
 static void build_mips(GfxTexture *tex);
+static void ip_frame_start(void);
+static void ip_frame_end(void);
+static void ip_keep_draw(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
+static void ip_keep_clear(int kind, const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+static int sIpMode, sIpReplaying;
 
 void gfxb_init(void) {
     const char *env = getenv("DKR_DUMP_EVERY");
@@ -97,6 +103,7 @@ void gfxb_init(void) {
 }
 
 void gfxb_start_frame(void) {
+    ip_frame_start(); // DKR_INTERP60
 }
 
 /* The level and the active camera, for the sweep's lines (port_autorun.c). */
@@ -159,6 +166,7 @@ static void sweep_frame(void) {
 
 void gfxb_end_frame(void) {
     sFramesRendered++;
+    ip_frame_end(); // DKR_INTERP60: the in-between picture
     frag_frame_end();
     if (sSweep != NULL) {
         sweep_frame();
@@ -194,6 +202,9 @@ static void clip_rect(const int16_t in[4], int *x0, int *y0, int *x1, int *y1) {
 
 void gfxb_clear_color(const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     int x, y, x0, y0, x1, y1;
+    if (sIpMode > 0 && !sIpReplaying) {
+        ip_keep_clear(1, rect, r, g, b, a);
+    }
     clip_rect(rect, &x0, &y0, &x1, &y1);
     if (frag_on()) {
         sFragClear += (unsigned long long) (x1 - x0) * (y1 - y0);
@@ -211,6 +222,9 @@ void gfxb_clear_color(const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, ui
 
 void gfxb_clear_depth(const int16_t rect[4]) {
     int x, y, x0, y0, x1, y1;
+    if (sIpMode > 0 && !sIpReplaying) {
+        ip_keep_clear(2, rect, 0, 0, 0, 0);
+    }
     clip_rect(rect, &x0, &y0, &x1, &y1);
     for (y = y0; y < y1; y++) {
         for (x = x0; x < x1; x++) {
@@ -905,6 +919,9 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
     if (sNullRender) {
         return;
     }
+    if (sIpMode > 0 && !sIpReplaying) {
+        ip_keep_draw(drawState, verts, numTriangles); // DKR_INTERP60: drawn again for the in-between picture
+    }
     {
         // DKR_SKIP_INVISIBLE=1: as the 3DS backend (gpu_cuts.inc), draws that can't change a pixel left out, for
         // checking that frames stay identical. Off here by default.
@@ -1008,7 +1025,8 @@ float gfxb_cpu_cull_margin(void) {
 
 int gfxb_gpu_transform(void) {
     return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
-           plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0; // as gfx_rdp.c's sNativeGpuSwitch
+           plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 || // as gfx_rdp.c's sNativeGpuSwitch
+           plat_switch("DKR_WAVE_SHADER", 0) != 0;
 }
 
 /* No guard band to keep to here; DKR_HOST_BAND (a band in screen widths, e.g. 1.5) makes one up the way the 3DS's
@@ -1102,12 +1120,64 @@ void gfxb_mesh_free(void *mesh) {
     }
 }
 
+/* P65 rank 3 (DKR_WAVE_SHADER): the wave shader's values, its sums done here in C (gfx_waves.h gfx_wave_eval). */
+static GfxWaveTable sWaveTable;
+static float sWaveTile[16];
+
+void gfxb_wave_table(const GfxWaveTable *table) {
+    sWaveTable = *table;
+}
+
+void gfxb_wave_table_call(void *payload) {
+    gfxb_wave_table((const GfxWaveTable *) payload);
+}
+
+void gfxb_wave_tile(const float unif[16]) {
+    memcpy(sWaveTile, unif, sizeof(sWaveTile));
+}
+
+void gfxb_wave_tile_call(void *payload) {
+    gfxb_wave_tile((const float *) payload);
+}
+
+int gfxb_wave_shader_ok(void) {
+    return 1;
+}
+
+/* A wave tile's mesh vertices as waves.v.pica makes them: height and colour worked out, texture coordinates from the
+ * column and row. */
+static void wave_mesh_vertices(GfxModelVertex *out, const GfxModelVertex *in, int numVerts) {
+    int i;
+    for (i = 0; i < numVerts; i++) {
+        short y;
+        unsigned char rgba[4];
+        int j = in[i].u, row = in[i].v;
+        gfx_wave_eval(in[i].x, in[i].y, in[i].one, j, row, in[i].r, sWaveTile, sWaveTable.heights,
+                      sWaveTable.scales, &y, rgba);
+        out[i] = in[i];
+        out[i].y = y;
+        out[i].one = 1;
+        out[i].u = (short) (sWaveTile[12] + (float) j * sWaveTile[14]);
+        out[i].v = (short) (sWaveTile[13] + (float) row * sWaveTile[15]);
+        out[i].r = rgba[0];
+        out[i].g = rgba[1];
+        out[i].b = rgba[2];
+        out[i].a = rgba[3];
+    }
+}
+
 void gfxb_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                       int numParts) {
+    static GfxModelVertex sWaveVerts[GFX_MAX_BATCH_VERTICES];
     int i;
     for (i = 0; i < numParts; i++) {
         const SoftMesh *m = parts[i].mesh;
-        gfxb_draw_model(state, params, m->verts, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
+        const GfxModelVertex *v = m->verts;
+        if (params->pad[1] == GFX_MODEL_PROG_WAVES && m->numVerts <= GFX_MAX_BATCH_VERTICES) {
+            wave_mesh_vertices(sWaveVerts, m->verts, m->numVerts);
+            v = sWaveVerts;
+        }
+        gfxb_draw_model(state, params, v, m->numVerts, m->indices + parts[i].firstIndex, parts[i].numTriangles);
     }
 }
 
@@ -1124,4 +1194,230 @@ void gfxb_gpu_kind(int kind) {
 
 void gfxb_gpu_kind_call(void *payload) {
     gfxb_gpu_kind(*(int *) payload);
+}
+
+/*
+ * The 60 Hz picture (DKR_INTERP60, S8 / P39; the 3DS draws it with the GPU, gpu_interp.inc). Here, so its keys, sky,
+ * karts and effects can be looked at without a 3DS: the frame's draws and clears are kept as they come, with the walk's
+ * delta in force for each (gfxb_interp_call), and at the frame's end drawn again from the picture the frame started
+ * with, every 3D vertex moved by its delta: the in-between picture. DKR_INTERP60_DUMP=n saves the real and in-between
+ * pictures of every nth frame (interp_N_real.png, interp_N_mid.png in DKR_DUMP_DIR). With DKR_INTERP60=1 each frame's
+ * in-between picture is also compared with the real pictures before and after it (the host test: it must lie between
+ * them, "60 Hz picture host check" line). DKR_INTERP60_CHECK: every delta also goes through the 3DS backend's
+ * conversion and its check (gfx_interp_math.h), so rule K6's break of it (=2) can be seen here too.
+ */
+#include "gfx/gfx_interp_math.h"
+
+typedef struct InterpOp {
+    int kind; /* 0 draw, 1 colour clear, 2 depth clear */
+    int delta; /* Index into sIpDeltas, -1 the identity */
+    GfxDrawState state;
+    int firstVert, numTriangles;
+    int16_t rect[4];
+    uint8_t rgba[4];
+} InterpOp;
+
+static int sIpDump, sIpCheck, sIpValid, sIpDelta = -1, sIpHavePrev, sIpRead;
+static InterpOp *sIpOps;
+static int sIpNumOps, sIpCapOps;
+static GfxVertex *sIpVerts;
+static int sIpNumVerts, sIpCapVerts;
+static float (*sIpDeltas)[4][4];
+static int sIpNumDeltas, sIpCapDeltas;
+static uint8_t sIpStartColor[MAX_W * H * 4], sIpPrev[MAX_W * H * 4], sIpMid[MAX_W * H * 4];
+static float sIpStartDepth[MAX_W * H], sIpStartDepthF[MAX_W * H];
+static unsigned int sIpStats[6]; /* Frames two pictures, one; moving frames compared, in between; checks, wrong */
+
+static void ip_read(void) {
+    if (!sIpRead) {
+        const char *e = getenv("DKR_INTERP60");
+        sIpMode = e != NULL ? atoi(e) : 0;
+        sIpMode = sIpMode == 1 || sIpMode == 2 ? sIpMode : 0;
+        e = getenv("DKR_INTERP60_DUMP");
+        sIpDump = e != NULL ? atoi(e) : 0;
+        e = getenv("DKR_INTERP60_CHECK");
+        sIpCheck = e != NULL ? atoi(e) : 0;
+        sIpRead = 1;
+    }
+}
+
+int gfxb_interp_frame(void) {
+    ip_read();
+    return sIpMode;
+}
+
+static void *ip_grow(void *p, int *cap, int need, size_t size) {
+    if (need > *cap) {
+        *cap = need * 2 + 64;
+        p = realloc(p, (size_t) *cap * size);
+        if (p == NULL) {
+            fprintf(stderr, "60 Hz picture: out of memory\n");
+            exit(1);
+        }
+    }
+    return p;
+}
+
+void gfxb_interp_call(void *payload) {
+    const GfxInterpCall *c = (const GfxInterpCall *) payload;
+    ip_read();
+    if (c->kind == GFX_INTERP_END_VALID || c->kind == GFX_INTERP_END_NOT) {
+        sIpValid = c->kind == GFX_INTERP_END_VALID;
+        return;
+    }
+    if (c->kind == GFX_INTERP_IDENTITY) {
+        sIpDelta = -1;
+        return;
+    }
+    sIpDeltas = ip_grow(sIpDeltas, &sIpCapDeltas, sIpNumDeltas + 1, sizeof(*sIpDeltas));
+    memcpy(sIpDeltas[sIpNumDeltas], c->d, sizeof(c->d));
+    sIpDelta = sIpNumDeltas++;
+    if (sIpCheck) {
+        /* The 3DS backend's conversion (gfx_interp_math.h) at two screen widths, and its check. */
+        static const float sScales[2] = { 1.0f, 0.8f };
+        int k;
+        for (k = 0; k < 2; k++) {
+            float rows[4][4];
+            gfx_interp_to_screen(c->d, sScales[k], rows, sIpCheck == 2);
+            int miss = gfx_interp_screen_check(c->d, rows, sScales[k]);
+            sIpStats[4]++;
+            sIpStats[5] += miss;
+            plat_check_report("60 Hz picture backend (host)", miss);
+        }
+    }
+}
+
+void gfxb_interp_check_counts(unsigned int *checked, unsigned int *wrong) {
+    *checked = sIpStats[4];
+    *wrong = sIpStats[5];
+}
+
+/* gfxb_start_frame: the picture the frame starts from, for the in-between picture. */
+static void ip_frame_start(void) {
+    ip_read();
+    sIpNumOps = sIpNumVerts = sIpNumDeltas = 0;
+    sIpDelta = -1;
+    sIpValid = 0;
+    if (sIpMode) {
+        memcpy(sIpStartColor, sColor, sizeof(sColor));
+        memcpy(sIpStartDepth, sDepth, sizeof(sDepth));
+        memcpy(sIpStartDepthF, sDepthF, sizeof(sDepthF));
+    }
+}
+
+static InterpOp *ip_op(int kind) {
+    InterpOp *op;
+    sIpOps = ip_grow(sIpOps, &sIpCapOps, sIpNumOps + 1, sizeof(*sIpOps));
+    op = &sIpOps[sIpNumOps++];
+    memset(op, 0, sizeof(*op));
+    op->kind = kind;
+    op->delta = sIpDelta;
+    return op;
+}
+
+static void ip_keep_draw(const GfxDrawState *state, const GfxVertex *verts, int numTriangles) {
+    InterpOp *op = ip_op(0);
+    op->state = *state;
+    op->firstVert = sIpNumVerts;
+    op->numTriangles = numTriangles;
+    sIpVerts = ip_grow(sIpVerts, &sIpCapVerts, sIpNumVerts + numTriangles * 3, sizeof(*sIpVerts));
+    memcpy(&sIpVerts[sIpNumVerts], verts, sizeof(*verts) * numTriangles * 3);
+    sIpNumVerts += numTriangles * 3;
+}
+
+static void ip_keep_clear(int kind, const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    InterpOp *op = ip_op(kind);
+    memcpy(op->rect, rect, sizeof(op->rect));
+    op->rgba[0] = r;
+    op->rgba[1] = g;
+    op->rgba[2] = b;
+    op->rgba[3] = a;
+}
+
+/* Mean difference of two pictures (all channels, 0-255), over the rows above the bottom one. */
+static double ip_diff(const uint8_t *a, const uint8_t *b) {
+    unsigned long long sum = 0;
+    int i, n = W * (H - 1) * 4;
+    for (i = 0; i < n; i++) {
+        if ((i & 3) != 3) {
+            sum += (unsigned long long) abs((int) a[i] - (int) b[i]);
+        }
+    }
+    return (double) sum / (W * (H - 1) * 3);
+}
+
+/* gfxb_end_frame, before the frame is dumped: the in-between picture, from the kept draws. */
+static void ip_frame_end(void) {
+    static uint8_t sReal[MAX_W * H * 4];
+    static float sRealDepth[MAX_W * H], sRealDepthF[MAX_W * H];
+    int i, t, savedFrag = sFragStats;
+    if (!sIpMode) {
+        return;
+    }
+    if (!sIpValid) {
+        sIpStats[1]++;
+        memcpy(sIpPrev, sColor, sizeof(sColor));
+        sIpHavePrev = 1;
+        return;
+    }
+    sIpStats[0]++;
+    memcpy(sReal, sColor, sizeof(sColor));
+    memcpy(sRealDepth, sDepth, sizeof(sDepth));
+    memcpy(sRealDepthF, sDepthF, sizeof(sDepthF));
+    memcpy(sColor, sIpStartColor, sizeof(sColor));
+    memcpy(sDepth, sIpStartDepth, sizeof(sDepth));
+    memcpy(sDepthF, sIpStartDepthF, sizeof(sDepthF));
+    sIpReplaying = 1;
+    sFragStats = 0;
+    for (i = 0; i < sIpNumOps; i++) {
+        const InterpOp *op = &sIpOps[i];
+        if (op->kind == 1) {
+            gfxb_clear_color(op->rect, op->rgba[0], op->rgba[1], op->rgba[2], op->rgba[3]);
+        } else if (op->kind == 2) {
+            gfxb_clear_depth(op->rect);
+        } else {
+            GfxVertex *v = &sIpVerts[op->firstVert];
+            if (op->delta >= 0 && !gfx_flat_mode(&op->state)) {
+                const float(*d)[4] = sIpDeltas[op->delta];
+                for (t = 0; t < op->numTriangles * 3; t++) {
+                    float x = v[t].x, y = v[t].y, z = v[t].z, w = v[t].w;
+                    v[t].x = x * d[0][0] + y * d[1][0] + z * d[2][0] + w * d[3][0];
+                    v[t].y = x * d[0][1] + y * d[1][1] + z * d[2][1] + w * d[3][1];
+                    v[t].z = x * d[0][2] + y * d[1][2] + z * d[2][2] + w * d[3][2];
+                    v[t].w = x * d[0][3] + y * d[1][3] + z * d[2][3] + w * d[3][3];
+                }
+            }
+            gfxb_draw_triangles(&op->state, v, op->numTriangles);
+        }
+    }
+    sFragStats = savedFrag;
+    sIpReplaying = 0;
+    memcpy(sIpMid, sColor, sizeof(sColor));
+    memcpy(sColor, sReal, sizeof(sColor));
+    memcpy(sDepth, sRealDepth, sizeof(sDepth));
+    memcpy(sDepthF, sRealDepthF, sizeof(sDepthF));
+    if (sIpMode == 1 && sIpHavePrev) {
+        double pc = ip_diff(sIpPrev, sColor), mp = ip_diff(sIpMid, sIpPrev), mc = ip_diff(sIpMid, sColor);
+        if (pc > 1.0) {
+            sIpStats[2]++;
+            sIpStats[3] += mp < pc && mc < pc;
+        }
+    }
+    if (sIpDump > 0 && sFramesRendered % sIpDump == 0) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/interp_%05d_real.png", sDumpDir, sFramesRendered);
+        stbi_write_png(path, W, H, 4, sColor, W * 4);
+        snprintf(path, sizeof(path), "%s/interp_%05d_mid.png", sDumpDir, sFramesRendered);
+        stbi_write_png(path, W, H, 4, sIpMid, W * 4);
+    }
+    memcpy(sIpPrev, sColor, sizeof(sColor));
+    sIpHavePrev = 1;
+    if (sFramesRendered % 300 == 0) {
+        plat_log("60 Hz picture host check: %u frames as two pictures, %u as one; %u of %u moving frames have the "
+                 "in-between picture between its neighbours",
+                 sIpStats[0], sIpStats[1], sIpStats[3], sIpStats[2]);
+        if (sIpCheck) {
+            plat_log("60 Hz picture backend check (host): %u deltas checked, %u wrong", sIpStats[4], sIpStats[5]);
+        }
+    }
 }

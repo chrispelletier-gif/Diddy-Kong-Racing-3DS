@@ -160,6 +160,26 @@ int port_native_particles(void);
  * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
  * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
 #define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* The 60 Hz picture (DKR_INTERP60, S8 / P39; port/src/gfx/gfx_interp.inc), only while that switch is on: whose
+ * matrices come next, so the renderer can find each thing's matrix of the last frame. PORT_IKEY_TAG | 1 | hash << 1
+ * (a 15-bit hash of the object) before an object's draws (render_object); PORT_IKEY_TAG alone before the world matrix
+ * (mtx_world_origin). One word, nothing after it. */
+#define PORT_IKEY_TAG 0x504B0000 /* "PK" */
+int port_interp_tags(void);
+#define port_ikey_object(dl, object)                                                                                   \
+    do {                                                                                                               \
+        if (port_interp_tags()) {                                                                                      \
+            unsigned int _h = (unsigned int) (unsigned long) (object);                                                 \
+            _h = (_h >> 3) * 0x9E3779B1u;                                                                              \
+            gDPNoOpTag((dl)++, PORT_IKEY_TAG | ((_h >> 17) << 1) | 1);                                                 \
+        }                                                                                                              \
+    } while (0)
+#define port_ikey_world(dl)                                                                                            \
+    do {                                                                                                               \
+        if (port_interp_tags()) {                                                                                      \
+            gDPNoOpTag((dl)++, PORT_IKEY_TAG);                                                                         \
+        }                                                                                                              \
+    } while (0)
 /* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
  * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
 void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);
@@ -180,6 +200,43 @@ int port_native_material_here(Gfx **dl, const void *key, int keyFlags);
 int port_native_batch_xlu(Gfx **dl, int index, u32 prim, u32 env, void *texture, const void *verts, int numVerts,
                           const void *tris, int numTris);
 int port_nmat_key(const void *texture, int flags, int texOffset, int *capture);
+
+/*
+ * Wave tiles on the GPU (custom shader plan P65 rank 3, DKR_WAVE_SHADER, off by default). waves_render puts
+ * PORT_WAVE_TAG, then a no-op whose second word is a PortWaveTile, before each high detail wave tile's own commands (the
+ * matrix is already pushed). The heights and colours of the tile's vertices are then not worked out when the list is
+ * made: the renderer (gfx_rdp.c native_wave) either draws the tile from a mesh of its own with waves.v.pica doing those
+ * sums on the GPU and skips the tile's commands (skip words after the tag), or has the game work them out now
+ * (port_wave_tile_cpu: the tile near the camera, off screen tests, the reference renderer...) and walks the commands
+ * as before. The renderer may walk a frame while the game makes the next one, so the record holds all the tile's own
+ * values as waves_render had them (port_wave_tile_cpu works from them, not from the game's lists). The records live
+ * for three frames.
+ */
+#define PORT_WAVE_TAG 0x50570000 /* "PW" */
+typedef struct PortWaveTile {
+    int skip;                  // Gfx words after the tag that the tile uses (this record's no-op and the strips)
+    short block, k;            // The wave model, and its entry in the visible tiles list (D_8012A5E8)
+    short viewport, quadrant;  // viewportID as waves_render has it; the quarter in double density (else 0)
+    short sub, textured;       // Subdivisions; the strips are textured (TRIN_ENABLE_TEXTURE)
+    unsigned int version;      // port_wave_tables' version when made: the meshes of an older one are gone
+    unsigned int meshKey;      // The tile's place in the grids (its mesh is the same while this and version are)
+    short gridX, gridZ;        // The tile's first column and row in the height index grid (D_8012A5E8 unk4, unk6)
+    int colour;                // Its first colour table entry (unk8 as the tile started)
+    short scaleRow, shade;     // Its scale table row (D_800E304C) and shade
+    const void *verts;         // The game's vertices for the tile ((sub + 1)^2), filled by port_wave_tile_cpu
+    float boxY;                // Heights lie within -boxY..boxY; x and z within 0..boxX / boxZ
+    float boxX, boxZ;
+    float unif[16];            // waves.v.pica's wavea, waveb, wavec, waved for the tile (gfx_waves.h)
+} PortWaveTile;
+int port_wave_shader(void);  // DKR_WAVE_SHADER this frame (read once a frame by waves_render)
+/* The tile's vertices the CPU way, into out (NULL: the tile's own, t->verts). DKR_WAVE_SHADER_CHECK leaves the game's
+ * own loop on (waves_render), so the renderer can compare. */
+void port_wave_tile_cpu(const PortWaveTile *t, void *out);
+/* The tile's mesh: (sub + 1)^2 vertices in gfx_waves.h's GfxWaveVertex layout (16 bytes each) and 2 sub^2
+ * triangles' indices. Returns the vertex count, 0 if it can't. */
+int port_wave_tile_mesh(const PortWaveTile *t, void *verts, unsigned short *indices);
+/* The level's height table (count entries, at most 188) and scale table (12 entries), and its version. */
+unsigned int port_wave_tables(const float **heights, int *count, const float **scales);
 
 /* Host builds with the walk census (PORT_CENSUS_SITES): the records obj_asm.c writes are named by the line that
  * called its functions (port/host/census_sites.c). obj_asm.c undefines these before defining the functions. */
@@ -222,6 +279,8 @@ void port_gpu_light_clear(const struct Vertex *verts);
 #else
 #define port_draw_tag(dl, kind)
 #define port_draw_tag_object(dl, kind, object)
+#define port_ikey_object(dl, object)
+#define port_ikey_world(dl)
 #define port_game_section(section) ((void) 0)
 #define PORT_PREFETCH_OBJS(list, i, end) ((void) 0)
 #define PORT_PREFETCH_OBJS_DOWN(list, i, start) ((void) 0)

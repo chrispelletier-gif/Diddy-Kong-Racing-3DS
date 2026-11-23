@@ -3806,6 +3806,7 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
                                                                        : PORT_DRAW_OBJECTS,
                              (obj->trans.flags & OBJ_FLAGS_PARTICLE) ? PROF_OBJ_PARTICLES : (obj->behaviorId & 0x7F));
     }
+    port_ikey_object(gObjectCurrDisplayList, obj); // DKR_INTERP60: this object's matrices come next
 #endif
     scale = obj->trans.scale;
     render_object_parts(obj);

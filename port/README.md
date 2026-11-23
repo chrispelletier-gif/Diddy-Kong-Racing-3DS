@@ -267,6 +267,21 @@ controls) work there, as do these renderer switches:
   (chk cells; logs `split lines: N frames compared, 0 differ, 0 frame ends not handed over` every 600 frames). `=2`
   and `=3` are broken on purpose (rule K6): 2 loses one draw record (must report 1 differ), 3 leaves one frame's end
   not handed over (must report 1 frame end))
+- `DKR_TRACK_SLIM=1` (custom shader plan P65 5b, off by default: the native track's batches, which are never lit,
+  drawn with `3ds/track.v.pica`, transform.v.pica without the light path and second texture factor: 26 instructions
+  instead of 39, same outputs bit for bit (checked on the PC, CI "Shader checks"). Needs `DKR_NATIVE_TRACK`. Logs
+  `slim shaders: N program switches, N slim track draws ...` every 600 frames; `track_slim.txt` on the SD card holds
+  its hang marker (`testing` until 30 frames drew, then `passed`; a start that finds `testing` leaves it off))
+- `DKR_WAVE_SHADER=1` (custom shader plan P65 rank 3, off by default: the see-through water's high detail tiles get
+  their heights and colours from `3ds/waves.v.pica` instead of the game's per-vertex loop. Each tile's mesh (grid,
+  height table indices as the level started, colour bytes) is made once a level; a frame sends each tile's offset,
+  shade, scale row and texture scroll as uniforms. Tiles near the camera (the guard band), the reference renderer and
+  two-player races stay the CPU way. Logs `wave shader: N tiles drawn by the GPU, N left out, N by the CPU` every 600
+  frames; hang marker `wave_shader.txt`. The GPU's 24-bit floats land one height unit or colour step away on about 1
+  vertex in 700. `DKR_WAVE_SHADER_CHECK=1` keeps the game's loop on and compares every tile's vertices with the
+  shader's sums on its mesh and with the renderer's own CPU way (chk cells; logs `wave shader check: N vertices ...
+  differ on 0 ..., the CPU way on 0`); `=2` is broken on purpose (rule K6: every index one step on; must report most
+  vertices))
 - `DKR_FRAME_PARTS=1` (roadmap P57 E, on by default; Old 3DS two-core renderer with the profiler on): the backend's
   "frame start/end" bucket of the `backend records` line timed in 15 named parts on the mix's timed frames (1 in 8 on
   an Old 3DS), logged as `backend frame start/end (ms a frame): capture/screen, start GPU wait, set-up, texture
