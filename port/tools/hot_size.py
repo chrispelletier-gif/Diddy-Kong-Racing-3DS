@@ -52,8 +52,8 @@ import sys
 # record path without step marks, census notes, kart counts or remote vertex maths) and run_flat_frame are a second
 # copy beside native_record and run_native_frame in .text.hot.game. A frame runs one copy or the other, so the code a
 # frame executes doesn't grow (on the host's 16 KB cache model it took 28% fewer instruction cache misses); hot_span
-# grows by the copy (~11.4 KB, estimated from an arm-none-eabi object build; set from CI once the branch builds).
-BUDGETS = {"hot_span": 87500, "walk_set": 22912, "backend_set": 21200}
+# grows by the copy: 85,192 in the branch's CI debug build (75,056 before).
+BUDGETS = {"hot_span": 85192, "walk_set": 22912, "backend_set": 21200}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024
