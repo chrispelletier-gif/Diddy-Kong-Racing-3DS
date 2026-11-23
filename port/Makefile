@@ -16,7 +16,7 @@ DEBUG   ?= 0
 RELEASE ?= 0
 
 ROOT      := ..
-BUILD_DIR := build/$(TARGET)$(if $(filter 1,$(RELEASE)),-release)
+BUILD_DIR := build/$(TARGET)$(if $(filter 1,$(RELEASE)),-release)$(if $(PGO),-pgo)
 
 ifeq ($(wildcard $(ROOT)/include/asset_enums.h),)
 $(error include/asset_enums.h is missing. Extract and build the assets from your ROM first (see port/README.md))
@@ -109,7 +109,9 @@ else
 endif
 # Profile-guided optimisation (Old 3DS game core): PGO=gen builds the training build, whose counts src/plat/pgo.c
 # writes to pgo_counts.bin during the whole game run; port/tools/pgo_unpack.py puts them next to the objects (the same
-# BUILD_DIR), and PGO=use builds with them. Build both in a BUILD_DIR of their own.
+# BUILD_DIR), and PGO=use builds with them. Both build in build/3ds-pgo (the .gcda files are found by object path), so
+# delete its objects when switching from one to the other. CI (job build-3ds-pgo in .github/workflows/Port.yml) builds
+# both from port/pgo/pgo_counts.bin; see port/pgo/README.md. The .cia of each installs as a title of its own.
 # Only the game's code and the port code compiled like it (the walk, the game core's work) is instrumented: with the
 # platform code (threads, idle meters, bottom screen) counted too, the training build hung right after loading the ROM
 # on an Old 3DS (#325). No value profiles (indirect-call targets kept in thread-local storage): branch counts only, in
@@ -119,7 +121,9 @@ ifeq ($(PGO),gen)
   OPT_FLAGS += -DPORT_PGO_GEN=1
   LDFLAGS_PGO := -fprofile-generate
 else ifeq ($(PGO),use)
-  PGO_FLAGS := -fprofile-use -fno-profile-values -fprofile-partial-training -Wno-missing-profile
+  # Counts from older code are fine: a function whose branches changed since the training run is built without them
+  # (a coverage-mismatch warning, not an error), one that only moved keeps them, new files have none (partial training).
+  PGO_FLAGS := -fprofile-use -fno-profile-values -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch
   # PGO_LEAN=1: the profile only steers branch layout and hot/cold placement; the code growth -fprofile-use also turns
   # on (unrolling, peeling, tracing, clones) is left off, as the first PGO build was 12% bigger and slower (#331).
   ifeq ($(PGO_LEAN),1)
@@ -160,7 +164,7 @@ ifeq ($(TARGET),3ds)
   PORT_VERSION_MICRO := $(or $(word 3,$(PORT_VERSION_NUMBERS)),0)
   # Identifies the build in bug reports: git describe from the newest version tag, or the commit before there is one.
   # BUILD_NAME=x (v31) adds "-x" to it, so test builds of one commit (compile levels, variants) tell apart in reports.
-  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)$(if $(BUILD_NAME),-$(BUILD_NAME))
+  PORT_BUILD_VERSION := $(shell $(GIT) describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo unknown)$(if $(filter 1,$(RELEASE)),-release)$(if $(PGO),-pgo$(if $(filter gen,$(PGO)),train))$(if $(BUILD_NAME),-$(BUILD_NAME))
   # The full commit, which the update (3ds/update_3ds.c) compares with the published builds.
   PORT_BUILD_COMMIT := $(shell $(GIT) rev-parse HEAD 2>/dev/null)
   SYS_CFLAGS := $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include -Iinclude -Isrc \

@@ -131,6 +131,76 @@ jobs:
             ${{ matrix.out }}/dkr.cia
             ${{ matrix.out }}/dkr.elf
 
+  # Profile-guided builds (P69, port/pgo/README.md), debug like the newest build so they have the same test runs:
+  #   dkr-pgo        PGO=use PGO_LEAN=1 from port/pgo/pgo_counts.bin: branch layout and hot/cold placement from the
+  #                  counts, no extra unrolling or cloning (the full PGO build was 12% bigger and slower, #331)
+  #   dkr-pgo-train  PGO=gen, the training build: its Whole game run writes the counts that refresh pgo_counts.bin
+  # Each .cia installs as a title of its own ("DKR PGO", "DKR PGO training") next to the usual one. The hot code size is
+  # only reported: the budgets are the usual build's. A failure here never stops the usual build's publish.
+  build-3ds-pgo:
+    name: 3DS build (profile-guided)
+    needs: assets
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm@sha256:116afba8df8453961de2936ffab20dd441edf4d682856c1ec8b0e53d7ed0bbf5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download include/asset_enums.h
+        uses: actions/download-artifact@v4
+        with:
+          name: asset-enums
+          path: include
+
+      - name: Install makerom and bannertool
+        run: |
+          command -v unzip >/dev/null || { apt-get update && apt-get install -y unzip; }
+          command -v python3 >/dev/null || { apt-get update && apt-get install -y python3; }
+          mkdir -p /tmp/cia-tools && cd /tmp/cia-tools
+          curl -sSfL -o makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
+          curl -sSfL -o bannertool.zip https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          sha256sum -c - <<'SUMS'
+          dd596854718c195c6e3229286be485b122921715555af8ae5cf8e9a465d9f970  makerom.zip
+          69768596f836acb3e3aeaa66e47c6ba560dde813c6dfcd33c8afc25fe29b7524  bannertool.zip
+          SUMS
+          unzip -o -q makerom.zip && unzip -o -q -j bannertool.zip linux-x86_64/bannertool
+          chmod +x makerom bannertool
+
+      # Both builds use port/build/3ds-pgo (the counts are found by object path), one after the other.
+      - name: Build dkr-pgo (lean, from port/pgo/pgo_counts.bin)
+        run: |
+          python3 port/tools/pgo_unpack.py port/pgo/pgo_counts.bin --to port
+          make -C port TARGET=3ds PGO=use PGO_LEAN=1 -j"$(nproc)" 2> pgo-warnings.txt || { cat pgo-warnings.txt; exit 1; }
+          make -C port TARGET=3ds PGO=use PGO_LEAN=1 cia MAKEROM=/tmp/cia-tools/makerom BANNERTOOL=/tmp/cia-tools/bannertool
+          mkdir -p out
+          for f in 3dsx cia elf; do cp port/build/3ds-pgo/dkr.$f out/dkr-pgo.$f; done
+          {
+            echo "### Profile-guided build"
+            echo "Functions built without their counts (changed since the training run): $(grep 'control flow checksum\|number of counters' pgo-warnings.txt | grep -o "function '[^']*'" | sort -u | wc -l)"
+            echo "Functions whose counts were kept although they moved: $(grep 'source locations' pgo-warnings.txt | grep -o "function '[^']*'" | sort -u | wc -l)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hot code size of dkr-pgo (report only)
+        run: |
+          bin="${DEVKITARM:-/opt/devkitpro/devkitARM}/bin"
+          python3 port/tools/hot_size.py out/dkr-pgo.elf --nm "$bin/arm-none-eabi-nm" --objdump "$bin/arm-none-eabi-objdump" \
+            --report-only
+
+      - name: Build dkr-pgo-train (training build)
+        run: |
+          rm -rf port/build/3ds-pgo
+          make -C port TARGET=3ds PGO=gen -j"$(nproc)"
+          make -C port TARGET=3ds PGO=gen cia MAKEROM=/tmp/cia-tools/makerom BANNERTOOL=/tmp/cia-tools/bannertool
+          for f in 3dsx cia elf; do cp port/build/3ds-pgo/dkr.$f out/dkr-pgo-train.$f; done
+
+      - name: Upload the profile-guided builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: dkr-3ds-pgo-${{ github.sha }}
+          path: out/
+
   # Releases (all pre-releases, each holding dkr.3dsx, the installable dkr.cia and build.txt):
   #   3ds-master        the player build (RELEASE=1) of master: the one to download and play
   #   3ds-master-debug  the debug build of master
@@ -140,8 +210,11 @@ jobs:
   publish-3ds:
     name: Publish the 3DS build
     # Only once the PC build has played its scenarios without a crash, hang or repeatability failure.
-    needs: [build-3ds, host]
-    if: github.event_name == 'push' && github.ref_type == 'branch'
+    # The profile-guided builds are added to 3ds-newest when they built; their failure doesn't hold this up.
+    needs: [build-3ds, host, build-3ds-pgo]
+    if: >-
+      !cancelled() && needs.build-3ds.result == 'success' && needs.host.result == 'success' &&
+      github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,6 +234,13 @@ jobs:
         with:
           name: dkr-3ds-release-${{ github.sha }}
           path: build/release
+
+      - name: Download the profile-guided builds
+        if: needs.build-3ds-pgo.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: dkr-3ds-pgo-${{ github.sha }}
+          path: build/pgo
 
       - name: Write build.txt
         env:
@@ -210,6 +290,13 @@ jobs:
           }
           DEBUG_NOTE="Debug build (profiler, test runs, bug reports, updates); install it from the game's Check for updates button."
           publish 3ds-newest "3DS build: newest ($BRANCH, debug)" build/debug "$DEBUG_NOTE"
+          # The profile-guided builds of the same commit (own HOME menu titles), or none: never an older commit's.
+          pgo_files="dkr-pgo.3dsx dkr-pgo.cia dkr-pgo-train.3dsx dkr-pgo-train.cia"
+          if [ -f build/pgo/dkr-pgo.cia ] && [ -f build/pgo/dkr-pgo-train.cia ]; then
+            gh release upload 3ds-newest --clobber $(for f in $pgo_files; do echo "build/pgo/$f"; done)
+          else
+            for f in $pgo_files; do gh release delete-asset 3ds-newest "$f" --yes 2>/dev/null || true; done
+          fi
           if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
             publish 3ds-master-debug "3DS build: master (debug)" build/debug "$DEBUG_NOTE"
             publish 3ds-master "3DS build: master" build/release \

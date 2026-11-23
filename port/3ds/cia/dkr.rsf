@@ -1,13 +1,14 @@
 # makerom settings for the installable dkr.cia (roadmap O7). Based on the devkitPro homebrew template.
 BasicInfo:
-  Title                   : "Diddy Kong Racing"
-  ProductCode             : "CTR-H-DKRP"
+  # From port/3ds/rules.mk (makerom -D): "Diddy Kong Racing", CTR-H-DKRP and 0xD4B52 for the usual build.
+  Title                   : "$(APP_TITLE)"
+  ProductCode             : "$(APP_PRODUCT_CODE)"
   Logo                    : Homebrew
 
 TitleInfo:
   Category                : Application
-  # Title ID 000400000D4B5200 ("DKR"): not used by any known homebrew title.
-  UniqueId                : 0xD4B52
+  # Title ID 000400000D4B5200 ("DKR"): not used by any known homebrew title. 0xD4B53 and 0xD4B54 are the PGO builds.
+  UniqueId                : $(APP_UNIQUE_ID)
 
 Option:
   UseOnSD                 : true
