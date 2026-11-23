@@ -45,6 +45,15 @@ unsigned int gfx_split_texture_free_later(GfxTexture *tex);
 int gfx_split_free_done(unsigned int ticket);
 void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts,
                           int numVerts, const unsigned short *indices, int numTriangles);
+/* P68 (DKR_KART_BATCH bit 2): a model draw written in place in the queue (see gfx_split.c): returns where its numVerts
+ * vertices go, and in *indices where the 3 * (n0 + n1) indices go (n0 triangles with no culling, then n1 with cull1),
+ * or NULL (nothing reserved: draw with gfx_split_draw_model). gfx_split_model2_end hands it over. */
+GfxModelVertex *gfx_split_model2_begin(const GfxDrawState *state, const GfxModelParams *params, int numVerts, int n0,
+                                       int n1, unsigned char cull1, int check, unsigned short **indices);
+void gfx_split_model2_end(void);
+/* Since start-up: OP_MODEL2 records, those queued with the texture factors only, and the backend's params compares
+ * (DKR_KART_BATCH_CHECK) and those that differed. */
+void gfx_split_model2_counts(unsigned int *records, unsigned int *slim, unsigned int *compared, unsigned int *wrong);
 void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
                            int numParts);
 void gfx_split_mesh_free(void *mesh);

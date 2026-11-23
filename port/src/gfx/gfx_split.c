@@ -44,6 +44,7 @@ enum {
     OP_MESH_FREE,
     OP_CALL, // v28: a function of the walk's run on the backend thread with the record's bytes (gfx_split_call_reserve)
     OP_INDEXED_REF, // P63 DKR_SPLIT_REF: an indexed draw whose arrays stay the walk's (gfx_split_draw_indexed_ref)
+    OP_MODEL2, // P68 DKR_KART_BATCH bit 2: one model vertex array, two cull groups' indices (gfx_split_model2_begin)
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -93,6 +94,31 @@ typedef struct SplitModel {
     GfxModelParams params;
     int numVerts, numTriangles;
 } SplitModel;
+
+/*
+ * OP_MODEL2 (P68): followed by the params (all of them, or with full clear only the texture factors, texScale then
+ * texOffset: the rest are the last OP_MODEL2's), then with check set the walk's whole params again (the self-check's
+ * copy), then numVerts model vertices, then n[0] triangles' indices drawn with no culling and n[1] drawn with cull1.
+ */
+typedef struct SplitModel2 {
+    GfxDrawState state;
+    int numVerts;
+    unsigned short n[2];
+    unsigned char cull1, full, check, pad; // check: 1 compare, 2 compare and leave the texture factors stale (K6)
+} SplitModel2;
+_Static_assert(sizeof(SplitModel2) % 4 == 0 && sizeof(GfxModelParams) % 4 == 0 && sizeof(GfxModelVertex) == 16,
+               "OP_MODEL2's parts stay 4-byte aligned");
+#define MODEL2_TEX_OFFSET __builtin_offsetof(GfxModelParams, texScale)
+#define MODEL2_TEX_BYTES (sizeof(float) * 8)
+_Static_assert(__builtin_offsetof(GfxModelParams, texOffset) == __builtin_offsetof(GfxModelParams, texScale) + 16,
+               "texScale then texOffset");
+
+/* The walk's last OP_MODEL2 params of this frame (gfx_split_model2_begin) and the backend's (the record's replay). */
+static GfxModelParams sWalkModel2Last, sBackendModel2Last;
+static int sWalkModel2LastOk;
+static void *sWalkModel2Open;
+static int sWalkModel2BreakArmed = 1;
+static volatile unsigned int sModel2Records, sModel2Slim, sModel2Compared, sModel2Wrong;
 
 typedef struct SplitTexture {
     GfxTexture *tex;
@@ -200,6 +226,7 @@ static int mix_kind(unsigned int op, const void *p) {
         case OP_INDEXED_REF:
             return MIX_DRAWS;
         case OP_MODEL:
+        case OP_MODEL2:
         case OP_MESHES:
         case OP_MESH_FREE:
             return MIX_MODELS;
@@ -405,6 +432,42 @@ static void commit(void *payload) {
     wake_backend(op);
 }
 
+/* OP_MODEL2 on the backend thread: the params made whole again from the last record's, then one model draw for each
+ * cull group with triangles (as gfx_split_draw_model would have made them, the vertices sent with each). */
+static void model2_replay(const void *payload) {
+    const SplitModel2 *m = payload;
+    const unsigned char *at = (const unsigned char *) (m + 1);
+    const GfxModelVertex *verts;
+    const unsigned short *idx;
+    GfxDrawState state = m->state;
+    if (m->full) {
+        memcpy(&sBackendModel2Last, at, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    } else {
+        if (m->check != 2) { // (2: rule K6's break, the texture factors left as the last record's)
+            memcpy((unsigned char *) &sBackendModel2Last + MODEL2_TEX_OFFSET, at, MODEL2_TEX_BYTES);
+        }
+        at += MODEL2_TEX_BYTES;
+    }
+    if (m->check) {
+        int wrong = __builtin_memcmp(&sBackendModel2Last, at, sizeof(GfxModelParams)) != 0;
+        sModel2Wrong += (unsigned int) wrong;
+        sModel2Compared++;
+        plat_check_report("kart batch params", wrong); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
+        at += sizeof(GfxModelParams);
+    }
+    verts = (const GfxModelVertex *) at;
+    idx = (const unsigned short *) (verts + m->numVerts);
+    if (m->n[0] > 0) {
+        state.cullMode = 0;
+        gfxb_draw_model(&state, &sBackendModel2Last, verts, m->numVerts, idx, m->n[0]);
+    }
+    if (m->n[1] > 0) {
+        state.cullMode = m->cull1;
+        gfxb_draw_model(&state, &sBackendModel2Last, verts, m->numVerts, idx + 3 * m->n[0], m->n[1]);
+    }
+}
+
 /* The backend's DKR_SPLIT_LINES settings (from the OP_START records) and the check's records run and their sum: shared
  * by both backend threads, as the queue (and the counting) is handed from one to the other (choose_backend). */
 static int sBackendLines, sBackendCheck;
@@ -558,6 +621,9 @@ static void backend_thread(void *arg) {
                                     (const unsigned short *) (verts + m->numVerts), m->numTriangles);
                     break;
                 }
+                case OP_MODEL2:
+                    model2_replay(p);
+                    break;
                 case OP_MESHES: {
                     SplitModel *m = p;
                     gfxb_draw_meshes(&m->state, &m->params, (const GfxMeshPart *) (m + 1), m->numVerts);
@@ -804,6 +870,7 @@ int gfx_split_frame_start(int direct, int holdCores) {
         sWalkWaitNs += plat_time_ns() - start;
             sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
     }
+    sWalkModel2LastOk = 0; // P68: each frame's first OP_MODEL2 carries all its params
     {
         SplitStart *st = reserve(OP_START, sizeof(SplitStart));
         st->lines = sLines;
@@ -1104,6 +1171,83 @@ void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *param
     memcpy(m + 1, verts, vertBytes);
     memcpy((unsigned char *) (m + 1) + vertBytes, indices, indexBytes);
     commit(m);
+}
+
+/*
+ * P68 (DKR_KART_BATCH bit 2): an OP_MODEL2 record reserved in the queue, for the walk to write its vertices and indices
+ * into (gfx_split_model2_end hands it over). The params are queued whole only when the matrix, fog or light differ
+ * from the frame's last OP_MODEL2 (a kart's batches share them): else only the texture factors. NULL when this frame's
+ * calls aren't queued or the record is too big for the ring: the caller draws as before (gfx_split_draw_model).
+ * check: 0 none, 1 the backend compares the params it made with the walk's, 3 the same, and once the backend leaves
+ * a record's texture factors stale (rule K6's break, which the compare must report).
+ */
+GfxModelVertex *gfx_split_model2_begin(const GfxDrawState *state, const GfxModelParams *params, int numVerts, int n0,
+                                       int n1, unsigned char cull1, int check, unsigned short **indices) {
+    SplitModel2 *m;
+    unsigned char *at;
+    int full;
+    unsigned int bytes;
+    if (!sActive || sWalkModel2Open != NULL) {
+        return NULL;
+    }
+    full = !sWalkModel2LastOk || __builtin_memcmp(params->mtx, sWalkModel2Last.mtx, sizeof(params->mtx)) != 0 ||
+           __builtin_memcmp((const unsigned char *) params + MODEL2_TEX_OFFSET + MODEL2_TEX_BYTES,
+                  (const unsigned char *) &sWalkModel2Last + MODEL2_TEX_OFFSET + MODEL2_TEX_BYTES,
+                  sizeof(GfxModelParams) - MODEL2_TEX_OFFSET - MODEL2_TEX_BYTES) != 0;
+    bytes = sizeof(SplitModel2) + (full ? sizeof(GfxModelParams) : MODEL2_TEX_BYTES) +
+            (check ? sizeof(GfxModelParams) : 0) + (unsigned int) numVerts * sizeof(GfxModelVertex) +
+            (unsigned int) (n0 + n1) * 3u * sizeof(unsigned short);
+    if (bytes + 64u > SPLIT_RING_BYTES / 4u) {
+        return NULL;
+    }
+    m = reserve(OP_MODEL2, bytes);
+    m->state = *state;
+    m->numVerts = numVerts;
+    m->n[0] = (unsigned short) n0;
+    m->n[1] = (unsigned short) n1;
+    m->cull1 = cull1;
+    m->full = (unsigned char) full;
+    m->check = check ? 1 : 0;
+    m->pad = 0;
+    at = (unsigned char *) (m + 1);
+    if (full) {
+        memcpy(at, params, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    } else {
+        if (check == 3 && sWalkModel2BreakArmed &&
+            __builtin_memcmp(params->texScale, sWalkModel2Last.texScale, MODEL2_TEX_BYTES) != 0) {
+            sWalkModel2BreakArmed = 0;
+            m->check = 2; // Stale factors that differ from these: the compare must see it
+        }
+        memcpy(at, params->texScale, MODEL2_TEX_BYTES);
+        at += MODEL2_TEX_BYTES;
+        sModel2Slim++;
+    }
+    if (check) {
+        memcpy(at, params, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    }
+    sWalkModel2Last = *params;
+    sWalkModel2LastOk = 1;
+    sWalkModel2Open = m;
+    sModel2Records++;
+    *indices = (unsigned short *) ((GfxModelVertex *) at + numVerts);
+    return (GfxModelVertex *) at;
+}
+
+void gfx_split_model2_end(void) {
+    void *m = sWalkModel2Open;
+    if (m != NULL) {
+        sWalkModel2Open = NULL;
+        commit(m);
+    }
+}
+
+void gfx_split_model2_counts(unsigned int *records, unsigned int *slim, unsigned int *compared, unsigned int *wrong) {
+    *records = sModel2Records;
+    *slim = sModel2Slim;
+    *compared = sModel2Compared;
+    *wrong = sModel2Wrong;
 }
 
 void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,
