@@ -18,6 +18,12 @@
 #include <stdlib.h>
 #endif
 #include "port_drawtag.h"
+static void port_wave_snapshot(void);
+static void port_wave_forget(void);
+static Gfx *port_wave_tag(s32 block, s32 quadrant, s32 viewportID, Vertex *verts);
+static void port_wave_tag_end(Gfx *data);
+static s32 sPortWavesFrame; // This waves_render leaves the tiles' heights to the renderer (DKR_WAVE_SHADER)
+static s32 sWaveColourStart[26]; // D_8012A5E8's unk8 as this waves_render started
 #endif
 
 /************ .data ************/
@@ -161,6 +167,9 @@ void waves_free(void) {
     gWaveGenObjs = NULL;
     D_800E3184 = NULL;
     gWaveGenCount = 0;
+#ifdef TARGET_PORT
+    port_wave_forget();
+#endif
 }
 
 /**
@@ -301,6 +310,9 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
             var_s5++;
         }
     }
+#ifdef TARGET_PORT
+    port_wave_snapshot(); // P65 rank 3: the indices as the level starts (the wave shader's meshes)
+#endif
     var_s5 = 0;
     i_2 = 0;
     load_rng_seed();
@@ -657,52 +669,36 @@ found:
     return result;
 }
 
-void func_800B92F4(s32 blockID, s32 viewportID) {
-    s32 i;
-    s32 var_s2;
-    s32 j;
-    f32 temp_f22;
-    f32 vertexY;
-    s32 sp98;
-    s32 var_v0;
-    s32 sp90;
-    s32 sp8C;
-    s32 sp88;
-    s32 sp84;
-    s32 vertexCol;
-    s32 vertexIdx;
-    s32 var_s1;
-    s32 k;
+#ifdef TARGET_PORT
+/*
+ * One visible tile's wave heights and colours (func_800B92F4's work for its entry k of D_8012A5E8), the port's
+ * faster loop (v27): the controller's settings and the tables held in locals; the original reads them from memory for
+ * every vertex, as its vertex writes might change them as far as the compiler knows (they can't). Same operations in
+ * the same order, so the same results. Also run on its own by the renderer for a tile it doesn't draw with the wave
+ * shader (port_wave_tile_cpu, P65 rank 3).
+ */
+static void wave_k_heights(s32 blockID, s32 viewportID, s32 k) {
+    s32 i, j, var_s2, var_s1, var_v0, vertexCol, vertexIdx, sp98, sp90, sp8C, sp88, sp84;
+    f32 temp_f22, vertexY;
     Vertex *vertices;
     LevelModel_Alternate *sp6C;
-
     temp_f22 = (1.0f - gWaveController.unk44) / 255.0f;
     sp6C = &gWaveModel[blockID];
     sp90 = (gWaveController.subdivisions + 1) * (gWaveController.subdivisions + 1);
-    for (k = 0; D_8012A5E8[k].blockID != -1; k++) {
-        if (blockID != D_8012A5E8[k].blockID) {
-            continue;
-        }
-
-        if (gWaveController.doubleDensity) {
-            sp98 = (((u32) D_800E30D4[sp6C->unkC] >> (D_8012A5E8[k].unk2 * 8)) & 0xFF) - 1;
-            sp8C = (D_8012A5E8[k].unk2 & 1) * gWaveController.subdivisions;
-            sp88 = ((D_8012A5E8[k].unk2 & 2) >> 1) * gWaveController.subdivisions;
-        } else {
-            sp98 = (D_800E30D4[sp6C->unkC] & 0xFF) - 1;
-            sp8C = 0;
-            sp88 = 0;
-        }
-
-        sp84 = D_8012A5E8[k].unk6;
-        vertices = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][sp90 * sp98];
-        sp98 = D_800E30E4[sp98];
-        vertexIdx = 0;
-#ifdef TARGET_PORT
-        // v27: the same loop with the controller's settings and the tables held in locals. The original reads them
-        // from memory for every vertex, as its vertex writes might change them as far as the compiler knows (they
-        // can't). Same operations in the same order, so the same results. DKR_WAVES_OLD=1 is the old loop.
-        if (!plat_switch("DKR_WAVES_OLD", 0)) {
+    if (gWaveController.doubleDensity) {
+        sp98 = (((u32) D_800E30D4[sp6C->unkC] >> (D_8012A5E8[k].unk2 * 8)) & 0xFF) - 1;
+        sp8C = (D_8012A5E8[k].unk2 & 1) * gWaveController.subdivisions;
+        sp88 = ((D_8012A5E8[k].unk2 & 2) >> 1) * gWaveController.subdivisions;
+    } else {
+        sp98 = (D_800E30D4[sp6C->unkC] & 0xFF) - 1;
+        sp8C = 0;
+        sp88 = 0;
+    }
+    sp84 = D_8012A5E8[k].unk6;
+    vertices = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][sp90 * sp98];
+    sp98 = D_800E30E4[sp98];
+    vertexIdx = 0;
+    {
             const s32 subdivisions = gWaveController.subdivisions, tileCount = gWaveController.tileCount;
             const s32 doubleDensity = gWaveController.doubleDensity, genCount = gWaveGenCount;
             const f32 magnitude = gWaveController.magnitude, unk44 = gWaveController.unk44;
@@ -760,6 +756,55 @@ void func_800B92F4(s32 blockID, s32 viewportID) {
                 }
             }
             D_8012A5E8[k].unk8 = unk8;
+    }
+}
+#endif
+
+void func_800B92F4(s32 blockID, s32 viewportID) {
+    s32 i;
+    s32 var_s2;
+    s32 j;
+    f32 temp_f22;
+    f32 vertexY;
+    s32 sp98;
+    s32 var_v0;
+    s32 sp90;
+    s32 sp8C;
+    s32 sp88;
+    s32 sp84;
+    s32 vertexCol;
+    s32 vertexIdx;
+    s32 var_s1;
+    s32 k;
+    Vertex *vertices;
+    LevelModel_Alternate *sp6C;
+
+    temp_f22 = (1.0f - gWaveController.unk44) / 255.0f;
+    sp6C = &gWaveModel[blockID];
+    sp90 = (gWaveController.subdivisions + 1) * (gWaveController.subdivisions + 1);
+    for (k = 0; D_8012A5E8[k].blockID != -1; k++) {
+        if (blockID != D_8012A5E8[k].blockID) {
+            continue;
+        }
+
+        if (gWaveController.doubleDensity) {
+            sp98 = (((u32) D_800E30D4[sp6C->unkC] >> (D_8012A5E8[k].unk2 * 8)) & 0xFF) - 1;
+            sp8C = (D_8012A5E8[k].unk2 & 1) * gWaveController.subdivisions;
+            sp88 = ((D_8012A5E8[k].unk2 & 2) >> 1) * gWaveController.subdivisions;
+        } else {
+            sp98 = (D_800E30D4[sp6C->unkC] & 0xFF) - 1;
+            sp8C = 0;
+            sp88 = 0;
+        }
+
+        sp84 = D_8012A5E8[k].unk6;
+        vertices = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][sp90 * sp98];
+        sp98 = D_800E30E4[sp98];
+        vertexIdx = 0;
+#ifdef TARGET_PORT
+        // v27: the faster loop (wave_k_heights). DKR_WAVES_OLD=1 is the old loop.
+        if (!plat_switch("DKR_WAVES_OLD", 0)) {
+            wave_k_heights(blockID, viewportID, k);
             continue;
         }
 #endif
@@ -1188,8 +1233,29 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
         }
 
         transform.rotation.x = transform.rotation.y = transform.rotation.z = 0;
+#ifdef TARGET_PORT
+        // P65 rank 3 (DKR_WAVE_SHADER): the see-through water's heights are left to the renderer, which has the GPU
+        // work them out or asks for them tile by tile (port_wave_tile_cpu). Not with wave generators (boats' waves
+        // add terms per vertex), two players, or the old loops.
+        sPortWavesFrame = gWaveController.xlu && viewportID == 0 && gWavePlayerCount != 2 && gWaveGenCount == 0 &&
+                          port_wave_shader() && !plat_switch("DKR_WAVES_OLD", 0) &&
+                          gWaveController.seedSize <= 188 && gWaveController.subdivisions <= 11;
+        if (sPortWavesFrame) {
+            s32 kk;
+            // The tiles' first colour entries before the game's loop moves them on (it stays on with
+            // DKR_WAVE_SHADER_CHECK, and runs before each block's tags)
+            for (kk = 0; kk < 26 && D_8012A5E8[kk].blockID != -1; kk++) {
+                sWaveColourStart[kk] = D_8012A5E8[kk].unk8;
+            }
+        }
+#endif
         // High Quality water
         for (; i < gVisibleWaveTiles; i++) {
+#ifdef TARGET_PORT
+            if (sPortWavesFrame && !plat_switch("DKR_WAVE_SHADER_CHECK", 0)) {
+                // The renderer works the tile out (DKR_WAVE_SHADER_CHECK: the game still does, for the comparison)
+            } else
+#endif
             if (gWaveController.xlu) {
                 func_800B92F4(gWaveBlockIDs[i], viewportID);
             } else {
@@ -1206,9 +1272,16 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     for (var_fp = 0; var_fp < 2; var_fp++) {
                         mtx_cam_push(&gWaveDL, &gWaveMtx, &transform, 1.0f, 0.0f);
                         if (sp104 & 0xFF) {
+#ifdef TARGET_PORT
+                            Gfx *waveTag;
+#endif
                             numTris = gWaveController.subdivisions << 1;
                             numVerts = gWaveController.subdivisions + 1;
                             var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
+#ifdef TARGET_PORT
+                            waveTag = sPortWavesFrame ? port_wave_tag(gWaveBlockIDs[i], sp11C * 2 + var_fp, viewportID,
+                                &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0]) : NULL;
+#endif
                             for (j = 0; j < gWaveController.subdivisions; j++) {
                                 vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
                                 tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS]
@@ -1224,6 +1297,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
 
                                 var_t0 += gWaveController.subdivisions + 1;
                             }
+#ifdef TARGET_PORT
+                            port_wave_tag_end(waveTag);
+#endif
                         } else {
                             if (waveMat >= 0) {
                                 port_native_record(&gWaveDL, waveMat, &D_8012A028[gWaveVertexFlip], 4, &D_800E3090[gWaveVertexFlip * 2], 2, 1, 1);
@@ -1241,10 +1317,17 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     transform.z_position += gWaveBoundingBoxH * 0.5f;
                 }
             } else {
+#ifdef TARGET_PORT
+                Gfx *waveTag;
+#endif
                 mtx_cam_push(&gWaveDL, &gWaveMtx, &transform, 1.0f, 0.0f);
                 numTris = gWaveController.subdivisions << 1;
                 numVerts = gWaveController.subdivisions + 1;
                 var_t0 = ((sp104 & 0xFF) - 1) * numVerts * numVerts;
+#ifdef TARGET_PORT
+                waveTag = sPortWavesFrame ? port_wave_tag(gWaveBlockIDs[i], 0, viewportID,
+                    &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0]) : NULL;
+#endif
                 for (j = 0; j < gWaveController.subdivisions; j++) {
                     vtx = &gWaveVertices[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][var_t0];
                     tri = &gWaveTriangles[gWaveVertexFlip + (viewportID >> 1) * FRAME_BUFFERS][j * (gWaveController.subdivisions << 1)];
@@ -1259,6 +1342,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
 
                     var_t0 += gWaveController.subdivisions + 1;
                 }
+#ifdef TARGET_PORT
+                port_wave_tag_end(waveTag);
+#endif
                 mtx_pop(&gWaveDL);
             }
         }
@@ -2820,3 +2906,282 @@ void obj_loop_wavepower(Object *obj) {
         gWaveGeneratorObj = obj;
     }
 }
+
+#ifdef TARGET_PORT
+/******************************** Wave tiles on the GPU (P65 rank 3) ********************************/
+/*
+ * DKR_WAVE_SHADER (port_drawtag.h PORT_WAVE_TAG, port/3ds/waves.v.pica). Every height index moves on by the same step
+ * each frame (waves_update), so a vertex's index now is its index as the level started plus one offset for the whole
+ * level, modulo the table's size: the mesh keeps the starting indices and each tile sends the offset. The tiles' own
+ * values (shade, scale table row, texture scroll) go with the tag; the height and scale tables once a level.
+ */
+#define PORT_WAVE_RECS 1024 // Tag records, reused in turn (a frame has at most a few dozen tiles)
+static Vec2s *sWaveIndicesStart;
+static s32 sWaveIndicesCount;
+static unsigned int sWaveVersion = 1;
+static f32 sWaveScales[12];
+static PortWaveTile sWaveRecs[PORT_WAVE_RECS];
+static s32 sWaveRecNext;
+
+static void port_wave_forget(void) {
+    free(sWaveIndicesStart);
+    sWaveIndicesStart = NULL;
+    sWaveIndicesCount = 0;
+    sWaveVersion++;
+}
+
+static void port_wave_snapshot(void) {
+    s32 n = gWaveController.tileCount * gWaveController.tileCount, i;
+    port_wave_forget();
+    sWaveIndicesStart = (Vec2s *) malloc(n * sizeof(Vec2s));
+    if (sWaveIndicesStart != NULL) {
+        memcpy(sWaveIndicesStart, gWaveHeightIndices, n * sizeof(Vec2s));
+        sWaveIndicesCount = n;
+    }
+    for (i = 0; i < 12; i++) {
+        sWaveScales[i] = 1.0f; // func_800BC6C8's sp34 is filled in once its rows are (port_wave_tables)
+    }
+}
+
+int port_wave_shader(void) {
+    return plat_switch("DKR_WAVE_SHADER", 0) != 0;
+}
+
+unsigned int port_wave_tables(const float **heights, int *count, const float **scales) {
+    s32 i, sub = gWaveController.subdivisions;
+    // sp34 of func_800BC6C8, read back from its row 1 (D_800E304C[1][i * (sub + 1)] = sp34[i]); 1.0 past sub.
+    for (i = 0; i <= sub && i < 12; i++) {
+        sWaveScales[i] = D_800E304C[1][i * (sub + 1)];
+    }
+    for (; i < 12; i++) {
+        sWaveScales[i] = 1.0f;
+    }
+    *heights = gWaveHeightTable;
+    *count = gWaveController.seedSize;
+    *scales = sWaveScales;
+    return sWaveVersion;
+}
+
+/* The entry of the visible tiles list for a model and quarter, or -1. */
+static s32 wave_find_k(s32 block, s32 quadrant) {
+    s32 k;
+    for (k = 0; D_8012A5E8[k].blockID != -1 && k < 26; k++) {
+        if (D_8012A5E8[k].blockID == block && (!gWaveController.doubleDensity || D_8012A5E8[k].unk2 == quadrant)) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+/* Index offset of every height index since the level started: -1 if they don't all agree (then no tags). */
+static s32 wave_index_offset(void) {
+    s32 S = gWaveController.seedSize, off;
+    if (sWaveIndicesStart == NULL || sWaveIndicesCount != gWaveController.tileCount * gWaveController.tileCount) {
+        return -1;
+    }
+    off = gWaveHeightIndices[0].s[0] - sWaveIndicesStart[0].s[0];
+    if (off < 0) {
+        off += S;
+    }
+    return off;
+}
+
+/* The tag and record before a tile's strips; returns the record's no-op (for port_wave_tag_end), NULL for none. */
+static Gfx *port_wave_tag(s32 block, s32 quadrant, s32 viewportID, Vertex *verts) {
+    PortWaveTile *t;
+    LevelModel_Alternate *model = &gWaveModel[block];
+    s32 k = wave_find_k(block, quadrant), off = wave_index_offset(), lod, sub = gWaveController.subdivisions;
+    f32 bound, f, unk44 = gWaveController.unk44;
+    Gfx *data;
+    if (k < 0 || off < 0) {
+        // The strips then come without a tag: their heights worked out here instead
+        if (k >= 0) {
+            wave_k_heights(block, viewportID, k);
+        }
+        return NULL;
+    }
+    lod = gWaveController.doubleDensity ? (((u32) D_800E30D4[model->unkC] >> (D_8012A5E8[k].unk2 * 8)) & 0xFF)
+                                        : (D_800E30D4[model->unkC] & 0xFF);
+    t = &sWaveRecs[sWaveRecNext];
+    sWaveRecNext = (sWaveRecNext + 1) % PORT_WAVE_RECS;
+    t->block = block;
+    t->k = k;
+    t->viewport = viewportID;
+    t->quadrant = D_8012A5E8[k].unk2;
+    t->sub = sub;
+    t->textured = 1;
+    t->version = sWaveVersion;
+    t->meshKey = ((u32) D_8012A5E8[k].unk4 & 0x3FF) | (((u32) D_8012A5E8[k].unk6 & 0x3FF) << 10) |
+                 (((u32) sWaveColourStart[k] & 0xFFF) << 20);
+    t->gridX = D_8012A5E8[k].unk4;
+    t->gridZ = D_8012A5E8[k].unk6;
+    t->colour = sWaveColourStart[k];
+    t->scaleRow = D_800E30E4[lod - 1];
+    t->shade = model->unk14[viewportID >> 1].unk0[D_8012A5E8[k].unk2];
+    t->verts = verts;
+    t->unif[0] = (f32) off;
+    t->unif[1] = (f32) gWaveController.seedSize;
+    t->unif[2] = 1.0f / (f32) gWaveController.seedSize;
+    t->unif[3] = gWaveController.magnitude;
+    t->unif[4] = unk44;
+    t->unif[5] = (1.0f - unk44) / 255.0f;
+    t->unif[6] = gWaveController.unk48;
+    t->unif[7] = (f32) model->unk14[viewportID >> 1].unk0[D_8012A5E8[k].unk2] / 128.0f;
+    {
+        // func_800BC6C8's rows as selections (gfx_waves.h): row r is sp34[min(i * ai + bi, j * aj + bj)]
+        static const s8 sSel[9][2] = { { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, 1 }, { 0, 0 },
+                                        { 0, -1 }, { -1, 1 }, { -1, 0 }, { -1, -1 } };
+        s32 row = D_800E30E4[lod - 1], ai = sSel[row][0], aj = sSel[row][1];
+        t->unif[8] = (f32) ai;
+        t->unif[9] = (f32) aj;
+        t->unif[10] = ai == 0 ? 100.0f : ai > 0 ? 0.0f : (f32) sub;
+        t->unif[11] = aj == 0 ? 100.0f : aj > 0 ? 0.0f : (f32) sub;
+    }
+    t->unif[12] = (f32) gWaveUVBaseX;
+    t->unif[13] = (f32) gWaveUVBaseY;
+    t->unif[14] = (f32) gWaveUVStepX;
+    t->unif[15] = (f32) gWaveUVStepY;
+    // The box: |y| <= (|lowest| or |highest| table entry) * 2 * |magnitude| * the largest colour factor (scale <= 1).
+    bound = gWaveUpperY > -gWaveLowerY ? gWaveUpperY : -gWaveLowerY;
+    f = (unk44 < 0.0f ? -unk44 : unk44) + 255.0f * (t->unif[5] < 0.0f ? -t->unif[5] : t->unif[5]);
+    f = f > 1.0f ? f : 1.0f;
+    t->boxY = bound * 2.0f * (gWaveController.magnitude < 0.0f ? -gWaveController.magnitude
+                                                               : gWaveController.magnitude) * f + 2.0f;
+    t->boxX = (f32) sub * gWaveVtxStepX + 1.0f;
+    t->boxZ = (f32) sub * gWaveVtxStepZ + 1.0f;
+    gDPNoOpTag(gWaveDL++, PORT_WAVE_TAG);
+    data = gWaveDL;
+    gDPNoOpTag(gWaveDL++, (u32) (uintptr_t) t);
+    t->skip = 1;
+    return data;
+}
+
+static void port_wave_tag_end(Gfx *data) {
+    if (data != NULL) {
+        ((PortWaveTile *) (uintptr_t) data->words.w1)->skip = (s32) (gWaveDL - data);
+    }
+}
+
+/*
+ * The tile's vertices worked out the CPU way, from its record (the renderer may run a frame behind the game, whose
+ * lists and vertex buffer have moved on by then): wave_k_heights' sums in the same order, the height table indices
+ * being the ones as the level started moved on by the record's offset (as every index moves by the same step).
+ */
+void port_wave_tile_cpu(const PortWaveTile *t, void *out) {
+    s32 i, j, col, row, at, i0, i1, v, c, vertexIdx = 0;
+    s32 S, tc, sub, off, unk8;
+    f32 y, temp;
+    Vertex *vertices;
+    const f32 *heightTable, *scaleRow;
+    f32 magnitude, unk44, unk48;
+    if (t == NULL || t->version != sWaveVersion || sWaveIndicesStart == NULL || t->verts == NULL) {
+        return;
+    }
+    S = gWaveController.seedSize;
+    tc = gWaveController.tileCount;
+    sub = t->sub;
+    off = (s32) t->unif[0];
+    unk8 = t->colour;
+    magnitude = gWaveController.magnitude;
+    unk44 = gWaveController.unk44;
+    unk48 = gWaveController.unk48;
+    temp = (1.0f - unk44) / 255.0f;
+    heightTable = gWaveHeightTable;
+    scaleRow = D_800E304C[t->scaleRow];
+    vertices = (Vertex *) (out != NULL ? out : t->verts);
+    row = t->gridZ;
+    for (i = 0; i <= sub; i++) {
+        col = t->gridX;
+        for (j = 0; j <= sub; j++) {
+            at = row * tc + col;
+            i0 = sWaveIndicesStart[at].s[0] + off;
+            i0 -= i0 >= S ? S : 0;
+            i1 = sWaveIndicesStart[at].s[1] + off;
+            i1 -= i1 >= S ? S : 0;
+            y = (heightTable[i0] + heightTable[i1]) * magnitude;
+            y *= scaleRow[vertexIdx];
+            v = D_800E3178[unk8] << 1;
+            unk8++;
+            if (v < 255) {
+                y *= unk44 + ((f32) v * temp);
+            }
+            v += (s32) (y * unk48);
+            if (v > 255) {
+                v = 255;
+            } else if (v < 0) {
+                v = 0;
+            }
+            v += ((255 - v) * t->shade) >> 7;
+            vertices[vertexIdx].y = y;
+            c = v < 192 ? 255 : ((255 - v) * 4) & 255;
+            vertices[vertexIdx].r = c;
+            vertices[vertexIdx].g = c;
+            vertices[vertexIdx].b = c;
+            vertices[vertexIdx].a = v < 64 ? (v * 4) & 255 : 255;
+            vertexIdx++;
+            if (++col >= tc) {
+                col -= tc;
+            }
+        }
+        if (++row >= tc) {
+            row -= tc;
+        }
+        if (gWaveController.doubleDensity) {
+            unk8 += sub;
+        }
+    }
+}
+
+int port_wave_tile_mesh(const PortWaveTile *t, void *out, unsigned short *indices) {
+    // GfxWaveVertex (gfx_waves.h): x, first index, z, second index, column, row (s16), colour byte, 3 zero bytes.
+    typedef struct {
+        s16 x, a0, z, a1, j, i;
+        u8 c, pad[3];
+    } WaveMeshVertex;
+    WaveMeshVertex *v = (WaveMeshVertex *) out;
+    s32 sub = t->sub, tc = gWaveController.tileCount, i, j, n = 0, row, col, colour, stride;
+    if (t->version != sWaveVersion || sWaveIndicesStart == NULL) {
+        return 0;
+    }
+    stride = gWaveController.doubleDensity ? 2 * sub + 1 : sub + 1;
+    for (i = 0; i <= sub; i++) {
+        row = t->gridZ + i;
+        while (row >= tc) {
+            row -= tc;
+        }
+        for (j = 0; j <= sub; j++) {
+            s32 at;
+            col = t->gridX + j;
+            while (col >= tc) {
+                col -= tc;
+            }
+            at = row * tc + col;
+            colour = t->colour + i * stride + j;
+            // The grid as waves_init lays out every vertex set (the same for each)
+            v[n].x = (s16) ((j * gWaveVtxStepX) + 0.5);
+            v[n].z = (s16) ((i * gWaveVtxStepZ) + 0.5);
+            v[n].a0 = sWaveIndicesStart[at].s[0];
+            v[n].a1 = sWaveIndicesStart[at].s[1];
+            v[n].j = (s16) j;
+            v[n].i = (s16) i;
+            v[n].c = D_800E3178[colour];
+            v[n].pad[0] = v[n].pad[1] = v[n].pad[2] = 0;
+            n++;
+        }
+    }
+    // The strips' triangles (waves_init: gWaveTriangles), per strip of two rows
+    for (i = 0, j = 0; i < sub; i++) {
+        s32 c;
+        for (c = 0; c < sub; c++) {
+            s32 base = i * (sub + 1);
+            indices[j++] = (u16) (base + c);
+            indices[j++] = (u16) (base + c + sub + 1);
+            indices[j++] = (u16) (base + c + 1);
+            indices[j++] = (u16) (base + c + 1);
+            indices[j++] = (u16) (base + c + sub + 1);
+            indices[j++] = (u16) (base + c + sub + 2);
+        }
+    }
+    return n;
+}
+#endif

@@ -17,6 +17,7 @@
 #include "gfx_census.h"
 #include "port_drawtag.h"
 #include "gfx_internal.h"
+#include "gfx_waves.h"
 
 #define MAX_VERTICES 64
 #define MAX_BATCH_TRIANGLES GFX_MAX_BATCH_TRIANGLES
@@ -2747,6 +2748,8 @@ static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and fla
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
+static s32 sWaveSwitch;        // DKR_WAVE_SHADER (P65 rank 3), see native_wave
+static s32 sWaveCheck;         // DKR_WAVE_SHADER_CHECK: 1 compares the wave meshes with the game's sums, 2 breaks it (K6)
 static s32 sNativeGpuSwitch;   // DKR_NATIVE_GPU (core balance 2b-B): native kart (1) and object (2) draws, GPU maths
 static u32 sNGpuStats[3];      // native_gpu_draw's draws by the GPU, left out, left to the CPU
 static s32 sKartCounts;        // DKR_KART_COUNTS (P65 rank 2): the native kart batches counted (kart_count)
@@ -2851,6 +2854,9 @@ static COLD void read_switches_now(void) {
     // run 50 on 62ac36e, game core -4.3 ms and renderer core -3.6 ms. Alone it only moves the work to the renderer's
     // core; 2 (objects too) was no better. Read the same way in gfx_c3d.c (sTransformWanted) and host/gfx_soft.c.
     sNativeGpuSwitch = plat_switch("DKR_NATIVE_GPU", plat_old_3ds());
+    // P65 rank 3: wave tiles drawn by waves.v.pica (native_wave); like the native track, GPU vertex maths for itself.
+    sWaveSwitch = plat_switch("DKR_WAVE_SHADER", 0) != 0;
+    sWaveCheck = plat_switch("DKR_WAVE_SHADER_CHECK", 0);
     if (!plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1)) {
         sGpuKinds = 0;
     }
@@ -3781,7 +3787,9 @@ static void model_params_matrix(float (*m)[4], GfxModelParams *params) {
 
 /* The rest of a model draw's parameters: texture coordinate factors from the tiles of the state's textures, and the
  * fog (when G_FOG is set) with these factors. */
-static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffset, GfxModelParams *params) {
+/* model_params_rest with the tiles and fog given (a native material's, native_wave). */
+static void model_params_tiles(const GfxDrawState *state, const Tile *tiles, s32 fog, s16 fogMul, s16 fogOffset,
+                               GfxModelParams *params) {
     s32 i;
     for (i = 0; i < 4; i++) {
         params->texScale[i] = 0.0f;
@@ -3789,7 +3797,7 @@ static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffs
     }
     for (i = 0; i < 2; i++) {
         if (state->textures[i] != NULL) {
-            Tile *tile = &g.tiles[i];
+            const Tile *tile = &tiles[i];
             float shift = texel_centre_shift(state->textures[i]);
             TexAxis u, v;
             tex_axis_init(&u, tile->shifts, tile->uls, state->textures[i]->width, shift);
@@ -3798,11 +3806,15 @@ static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffs
             tex_axis_factors(&v, &params->texScale[i * 2 + 1], &params->texOffset[i * 2 + 1]);
         }
     }
-    params->fog = (g.geometryMode & G_FOG) != 0;
+    params->fog = fog != 0;
     params->fogMul = params->fog ? fogMul : 0;
     params->fogOffset = params->fog ? fogOffset : 0;
     params->pad[0] = params->pad[1] = params->pad[2] = 0;
     params->light[0] = params->light[1] = params->light[2] = params->light[3] = 0.0f;
+}
+
+static void model_params_rest(const GfxDrawState *state, s16 fogMul, s16 fogOffset, GfxModelParams *params) {
+    model_params_tiles(state, g.tiles, (g.geometryMode & G_FOG) != 0, fogMul, fogOffset, params);
 }
 
 /*
@@ -4318,6 +4330,7 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
     }
     state.flat = 0;
     model_params_rest(&state, g.fogMul, g.fogOffset, &params);
+    params.pad[1] = GFX_MODEL_PROG_TRACK; // P65 5b: the backend may draw it with the slim track shader (DKR_TRACK_SLIM)
     for (i = 0; i < e->numRuns; i++) {
         state.cullMode = e->runs[i].doubleSided ? 0 : frontCull;
         if (sDrawKind == PORT_DRAW_TRACK) {
@@ -4351,6 +4364,7 @@ static u32 sNopStats[2];
 static u32 sNopStaticCount, sNopStaticWords;
 #endif
 /* The renderer's logs every 600 frames (track_frame_start). Cold (P57 D): one frame in 600 runs it. */
+static void wave_log_600(void);
 static COLD void frame_logs_600(void) {
 #ifdef PORT_NATIVE_OPS
     if (sNopStats[0] > 0) {
@@ -4378,6 +4392,7 @@ static COLD void frame_logs_600(void) {
     if (sCensusOn > 0 && sCensusFrames > 0) {
         census_log();
     }
+    wave_log_600();
     if (sOpCountOn && sFrameCount > 0) {
         char line[1024];
         s32 n = 0, i;
@@ -7365,6 +7380,310 @@ static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     return used;
 }
 
+/******************************** Wave tiles on the GPU (P65 rank 3) ********************************/
+
+/*
+ * DKR_WAVE_SHADER (port_drawtag.h PORT_WAVE_TAG, port/3ds/waves.v.pica). waves_render leaves the heights and colours of
+ * the see-through water's high detail tiles to the renderer. Each tile comes as a tag and its record, then its strips
+ * (N64 commands or native records). Here a tile is either drawn from a mesh of its own (made once a level: the grid,
+ * the height table indices as the level started, the colour bytes), the GPU's vertex shader doing the game's sums
+ * (gfx_waves.h), and its strips skipped; or, near the camera (the guard band), off screen tests, the reference
+ * renderer and the rest, the game works the vertices out now (port_wave_tile_cpu) and the strips are walked as before.
+ *
+ * DKR_WAVE_SHADER_CHECK=1: every tile goes the CPU way, and its vertices as the game made them are compared with
+ * gfx_wave_eval on the tile's mesh and values (the shader's sums, checked against waves.v.pica on the PC by
+ * port/tools/pica_wave_check.py): the log line every 600 frames gives how many differ. =2 is the same with the index
+ * offset broken on purpose (rule K6): most vertices must differ.
+ */
+#define WAVE_MESHES 64
+#define WAVE_MAX_SUB 11
+typedef struct WaveMesh {
+    void *mesh; // NULL: unused
+    u32 version, key;
+    s16 block, quadrant, sub, pad;
+} WaveMesh;
+static WaveMesh sWaveMeshes[WAVE_MESHES];
+static u32 sWaveMeshNext, sWaveMeshUsed;
+static u32 sWaveTablesSent; // The version of the tables the backend has (0: none)
+static s32 sWaveOn;         // This frame's DKR_WAVE_SHADER, with GPU vertex maths and a wave program that draws
+static u32 sWaveStats[4];   // Tiles drawn by the GPU, left out, left to the CPU, meshes made
+static u32 sWaveCheckStats[4]; // DKR_WAVE_SHADER_CHECK: vertices compared, differing, worst height, worst colour
+static u32 sWaveCheckCpu;     // DKR_WAVE_SHADER_CHECK: vertices port_wave_tile_cpu makes differently from the game
+
+static COLD void wave_drop_all(void) {
+    s32 i;
+    for (i = 0; i < WAVE_MESHES; i++) {
+        if (sWaveMeshes[i].mesh != NULL) {
+            gfx_split_mesh_free(sWaveMeshes[i].mesh);
+        }
+    }
+    __builtin_memset(sWaveMeshes, 0, sizeof(sWaveMeshes));
+    sWaveMeshUsed = 0;
+    sWaveTablesSent = 0;
+}
+
+/* At a frame's start, after the switches: this frame's wave switch; the meshes go with it off. */
+static void wave_frame_start(void) {
+    sWaveOn = sWaveSwitch && sGpuTransform && gfxb_wave_shader_ok();
+    if (sWaveMeshUsed > 0 && !sWaveOn) {
+        gfx_split_drain(); // As track_frame_start: frees go through the backend's frame slot
+        wave_drop_all();
+    }
+}
+
+static COLD void wave_log_600(void) {
+    if ((sWaveStats[0] | sWaveStats[1] | sWaveStats[2]) != 0) {
+        plat_log("wave shader: %u tiles drawn by the GPU, %u left out, %u by the CPU, %u meshes made (600 frames)",
+                 (unsigned) sWaveStats[0], (unsigned) sWaveStats[1], (unsigned) sWaveStats[2], (unsigned) sWaveStats[3]);
+        __builtin_memset(sWaveStats, 0, sizeof(sWaveStats));
+    }
+    if (sWaveCheckStats[0] != 0) {
+        plat_log("wave shader check%s: %u vertices against the game's own loop: the shader's sums differ on %u (worst "
+                 "height %u, worst colour %u), the CPU way on %u",
+                 sWaveCheck == 2 ? " (broken on purpose, K6)" : "", (unsigned) sWaveCheckStats[0],
+                 (unsigned) sWaveCheckStats[1], (unsigned) sWaveCheckStats[2], (unsigned) sWaveCheckStats[3],
+                 (unsigned) sWaveCheckCpu);
+        __builtin_memset(sWaveCheckStats, 0, sizeof(sWaveCheckStats));
+        sWaveCheckCpu = 0;
+    }
+}
+
+static GfxModelVertex sWaveMeshVerts[(WAVE_MAX_SUB + 1) * (WAVE_MAX_SUB + 1)];
+static u16 sWaveMeshIndices[WAVE_MAX_SUB * WAVE_MAX_SUB * 6];
+
+/*
+ * DKR_WAVE_SHADER_CHECK: the tile's vertices as the game's own loop made them (it stays on with the check) against the
+ * shader's sums on the tile's mesh and values (gfx_wave_eval), and against port_wave_tile_cpu (the renderer's CPU way).
+ * Counts: [0] vertices, [1] shader sums differing, [2] worst height, [3] worst colour step, [4] CPU way differing.
+ */
+static Vertex sWaveCheckVerts[(WAVE_MAX_SUB + 1) * (WAVE_MAX_SUB + 1)];
+static COLD void wave_check(const PortWaveTile *t) {
+    const float *heights, *scales;
+    float unif[16];
+    int count;
+    s32 n, i;
+    const Vertex *gv = (const Vertex *) t->verts;
+    if (gv == NULL || t->sub > WAVE_MAX_SUB || port_wave_tables(&heights, &count, &scales) != t->version ||
+        (n = port_wave_tile_mesh(t, sWaveMeshVerts, sWaveMeshIndices)) <= 0) {
+        return;
+    }
+    __builtin_memcpy(unif, t->unif, sizeof(unif));
+    if (sWaveCheck == 2) {
+        unif[0] = (float) (((s32) unif[0] + 1) % (s32) unif[1]); // K6: every index one step on
+    }
+    port_wave_tile_cpu(t, sWaveCheckVerts);
+    {
+        u32 differBefore = sWaveCheckStats[1] + sWaveCheckCpu;
+        for (i = 0; i < n; i++) {
+            const GfxModelVertex *m = &sWaveMeshVerts[i];
+            s16 y;
+            u8 rgba[4];
+            u32 dy, dc = 0, k;
+            gfx_wave_eval(m->x, m->y, m->one, m->u, m->v, m->r, unif, heights, scales, &y, rgba);
+            dy = (u32) (y > gv[i].y ? y - gv[i].y : gv[i].y - y);
+            for (k = 0; k < 4; k++) {
+                u8 c = k == 0 ? gv[i].r : k == 1 ? gv[i].g : k == 2 ? gv[i].b : gv[i].a;
+                u32 d = (u32) (rgba[k] > c ? rgba[k] - c : c - rgba[k]);
+                dc = d > dc ? d : dc;
+            }
+            if (m->x != gv[i].x || m->z != gv[i].z) {
+                dc = 999;
+            }
+            sWaveCheckStats[0]++;
+            if (dy | dc) {
+                sWaveCheckStats[1]++;
+                sWaveCheckStats[2] = dy > sWaveCheckStats[2] ? dy : sWaveCheckStats[2];
+                sWaveCheckStats[3] = dc > sWaveCheckStats[3] ? dc : sWaveCheckStats[3];
+            }
+            if (__builtin_memcmp(&sWaveCheckVerts[i].y, &gv[i].y, 2) != 0 ||
+                __builtin_memcmp(&sWaveCheckVerts[i].r, &gv[i].r, 4) != 0) {
+                sWaveCheckCpu++;
+            }
+        }
+        plat_check_report("wave shader", sWaveCheckStats[1] + sWaveCheckCpu != differBefore); // P59 E: the race's chk
+    }
+}
+
+/* The tile the CPU way: its vertices worked out now (with the check on, the game's loop already did), its strips
+ * walked (after the record). */
+static COLD s32 wave_cpu(const PortWaveTile *t) {
+    if (UNLIKELY(sWaveCheck)) {
+        wave_check(t);
+    } else {
+        port_wave_tile_cpu(t, NULL);
+    }
+    sWaveStats[2]++;
+    return 1;
+}
+
+/* The tile's mesh, made if it isn't yet. */
+static WaveMesh *wave_mesh_for(const PortWaveTile *t) {
+    WaveMesh *e;
+    s32 i, n;
+    for (i = 0; i < WAVE_MESHES; i++) {
+        e = &sWaveMeshes[i];
+        if (e->mesh != NULL && e->key == t->meshKey && e->block == t->block && e->quadrant == t->quadrant &&
+            e->sub == t->sub) {
+            if (e->version == t->version) {
+                return e;
+            }
+            gfx_split_mesh_free(e->mesh); // Another level's (or the same level loaded again)
+            e->mesh = NULL;
+            sWaveMeshUsed--;
+        }
+    }
+    n = port_wave_tile_mesh(t, sWaveMeshVerts, sWaveMeshIndices);
+    if (n <= 0) {
+        return NULL;
+    }
+    e = NULL;
+    for (i = 0; i < WAVE_MESHES; i++) {
+        if (sWaveMeshes[i].mesh == NULL) {
+            e = &sWaveMeshes[i];
+            break;
+        }
+    }
+    if (e == NULL) {
+        e = &sWaveMeshes[sWaveMeshNext++ % WAVE_MESHES]; // Full: the oldest made goes
+        gfx_split_mesh_free(e->mesh);
+        e->mesh = NULL;
+        sWaveMeshUsed--;
+    }
+    e->mesh = gfxb_mesh_create(sWaveMeshVerts, n, sWaveMeshIndices, t->sub * t->sub * 6);
+    if (e->mesh == NULL) {
+        return NULL;
+    }
+    e->version = t->version;
+    e->key = t->meshKey;
+    e->block = t->block;
+    e->quadrant = t->quadrant;
+    e->sub = t->sub;
+    sWaveMeshUsed++;
+    sWaveStats[3]++;
+    return e;
+}
+
+/*
+ * The PORT_WAVE_TAG at dl[-1], its record's no-op at dl[0]: draws the tile on the GPU and returns the words to skip
+ * (the record and the strips), or has its vertices made and returns 1 (the strips are walked).
+ */
+static NOINLINE s32 native_wave(const Gfx *dl, s32 remaining) {
+    const PortWaveTile *t;
+    WaveMesh *e;
+    GfxDrawState state;
+    GfxModelParams params;
+    const Tile *tiles;
+    float(*m)[4];
+    s32 verdict, fog, textured = TRUE, slots;
+    s16 boxMin[3], boxMax[3];
+
+    if (remaining < 1) {
+        return 0;
+    }
+    t = (const PortWaveTile *) (uintptr_t) dl[0].words.w1;
+    if (t == NULL) {
+        return 1;
+    }
+    if (!sWaveOn || UNLIKELY(sWaveCheck) || g.billboard || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame) ||
+        UNLIKELY(gGfxSweep) || REF_ACTIVE() || t->skip < 2 || t->skip > remaining || t->sub < 1 ||
+        t->sub > WAVE_MAX_SUB) {
+        return wave_cpu(t);
+    }
+    // The strips' material: a native record's, or the walk's settings
+    if ((dl[1].words.w1 & 0xFFFF0000) == PORT_NDRAW_TAG && dl[1].words.w0 == dl[-1].words.w0) {
+        NMat *mat = &sNMats[dl[1].words.w1 & (NMAT_MAX - 1)];
+        if (remaining < 4 || !mat->valid || !nmat_textures_ok(mat)) {
+            return wave_cpu(t);
+        }
+        state = mat->state;
+        tiles = mat->tiles;
+        fog = mat->fog;
+        textured = (dl[3].words.w0 >> 16) & 1;
+    } else {
+        if (!sTriStateValid) {
+            build_draw_state(&sTriState, FALSE);
+            sTriStateValid = TRUE;
+        }
+        state = sTriState;
+        tiles = g.tiles;
+        fog = (g.geometryMode & G_FOG) != 0;
+    }
+    m = g.matrices[g.curMatrix];
+    if (fog || (m[0][3] == 0.0f && m[1][3] == 0.0f && m[2][3] == 0.0f)) {
+        return wave_cpu(t); // The shader has no fog (the see-through water turns it off); a flat matrix: the CPU's
+    }
+    model_params_matrix(m, &params);
+    boxMin[0] = 0;
+    boxMin[2] = 0;
+    boxMax[0] = (s16) (t->boxX < 32000.0f ? t->boxX : 32000.0f);
+    boxMax[2] = (s16) (t->boxZ < 32000.0f ? t->boxZ : 32000.0f);
+    boxMax[1] = (s16) (t->boxY < 32000.0f ? t->boxY : 32000.0f);
+    boxMin[1] = (s16) -boxMax[1];
+    verdict = gfxb_model_check(params.mtx, boxMin, boxMax);
+    if (verdict == GFX_MODEL_CPU) {
+        return wave_cpu(t);
+    }
+    // The vertex slots the strips' loads would have filled: no longer what they held.
+    slots = (t->sub + 1) * 2;
+    if (sAnyPending) {
+        forget_slots(0, slots);
+    }
+    g.vertexIndex = 0;
+    g.flatVerts &= ~((1ULL << slots) - 1);
+    if (verdict == GFX_MODEL_HIDDEN) {
+        sWaveStats[1]++;
+        return t->skip;
+    }
+    e = wave_mesh_for(t);
+    if (e == NULL) {
+        return wave_cpu(t);
+    }
+    if (sTrackPending) {
+        track_flush();
+    }
+    flush_batch(); // What came before goes first, then the tile's values, then its draw
+    if (sWaveTablesSent != t->version) {
+        GfxWaveTable *tab;
+        const float *heights, *scales;
+        int count;
+        if (port_wave_tables(&heights, &count, &scales) != t->version || count > GFX_WAVE_TABLE_MAX) {
+            return wave_cpu(t);
+        }
+        tab = (GfxWaveTable *) remote_begin(gfxb_wave_table_call, sizeof(GfxWaveTable));
+        if (tab == NULL) {
+            return wave_cpu(t);
+        }
+        tab->count = count;
+        __builtin_memcpy(tab->scales, scales, sizeof(tab->scales));
+        __builtin_memset(tab->heights, 0, sizeof(tab->heights));
+        __builtin_memcpy(tab->heights, heights, (size_t) count * sizeof(float));
+        remote_end(tab);
+        sWaveTablesSent = t->version;
+    }
+    {
+        float *u = (float *) remote_begin(gfxb_wave_tile_call, sizeof(float) * 16);
+        if (u == NULL) {
+            return wave_cpu(t);
+        }
+        __builtin_memcpy(u, t->unif, sizeof(float) * 16);
+        remote_end(u);
+    }
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    state.flat = 0;
+    state.cullMode = 0; // The game's wave triangles are all BACKFACE_DRAW
+    model_params_tiles(&state, tiles, FALSE, 0, 0, &params);
+    params.pad[1] = GFX_MODEL_PROG_WAVES;
+    mesh_part(&state, &params, e->mesh, 0, t->sub * t->sub * 2);
+    flush_mesh_batch(); // A tile a draw: the next one has its own values
+    sMix.kinds[sDrawKind].verts += (unsigned long) ((t->sub + 1) * (t->sub + 1));
+    sObjTris[sDrawObj] += t->sub * t->sub * 2;
+    sWaveStats[0]++;
+    return t->skip;
+}
+
 /******************************** RDP rectangles ********************************/
 
 static void screen_to_clip(GfxVertex *v, float sx, float sy) {
@@ -8549,6 +8868,8 @@ static NOINLINE COLD void census_command(const Gfx *at, u32 w0, u32 w1, s32 dept
             census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_MESH, NULL);
         } else if (w1 == PORT_TRACK_TAG) {
             census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_TRACK, NULL);
+        } else if (w1 == PORT_WAVE_TAG) {
+            census_add(at, depth, CENSUS_RECORD, CENSUS_OP_NATIVE_TRACK, NULL); // P65 rank 3: a wave tile
         } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
             u32 flags = at[2].words.w0; /* The record's second data word (written with the tag) */
             census_add(at, depth, CENSUS_RECORD,
@@ -8766,6 +9087,9 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
         dl += used;
     } else if (w1 == PORT_TRACK_TAG) {
         s32 used = native_track(dl, remaining);
+        dl += used;
+    } else if (w1 == PORT_WAVE_TAG) {
+        s32 used = native_wave(dl, remaining);
         dl += used;
     } else if ((w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
         s32 used = native_record(dl, remaining, w1 & 0xFFFF);
@@ -9748,7 +10072,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     forget_all_loads();
     sLightOn = FALSE;
     // The native track (NR4) works with the two-core renderer on either console, as the Old 3DS's model draws do.
-    sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch || sNativeGpuSwitch) &&
+    sGpuTransform = (plat_old_3ds() || !gfx_split_active() || sNativeTrackSwitch || sNativeGpuSwitch || sWaveSwitch) &&
                     gfxb_gpu_transform();
     sCpuCull = sCpuCullSwitch && gfxb_cpu_cull_ok() && !gGfxSweep;
     sCullMargin = sCpuCull ? gfxb_cpu_cull_margin() : 0.0f;
@@ -9756,6 +10080,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     sModelMesh = sGpuTransform && sModelMeshSwitch;
     STALL_MARK("frame set-up: track", 0, 0);
     track_frame_start();
+    wave_frame_start();
     STALL_MARK("frame set-up: meshes", 0, 0);
     if (!sTrackMesh && !sModelMesh) {
         if (sMeshBytes > 0) {
