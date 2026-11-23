@@ -414,9 +414,11 @@ extern volatile unsigned int gPlatCounters[PLAT_COUNTER_COUNT];
  * P56 K2: the ARM11's performance counters (DKR_PMU, debug builds, default 0; port/3ds/pmu_3ds.c, stubs elsewhere).
  * plat_pmu_on: 0 off (or not available), 1 PMN1 counts instruction cache misses, 2 data cache read misses (PMN0 the
  * cycles the core waited for instructions in both); P60 A1: 3 PMN0 the cycles stalled on a data hazard, PMN1 the
- * instructions executed; 4 PMN0 the cycles the load/store unit was full, PMN1 data cache write misses. The counters are per core, not per thread. plat_pmu_frame
- * samples the calling core once a frame for a slot (PLAT_PMU_GAME on the game thread, PLAT_PMU_RENDER on the
- * renderer's core) and adds what it counted since the slot's last sample to the slot's totals.
+ * instructions executed; 4 PMN0 the cycles the load/store unit was full, PMN1 data cache write misses; P64: 5 PMN0 data
+ * micro TLB misses, 6 PMN0 instruction micro TLB misses, PMN1 main TLB misses in both (events, not cycles; the first
+ * frame of each also logs a TLB probe of the heap and linear memory). The counters are per core, not per thread.
+ * plat_pmu_frame samples the calling core once a frame for a slot (PLAT_PMU_GAME on the game thread, PLAT_PMU_RENDER on
+ * the renderer's core) and adds what it counted since the slot's last sample to the slot's totals.
  */
 typedef struct PlatPmuSample {
     unsigned long long cycles, pmn0, pmn1;

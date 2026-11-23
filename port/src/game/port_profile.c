@@ -341,7 +341,19 @@ static const char *cpu_line(const ProfStats *s) {
     static char line[192];
     s32 at = 0;
     line[0] = '\0';
-    if (s->cpu.pmuKind && s->cpu.pmuFrames[0]) {
+    if (s->cpu.pmuKind >= 5 && s->cpu.pmuFrames[0]) {
+        // P64: kinds 5 and 6 count events, not stalls: micro TLB (PMN0) and main TLB (PMN1) misses a game frame
+        at +=
+            plat_snprintf(line + at, sizeof(line) - at, "TLB misses a frame: game core %s micro %.1fk, main %.1fk",
+                          s->cpu.pmuKind == 5 ? "data" : "instruction",
+                          s->cpu.fetchStall[0] / 1e3 / s->cpu.pmuFrames[0], s->cpu.pmn1[0] / 1e3 / s->cpu.pmuFrames[0]);
+        if (s->cpu.pmuFrames[1]) {
+            at += plat_snprintf(line + at, sizeof(line) - at, "; render core %.1fk, %.1fk",
+                                s->cpu.fetchStall[1] / 1e3 / s->cpu.pmuFrames[1],
+                                s->cpu.pmn1[1] / 1e3 / s->cpu.pmuFrames[1]);
+        }
+        at += plat_snprintf(line + at, sizeof(line) - at, "\n");
+    } else if (s->cpu.pmuKind && s->cpu.pmuFrames[0]) {
         // P60 A1: PMN0 is the fetch stall for DKR_PMU 1 and 2, the data hazard stall for 3, the load/store unit full
         // stall for 4 (plat.h plat_pmu_on)
         static const char *const sStallNames[5] = { "fetch", "fetch", "fetch", "data", "load/store full" };
@@ -543,7 +555,7 @@ static unsigned long long sec_other_now(unsigned long long now) {
 }
 
 /*
- * P61 M1 (DKR_PMU 1-4): the CPU counters per game core section, on timed frames (sGameTimed: an Old 3DS's 1 in 8) with
+ * P61 M1 (DKR_PMU 1-6): the CPU counters per game core section, on timed frames (sGameTimed: an Old 3DS's 1 in 8) with
  * the counters on. A sample (three system calls) at each section change; what the game's core counted in between
  * (the game, and an Old 3DS's walk and sound players there) goes to the section. The "top" section holds the walk, so
  * walk, logic and scene build each get their own stall share and events. Whatever DKR_PMU kind is on is summed.
@@ -589,6 +601,10 @@ static const char *sec_pmu_kind_name(s32 kind) {
             return "M cycles/instruction fetch stall/k I-cache misses";
         case 2:
             return "M cycles/instruction fetch stall/k D-cache read misses";
+        case 5:
+            return "M cycles/data micro TLB misses per 100 cycles/k main TLB misses";
+        case 6:
+            return "M cycles/instruction micro TLB misses per 100 cycles/k main TLB misses";
         default:
             return "M cycles/PMN0 share/k PMN1 events";
     }

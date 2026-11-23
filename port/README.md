@@ -434,6 +434,15 @@ with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps 
 off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
 FPSCR ...`).
 
+Page lookups (roadmap P64, 2026-11-22). `DKR_PMU=5` counts the data micro TLB misses and `DKR_PMU=6` the
+instruction micro TLB misses, each with the main TLB misses: events, not stalls, so the summary line reads `TLB misses
+a frame: game core data micro Nk, main Nk`, the results' stall column holds the micro misses in thousands a frame (kind
+`dtlb` / `itlb`, marked `T` / `I` in the switch bench table) and the PMN1 column the main ones. The first frame of
+each kind logs a `TLB probe` line: the main TLB misses a pass over 1 MB of the heap (the game's pool and the ROM) and of
+linear memory read a page at a time, about 256 for memory mapped in 4 KB pages and only a few for large pages. The
+walk steps (`DKR_WALK_STEPS`) split sprite records into `sprites` (checks, state and axes) and `sprite corners` (their
+vertex maths and drawing).
+
 The walk's exact data cuts (roadmap P61 W, 2026-11-22), each its own switch, `0` the old way:
 `DKR_WALK_BACKFACE` (default 1) reads each triangle's back-face flag from the mesh's 1-byte table instead of its
 16-byte triangle copy; `DKR_NMAT_ONCE` (default 1) checks a material's textures (still in the cache, the same
