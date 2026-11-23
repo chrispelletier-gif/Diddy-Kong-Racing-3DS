@@ -196,6 +196,7 @@ ifneq ($(TARGET),3ds)
   SYS_CFLAGS += -DPORT_CENSUS_SITES=1
   # The hidden track batch count (port/host/occl_count.c, DKR_OCCL_COUNT): host only.
   GAME_DEFINES += -DPORT_OCCL_COUNT=1
+  SYS_CFLAGS += -DPORT_OCCL_COUNT=1
 endif
 
 GAME_CFLAGS := $(ARCH) $(GAME_ARCH_FLAGS) $(OPT_FLAGS) $(PGO_FLAGS) $(COMMON_FLAGS) -std=gnu99 $(GAME_SYSINC) $(GAME_INCLUDES) $(GAME_DEFINES) \

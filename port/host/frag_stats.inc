@@ -19,8 +19,10 @@ static unsigned long long sFragRaster[PROF_KINDS + 2], sFragPass[PROF_KINDS + 2]
     sFragBlend[PROF_KINDS + 2], sFragNoDepth[PROF_KINDS + 2], sFragTris[PROF_KINDS + 2], sFragDraws[PROF_KINDS + 2];
 static unsigned long long sFragClear, sFragFrames, sFragCovered;
 static unsigned long long sDrawRaster; // This draw's (DKR_FRAG_STATS=2)
+#ifdef PORT_OCCL_COUNT // Host only (gfx_ref.c on the 3DS includes this file too)
 static uint8_t sFragTrackMask[MAX_W * H]; // This frame's pixels the track kind rasterized (occl_count.c's check)
 void port_occl_renderer_frame(const uint8_t *mask, int w, int h);
+#endif
 #define FRAG_CLEAR_KIND (PROF_KINDS + 1)
 #define PORT_DRAW_SKY_KIND 4 // port_drawtag.h PORT_DRAW_SKY
 
@@ -122,8 +124,10 @@ static void frag_frame_end(void) {
             memset(sPrevDraws, 0, sizeof(sPrevDraws));
         }
     }
+#ifdef PORT_OCCL_COUNT
     port_occl_renderer_frame(sFragTrackMask, W, H);
     memset(sFragTrackMask, 0, sizeof(sFragTrackMask));
+#endif
     memset(sFragLast, 0, sizeof(sFragLast));
     memset(sFragSky, 0, sizeof(sFragSky));
     if (++sFragFrames % 300 != 0) {
