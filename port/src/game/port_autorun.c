@@ -1099,7 +1099,9 @@ static void build_short_list(void) {
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
             sRaces[sNumRaces].config = (quick || boss) ? -1 : configs[pass];
             sRaces[sNumRaces].kind = STOP_RACE;
-            sRaces[sNumRaces].laps = sMode == MODE_SWITCH ? switch_race_laps(configs[pass]) : 0;
+            sRaces[sNumRaces].laps = sMode == MODE_SWITCH            ? switch_race_laps(configs[pass])
+                                     : plat_getenv("DKR_AUTORUN_LAPS") ? port_atoi(plat_getenv("DKR_AUTORUN_LAPS"))
+                                                                       : 0; // P67's CI check: 1 lap
             sNumRaces++;
         }
     }
@@ -3946,6 +3948,11 @@ void port_autorun_frame(s32 updateRate) {
     switch (sPhase) {
         case PHASE_LOADING:
             if (racer != NULL) {
+                if (plat_getenv("DKR_AUTORUN_ZOOM") != NULL) {
+                    // P67's pose log races (port/tools/hidden_bake.py): the player's camera zoom (0 medium, 1 far,
+                    // 2 close, 3 very close), as a press of C-up before the start would set it
+                    cam_set_zoom(0, port_atoi(plat_getenv("DKR_AUTORUN_ZOOM")));
+                }
                 sLoadNs = plat_time_ns() - sPhaseStartNs;
                 sQuietUntilNs = plat_time_ns() + QUIET_SECONDS * 1000000000ULL;
                 set_phase(PHASE_COUNTDOWN);

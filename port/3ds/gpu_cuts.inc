@@ -346,6 +346,20 @@ void gfxb_gpu_kind_call(void *payload) {
     gfxb_gpu_kind(*(int *) payload);
 }
 
+/* P67 DKR_HIDDEN_SKIP_CHECK: the 3DS's stencil count comes in P67 PR 2; until then the check isn't available here (the
+ * frame is drawn as usual, the check pass included, and the level's "hidden check" line reports 0 frames). */
+void gfxb_hidden_check(int value) {
+    static int sSaid;
+    if ((value & 1) && !sSaid) {
+        sSaid = 1;
+        plat_log("hidden check: not available on the 3DS yet (P67 PR 2)");
+    }
+}
+
+void gfxb_hidden_check_call(void *payload) {
+    gfxb_hidden_check(*(int *) payload);
+}
+
 /* Backend, at the frame's end: the last part's kind (the rest of the command list, which C3D_FrameEnd ends). */
 static inline void gpu_kind_end_frame(void) {
     if (sKindFrame[sRec] && sKindParts[sRec] <= MAX_LIST_PARTS) {
