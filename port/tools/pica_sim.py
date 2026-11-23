@@ -394,7 +394,8 @@ def main(argv):
                        sim.code[d.main] >> 26 == 0x00 and i == 1)
     track_i = None
     for i, d in enumerate(sim.dvles):
-        if i > 1 and not d.geo and "mtx" in d.uniforms and "wavea" not in d.uniforms and "animf" not in d.uniforms:
+        if i > 1 and not d.geo and "mtx" in d.uniforms and "stab" not in d.uniforms and "animf" not in d.uniforms and \
+                "ipk" not in d.uniforms:
             track_i = i
             break
     failed = False

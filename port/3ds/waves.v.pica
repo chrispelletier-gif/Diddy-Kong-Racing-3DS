@@ -7,7 +7,7 @@
 ;   v0 = (x, a0, z, a1): the grid position, and the tile's two height table indices as the level started
 ;   v1 = (j, i): the vertex's column and row in the tile
 ;   v3.x = the colour table's byte for the vertex (0 to 255, not scaled)
-; Per tile (uniforms):
+; Per tile (uniforms, stab rows 50..53, named wavea..waved below):
 ;   wavea = (off, S, 1/S, magnitude): every index has moved on by off since the level started (they all move by the
 ;           same step, waves_update), modulo the table's size S
 ;   waveb = (unk44, (1 - unk44) / 255, unk48, shade / 128)
@@ -39,17 +39,12 @@
 .fvec texb
 .fvec fogp
 .fvec lightv
-.fvec wavea
-.fvec waveb
-.fvec wavec
-.fvec waved
 .fvec stab[75]
 
 ; Constants
 .constf wk0(0.00392156862745098, 0.0, 1.0, 0.5)
 .constf wk1(0.25, 4.0, 2.0, 255.0)
 .constf wk2(-0.5, 0.5, 1.5, 2.5)
-.constf wk3(0.5, 1.5, 2.5, 3.5)
 .constf wk4(254.5, 191.5, 63.5, 11.0)
 .alias w_rgba_scale wk0.xxxx
 .alias w_zeros wk0.yyyy
@@ -68,11 +63,11 @@
 
 .proc waves_main
 	; Height table indices now: (a + off) modulo S, for both (x: a0, y: a1)
-	add r0.xy, wavea.xx, v0.yw
+	add r0.xy, stab[50].xx, v0.yw
 	add r1.xy, w_half, r0
-	mul r1.xy, wavea.zz, r1
+	mul r1.xy, stab[50].zz, r1
 	flr r1.xy, r1
-	mul r1.xy, wavea.yy, r1
+	mul r1.xy, stab[50].yy, r1
 	add r0.xy, r0, -r1
 
 	; Their rows (index / 4) and columns
@@ -82,23 +77,24 @@
 	add r3.xy, r0, -r3
 	mova a0.xy, r2.xy
 
-	; One-hot masks of the columns (the column c is in 0..3: (k - 0.5 < c) - (k + 0.5 < c) is 1 for k = c)
+	; One-hot masks of the columns (the column c is in 0..3: (k - 0.5 < c) - (k - 0.5 < c - 1) is 1 for k = c)
+	add r10.xy, -w_ones, r3.xy
 	slt r4, wk2, r3.xxxx
-	slt r5, wk3, r3.xxxx
+	slt r5, wk2, r10.xxxx
 	add r4, r4, -r5
 	slt r5, wk2, r3.yyyy
-	slt r6, wk3, r3.yyyy
+	slt r6, wk2, r10.yyyy
 	add r5, r5, -r6
 
 	; The two heights, their sum times the magnitude
 	dp4 r7.x, stab[a0.x], r4
 	dp4 r7.y, stab[a0.y], r5
 	add r7.x, r7.x, r7.y
-	mul r7.x, wavea.wwww, r7.x
+	mul r7.x, stab[50].wwww, r7.x
 
 	; The scale table's index: min(i * ai + bi, j * aj + bj) clamped to 0..11, its row and column
-	mul r8.xy, wavec.xy, v1.yx
-	add r8.xy, wavec.zw, r8
+	mul r8.xy, stab[52].xy, v1.yx
+	add r8.xy, stab[52].zw, r8
 	min r8.x, r8.x, r8.y
 	max r8.x, w_zeros, r8.x
 	min r8.x, wk4.wwww, r8.x
@@ -107,16 +103,17 @@
 	mul r10.x, w_four, r9.x
 	add r10.x, r8.x, -r10.x
 	mova a0.x, r9.x
+	add r13.x, -w_ones, r10.x
 	slt r11, wk2, r10.xxxx
-	slt r12, wk3, r10.xxxx
+	slt r12, wk2, r13.xxxx
 	add r11, r11, -r12
 	dp4 r8.x, stab[a0.x+47], r11
 	mul r7.x, r7.x, r8.x
 
 	; v = c * 2; below 255 the height is also scaled by unk44 + v * (1 - unk44) / 255
 	mul r9.x, w_two, v3.x
-	mul r10.x, waveb.yyyy, r9.x
-	add r10.x, waveb.xxxx, r10.x
+	mul r10.x, stab[51].yyyy, r9.x
+	add r10.x, stab[51].xxxx, r10.x
 	add r10.x, -w_ones, r10.x
 	slt r11.x, wk4.xxxx, r9.x
 	add r11.x, w_ones, -r11.x
@@ -125,7 +122,7 @@
 	mul r7.x, r7.x, r10.x
 
 	; v += trunc(y * unk48) (toward zero: the floor of the size, the sign put back), clamped to 0..255
-	mul r12.x, waveb.zzzz, r7.x
+	mul r12.x, stab[51].zzzz, r7.x
 	max r13.x, r12.x, -r12.x
 	flr r13.x, r13.x
 	slt r14.x, w_zeros, -r12.x
@@ -136,9 +133,9 @@
 	max r9.x, w_zeros, r9.x
 	min r9.x, w_255, r9.x
 
-	; v += (255 - v) * shade >> 7 (waveb.w is shade / 128)
+	; v += (255 - v) * shade >> 7 (waveb.w, stab[51].w, is shade / 128)
 	add r10.x, w_255, -r9.x
-	mul r10.x, waveb.wwww, r10.x
+	mul r10.x, stab[51].wwww, r10.x
 	flr r10.x, r10.x
 	add r9.x, r9.x, r10.x
 
@@ -181,8 +178,8 @@
 	min r1.z, w_zeros, r1
 
 	; Texture coordinates: (u base + j * u step, v base + i * v step), then as transform.v.pica
-	mul r6.xy, waved.zw, v1.xy
-	add r6.xy, waved.xy, r6
+	mul r6.xy, stab[53].zw, v1.xy
+	add r6.xy, stab[53].xy, r6
 	mul r7, texa, r6.xyxy
 	add r7, texb, r7
 

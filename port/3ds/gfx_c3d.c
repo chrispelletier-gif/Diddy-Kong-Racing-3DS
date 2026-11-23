@@ -212,6 +212,11 @@ typedef struct VertConsts {
 static int sEyeUniform = -1; // The shader's eye uniform register, if found
 static int sStereoOnce;      // DKR_STEREO_ONCE (P33): stereo frames made once and drawn twice, see stereo_once_lists
 static int sOnceFrame;       // This frame is
+static int sInterpFrame;     // DKR_INTERP60: this frame is made for two runs, two pictures (gpu_interp.inc)
+static volatile int sInterpChain; // gpu_interp.inc: 0 idle, 1 and 2 its runs on the GPU, 3 its second picture waits
+static shaderProgram_s sProgramI; // interp.v.pica (gpu_interp.inc)
+static int sEyeUniformI;
+static void init_interp(void);
 static int stereo_wanted(float slider);
 #define EYE_CMD_WORDS 128
 /* citro3d's flags (internal.h C3DiF_*): the target, and the groups of settings a frame made once writes again at its
@@ -404,7 +409,9 @@ static void move_shares(const void *from, void *to) {
 static void promote_textures(void) {
     C3DTexture *t;
     int done = 0;
-    if (sToVram == 0) {
+    if (sToVram == 0 || sInterpChain == 1 || sInterpChain == 2) {
+        // The 60 Hz picture's second run is queued from the GSP's thread (gpu_interp.inc): not two threads adding
+        // to the queue at once. The textures go to VRAM on a later frame.
         return;
     }
     for (t = sTextures; t != NULL && sToVram > 0 && done < PROMOTE_PER_FRAME; t = t->next) {
@@ -1957,6 +1964,7 @@ void gfxb_init(void) {
     sEyeUniform = shaderInstanceGetUniformLocation(sProgram.vertexShader, "eye");
     init_transform();
     init_model_programs();
+    init_interp(); // gpu_interp.inc
     sprite_gs_init();
     sprite_table_init();
 
@@ -2066,14 +2074,21 @@ __attribute__((used)) u8 *__wrap_gfxGetFramebuffer(gfxScreen_t screen, gfx3dSide
 }
 
 /* What libctru's gfxPresentFramebuffer does for the top screen, with our buffer (in linear memory). */
+static void triple_present_buf(int buf, bool hasStereo);
 static void triple_present(bool hasStereo) {
+    triple_present_buf(sTripleNext, hasStereo);
+    sTripleSwaps++;
+}
+
+/* Buffer buf presented (triple_present; the 60 Hz picture's own presents, gpu_interp.inc). */
+static void triple_present_buf(int buf, bool hasStereo) {
     GSPGPU_FramebufferFormat format = gfxGetScreenFormat(GFX_TOP);
     // Bits 8-9 say where the buffer lives: 1 main memory, 3 VRAM (as libctru's gfxPresentFramebuffer sets them). The
     // screen shows either way, but the HOME menu's picture of the game is read the way they say: a VRAM buffer
     // (DKR_FB_VRAM) marked as main memory came out as a white and grey box when the HOME menu opened and closed
     // ("Fix grey box after HOME resume", 2026-11-12).
     u32 mode = format | ((sTripleSetNow == 1 ? 3u : 1u) << 8);
-    const u8 *fbA = sTriple[sTripleNext], *fbB = fbA;
+    const u8 *fbA = sTriple[buf], *fbB = fbA;
     if (gfxIs3D()) {
         mode |= BIT(5);
         fbB = hasStereo ? fbA + TRIPLE_BYTES / 2 : fbA;
@@ -2086,10 +2101,9 @@ static void triple_present(bool hasStereo) {
         sTripleShown = sTriplePresented;
         sTripleMaybe = -1;
     }
-    sTriplePresented = sTripleNext;
+    sTriplePresented = buf;
     sTripleId ^= 1;
     gspPresentBuffer(GSP_SCREEN_TOP, sTripleId, fbA, fbB, GSP_SCREEN_WIDTH * gspGetBytesPerPixel(format), mode);
-    sTripleSwaps++;
 }
 
 /* P56 K7: the pictures that reached the screen (plat/shown.h), from the top screen's swaps. GSP thread; the
@@ -2163,16 +2177,8 @@ static int fb_vram_wanted(void);   // gpu_cuts.inc
 static int triple_use_set(int vram);
 static u8 *sTripleSets[2][3];
 
-static int triple_choose(void) {
-    int i;
-    if (sTripleFrame && !triple_poll(triple_swapped)) {
-        plat_log("top screen: the last frame's swap never came, two buffers from now");
-        sTripleFail = 1;
-    }
-    sTripleFrame = 0;
-    if (!sTripleWanted || sStereo || sTripleFail) {
-        return 0;
-    }
+/* The three buffers made (or moved) if they need to be; 0 if there is no room for them. */
+static int triple_alloc(void) {
     if (fb_vram_wanted() != sTripleSetNow || sTriple[0] == NULL) {
         // The buffers in VRAM (DKR_FB_VRAM, gpu_cuts.inc), else in linear memory.
         if (!(fb_vram_wanted() && triple_use_set(1))) {
@@ -2191,6 +2197,19 @@ static int triple_choose(void) {
                 return 0;
             }
         }
+    }
+    return 1;
+}
+
+static int triple_choose(void) {
+    int i;
+    if (sTripleFrame && !triple_poll(triple_swapped)) {
+        plat_log("top screen: the last frame's swap never came, two buffers from now");
+        sTripleFail = 1;
+    }
+    sTripleFrame = 0;
+    if (!sTripleWanted || sStereo || sTripleFail || !triple_alloc()) {
+        return 0;
     }
     i = triple_free();
     if (i < 0 && triple_poll(triple_shown)) {
@@ -3841,6 +3860,12 @@ static void adaptive_observe(const FrameSlot *slot, float gpuMs) {
  * Waits for the GPU to finish the frame it was given last, and begins a citro3d frame (which sets citro3d's own
  * command buffer: the caller sets the slot's). Then that frame's freed textures are deleted.
  */
+/* citro3d's frame begun, if the GPU has finished: also the 60 Hz picture's second run, which the GSP's thread queues
+ * once the first is done (the queue is idle for a moment in between). */
+static int frame_begin(void) {
+    return sInterpChain != 1 && sInterpChain != 2 && C3D_FrameBegin(C3D_FRAME_NONBLOCK);
+}
+
 static void wait_for_gpu(int measure) {
     unsigned long long waitStart;
     if (sFrameCount < 3) {
@@ -3853,11 +3878,11 @@ static void wait_for_gpu(int measure) {
         plat_log("DKR_GPU_HANG_TEST: writing gpu_hang.txt as a hang would");
         save_gpu_hang();
     }
-    if (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+    if (!frame_begin()) {
         // Poll instead of blocking, so that a GPU that never finishes the previous frame gets reported.
         unsigned long long start = plat_time_ns();
         int reported = 0;
-        while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        while (!frame_begin()) {
             if (!reported && plat_time_ns() - start > 3000000000ULL) {
                 reported = 1;
                 gPlatGfxStage = "GPU not responding";
@@ -3929,7 +3954,9 @@ static int sTransformOn;     // This frame is drawn with transform.v.pica
 static int sTransformTestFrame = -1; // The first frame drawn with it this run, until it is known to work
 static int sEyeUniformP, sEyeUniformT; // The eye uniform of each program
 
-enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_LIGHT, UNIF_COUNT };
+/* UNIF_DLT: the 60 Hz picture's delta rows (interp.v.pica only, DKR_INTERP60, gpu_interp.inc); set only while that
+ * program is bound. */
+enum { UNIF_MTX, UNIF_CAMOFF = 4, UNIF_TEXA, UNIF_TEXC, UNIF_TEXB, UNIF_FOGP, UNIF_LIGHT, UNIF_DLT, UNIF_COUNT = UNIF_DLT + 4 };
 static int sUnifLoc[UNIF_COUNT];
 static float sUnifVal[UNIF_COUNT][4];
 static int sUnifKnown; // sUnifVal holds what citro3d has
@@ -3958,7 +3985,10 @@ static void init_transform(void) {
     sProgramTUsable = sShaderDvlb->numDVLE >= 2 && shaderProgramSetVsh(&sProgramT, &sShaderDvlb->DVLE[1]) == 0;
     sEyeUniformP = sEyeUniform;
     sEyeUniformT = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, "eye") : -1;
-    for (i = 0; i < UNIF_COUNT; i++) {
+    for (i = UNIF_DLT; i < UNIF_COUNT; i++) {
+        sUnifLoc[i] = -1; // transform.v.pica has no delta rows (interp.v.pica, gpu_interp.inc)
+    }
+    for (i = 0; i < UNIF_DLT; i++) {
         int name = i < UNIF_CAMOFF ? 0 : i - UNIF_CAMOFF + 1;
         int loc = sProgramTUsable ? shaderInstanceGetUniformLocation(sProgramT.vertexShader, sNames[name]) : -1;
         sUnifLoc[i] = loc >= 0 && i < UNIF_CAMOFF ? loc + i : loc;
@@ -4210,13 +4240,20 @@ rest:
 
 /* At the start of a frame: binds the program the frame is drawn with, and watches the first frames drawn with the
  * transform one (see above). */
+static int sInterpBound;
+static void interp_use_locations(int interp);
 static void transform_frame_start(void) {
     int on = sTransformWanted && sProgramTUsable && !sTransformHung;
+    int interp = on && sInterpFrame; // DKR_INTERP60: interp.v.pica, transform.v.pica with the delta (gpu_interp.inc)
+    if (on != sTransformOn || interp != sInterpBound) {
+        sInterpBound = interp;
+        C3D_BindProgram(!on ? &sProgram : interp ? &sProgramI : &sProgramT);
+        sEyeUniform = !on ? sEyeUniformP : interp ? sEyeUniformI : sEyeUniformT;
+        interp_use_locations(interp);
+        sUnifKnown = 0;
+    }
     if (on != sTransformOn) {
         sTransformOn = on;
-        C3D_BindProgram(on ? &sProgramT : &sProgram);
-        sEyeUniform = on ? sEyeUniformT : sEyeUniformP;
-        sUnifKnown = 0;
         plat_log("GPU vertex maths %s (frame %d)", on ? "on" : "off", sFrameCount);
         if (on && sTransformTestFrame == -1) {
             transform_marker_write("testing");
@@ -4325,10 +4362,10 @@ static int PLAT_COLD same_uniforms(shaderProgram_s *p) {
 }
 
 /*
- * The wave shader's uniforms (waves.v.pica: wavea..waved, and its tables in stab rows 0..49; gfx_backend.h gfxb_wave_*).
- * wavea..waved are read by that program only; stab is shared with the sprite table program (the blob has room for one
- * 75-row table), which rewrites it on each of its draws, so draw_table_gpu marks the wave tables as needing writing
- * again. They are written as words when a wave tile is drawn: the tile's four each wave draw, the tables at the first
+ * The wave shader's uniforms (waves.v.pica: its tables in stab rows 0..49, the tile's four in rows 50..53; gfx_backend.h
+ * gfxb_wave_*). stab is shared with the sprite table program (the blob has room for one 75-row table beside the 60 Hz
+ * picture's uniforms), which rewrites it on each of its draws, so draw_table_gpu marks the wave tables and tile as
+ * needing writing again. They are written as words when a wave tile is drawn: the tile's four each wave draw, the tables at the first
  * wave draw of a frame (and when they change or a sprite table draw came between), each twice, as the other uniforms
  * are (unif_write_twice). citro3d's copy is kept for after the HOME menu but not marked.
  */
@@ -4337,14 +4374,14 @@ static C3D_FVec sWaveTileVec[4], sWaveTabVec[GFX_WAVE_TABLE_MAX / 4], sWaveScVec
 static int sWaveTileNew, sWaveTabFrame = -1, sWaveTabGiven;
 
 static void PLAT_COLD wave_init_uniforms(void) {
-    sWaveLocTile = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wavea");
     sWaveLocTab = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "stab");
     sWaveLocSc = sWaveLocTab < 0 ? -1 : sWaveLocTab + GFX_WAVE_TABLE_MAX / 4;
-    if (sWaveLocTile < 0 || sWaveLocTab < 0 || sWaveLocSc + GFX_WAVE_SCALES / 4 > 96 ||
-        shaderInstanceGetUniformLocation(sProgramW.vertexShader, "waved") != sWaveLocTile + 3) {
+    sWaveLocTile = sWaveLocTab < 0 ? -1 : sWaveLocSc + GFX_WAVE_SCALES / 4; // stab rows 50..53 (waves.v.pica)
+    if (sWaveLocTab < 0 || sWaveLocTile + 4 > 96 ||
+        shaderInstanceGetUniformLocation(sProgramW.vertexShader, "mtx") < 0) {
         sProgramWUsable = 0;
     }
-    plat_log("wave shader: uniforms wavea %d stab %d scales %d", sWaveLocTile, sWaveLocTab, sWaveLocSc);
+    plat_log("wave shader: uniforms stab %d (scales %d, tile %d)", sWaveLocTab, sWaveLocSc, sWaveLocTile);
 }
 
 static void wave_vecs(C3D_FVec *out, const float *in, int count) {
@@ -4421,10 +4458,10 @@ static void PLAT_COLD wave_uniforms_write(void) {
 static void PLAT_COLD init_model_programs(void) {
     shaderProgramInit(&sProgramK);
     shaderProgramInit(&sProgramW);
-    sProgramKUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 6 &&
-                      shaderProgramSetVsh(&sProgramK, &sShaderDvlb->DVLE[5]) == 0 && same_uniforms(&sProgramK);
-    sProgramWUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 7 &&
-                      shaderProgramSetVsh(&sProgramW, &sShaderDvlb->DVLE[6]) == 0 && same_uniforms(&sProgramW);
+    sProgramKUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 7 &&
+                      shaderProgramSetVsh(&sProgramK, &sShaderDvlb->DVLE[6]) == 0 && same_uniforms(&sProgramK);
+    sProgramWUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 8 &&
+                      shaderProgramSetVsh(&sProgramW, &sShaderDvlb->DVLE[7]) == 0 && same_uniforms(&sProgramW);
     if (sProgramWUsable) {
         wave_init_uniforms();
     }
@@ -4554,6 +4591,8 @@ static int sFastClip = 1;  // DKR_FAST_CLIP (roadmap P22): triangles wholly beyo
 static int sBackendLoadMs; // DKR_BACKEND_LOAD: milliseconds of busy waiting at each frame end (tunnel bench)
 static int sDrawParts;     // DKR_DRAW_PARTS: time each draw's parts while the profiler is on (gfxb_draw_indexed)
 
+static int sInterpWanted;
+static void interp_read_switches(void);
 static void read_switches(void) {
     int recent, i;
     if (sSwitchEpoch == gPlatSwitchEpoch) {
@@ -4596,7 +4635,8 @@ static void read_switches(void) {
     sFogMode = -1;
     sIboAlign = plat_switch("DKR_IBO_ALIGN", 0) != 0;
     sFastClip = plat_switch("DKR_FAST_CLIP", 1) != 0;
-    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0;
+    interp_read_switches(); // DKR_INTERP60 (gpu_interp.inc): needs the third top screen buffer and GPU vertex maths
+    sTripleWanted = plat_switch("DKR_TRIPLE_BUFFER", !plat_old_3ds()) != 0 || sInterpWanted;
     // The lean draw (gfxb_draw_indexed): on by default on an Old 3DS only, until a New 3DS bench has measured it.
     sDrawLean = plat_switch("DKR_DRAW_LEAN", plat_old_3ds()) != 0;
     // Off on an Old 3DS: the five to seven clock reads a draw are system calls there (see the draws' parts below).
@@ -4605,7 +4645,7 @@ static void read_switches(void) {
     // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
                        plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
-                       plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 ||
+                       plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 || sInterpWanted ||
                        plat_switch("DKR_WAVE_SHADER", 0) != 0; // P65 rank 3: wave tiles need it too
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sSlimWanted = plat_switch("DKR_TRACK_SLIM", 0) != 0; // P65 5b: the native track's slim shader (model_program_for)
@@ -4652,6 +4692,7 @@ static void read_switches(void) {
 
 static void walk_publish_consts(void);
 
+#include "gpu_interp.inc" // DKR_INTERP60 (S8 / P39): the 60 Hz picture
 /*
  * P57 E (gfx_backend.h GFXB_FPART_*, DKR_FRAME_PARTS default 1): the frame start and end in named parts, on the
  * backend mix's timed frames only (an Old 3DS's 1 in 8). Each mark adds the span since the last to its part, so the
@@ -4729,9 +4770,12 @@ void gfxb_start_frame(void) {
     sBufMesh = NULL;
     GPUCMD_SetBuffer(slot->cmd, sCmdWords, 0);
     read_switches();
+    sInterpFrame = interp_frame_wanted(); // DKR_INTERP60: made like a stereo frame made once (gpu_interp.inc)
+    sInterpValid = 0;
+    sInterpIdentity = 1;
     transform_frame_start();
     model_programs_frame_start();
-    sOnceFrame = sStereo && sStereoOnce && sSplitMode == 0;
+    sOnceFrame = (sStereo && sStereoOnce && sSplitMode == 0) || sInterpFrame;
     if (!sStereo) {
         write_eye(0.0f, 0.0f); // In 3D, each draw sets it (draw_arrays), or each eye's pass (stereo_once_lists).
     }
@@ -4932,7 +4976,10 @@ void gfxb_end_frame(void) {
     hand_over_draw_parts();
     gpu_kind_end_frame();
     dp_frame_end();
-    if (sOnceFrame) {
+    int interpLists = 0;
+    if (sInterpFrame) {
+        interpLists = interp_lists(&sSlots[sRec]); // DKR_INTERP60 (gpu_interp.inc)
+    } else if (sOnceFrame) {
         stereo_once_lists(&sSlots[sRec]);
     }
     {
@@ -5004,7 +5051,8 @@ void gfxb_end_frame(void) {
         if (sFpOn) {
             sFpListParts += slot->numParts;
         }
-        for (i = 0; i < slot->numParts; i++) {
+        // DKR_INTERP60: a frame made for two runs is queued after pace_frame (interp_hand_over).
+        for (i = 0; i < slot->numParts && !interpLists; i++) {
             if (sSvcFlush) {
                 gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
                 GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, 0);
@@ -5027,6 +5075,13 @@ void gfxb_end_frame(void) {
         sOnGpu = sRec;
         sRec = (sRec + 1) % sNumSlots;
         pace_frame();
+        if (interpLists && interp_hand_over(slot, interpLists)) {
+            goto handed_over; // Both pictures queued, citro3d's frame ended (gpu_interp.inc)
+        }
+        for (i = 0; i < slot->numParts && interpLists; i++) {
+            // Drawn once after all: the real picture's short list was queued first.
+            GX_ProcessCommandList(slot->partAddr[i], slot->partWords[i] * 4, GX_CMDLIST_FLUSH);
+        }
         if (!triple_choose()) {
             wait_for_present();
         }
@@ -5052,6 +5107,7 @@ void gfxb_end_frame(void) {
         }
         fpart(GFXB_FPART_C3D_END);
         sTripleGet = 0;
+    handed_over:
         timeline_expect(); // gpu_cuts.inc
         history_note_copy();
         record_recent_frame();
@@ -6463,6 +6519,9 @@ static void __attribute__((noinline, cold)) read_state_cache_setting(void) {
 PLAT_HOT static void set_all_state(const GfxDrawState *state, float *su0, float *sv0, float *su1, float *sv1) {
     int newTexture;
 
+    if (__builtin_expect(sInterpFrame, 0)) {
+        interp_draw_now(state->flat); // DKR_INTERP60: the draw's delta rows (gpu_interp.inc)
+    }
     if (__builtin_expect(sRawDraw, 0) && raw_set_all_state(state, su0, sv0, su1, sv1)) {
         return; // DKR_RAW_REGS (gpu_raw.inc)
     }
@@ -7771,7 +7830,8 @@ static int __attribute__((noinline)) draw_table_gpu(const GfxDrawState *state, c
         table_write_rows(sStabLoc, sRows, numGroups * GFX_TAB_ROWS);
         table_write_rows(sStfogLoc, &fogv, 1);
     }
-    sWaveTabFrame = -1; // the wave tables share stab's rows (waves.v.pica): written again at the next wave draw
+    sWaveTabFrame = -1; // the wave tables and tile share stab's rows (waves.v.pica): written again at the next wave draw
+    sWaveTileNew = 1;
     if (sVfmtBound != VFMT_STAB) {
         bind_vertex_format(VFMT_STAB);
     }

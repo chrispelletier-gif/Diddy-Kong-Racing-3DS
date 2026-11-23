@@ -2093,6 +2093,8 @@ static COLD void kind_switch_timed(void) {
 static inline void flush_batch(void);
 static s32 sTrackPending;
 static void track_flush(void);
+static s32 sOpaqueSortSwitch; // (Defined with the opaque sort, below)
+#include "gfx_interp.inc" // DKR_INTERP60 (S8 / P39): the 60 Hz picture's deltas
 static inline void kind_switch(u32 tag) {
     u32 obj = ((tag >> 4) & 0xFF) - 1; // No object (0) wraps round to a big number
     if (UNLIKELY(sTrackPending) && (tag & (PROF_KINDS - 1)) != PORT_DRAW_TRACK) {
@@ -2606,7 +2608,7 @@ static inline void flush_batch(void) {
     flush_cpu_batch();
 }
 
-static void flush_batch_for_atlas(void) {
+static NOINLINE void flush_batch_for_atlas(void) {
     flush_batch();
 }
 
@@ -2961,6 +2963,7 @@ static COLD void read_switches_now(void) {
     // P60 D: sprite tiles as points, the GPU's geometry shader making their corners (1: the backend's CPU makes them,
     // 2: the geometry shader where it can). Off by default until an Old 3DS bench has raced it.
     sSpriteGs = plat_switch("DKR_SPRITE_GS", 0);
+    ikey_switches(); // DKR_INTERP60 (gfx_interp.inc): no opaque sort or sprite geometry shader while it is set
 #if PLAT_DEBUG_TOOLS
     sSpriteGsCheck = plat_switch("DKR_SPRITE_GS_CHECK", 0) != 0;
 #endif
@@ -9730,10 +9733,16 @@ static NOINLINE HOT s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) 
             break;
         case NOPX_MVP:
             g.curMatrix = bits & 3;
+            if (UNLIKELY(sIkeyOn)) {
+                ikey_select();
+            }
             break;
         case NOPX_MTX:
             load_matrix((const Mtx *) seg_addr(w1), bits & 3);
             g.curMatrix = bits & 3;
+            if (UNLIKELY(sIkeyOn)) {
+                ikey_load(bits & 3);
+            }
             break;
         default:
             break;
@@ -10006,11 +10015,17 @@ static NOINLINE void native_particle_begin(const Gfx *dl) {
     __builtin_memcpy(g.matrices[2], seg_addr(dl[0].words.w1), sizeof(g.matrices[2]));
     g.curMatrix = 2;
     g.billboard = 1;
+    if (UNLIKELY(sIkeyOn)) {
+        ikey_load(2);
+    }
 }
 
 static inline void native_particle_end(u32 w1) {
     g.curMatrix = (w1 >> 1) & 1;
     g.billboard = 0;
+    if (UNLIKELY(sIkeyOn)) {
+        ikey_select();
+    }
     if (w1 & (1 << 3)) {
         unpack_rgba(0xFFFFFFFFu, g.prim);
         g.primLodFrac = 0;
@@ -10139,7 +10154,15 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
         u32 index = w1 & 3;
         __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
         g.curMatrix = index;
+        if (UNLIKELY(sIkeyOn)) {
+            ikey_load(index);
+        }
         dl++;
+    } else if ((w1 & 0xFFFF0000) == PORT_IKEY_TAG) {
+        // DKR_INTERP60: whose matrices come next (an object's, by a hash of it, or the world's).
+        if (UNLIKELY(sIkeyOn)) {
+            ikey_tag(w1);
+        }
     } else if (w1 == (PORT_LIGHT_TAG | 1) && remaining >= 4) {
         s32 k;
         for (k = 0; k < 4; k++) {
@@ -10230,6 +10253,9 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
             case OP(G_MTX):
                 load_matrix((const Mtx *) seg_addr(w1), (w0 >> 22) & 3);
                 g.curMatrix = (w0 >> 22) & 3;
+                if (UNLIKELY(sIkeyOn)) {
+                    ikey_load((w0 >> 22) & 3);
+                }
                 break;
 
             case OP(G_MOVEMEM):
@@ -10304,6 +10330,9 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
                         break;
                     case OP(G_MW_MVPMATRIX):
                         g.curMatrix = (w1 >> 6) & 3;
+                        if (UNLIKELY(sIkeyOn)) {
+                            ikey_select();
+                        }
                         break;
                     case OP(G_MW_FOG):
                         sTriStateValid = FALSE;
@@ -11106,6 +11135,7 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     STALL_MARK("frame set-up: track", 0, 0);
     track_frame_start();
     wave_frame_start();
+    ikey_frame_start(); // DKR_INTERP60 (gfx_interp.inc)
     STALL_MARK("frame set-up: meshes", 0, 0);
     if (!sTrackMesh && !sModelMesh) {
         if (sMeshBytes > 0) {
@@ -11163,6 +11193,9 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     walk_switch(WALK_FRAMEEND);
     STALL_MARK("opaque flush", 0, 0);
     OPAQUE_FLUSH();
+    if (UNLIKELY(sIkeyOn)) {
+        ikey_frame_end(); // DKR_INTERP60: the frame's verdict (gfx_interp.inc)
+    }
     STALL_MARK("backend frame end", 0, 0);
     gfx_split_frame_end();
     walk_steps_end();

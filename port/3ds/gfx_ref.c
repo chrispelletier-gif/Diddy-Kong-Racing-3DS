@@ -29,6 +29,9 @@
 #define gfxb_wave_tile refb_wave_tile
 #define gfxb_wave_tile_call refb_wave_tile_call
 #define gfxb_wave_shader_ok refb_wave_shader_ok
+#define gfxb_interp_frame refb_interp_frame
+#define gfxb_interp_call refb_interp_call
+#define gfxb_interp_check_counts refb_interp_check_counts
 #define gfxb_walk_frame_start refb_walk_frame_start
 #define gfxb_walk_draw_indexed refb_walk_draw_indexed
 #define gfxb_walk_coverage refb_walk_coverage
