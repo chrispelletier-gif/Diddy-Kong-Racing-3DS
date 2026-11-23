@@ -71,8 +71,11 @@ $(OUT)/backend/gfx_c3d.o: $(PORT)/3ds/gfx_c3d.c $(wildcard $(PORT)/3ds/*.inc $(P
 	$(CC) $(BACKEND_CFLAGS) -c $< -o $@
 
 # The vertex shaders, assembled as the 3DS build does (port/3ds/rules.mk), into a C array instead of bin2s's assembly.
+# The sprite table, slim track and waves shaders (P65) only where the port has them (a base build from before them),
+# in rules.mk's order (the DVLE numbers gfx_c3d.c expects).
 $(OUT)/shader/shader.shbin: $(PORT)/3ds/shader.v.pica $(PORT)/3ds/transform.v.pica $(PORT)/3ds/sprite.v.pica \
-                           $(PORT)/3ds/sprite.g.pica
+                           $(PORT)/3ds/sprite.g.pica $(wildcard $(PORT)/3ds/sprite_table.v.pica) $(wildcard $(PORT)/3ds/interp.v.pica) \
+                           $(wildcard $(PORT)/3ds/track.v.pica) $(wildcard $(PORT)/3ds/waves.v.pica)
 	@mkdir -p $(dir $@)
 	$(PICASSO) -o $@ $^
 

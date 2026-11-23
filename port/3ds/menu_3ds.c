@@ -445,12 +445,14 @@ static const MenuPage sScreenPage = {
 /* The test run (port_autorun.c): stop the one running, or start one of its kinds; the GS freeze test row (gfx_c3d.c
  * gs_ladder) restarts the game and runs before the title. On an Old 3DS the Shelved switches row (a New 3DS bench) is
  * the 60 fps bench, and the last two rows turn the Old 3DS 60 fps mode and its far-kart models on or off (P55,
- * plat.h plat_o3ds_60_mode; saved, used from the next frame). */
-#define TEST_ROWS 14
+ * plat.h plat_o3ds_60_mode; saved, used from the next frame). The last row is the 60 Hz picture (DKR_INTERP60,
+ * S8 / P39, gpu_interp.inc), a setting tried in play (left / right), never an env.txt line. */
+#define TEST_ROWS 15
 #define TEST_SHELVED 7
 #define TEST_GS_LADDER 11
 #define TEST_60_MODE 12
 #define TEST_60_LOD 13
+#define TEST_INTERP60 14
 static int test_count(void) {
     return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
@@ -460,14 +462,29 @@ static const char *test_label(int i) {
                                                    "Switch bench", "Whole game", "Whole game (short)",
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
                                                    "Lean full test", "GS freeze test",
-                                                   "60 fps mode (Old 3DS)", "60 fps: far karts simpler" };
+                                                   "60 fps mode (Old 3DS)", "60 fps: far karts simpler",
+                                                   "60 Hz picture" };
     if (port_autorun_enabled()) {
         return "Stop the test run";
     }
     return i == TEST_SHELVED && plat_old_3ds() ? "60 fps bench" : sStart[i];
 }
 
+/* The 60 Hz picture row's value: DKR_INTERP60 (0 off, 1 interpolated, 2 extrapolated), with DKR_INTERP60_CHECK. */
+static int test_interp60_value(void) {
+    int mode = plat_switch("DKR_INTERP60", 0);
+    if (mode == 1 && plat_switch("DKR_INTERP60_CHECK", 0) == 1) {
+        return 3;
+    }
+    return mode == 1 || mode == 2 ? mode : 0;
+}
+
 static void test_value(int i, char *out, int size) {
+    static const char *const sInterp[4] = { "Off", "Smooth", "Ahead", "Smooth + check" };
+    if (i == TEST_INTERP60 && !port_autorun_enabled()) {
+        snprintf(out, size, "%s", port_text(sInterp[test_interp60_value()]));
+        return;
+    }
     if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
         int on = i == TEST_60_MODE ? plat_o3ds_60_setting() : plat_o3ds_60_lod_setting();
         snprintf(out, size, "%s", port_text(on ? "On" : "Off"));
@@ -487,7 +504,8 @@ static const char *test_hint(int i) {
         "Full test, profiler off as in a player's build",
         "Restarts the game; ~1 min, may need power-offs",
         "Old 3DS: 60 fps in 2D, AA off; 3D stays 30",
-        "Test: other karts' models swap sooner at 60" };
+        "Test: other karts' models swap sooner at 60",
+        "Old 3DS at 30 fps, 3D off: a picture every retrace" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -520,6 +538,13 @@ static const char *test_hint(int i) {
 }
 
 static void test_change(int i, int step) {
+    if (i == TEST_INTERP60 && !port_autorun_enabled()) {
+        // Off, Smooth, Ahead, Smooth + check (the self-check's counts go to log.txt every 10 s).
+        int v = (test_interp60_value() + (step < 0 ? 3 : 1)) % 4;
+        plat_override_switch("DKR_INTERP60", v == 3 ? 1 : v);
+        plat_override_switch("DKR_INTERP60_CHECK", v == 3 ? 1 : -1);
+        return; // A setting: the menu stays open
+    }
     (void) step;
     if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
         // A setting, not a run: the page stays open.

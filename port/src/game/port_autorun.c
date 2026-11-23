@@ -423,6 +423,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
     // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
     { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    // P65 5b and rank 3 (2026-11-23, proposals/3ds-custom-shader-plan.md). First the measurement the slim track
+    // shader's worth rests on: the native track's GPU time by kind again with anti-aliasing off (BENCH_AA_OFF), so a
+    // quarter of the pixels. Against "GPU time by kind, native track on the GPU": the track kind's GPU ms barely
+    // moving means its cost is the vertices (the slim shader's 26 instructions instead of 39 can help); dropping a lot
+    // means pixels (the shader can't). Then the slim shader itself (DKR_TRACK_SLIM, log "slim shaders: ... slim track
+    // draws"), timed the same way. Both measurements.
+    { "GPU time by kind, native track, anti-aliasing off (P65 5b: vertices or pixels)",
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0 },
+    { "GPU time by kind, native track with the slim track shader (P65 5b)",
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM" }, 0, 1, 1, 0 },
+    // Rank 3: the see-through water's heights and colours worked out by waves.v.pica (DKR_WAVE_SHADER), the game's
+    // per-vertex loop gone from the game core for tiles the GPU draws (log "wave shader: N tiles drawn by the GPU").
+    // Then its self-check (DKR_WAVE_SHADER_CHECK): every tile the CPU way, compared with the shader's sums; the log line
+    // "wave shader check" must say "differ on 0" and "the CPU way on 0". The first race with the wave shader writes
+    // wave_shader.txt ("testing", then "passed"); a lock there leaves it off in later runs.
+    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", NULL, NULL }, 0, 1, 0, 0 },
+    { "water waves, self-check (1 lap, chk: differ on 0)", { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", NULL }, 0, 1, 1,
+      1 },
     // P65 rank 1 (2026-11-23, proposals/3ds-sprite-table-plan.md): billboard sprite tiles handed to the GPU as the
     // game's own vertices with one matrix per load (DKR_SPRITE_TABLE), so the game core no longer works out their
     // corners (run 54: sprite set-up + corners + tris 1.5-2.2 ms timed). 1: draws of one load by the frame's transform
@@ -452,10 +470,20 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // renderer core (host model; unmeasured). Host, Whale Bay: 135 kart records a frame drawn in 91 draws. The walk
     // steps row splits "other paths" into "kart set-up", "kart corners" and "kart queue"; the self-check row (which
     // turns the batching on itself) must say 0 wrong.
-    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 0, 0 },
+    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 }, // alone: the all-together race takes 2
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
+    // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
+    // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
+    // GPU ms (two pictures a frame: expect about twice), both cores (should not move: the walk's extra work is a
+    // matrix inverse per moving thing) and the 1% low, and the log's "60 Hz picture" lines (frames as two pictures /
+    // as one; walk: matched, new, not sane). The self-check row checks every delta the walk makes (C D against C')
+    // and the backend's conversion of it to the 3DS screen (CSV chk: 0 wrong). Normal laps for the first, one lap for
+    // the check. Off by default; tried in play from Test run > 60 Hz picture.
+    { "60 Hz picture, interpolated (S8 / P39)", { "DKR_INTERP60", NULL, NULL }, 0, 1, 1, 0 },
+    { "60 Hz picture, self-check (1 lap, chk: 0 wrong)", { "DKR_INTERP60", "DKR_INTERP60_CHECK", NULL }, 0, 1, 1, 1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
@@ -548,6 +576,11 @@ static const BenchSwitch sSwitches60[] = {
     // Mega build (2026-11-23): the sprite table shader (P65 rank 1) has not run on hardware yet, so it is a row here
     // and not in the 60 mode's defaults (plat_common.c s60Defaults) until the Old 3DS bench passes its self-check.
     { "sprite table 1 at 60 (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL }, -1, 1, 1, 0 },
+    // S8 / P39 (proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation, the route plan's fallback if the
+    // mode can't hold 60: the game at the 30 cap, each frame's GPU commands run twice (a picture every retrace). It
+    // only works at the 30 cap, so the row pins it. Read the GPU ms (about twice), both cores (should not move) and the
+    // log's "60 Hz picture" lines. A row, not a mode default, until the Old 3DS has run it.
+    { "60 Hz picture at the 30 cap (S8 / P39)", { "DKR_FPS_PIN", "DKR_INTERP60=1", NULL }, -1, 30, 1, 0 },
     // The 3D slider up drops the mode to 30 (DKR_STEREO3D=2: 3D whatever the slider says). Check: 30 fps, clean 3D.
     { "3D forced on: must run at 30 (1 lap)", { "DKR_STEREO3D", NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
@@ -630,7 +663,7 @@ static s32 switch_race_laps(s32 config) {
     return all ? 1 : 0;
 }
 #define SWITCH_RACES (SWITCH_CONFIGS + (SWITCH_ALL >= 0))
-#define MAX_CONFIGS 32 // (the switch bench's usual races, its rows and the all-together race: 18 now)
+#define MAX_CONFIGS 64 // The switch bench's usual races, its rows and the all-together race (46 on the Old 3DS, 2026-11-23)
 
 static s32 sMode; // enum Mode
 
@@ -707,6 +740,9 @@ static void apply_config(s32 config) {
                     plat_override_switch(name, fixed != BENCH_VAR_PLAIN ? fixed : sSwitches[i].test);
                 }
             }
+        }
+        if (plat_switch("BENCH_AA_OFF", 0)) {
+            plat_override_switch("BENCH_AA", PLAT_AA_OFF); // A row's own anti-aliasing off (P65 5b's measurement)
         }
         if (plat_switch("BENCH_400", 0)) {
             plat_override_switch("BENCH_WIDE800", 0);

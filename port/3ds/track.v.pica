@@ -1,0 +1,80 @@
+; Slim vertex shader for the native track (roadmap P65 / custom shader plan 5b, DKR_TRACK_SLIM, gfx_c3d.c
+; model_program). transform.v.pica does every model draw's maths, with a light path and a second texture coordinate
+; factor that the track never uses (the track is never lit and its model draws have texc = 0). This is the same
+; shader with those two parts taken out: 26 instructions instead of 39. Every instruction it keeps is transform.v.pica's
+; own, in the same order on the same registers, so a track vertex comes out bit for bit the same as through
+; transform.v.pica with fogp.w = 0 and texc = 0 (checked on the PC by port/tools/pica_sim.py, CI "Shader checks").
+; Its uniforms are transform.v.pica's, declared in the same order: picasso gives uniforms of the same name the same
+; registers in every shader of the blob, so switching between the two programs keeps every uniform where it is.
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register is written whole, once, with no
+; branches; intermediate results go to temporaries.
+
+.entry track_main
+
+; Uniforms (transform.v.pica's, same order; texc and lightv are not read here)
+.fvec eye
+.fvec mtx[4]
+.fvec camoff
+.fvec texa
+.fvec texc
+.fvec texb
+.fvec fogp
+.fvec lightv
+
+; Constants
+.constf tconsts(0.00392156862745098, 0.0, 1.0, 0.0001)
+.alias t_rgba_scale tconsts.xxxx
+.alias t_zeros tconsts.yyyy
+.alias t_ones tconsts.zzzz
+.alias t_tiny tconsts.wwww
+
+; Outputs (transform.v.pica's)
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+; Inputs
+.alias inpos v0
+.alias intc0 v1
+.alias inclr v3
+
+.proc track_main
+	; Position
+	add r0, -camoff, inpos
+	dp4 r1.x, mtx[0], r0
+	dp4 r1.y, mtx[1], r0
+	dp4 r1.z, mtx[2], r0
+	dp4 r1.w, mtx[3], r0
+
+	; Fog factor, from z before the depth clamp below
+	max r2, t_tiny, r1.wwww
+	rcp r2, r2.x
+	mul r2, r2, r1.zzzz
+	mul r2, fogp.xxxx, r2
+	add r2, fogp.yyyy, r2
+	max r2, t_zeros, r2
+	min r2, t_ones, r2
+
+	; Colour, the alpha replaced by the fog factor when fogp.z is 1 (no light path: the track is never lit)
+	mul r3, t_rgba_scale, inclr
+	add r4, r2, -r3.wwww
+	mul r4, fogp.zzzz, r4
+	add r3.w, r3, r4
+
+	; Stereo offset, then the depth clamp (the N64 has no far plane)
+	mul r5, eye.xxxx, r1.wwww
+	add r5, eye.yyyy, r5
+	add r1.y, r1, r5
+	min r1.z, t_zeros, r1
+
+	; Texture coordinates (no second factor: texc is 0 for model draws)
+	mul r6, texa, intc0.xyxy
+	add r6, texb, r6
+
+	mov outpos, r1
+	mov outtc0, r6
+	mov outtc1, r6.zwzw
+	mov outclr, r3
+	end
+.end
