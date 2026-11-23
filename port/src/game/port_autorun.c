@@ -377,6 +377,18 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
     // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
     { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
+    // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
+    // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
+    // 4, then every batch (run 50's row). One lap each: they answer "does it lock", not speed. Each cap has its own
+    // marker (sprite_gs_capN.txt, sprite_gs.txt for every batch): a lock in a row leaves "testing", and the next start
+    // logs that cap "LEFT OFF" and races it the first way. The log's "sprite points" lines say how many batches went
+    // through the geometry shader ("not GS: cap" for the rest). Watch the smoke, sparks and balloons for torn sprites.
+    { "sprite GS, first batch a frame only (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
+      0, 1, 1, 1 },
+    { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
+      0, 4, 1, 1 },
+    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

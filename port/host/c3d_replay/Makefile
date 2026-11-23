@@ -34,8 +34,10 @@ C3D_OBJS  := $(patsubst $(C3D)/source/%.c,$(OUT)/citro3d/%.o,$(C3D_SRC))
 CTRU_OBJS := $(patsubst $(CTRU)/source/gpu/%.c,$(OUT)/ctru/%.o,$(CTRU_SRC))
 HARNESS_OBJS := $(OUT)/harness/replay.o $(OUT)/harness/stubs_ctru.o $(OUT)/harness/stubs_plat.o
 # The GS hang ladder's blob (P65 rank 4) only where PORT has it (a base checkout from before it doesn't).
-GSL_SRC := $(wildcard $(PORT)/3ds/gsl_n.v.pica $(PORT)/3ds/gsl_p.v.pica $(PORT)/3ds/gsl_p.g.pica \
-                      $(PORT)/3ds/gsl_t.v.pica $(PORT)/3ds/gsl_t.g.pica)
+# GS freeze test 2 adds P60 D's sprite shaders to it (steps 7-9).
+GSL_SRC := $(if $(wildcard $(PORT)/3ds/gsl_n.v.pica),$(PORT)/3ds/gsl_n.v.pica $(PORT)/3ds/gsl_p.v.pica \
+             $(PORT)/3ds/gsl_p.g.pica $(PORT)/3ds/gsl_t.v.pica $(PORT)/3ds/gsl_t.g.pica \
+             $(wildcard $(PORT)/3ds/sprite.v.pica $(PORT)/3ds/sprite.g.pica))
 GSL_OBJ := $(if $(GSL_SRC),$(OUT)/shader/gsl_shbin.o)
 GSL_HDR := $(if $(GSL_SRC),$(OUT)/shader/gsl_shbin.h)
 BACKEND_OBJS := $(OUT)/backend/gfx_c3d.o $(OUT)/shader/shader_shbin.o $(GSL_OBJ)

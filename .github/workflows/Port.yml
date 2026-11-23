@@ -334,6 +334,9 @@ jobs:
           gcc -Wall -Iport/3ds -o "$RUNNER_TEMP/gs_ladder_test" port/tools/gs_ladder_test.c && "$RUNNER_TEMP/gs_ladder_test"
           gcc -Wall -DGS_LADDER_BREAK -Iport/3ds -o "$RUNNER_TEMP/gs_ladder_break" port/tools/gs_ladder_test.c
           if "$RUNNER_TEMP/gs_ladder_break"; then echo "the broken test passed"; exit 1; fi
+          # GS freeze test 2: every sprite GS cap sharing one marker file (a lock in one bench row would leave all off)
+          gcc -Wall -DGS_CAP_BREAK -Iport/3ds -o "$RUNNER_TEMP/gs_cap_break" port/tools/gs_ladder_test.c
+          if "$RUNNER_TEMP/gs_cap_break"; then echo "the broken cap test passed"; exit 1; fi
       - name: Fused VFP vertex loop matches the C
         # P60 B: gfx_vertex_asm (DKR_VERTEX_ASM) against native_record's C passes on random vertices in an ARM11, with
         # the 3DS hot files' flags; then broken on purpose (rule K6: the C leaves the fog out), which must fail. Linked at

@@ -40,7 +40,8 @@ $(SHADER_OBJS): $(SHADER_ASM)
 
 # The GS hang ladder's own blob (P65 rank 4, DKR_GS_LADDER, gfx_c3d.c gs_ladder): kept apart from shader.shbin so
 # that the game's shader code (and its upload) stays the same; only the ladder binds it.
-GSL_SRC := 3ds/gsl_n.v.pica 3ds/gsl_p.v.pica 3ds/gsl_p.g.pica 3ds/gsl_t.v.pica 3ds/gsl_t.g.pica
+GSL_SRC := 3ds/gsl_n.v.pica 3ds/gsl_p.v.pica 3ds/gsl_p.g.pica 3ds/gsl_t.v.pica 3ds/gsl_t.g.pica \
+           3ds/sprite.v.pica 3ds/sprite.g.pica
 GSL_BIN := $(BUILD_DIR)/shader/gsl.shbin
 GSL_ASM := $(BUILD_DIR)/shader/gsl_shbin.s
 GSL_HDR := $(BUILD_DIR)/shader/gsl_shbin.h

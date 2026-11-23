@@ -11,6 +11,7 @@
 #ifndef GS_LADDER_H
 #define GS_LADDER_H
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,6 +46,28 @@ static inline int gs_ladder_marker_action(const char *text, int version, int rer
         return GSL_HUNG;
     }
     return GSL_RUN;
+}
+
+/*
+ * GS freeze test 2, step 10 (gfx_c3d.c gfxb_draw_sprites, DKR_SPRITE_GS_CAP): the marker file of a cap, in the data
+ * directory. Each cap (each Old 3DS bench row) has its own, so a lock in one row doesn't leave the others off; 0
+ * (every batch) keeps P60 D's sprite_gs.txt. -DGS_CAP_BREAK gives every cap the same file (K6).
+ */
+static inline void sprite_gs_marker_name(char *out, size_t size, int cap) {
+#ifndef GS_CAP_BREAK
+    if (cap > 0) {
+        snprintf(out, size, "sprite_gs_cap%d.txt", cap);
+        return;
+    }
+#endif
+    snprintf(out, size, "sprite_gs.txt");
+}
+
+/* Whether the sprite geometry shader stays off for a cap: its marker (NULL: none) says the console locked in it
+ * ("testing V", left by the run that locked) or that it hung before ("hung V", "gpu-hung V"). */
+static inline int sprite_gs_marker_off(const char *text, int version) {
+    int action = gs_ladder_marker_action(text, version, 0);
+    return action == GSL_LOCKED_NOW || action == GSL_HUNG;
 }
 
 #endif
