@@ -704,6 +704,37 @@ jobs:
             exit 1
           fi
 
+      - name: Flat record handles check
+        # P55 S4 stage 2: DKR_FLAT_RES (on flat frames, DRAW records find their tables by a handle kept per material
+        # id, track records reuse the clip matrix) must draw frames identical to the record dispatcher's with the Old
+        # 3DS defaults, its self-check on (DKR_FLAT_RES_CHECK=1: each handle against the tables' search, each reused
+        # matrix against a new one) reporting 0 wrong. Mode 2 is the check broken on purpose (rule K6: each frame's
+        # first comparison given a wrong value) and must report.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_FLAT_FRAME=1 --head-env DKR_FLAT_RES=1 \
+            --head-env DKR_FLAT_RES_CHECK=1 --out "$RUNNER_TEMP/flat-res" --max-images 0 --no-repeat-check \
+            --fail-on-diff
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_FLAT_FRAME=1 --head-env DKR_FLAT_RES=1 \
+            --head-env DKR_FLAT_RES_CHECK=2 --only levels --out "$RUNNER_TEMP/flat-res-broken" --max-images 0 \
+            --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/flat-res/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/flat-res-broken/runs" -path "*/head/log.txt")
+          grep -h "flat res:" $logs $broken | tail -n 6
+          if ! grep -q "flat res: .* [1-9][0-9]* handle hits, .* [1-9][0-9]* checked, 0 wrong" $logs; then
+            echo "::error::The flat record handles never hit, or their self-check found a wrong handle or matrix."
+            exit 1
+          fi
+          if grep -q "flat res: .* [1-9][0-9]* wrong" $logs; then
+            echo "::error::The flat record handles' self-check found a wrong handle or matrix (see above)."
+            exit 1
+          fi
+          if ! grep -q "flat res: .* [1-9][0-9]* wrong" $broken; then
+            echo "::error::The flat record handles check broken on purpose (DKR_FLAT_RES_CHECK=2) reported nothing."
+            exit 1
+          fi
+
       - name: Track bake check
         # P55 S1: DKR_TRACK_BAKE makes the native track's meshes during the level load, so the same build must draw
         # identical frames with it on (the Old 3DS defaults have the native track on), with its self-check on

@@ -464,13 +464,20 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "flat dispatcher (S4 step 1)", { "DKR_FLAT_FRAME", NULL, NULL }, 0, 1, 0, 0 },
     { "flat dispatcher, self-check (1 lap, chk: 0 wrong)", { "DKR_FLAT_FRAME", "DKR_FLAT_FRAME_CHECK", NULL }, 0, 1, 1,
       1 },
+    // P55 S4 stage 2 (2026-11-23): on flat frames, DRAW records find their tables by a handle kept per material id and
+    // track records reuse the camera's clip matrix (DKR_FLAT_RES). Host cache model: about -4% instruction cache misses
+    // in the walk on top of the flat dispatcher. Read the game core ms against the flat dispatcher row above.
+    { "flat dispatcher + record handles (S4 stage 2)", { "DKR_FLAT_FRAME", "DKR_FLAT_RES", NULL }, 0, 1, 0, 0 },
+    { "flat record handles, self-check (1 lap, chk: 0 wrong)",
+      { "DKR_FLAT_FRAME", "DKR_FLAT_RES", "DKR_FLAT_RES_CHECK", NULL }, 0, 1, 1, 1 },
     // P68 (2026-11-23, proposals/3ds-kart-draw-batching-plan.md): GPU-maths kart batches with the same material drawn
     // as one draw (DKR_KART_BATCH 1), and slim records on top (2: index lists made once, corners written into the
     // queue, both cull groups in one record, matrix/fog/light once a kart). Est. -0.4..-1.0 ms game core, -0.3..-0.6
     // renderer core (host model; unmeasured). Host, Whale Bay: 135 kart records a frame drawn in 91 draws. The walk
     // steps row splits "other paths" into "kart set-up", "kart corners" and "kart queue"; the self-check row (which
     // turns the batching on itself) must say 0 wrong.
-    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 }, // alone: the all-together race takes 2
+    // (Bit 1 alone is left out of the all-together race, where the slim row below sets the same switch.)
+    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 },
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
