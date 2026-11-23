@@ -442,10 +442,15 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the last row, the GS freeze test
- * (gfx_c3d.c gs_ladder), restarts the game and runs before the title. */
-#define TEST_ROWS 12
+/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the GS freeze test row (gfx_c3d.c
+ * gs_ladder) restarts the game and runs before the title. On an Old 3DS the Shelved switches row (a New 3DS bench) is
+ * the 60 fps bench, and the last two rows turn the Old 3DS 60 fps mode and its far-kart models on or off (P55,
+ * plat.h plat_o3ds_60_mode; saved, used from the next frame). */
+#define TEST_ROWS 14
+#define TEST_SHELVED 7
 #define TEST_GS_LADDER 11
+#define TEST_60_MODE 12
+#define TEST_60_LOD 13
 static int test_count(void) {
     return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
@@ -454,13 +459,20 @@ static const char *test_label(int i) {
     static const char *const sStart[TEST_ROWS] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
                                                    "Switch bench", "Whole game", "Whole game (short)",
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
-                                                   "Lean full test", "GS freeze test" };
-    return port_autorun_enabled() ? "Stop the test run" : sStart[i];
+                                                   "Lean full test", "GS freeze test",
+                                                   "60 fps mode (Old 3DS)", "60 fps: far karts simpler" };
+    if (port_autorun_enabled()) {
+        return "Stop the test run";
+    }
+    return i == TEST_SHELVED && plat_old_3ds() ? "60 fps bench" : sStart[i];
 }
 
 static void test_value(int i, char *out, int size) {
-    (void) i;
-    (void) size;
+    if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
+        int on = i == TEST_60_MODE ? plat_o3ds_60_setting() : plat_o3ds_60_lod_setting();
+        snprintf(out, size, "%s", port_text(on ? "On" : "Off"));
+        return;
+    }
     out[0] = '\0';
 }
 
@@ -473,7 +485,9 @@ static const char *test_hint(int i) {
         "Switch bench, profiler off as in a player's build",
         "Quick test, profiler off as in a player's build",
         "Full test, profiler off as in a player's build",
-        "Restarts the game; ~1 min, may need power-offs" };
+        "Restarts the game; ~1 min, may need power-offs",
+        "Old 3DS: 60 fps in 2D, AA off; 3D stays 30",
+        "Test: other karts' models swap sooner at 60" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -487,7 +501,13 @@ static const char *test_hint(int i) {
                  (sets * 13 + 1) / 2);
         return sSwitchHint;
     }
-    if (i == 7) {
+    if (i == TEST_SHELVED && plat_old_3ds()) {
+        long sets = port_autorun_shelved_count() + 1;
+        snprintf(sSwitchHint, sizeof(sSwitchHint), port_text("60 fps mode, 3 heavy tracks x %ld sets, ~%ld min"), sets,
+                 (sets * 13 + 1) / 2);
+        return sSwitchHint;
+    }
+    if (i == TEST_SHELVED) {
         long sets = port_autorun_shelved_count() + 1;
         if (sets < 2) {
             return "Shelved switches: a New 3DS bench";
@@ -501,6 +521,15 @@ static const char *test_hint(int i) {
 
 static void test_change(int i, int step) {
     (void) step;
+    if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
+        // A setting, not a run: the page stays open.
+        if (i == TEST_60_MODE) {
+            plat_set_o3ds_60_setting(!plat_o3ds_60_setting());
+        } else {
+            plat_set_o3ds_60_lod_setting(!plat_o3ds_60_lod_setting());
+        }
+        return;
+    }
     if (port_autorun_enabled()) {
         port_autorun_request(0);
     } else if (i == TEST_GS_LADDER) {
