@@ -16,6 +16,7 @@
 #ifdef TARGET_PORT
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #endif
 #include "port_drawtag.h"
 static void port_wave_snapshot(void);
@@ -2935,7 +2936,9 @@ static void port_wave_snapshot(void) {
     port_wave_forget();
     sWaveIndicesStart = (Vec2s *) malloc(n * sizeof(Vec2s));
     if (sWaveIndicesStart != NULL) {
-        memcpy(sWaveIndicesStart, gWaveHeightIndices, n * sizeof(Vec2s));
+        for (i = 0; i < n; i++) { // a loop: the game's files see no memcpy declaration on the 3DS
+            sWaveIndicesStart[i] = gWaveHeightIndices[i];
+        }
         sWaveIndicesCount = n;
     }
     for (i = 0; i < 12; i++) {
