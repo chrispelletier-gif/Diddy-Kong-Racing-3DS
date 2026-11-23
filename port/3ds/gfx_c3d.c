@@ -893,9 +893,10 @@ PLAT_COLD static void gpu_self_test(void) {
 
 /*
  * GS hang ladder (roadmap P65 rank 4, DKR_GS_LADDER, default 0; proposals/3ds-custom-shader-plan.md section 3): which
- * rule the sprite geometry shader (P60 D, DKR_SPRITE_GS=2) broke when it froze an Old 3DS in bench run 50. With
- * DKR_GS_LADDER=1 in env.txt, before the game starts, six steps of 30 frames each are drawn, one more risky than the
- * one before, with shaders of their own blob (gsl_*.pica, the game's shader.shbin untouched):
+ * rule the sprite geometry shader (P60 D, DKR_SPRITE_GS=2) broke when it froze an Old 3DS in bench run 50. After
+ * Test run > GS freeze test (or with DKR_GS_LADDER=1 in env.txt), before the game starts, six steps of 30 frames each
+ * are drawn, one more risky than the one before, with shaders of their own blob (gsl_*.pica, the game's shader.shbin
+ * untouched):
  *   1. the geometry shader's program alone, one GS triangle a frame and nothing else;
  *   2. a GS draw, then ordinary indexed draws (citro3d issue #53's order that works);
  *   3. ordinary draws, then a GS draw (#53's order that hung, with a hard power-off);
@@ -1059,11 +1060,40 @@ static void gsl_run_step(int step) {
     plat_log("GS ladder step %d: passed (%d frames)", step, GS_LADDER_FRAMES);
 }
 
+static void gsl_armed_path(char *out, size_t size) {
+    snprintf(out, size, "%s/gs_ladder_armed.txt", plat_data_dir());
+}
+
+/*
+ * The Test run page's GS freeze test button (menu_3ds.c): a fresh ladder (every step's file removed) armed on the SD
+ * card for the next start, which the button then makes. It stays armed until every step has an answer, so a start
+ * after a power-off carries on with the next step by itself, with no env.txt line.
+ */
+PLAT_COLD void gfxb_gs_ladder_arm(void) {
+    char path[256];
+    int step;
+    for (step = 1; step <= GS_LADDER_STEPS; step++) {
+        gsl_marker_path(path, sizeof(path), step);
+        remove(path);
+    }
+    gsl_armed_path(path, sizeof(path));
+    plat_save_file(path, "1\n", 2);
+    plat_log("GS ladder: armed by the Test run button, runs at the next start");
+}
+
 PLAT_COLD static void gs_ladder(void) {
     const char *e = plat_getenv("DKR_GS_LADDER");
     char summary[256], path[256], text[32];
-    int mode = e != NULL ? atoi(e) : 0, step, at;
-    if (!PLAT_DEBUG_TOOLS || mode <= 0) {
+    int mode = e != NULL ? atoi(e) : 0, step, at, armed = 0;
+    if (!PLAT_DEBUG_TOOLS) {
+        return;
+    }
+    if (mode <= 0) {
+        gsl_armed_path(path, sizeof(path));
+        armed = plat_load_file_start(path, text, sizeof(text) - 1) > 0;
+        mode = armed;
+    }
+    if (mode <= 0) {
         return;
     }
     sGslDvlb = DVLB_ParseFile((u32 *) gsl_shbin, gsl_shbin_size);
@@ -1113,6 +1143,10 @@ PLAT_COLD static void gs_ladder(void) {
     plat_log("%s", summary);
     snprintf(path, sizeof(path), "%s/gs_ladder.txt", plat_data_dir());
     plat_save_file(path, summary, strlen(summary));
+    if (armed) {
+        gsl_armed_path(path, sizeof(path));
+        remove(path); // Every step has its answer: the next start is a normal one
+    }
     plat_status("%s", summary);
     // Back to the game's program and state, inside a frame of its own: between frames citro3d has no command buffer
     // (C3D_FrameEnd sets it to NULL), and a command written then (C3Di_UpdateContext, write_eye) stops the game with
