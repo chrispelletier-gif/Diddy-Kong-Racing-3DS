@@ -62,14 +62,23 @@ typedef struct DrawDetail {
     short scissor[4];
     u8 fogOn, hasBox;
 } DrawDetail;
-static DrawDetail sDpDet[2][MAX_LIST_PARTS + 1], sDpPrevDet, sDpBigDet;
-static DrawDesc sDpBig;
-static u64 sDpBigTicks;
+static DrawDetail sDpDet[2][MAX_LIST_PARTS + 1], sDpPrevDet;
 static int dp_wanted(int frame);
 static int sRectFill = -1; // DKR_RECT_FILL (section 7; read_switches resets it)
 static int rect_as_fill(const GfxDrawState *st, const GfxVertex *v, int numVerts, const u16 *indices);
 static void dp_arm(void);
 static void dp_log(void);
+/* Section 8's (DKR_GPU_CENSUS): the race's GPU numbers for the test run's autorun_gpudraws.txt. */
+// (Its data and section 6's tables are in a section of their own, GPU_CUTS_COLD, so that they don't move the hot
+// code's data: the walk's globals are reached from shared base addresses, and the hot code size check, P56, counts
+// a moved one.)
+#define GPU_CUTS_COLD __attribute__((section(".bss.gpu_cuts_cold")))
+static volatile int sCensusReq GPU_CUTS_COLD, sCensusState GPU_CUTS_COLD; // Asked (1 start, 2 stop); 1 counting, 2 stopped
+static unsigned long long sCensusFill GPU_CUTS_COLD, sCensusList GPU_CUTS_COLD, sCensusCopy GPU_CUTS_COLD,
+    sCensusWhole GPU_CUTS_COLD, sCensusKindTicks[PROF_KINDS + 1] GPU_CUTS_COLD;
+static unsigned int sCensusFrames GPU_CUTS_COLD, sCensusKindFrames GPU_CUTS_COLD, sCensusDpFrames GPU_CUTS_COLD;
+static unsigned long sCensusDrawSum GPU_CUTS_COLD; // Draws a frame, summed over the frames timed by draw
+static void census_service(void);
 
 /* This frame's command list is cut by kind (gfxb_gpu_kind), and each part's kind, for the slot it is built in. */
 static int sKindFrame[2], sKindParts[2], sKindNow;
@@ -189,6 +198,9 @@ static void timeline_take(int slot) {
     u64 prev;
     u32 n, i;
     int part = 0, kinds = slot >= 0 && sKindFrame[slot];
+    if (__builtin_expect(sCensusReq != 0, 0)) {
+        census_service();
+    }
     if (slot >= 0) {
         sKindFrame[slot] = 0;
     }
@@ -222,6 +234,9 @@ static void timeline_take(int slot) {
                 if (kinds) {
                     int k = part < sKindParts[slot] ? sPartKind[slot][part] : GPU_KIND_MIXED;
                     sTlKindTicks[k] += d;
+                    if (sCensusState == 1) {
+                        sCensusKindTicks[k] += d;
+                    }
                 }
                 part++;
                 break;
@@ -235,13 +250,25 @@ static void timeline_take(int slot) {
     }
     if (kinds) {
         sTlKindFrames++;
+        sCensusKindFrames += sCensusState == 1;
     }
     if (slot >= 0 && sDpFrame[slot]) {
         sDpFrame[slot] = 0;
         sDpFrames++;
+        if (sCensusState == 1) {
+            sCensusDpFrames++;
+            sCensusDrawSum += (unsigned long) sDpCount;
+        }
     }
     if (n == 0) {
         return;
+    }
+    if (sCensusState == 1) {
+        sCensusFill += fill;
+        sCensusList += list;
+        sCensusCopy += copy;
+        sCensusWhole += prev - sTlStart;
+        sCensusFrames++;
     }
     sTlFillTicks += fill;
     sTlListTicks += list;
@@ -800,15 +827,34 @@ static inline int skip_invisible(const GfxDrawState *state) {
 #define DP_KEYS 96
 static int sGpuDraws = -1; // DKR_GPU_DRAWS
 static int sDpArmed;
-static struct {
+/* Draws added up by their textures and settings: the log's since its last line (sDpTab), the race's for the census
+ * (sCensusTab, section 8). Each key keeps its costliest single draw's detail (M1: the top 3 are logged with it). */
+typedef struct DpKey {
     DrawDesc d;
-    u64 ticks;
+    u64 ticks, maxTicks;
     unsigned int count;
     unsigned long tris;
-} sDpKeys[DP_KEYS];
-static int sDpKeysUsed;
-static unsigned long long sDpTicksAll;
-static unsigned int sDpTimed;
+    DrawDetail det; // The costliest single one's
+} DpKey;
+typedef struct DpTable {
+    DpKey keys[DP_KEYS];
+    int used;
+    unsigned long long ticksAll;
+    unsigned int timed;
+} DpTable;
+static DpTable sDpTab GPU_CUTS_COLD, sCensusTab GPU_CUTS_COLD;
+/* The census's frame-start draws (P62 M1/M4): what was drawn at each of the race frames' first CENSUS_START places
+ * (a key's first place in sCensusTab is the lowest over all frames, menus too, so it can't say this), up to
+ * CENSUS_START_KEYS different draws a place. */
+#define CENSUS_START 3
+#define CENSUS_START_KEYS 4
+static struct {
+    DrawDesc d;
+    DrawDetail det;
+    u64 ticks, maxTicks;
+    unsigned int count;
+} sCensusStart[CENSUS_START][CENSUS_START_KEYS] GPU_CUTS_COLD;
+static unsigned int sCensusStartOther[CENSUS_START] GPU_CUTS_COLD; // Seen at the place, but past CENSUS_START_KEYS kinds
 
 /* Walk: whether this frame is timed by draw (the walk then tells the backend, gfxb_gpu_kind with GFX_KIND_DRAWS). */
 static int dp_wanted(int frame) {
@@ -945,10 +991,50 @@ static int dp_same(const DrawDesc *a, const DrawDesc *b) {
            a->depth == b->depth && a->alphaTest == b->alphaTest && a->path == b->path && a->cycles == b->cycles;
 }
 
+/* A draw's time added to a table (dp_take). */
+static void dp_add(DpTable *t, const DrawDesc *d, const DrawDetail *det, u64 ticks) {
+    int i;
+    t->ticksAll += ticks;
+    t->timed++;
+    for (i = 0; i < t->used; i++) {
+        if (dp_same(&t->keys[i].d, d)) {
+            break;
+        }
+    }
+    if (i == t->used) {
+        if (t->used == DP_KEYS) {
+            // Full: the cheapest so far makes room
+            int j, low = 0;
+            for (j = 1; j < DP_KEYS; j++) {
+                if (t->keys[j].ticks < t->keys[low].ticks) {
+                    low = j;
+                }
+            }
+            i = low;
+        } else {
+            t->used++;
+        }
+        // A new key (or an evicted one's slot): every total starts again, as dp_log only empties the table.
+        t->keys[i].d = *d;
+        t->keys[i].ticks = 0;
+        t->keys[i].maxTicks = 0;
+        t->keys[i].count = 0;
+        t->keys[i].tris = 0;
+    } else if (d->idx < t->keys[i].d.idx) {
+        t->keys[i].d.idx = d->idx; // Only the first place moves; the totals keep counting together.
+    }
+    t->keys[i].ticks += ticks;
+    t->keys[i].count++;
+    t->keys[i].tris += d->tris;
+    if (ticks > t->keys[i].maxTicks) {
+        t->keys[i].maxTicks = ticks;
+        t->keys[i].det = *det;
+    }
+}
+
 /* Renderer (timeline_take): part `part` of the frame slot built took `ticks` on the GPU. */
 static void dp_take(int slot, int part, u64 ticks) {
     const DrawDesc *d;
-    int i;
     if (part >= sDpParts[slot]) {
         return;
     }
@@ -956,76 +1042,91 @@ static void dp_take(int slot, int part, u64 ticks) {
     if (d->kind == 0xFF) {
         return; // Before the window
     }
-    sDpTicksAll += ticks;
-    sDpTimed++;
-    if (ticks > sDpBigTicks) {
-        sDpBigTicks = ticks;
-        sDpBig = *d;
-        sDpBigDet = sDpDet[slot][part];
-    }
-    for (i = 0; i < sDpKeysUsed; i++) {
-        if (dp_same(&sDpKeys[i].d, d)) {
-            break;
-        }
-    }
-    if (i == sDpKeysUsed) {
-        if (sDpKeysUsed == DP_KEYS) {
-            // Full: the cheapest so far makes room
-            int j, low = 0;
-            for (j = 1; j < DP_KEYS; j++) {
-                if (sDpKeys[j].ticks < sDpKeys[low].ticks) {
-                    low = j;
+    dp_add(&sDpTab, d, &sDpDet[slot][part], ticks);
+    if (sCensusState == 1) {
+        dp_add(&sCensusTab, d, &sDpDet[slot][part], ticks);
+        if (d->idx < CENSUS_START) {
+            int k;
+            for (k = 0; k < CENSUS_START_KEYS; k++) {
+                if (sCensusStart[d->idx][k].count == 0 || dp_same(&sCensusStart[d->idx][k].d, d)) {
+                    break;
                 }
             }
-            i = low;
-        } else {
-            sDpKeysUsed++;
+            if (k == CENSUS_START_KEYS) {
+                sCensusStartOther[d->idx]++;
+            } else {
+                if (sCensusStart[d->idx][k].count == 0) {
+                    sCensusStart[d->idx][k].d = *d;
+                }
+                sCensusStart[d->idx][k].count++;
+                sCensusStart[d->idx][k].ticks += ticks;
+                if (ticks > sCensusStart[d->idx][k].maxTicks) {
+                    sCensusStart[d->idx][k].maxTicks = ticks;
+                    sCensusStart[d->idx][k].det = sDpDet[slot][part];
+                }
+            }
         }
-        // A new key (or an evicted one's slot): every total starts again, as dp_log only empties the table.
-        sDpKeys[i].d = *d;
-        sDpKeys[i].ticks = 0;
-        sDpKeys[i].count = 0;
-        sDpKeys[i].tris = 0;
-    } else if (d->idx < sDpKeys[i].d.idx) {
-        sDpKeys[i].d.idx = d->idx; // Only the first place moves; the totals keep counting together.
     }
-    sDpKeys[i].ticks += ticks;
-    sDpKeys[i].count++;
-    sDpKeys[i].tris += d->tris;
 }
 
-static void PLAT_COLD dp_log(void) {
+typedef void (*DpEmit)(void *ctx, const char *line);
+
+/* A draw's detail line (box, colours, combiner, scissor), `what` first. */
+static void dp_detail_line(char *line, int size, const char *what, u64 ticks, const DrawDesc *d, const DrawDetail *e) {
+    snprintf(line, size,
+             "GPU draws: %s %.3f ms, %s #%d, %d tris, tex %dx%d, blend %d depth %d flat %d: box x %.2f..%.2f y "
+             "%.2f..%.2f%s, shade %d,%d,%d,%d prim %d,%d,%d,%d env %d,%d,%d,%d, colour (%d-%d)*%d+%d alpha "
+             "(%d-%d)*%d+%d, scissor %d,%d-%d,%d, fog %d",
+             what, ticks_ms(ticks), d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?", d->idx, d->tris, d->w,
+             d->h, d->blend, d->depth, d->flat, e->x0, e->x1, e->y0, e->y1, e->hasBox ? "" : " (none)", e->shade[0],
+             e->shade[1], e->shade[2], e->shade[3], e->prim[0], e->prim[1], e->prim[2], e->prim[3], e->env[0],
+             e->env[1], e->env[2], e->env[3], e->rgb.a, e->rgb.b, e->rgb.c, e->rgb.d, e->alpha.a, e->alpha.b,
+             e->alpha.c, e->alpha.d, e->scissor[0], e->scissor[1], e->scissor[2], e->scissor[3], e->fogOn);
+}
+
+/* A table's lines: its costliest draws (ms a frame over `frames` frames timed by draw, about `drawsAFrame` draws a
+ * frame), then the detail of the 3 costliest single draws (P62 M1; one before). Empties the table. */
+static void PLAT_COLD dp_lines(DpTable *t, unsigned int frames, int drawsAFrame, int shownMax, DpEmit emit, void *ctx) {
     static const char *const sFmt[] = { "RGBA8", "RGB8", "RGBA5551", "RGB565", "RGBA4", "LA8", "HILO8", "L8",
                                         "A8", "LA4", "L4", "A4", "ETC1", "ETC1A4" };
-    int shown, i, j;
+    char line[512];
+    u8 detailed[DP_KEYS];
+    int shown, j, n;
     double perFrame;
-    if (sDpFrames == 0 || sDpTimed == 0) {
+    if (frames == 0 || t->timed == 0) {
+        t->used = 0;
+        t->ticksAll = 0;
+        t->timed = 0;
         return;
     }
     // The window covers DP_WINDOW of the frame's draws, so a draw's time a frame is its sampled time spread over the
     // frames in which its index was in the window.
-    perFrame = (double) sDpCount / DP_WINDOW;
-    plat_log("GPU draws (%u frames timed by draw, %u draws timed, %.2f ms of GPU in them; about %d draws a frame): the "
+    perFrame = (double) drawsAFrame / DP_WINDOW;
+    snprintf(line, sizeof(line),
+             "GPU draws (%u frames timed by draw, %u draws timed, %.2f ms of GPU in them; about %d draws a frame): the "
              "costliest, ms a frame (est.) / ms each, how many, triangles each, kind and first place in the frame, "
              "texture, settings:",
-             sDpFrames, sDpTimed, ticks_ms(sDpTicksAll), sDpCount);
-    for (shown = 0; shown < 14 && sDpKeysUsed > 0; shown++) {
-        int best = 0;
-        for (j = 1; j < sDpKeysUsed; j++) {
-            if (sDpKeys[j].ticks > sDpKeys[best].ticks) {
+             frames, t->timed, ticks_ms(t->ticksAll), drawsAFrame);
+    emit(ctx, line);
+    memset(detailed, 0, sizeof(detailed));
+    for (shown = 0; shown < shownMax && shown < t->used; shown++) {
+        int best = -1;
+        for (j = 0; j < t->used; j++) {
+            if (!(detailed[j] & 1) && (best < 0 || t->keys[j].ticks > t->keys[best].ticks)) {
                 best = j;
             }
         }
         {
-            const DrawDesc *d = &sDpKeys[best].d;
-            double each = ticks_ms(sDpKeys[best].ticks) / sDpKeys[best].count;
-            plat_log("  %.3f / %.3f ms x%u, %lu tris, %s #%d: tex %dx%d %s%s mips %d, blend %d depth %s alpha test %d "
+            const DrawDesc *d = &t->keys[best].d;
+            double each = ticks_ms(t->keys[best].ticks) / t->keys[best].count;
+            detailed[best] |= 1; // Shown
+            snprintf(line, sizeof(line),
+                     "  %.3f / %.3f ms x%u, %lu tris, %s #%d: tex %dx%d %s%s mips %d, blend %d depth %s alpha test %d "
                      "fog %d cycles %d flat %d %s",
-                     ticks_ms(sDpKeys[best].ticks) / sDpFrames * perFrame, each, sDpKeys[best].count,
-                     sDpKeys[best].tris / sDpKeys[best].count, d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?",
-                     d->idx,
-                     d->w, d->h, d->tex0 != NULL && d->fmt < 14 ? sFmt[d->fmt] : "none", d->tex1 != NULL ? " +2nd" : "",
-                     d->levels, d->blend,
+                     ticks_ms(t->keys[best].ticks) / frames * perFrame, each, t->keys[best].count,
+                     t->keys[best].tris / t->keys[best].count, d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?",
+                     d->idx, d->w, d->h, d->tex0 != NULL && d->fmt < 14 ? sFmt[d->fmt] : "none",
+                     d->tex1 != NULL ? " +2nd" : "", d->levels, d->blend,
                      d->depth == 3 ? "test+write" : d->depth == 1 ? "test" : d->depth == 2 ? "write" : "off",
                      d->alphaTest, d->fog, d->cycles, d->flat,
                      d->path == 0   ? "triangles"
@@ -1033,28 +1134,39 @@ static void PLAT_COLD dp_log(void) {
                      : d->path == 2 ? "meshes"
                      : d->path == 3 ? "COLOUR CLEAR drawn"
                                     : "DEPTH CLEAR drawn");
+            emit(ctx, line);
         }
-        sDpKeys[best].ticks = 0; // Shown (the table is emptied below)
     }
-    if (sDpBigTicks != 0) {
-        const DrawDesc *d = &sDpBig;
-        const DrawDetail *e = &sDpBigDet;
-        plat_log("GPU draws: the costliest single one, %.3f ms, %s #%d, %d tris, tex %dx%d, blend %d depth %d flat %d: box "
-                 "x %.2f..%.2f y %.2f..%.2f%s, shade %d,%d,%d,%d prim %d,%d,%d,%d env %d,%d,%d,%d, colour (%d-%d)*%d+%d "
-                 "alpha (%d-%d)*%d+%d, scissor %d,%d-%d,%d, fog %d",
-                 ticks_ms(sDpBigTicks), d->kind < PROF_KINDS ? prof_kind_name(d->kind) : "?", d->idx, d->tris, d->w,
-                 d->h, d->blend, d->depth, d->flat, e->x0, e->x1, e->y0, e->y1, e->hasBox ? "" : " (none)",
-                 e->shade[0], e->shade[1], e->shade[2], e->shade[3], e->prim[0], e->prim[1], e->prim[2], e->prim[3],
-                 e->env[0], e->env[1], e->env[2], e->env[3], e->rgb.a, e->rgb.b, e->rgb.c, e->rgb.d, e->alpha.a,
-                 e->alpha.b, e->alpha.c, e->alpha.d, e->scissor[0], e->scissor[1], e->scissor[2], e->scissor[3],
-                 e->fogOn);
-        sDpBigTicks = 0;
+    // The detail of the 3 costliest single draws (by their own costliest time).
+    for (n = 0; n < 3; n++) {
+        int best = -1;
+        for (j = 0; j < t->used; j++) {
+            if (!(detailed[j] & 2) && (best < 0 || t->keys[j].maxTicks > t->keys[best].maxTicks)) {
+                best = j;
+            }
+        }
+        if (best < 0 || t->keys[best].maxTicks == 0) {
+            break;
+        }
+        detailed[best] |= 2;
+        dp_detail_line(line, sizeof(line),
+                       n == 0 ? "the costliest single one," : n == 1 ? "the 2nd costliest," : "the 3rd costliest,",
+                       t->keys[best].maxTicks, &t->keys[best].d, &t->keys[best].det);
+        emit(ctx, line);
     }
-    sDpKeysUsed = 0;
-    sDpTicksAll = 0;
-    sDpTimed = 0;
+    t->used = 0;
+    t->ticksAll = 0;
+    t->timed = 0;
+}
+
+static void dp_emit_log(void *ctx, const char *line) {
+    (void) ctx;
+    plat_log("%s", line);
+}
+
+static void PLAT_COLD dp_log(void) {
+    dp_lines(&sDpTab, sDpFrames, sDpCount, 14, dp_emit_log, NULL);
     sDpFrames = 0;
-    (void) i;
 }
 
 /******************************** 7. A solid rectangle as the frame's clear ********************************/
@@ -1170,4 +1282,124 @@ static int __attribute__((noinline, cold)) rect_as_fill(const GfxDrawState *st, 
     }
     sRectFills++;
     return 1;
+}
+
+/******************************** 8. The race's GPU census ********************************/
+
+/*
+ * DKR_GPU_CENSUS (P62 M1, 2026-11-22; port_autorun.c, on in the New 3DS's switch bench and boss fights): sections 1
+ * and 6 log their numbers every 600 frames, so a bench issue only shows the last race's. While a test run's race is
+ * counted, they are also added up for the race (sCensus*, sCensusTab), and at its end port_autorun.c writes them to
+ * autorun_gpudraws.txt. The game thread asks (sCensusReq); the renderer starts and stops counting at its next frame
+ * (census_service, in timeline_take), and once it has stopped the game thread reads the totals: the renderer doesn't
+ * touch them again until the next start.
+ */
+static void census_service(void) {
+    int r = sCensusReq;
+    sCensusReq = 0;
+    if (r == 1) {
+        sCensusFill = sCensusList = sCensusCopy = sCensusWhole = 0;
+        memset(sCensusKindTicks, 0, sizeof(sCensusKindTicks));
+        sCensusFrames = sCensusKindFrames = sCensusDpFrames = 0;
+        sCensusDrawSum = 0;
+        sCensusTab.used = 0;
+        sCensusTab.ticksAll = 0;
+        sCensusTab.timed = 0;
+        memset(sCensusStart, 0, sizeof(sCensusStart));
+        memset(sCensusStartOther, 0, sizeof(sCensusStartOther));
+        sCensusState = 1;
+    } else if (r == 2) {
+        __sync_synchronize();
+        sCensusState = 2;
+    }
+}
+
+typedef struct CensusOut {
+    char *out;
+    int size, at;
+} CensusOut;
+
+static void census_emit(void *ctx, const char *line) {
+    CensusOut *o = (CensusOut *) ctx;
+    if (o->at < o->size - 1) {
+        int n = snprintf(o->out + o->at, o->size - o->at, "%s\n", line);
+        o->at += n > 0 ? n : 0;
+        if (o->at > o->size - 1) {
+            o->at = o->size - 1;
+        }
+    }
+}
+
+/* Game thread (port_autorun.c): 1 start counting, 2 stop; 3 the stopped race's lines into out (their length, or -1
+ * while the renderer hasn't stopped yet). */
+int port_gpu_census(int request, char *out, int size) {
+    CensusOut o;
+    char line[512];
+    int k, at;
+    if (request == 1 || request == 2) {
+        sCensusReq = request;
+        return 1;
+    }
+    if (sCensusState != 2 || sCensusReq != 0) {
+        return -1;
+    }
+    __sync_synchronize();
+    o.out = out;
+    o.size = size;
+    o.at = 0;
+    if (size > 0) {
+        out[0] = 0;
+    }
+    if (sCensusFrames == 0) {
+        census_emit(&o, "GPU timeline: no frames timed (the profiler wasn't recording, or the timeline is off)");
+    } else {
+        double f = 1.0 / sCensusFrames;
+        snprintf(line, sizeof(line),
+                 "GPU timeline (%u frames): %.2f ms a frame from start to finish: memory fills %.2f, command lists %.2f, "
+                 "copies to the screen %.2f",
+                 sCensusFrames, ticks_ms(sCensusWhole) * f, ticks_ms(sCensusFill) * f, ticks_ms(sCensusList) * f,
+                 ticks_ms(sCensusCopy) * f);
+        census_emit(&o, line);
+    }
+    if (sCensusKindFrames > 0) {
+        at = snprintf(line, sizeof(line), "GPU command lists by kind (%u frames cut at each kind, ms):",
+                      sCensusKindFrames);
+        for (k = 0; k <= PROF_KINDS && at < (int) sizeof(line) - 40; k++) {
+            if (sCensusKindTicks[k] != 0) {
+                at += snprintf(line + at, sizeof(line) - at, " %s %.2f,",
+                               k == GPU_KIND_MIXED ? "past the cuts" : prof_kind_name(k),
+                               ticks_ms(sCensusKindTicks[k]) / sCensusKindFrames);
+            }
+        }
+        if (line[at - 1] == ',') {
+            line[at - 1] = 0;
+        }
+        census_emit(&o, line);
+    } else {
+        census_emit(&o, "GPU command lists by kind: no frames cut (3D, or DKR_GPU_KINDS off)");
+    }
+    if (sCensusDpFrames > 0) {
+        dp_lines(&sCensusTab, sCensusDpFrames, (int) (sCensusDrawSum / sCensusDpFrames), 12, census_emit, &o);
+        // The frame-start draws: each place's draws, how often (the frames that timed that place), ms each on average.
+        for (k = 0; k < CENSUS_START; k++) {
+            int j;
+            for (j = 0; j < CENSUS_START_KEYS && sCensusStart[k][j].count != 0; j++) {
+                char what[96];
+                snprintf(what, sizeof(what), "frame-start place %d, %u times, %.3f ms each on average, costliest", k,
+                         sCensusStart[k][j].count, ticks_ms(sCensusStart[k][j].ticks) / sCensusStart[k][j].count);
+                dp_detail_line(line, sizeof(line), what, sCensusStart[k][j].maxTicks, &sCensusStart[k][j].d,
+                               &sCensusStart[k][j].det);
+                census_emit(&o, line);
+            }
+            if (sCensusStartOther[k] != 0) {
+                snprintf(line, sizeof(line), "GPU draws: frame-start place %d: %u more draws of other kinds", k,
+                         sCensusStartOther[k]);
+                census_emit(&o, line);
+            }
+        }
+    } else {
+        census_emit(&o, "GPU draws: no frames timed by draw (3D, or DKR_GPU_DRAWS off)");
+    }
+    sCensusState = 0;
+    return o.at;
 }

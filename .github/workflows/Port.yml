@@ -320,7 +320,8 @@ jobs:
         # P59 E (rule K6): a fake check reported right and one wrong reach the CSV's chk cells as 2 run, 1 wrong
         run: DKR_CHECKS_CSV_TEST=1 port/build/host/dkr
       - name: Switch bench overrides all reach the game
-        # every switch bench race of both consoles' lists sets its switches without overflowing the override table
+        # every switch bench race of both consoles' lists sets its switches without overflowing the override table, and
+        # no row silently replaces another's usual setting (run 52); a planted list's 3 conflicts must be found
         run: |
           DKR_BENCH_OVERRIDE_CHECK=1 port/build/host/dkr
           DKR_BENCH_OVERRIDE_CHECK=1 DKR_HOST_OLD3DS=1 port/build/host/dkr
@@ -458,6 +459,69 @@ jobs:
             --work "$RUNNER_TEMP/hidden-check" --tracks 29
           python3 port/tools/hidden_bake.py check --exe port/build/host/dkr --rom "$RUNNER_TEMP/rom/baserom.z64" \
             --work "$RUNNER_TEMP/hidden-check-break" --tracks 29 --break
+
+      - name: Split ref check
+        # P63: DKR_SPLIT_REF hands the opaque buckets to the two-core renderer's backend by pointer, so the same build
+        # must draw identical frames with its self-check on (DKR_SPLIT_REF_CHECK=2: every hand-off compared by the
+        # backend with a queued copy, returned blocks filled with 0xA5), with the Old 3DS defaults, and report 0 differ.
+        # Mode 3 is the check broken on purpose (rule K6: blocks returned one draw early) and must report differences.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_SPLIT_REF_CHECK=2 \
+            --out "$RUNNER_TEMP/split-ref" --max-images 0 --no-repeat-check --fail-on-diff
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_SPLIT_REF_CHECK=3 --only levels \
+            --out "$RUNNER_TEMP/split-ref-broken" --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/split-ref/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/split-ref-broken/runs" -path "*/head/log.txt")
+          grep -h "split ref:" $logs $broken | tail -n 8
+          if grep -q "split ref: first difference" $logs; then
+            echo "::error::A handed-over bucket block changed before the backend drew it (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "split ref: [1-9][0-9]* handed over, .* [1-9][0-9]* compared, 0 differ" $logs; then
+            echo "::error::The split ref check never compared a hand-off (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "split ref: first difference" $broken; then
+            echo "::error::The split ref check broken on purpose (DKR_SPLIT_REF_CHECK=3) reported nothing."
+            exit 1
+          fi
+
+      - name: Split lines check
+        # P66: DKR_SPLIT_LINES hands the split ring's head and tail over in batches, so the same build must draw
+        # identical frames with its self-check on (DKR_SPLIT_LINES_CHECK=1: the backend compares every frame's records
+        # with the walk's) and the Old 3DS defaults, and report 0 differ. Modes 2 and 3 are the check broken on purpose
+        # (rule K6: a draw record lost; a frame's end not handed over) and must report it.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_SPLIT_LINES_CHECK=1 \
+            --out "$RUNNER_TEMP/split-lines" --max-images 0 --no-repeat-check --fail-on-diff
+          for m in 2 3; do
+            DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+              --head port/build/host/dkr --head-env DKR_SPLIT_LINES_CHECK=$m --only levels \
+              --out "$RUNNER_TEMP/split-lines-broken$m" --max-images 0 --no-repeat-check
+          done
+          logs=$(find "$RUNNER_TEMP/split-lines/runs" -path "*/head/log.txt")
+          lost=$(find "$RUNNER_TEMP/split-lines-broken2/runs" -path "*/head/log.txt")
+          late=$(find "$RUNNER_TEMP/split-lines-broken3/runs" -path "*/head/log.txt")
+          grep -h "split lines:" $logs $lost $late | tail -n 8
+          if grep -q "split lines: first difference" $logs; then
+            echo "::error::The split ring lost, tore or delayed a record with DKR_SPLIT_LINES (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "split lines: [1-9][0-9]* frames compared, 0 differ, 0 frame ends" $logs; then
+            echo "::error::The split lines check never compared a frame (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "split lines: first difference .*(1 frames differ" $lost; then
+            echo "::error::The split lines check broken on purpose (DKR_SPLIT_LINES_CHECK=2, a lost record) reported nothing."
+            exit 1
+          fi
+          if ! grep -q "split lines: first difference .* 1 frame ends not handed over" $late; then
+            echo "::error::The split lines check broken on purpose (DKR_SPLIT_LINES_CHECK=3, a frame end kept) reported nothing."
+            exit 1
+          fi
 
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words

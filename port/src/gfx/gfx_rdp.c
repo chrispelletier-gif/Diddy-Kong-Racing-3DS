@@ -309,7 +309,9 @@ enum {
     WS_STATE,     // (7) State, axes, opaque_direct_ok
     WS_TRIS,      // (8) The triangle loop
     WS_BUCKET,    // (9) Inside it: bucket finds and draws, batch starts
-    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free)
+    WS_SPRITES,   // (10) Sprite records (native_record_append, native_sprite_free) bar their corners:
+    WS_SPRITE_CORNERS, // (10b) P64 candidate 4: a sprite record's corners made (vertex maths, billboard placement) and
+                       // drawn (draw_record_triangles / draw_dkr_triangles), what a vertex shader table would replace
     WS_OPS,       // (11) native_op and the other state commands
     WS_COPY,      // (12) gfx_split_draw_indexed's copy into the split ring
     WS_FLUSH,     // (13) opaque_flush_now
@@ -318,7 +320,7 @@ enum {
 };
 static const char *const sWalkStepNames[WS_COUNT] = {
     "rest", "entry", "find", "box", "transform", "colour/fog", "edges", "state", "triangles", "buckets",
-    "sprites", "state commands", "split copy", "opaque flush", "other paths",
+    "sprites", "sprite corners", "state commands", "split copy", "opaque flush", "other paths",
 };
 static u8 sDrawKind; // The kind being drawn (the draw mix, below)
 static s32 sWalkStepsSwitch; // DKR_WALK_STEPS (read_switches)
@@ -2102,13 +2104,23 @@ static inline s32 opaque_sortable(const GfxDrawState *st) {
  * decal draw, a clear, a texture change, the frame's end). Blended particles keep their order.
  */
 #define OPAQUE_BUCKETS 8
+/* A bucket's arrays. P63 (DKR_SPLIT_REF): a full block is handed to the backend whole, by pointer, and the bucket takes
+ * another from a pool (split_ref_handoff); with the switch off each bucket keeps its home block for good. */
+typedef struct OpaqueBlock {
+    GfxVertex verts[MAX_BATCH_VERTICES];
+    u16 indices[MAX_BATCH_TRIANGLES * 3];
+} OpaqueBlock;
 typedef struct OpaqueBucket {
     GfxDrawState state;
     s32 numVerts, numTris;
-    GfxVertex verts[MAX_BATCH_VERTICES];
-    u16 indices[MAX_BATCH_TRIANGLES * 3];
+    GfxVertex *verts; // == block->verts
+    u16 *indices;     // == block->indices
+    OpaqueBlock *block;
 } OpaqueBucket;
-static OpaqueBucket sOpaque[OPAQUE_BUCKETS];
+static OpaqueBlock sOpaqueHome[OPAQUE_BUCKETS] __attribute__((aligned(32)));
+#define OPAQUE_HOME(i) { .verts = sOpaqueHome[i].verts, .indices = sOpaqueHome[i].indices, .block = &sOpaqueHome[i] }
+static OpaqueBucket sOpaque[OPAQUE_BUCKETS] = { OPAQUE_HOME(0), OPAQUE_HOME(1), OPAQUE_HOME(2), OPAQUE_HOME(3),
+                                                OPAQUE_HOME(4), OPAQUE_HOME(5), OPAQUE_HOME(6), OPAQUE_HOME(7) };
 static s32 sOpaqueCount;
 static u32 sOpaqueStats[2]; // Batches held, draws made
 
@@ -2135,6 +2147,120 @@ static s32 sEngPending;
 static u32 sEngStats[2];  // sOpaqueStats of the backend's
 #define ENG_PENDING (*(sRemote ? &sEngPending : &sOpaquePending))
 
+/*
+ * P63 DKR_SPLIT_REF (default off; proposals/3ds-old3ds-bucket-handoff-plan.md, scope A): with the buckets on the walk
+ * (sRemote off) every bucket draw was copied into the split ring on the game core, the Old 3DS's limiting one ("split
+ * copy" 1.44 ms a frame in run 50's walk steps rows). The backend only reads the arrays inside gfxb_draw_indexed, so
+ * the bucket's block is handed over by pointer (OP_INDEXED_REF) and the bucket takes a free block from a pool: the 8
+ * home blocks plus DKR_SPLIT_REF_BLOCKS more (default 16, ~29 KB each, allocated when the switch is first on). Handed
+ * blocks wait in a FIFO (the queue is drawn in order) with their ticket, and come back to the free list (LIFO: the
+ * warmest first) once the backend has drawn them. No free block: the bucket is copied as before (exact, slower).
+ * Same draws, same order, same bytes. The CPU batch (flush_cpu_batch) keeps the copy: its array is reused at once.
+ * DKR_SPLIT_REF_CHECK (test builds, implies the switch): 1 queues a copy of each handed block that the backend compares
+ * with the block before drawing it (chk cell "split ref"); 2 also fills each block with 0xA5 when it comes back;
+ * 3 is mode 2 broken on purpose (rule K6): blocks come back one ticket early, before the backend has drawn them.
+ */
+#define SPLIT_REF_MAX_EXTRA 48
+#define SPLIT_REF_FLIGHT 64 // A power of two, more than SPLIT_REF_MAX_EXTRA
+static s32 sSplitRef;      // DKR_SPLIT_REF, with the pool made
+static s32 sSplitRefCheck; // DKR_SPLIT_REF_CHECK
+static s32 sSplitRefExtra; // Pool blocks besides the home ones: 0 not made yet, -1 no memory
+static OpaqueBlock *sRefFree[SPLIT_REF_MAX_EXTRA];
+static s32 sRefFreeCount;
+static struct {
+    OpaqueBlock *block;
+    u32 ticket;
+} sRefFlight[SPLIT_REF_FLIGHT];
+static u32 sRefFlightHead, sRefFlightTail; // Handed over so far, and back so far (they wrap together)
+static u32 sRefStats[3];                   // Buckets handed over, copied for want of a free block, their vertices
+static u32 sRefLoggedFrame, sRefDifferSeen;
+
+/* Makes the pool the first time the switch is on: FALSE (and the switch stays off) without the memory. */
+static COLD s32 split_ref_pool(void) {
+    u8 *mem;
+    s32 n, i;
+    if (sSplitRefExtra != 0) {
+        return sSplitRefExtra > 0;
+    }
+    n = plat_switch("DKR_SPLIT_REF_BLOCKS", 16);
+    n = n < 1 ? 1 : n > SPLIT_REF_MAX_EXTRA ? SPLIT_REF_MAX_EXTRA : n;
+    mem = (u8 *) plat_malloc((u32) n * sizeof(OpaqueBlock) + 32);
+    if (mem == NULL) {
+        plat_log("split ref: no memory for %d blocks, off", (int) n);
+        sSplitRefExtra = -1;
+        return FALSE;
+    }
+    mem = (u8 *) (((unsigned long) mem + 31) & ~31UL); // Never freed
+    for (i = 0; i < n; i++) {
+        sRefFree[i] = (OpaqueBlock *) mem + i;
+    }
+    sRefFreeCount = n;
+    sSplitRefExtra = n;
+    plat_log("split ref: %d blocks, %lu KB", (int) n, (unsigned long) (n * sizeof(OpaqueBlock) / 1024));
+    return TRUE;
+}
+
+/* Blocks the backend has drawn go back on the free list. */
+static inline void split_ref_reclaim(void) {
+    // Mode 3 (rule K6's break): a block counts as drawn one ticket early.
+    u32 early = sSplitRefCheck == 3;
+    while (sRefFlightTail != sRefFlightHead) {
+        u32 slot = sRefFlightTail % SPLIT_REF_FLIGHT;
+        if (!gfx_split_ref_done(sRefFlight[slot].ticket - early)) {
+            break;
+        }
+        if (sSplitRefCheck >= 2) {
+            __builtin_memset(sRefFlight[slot].block, 0xA5, sizeof(OpaqueBlock)); // A late read now differs
+        }
+        sRefFree[sRefFreeCount++] = sRefFlight[slot].block;
+        sRefFlightTail++;
+    }
+}
+
+/* Draws the bucket by handing its block over: FALSE when it must be copied instead (nothing done). */
+static NOINLINE s32 split_ref_handoff(OpaqueBucket *b) {
+    unsigned int ticket;
+    s32 made;
+    split_ref_reclaim();
+    sRefStats[2] += (u32) b->numVerts;
+    if (sRefFreeCount == 0) {
+        sRefStats[1]++;
+        return FALSE;
+    }
+    made = gfx_split_draw_indexed_ref(&b->state, b->verts, b->numVerts, b->indices, b->numTris, sSplitRefCheck != 0,
+                                      &ticket);
+    if (made == SPLIT_REF_QUEUED) {
+        OpaqueBlock *fresh = sRefFree[--sRefFreeCount];
+        sRefFlight[sRefFlightHead % SPLIT_REF_FLIGHT].block = b->block;
+        sRefFlight[sRefFlightHead % SPLIT_REF_FLIGHT].ticket = ticket;
+        sRefFlightHead++;
+        b->block = fresh;
+        b->verts = fresh->verts;
+        b->indices = fresh->indices;
+        sRefStats[0]++;
+    }
+    return made != SPLIT_REF_NOT_QUEUED;
+}
+
+/* Each frame with the switch on: the self-check's result for the race's checks, and the log every 600 frames. */
+static COLD void split_ref_frame(s32 frame) {
+    unsigned int compared, differ;
+    gfx_split_ref_counts(&compared, &differ);
+    if (sSplitRefCheck) {
+        plat_check_report("split ref", differ != sRefDifferSeen);
+        if (differ != 0 && sRefDifferSeen == 0) {
+            plat_log("split ref: first difference by frame %d (a block changed before the backend drew it)", (int) frame);
+        }
+        sRefDifferSeen = differ;
+    }
+    if ((u32) frame - sRefLoggedFrame >= 600) {
+        sRefLoggedFrame = (u32) frame;
+        plat_log("split ref: %lu handed over, %lu fallbacks (%lu vertices a draw), %u compared, %u differ",
+                 (unsigned long) sRefStats[0], (unsigned long) sRefStats[1],
+                 (unsigned long) (sRefStats[2] / (sRefStats[0] + sRefStats[1] + 1)), compared, differ);
+    }
+}
+
 static void opaque_draw(OpaqueBucket *b) {
     if (b->numTris == 0) {
         return;
@@ -2145,7 +2271,9 @@ static void opaque_draw(OpaqueBucket *b) {
         sEngStats[1]++;
     } else {
         u32 ws = walk_step(WS_COPY);
-        gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
+        if (!sSplitRef || !split_ref_handoff(b)) {
+            gfx_split_draw_indexed(&b->state, b->verts, b->numVerts, b->indices, b->numTris);
+        }
         walk_step(ws);
         prof_count(PROF_DRAWS, 1);
         sOpaqueStats[1]++;
@@ -2662,6 +2790,11 @@ static COLD void read_switches_now(void) {
     // game's (Whale Bay 21.4 / 17.5 ms), raised the ceiling ~6 fps and doubled its 1% low, at 30 fps. 3 (the old Old
     // 3DS default, v28) and 1 stay for the bench and rollback.
     sNativeRemote = plat_switch("DKR_NATIVE_REMOTE", 0);
+    // P63: opaque buckets handed to the backend by pointer (see split_ref_handoff). Off until the Old 3DS bench.
+#if PLAT_DEBUG_TOOLS
+    sSplitRefCheck = plat_switch("DKR_SPLIT_REF_CHECK", 0);
+#endif
+    sSplitRef = (plat_switch("DKR_SPLIT_REF", 0) != 0 || sSplitRefCheck != 0) && split_ref_pool();
     sWalkPrefetch = plat_switch("DKR_WALK_PREFETCH", plat_old_3ds()) != 0;
     // P61 W (2026-11-22, proposals/3ds-old3ds-game-core-hot-plan.md): the walk's exact data cuts. W1 and W2 change no
     // picture (on by default on both consoles; 0 = the old way); W3's prefetches are hints (Old 3DS, bits 1 and 2;
@@ -5440,12 +5573,16 @@ static NOINLINE HOT void native_record_append(NMat *mat, const Vertex *vtx, s32 
             }
             forget_slots(dest, dest + numVerts);
         }
+        walk_step(WS_SPRITE_CORNERS);
         load_vertices_now(vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard);
+        walk_step(WS_SPRITES);
     }
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    walk_step(WS_SPRITE_CORNERS);
     draw_dkr_triangles(tris, count, textured);
+    walk_step(WS_SPRITES);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -5525,8 +5662,10 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
         g.tiles[0] = mat->tiles[0];
         g.tiles[1] = mat->tiles[1];
         g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
+        walk_step(WS_SPRITE_CORNERS);
         load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
                            &f);
+        walk_step(WS_SPRITES);
         sSprFlat = flatBits | f;
         sSprFrame = (u32) sFrameCount;
         sSprValid = TRUE;
@@ -5540,7 +5679,9 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     nmat_state(mat, &sTriState, textured);
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
+    walk_step(WS_SPRITE_CORNERS);
     draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    walk_step(WS_SPRITES);
     sPresetAxes = NULL;
     g.vertexIndex = 0;
     g.tiles[0] = t0;
@@ -9145,6 +9286,9 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
             sRemote = remote;
         }
         native_remote_take();
+    }
+    if (UNLIKELY(sSplitRef)) {
+        split_ref_frame(sFrameCount);
     }
     STALL_MARK("frame set-up: triangle lists", 0, 0);
     native_tris_take();

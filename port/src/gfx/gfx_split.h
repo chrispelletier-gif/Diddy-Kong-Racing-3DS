@@ -22,6 +22,19 @@ void gfx_split_clear_depth(const short rect[4]);
 void gfx_split_draw_triangles(const GfxDrawState *state, const GfxVertex *verts, int numTriangles);
 void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
                             const unsigned short *indices, int numTriangles);
+/*
+ * P63 DKR_SPLIT_REF: an indexed draw handed over by pointer instead of copied into the queue. The caller keeps verts and
+ * indices unchanged until gfx_split_ref_done says the ticket (*ticket) is done: the backend has drawn them. check
+ * (DKR_SPLIT_REF_CHECK) also queues a copy of the bytes, which the backend compares with the arrays before it draws.
+ * Returns SPLIT_REF_QUEUED, SPLIT_REF_DRAWN (DKR_WALK_VERTS drew it now: nothing to wait for) or SPLIT_REF_NOT_QUEUED
+ * (this frame's calls aren't queued: nothing was done, the caller draws it as before).
+ */
+enum { SPLIT_REF_NOT_QUEUED, SPLIT_REF_DRAWN, SPLIT_REF_QUEUED };
+int gfx_split_draw_indexed_ref(const GfxDrawState *state, const GfxVertex *verts, int numVerts,
+                               const unsigned short *indices, int numTriangles, int check, unsigned int *ticket);
+int gfx_split_ref_done(unsigned int ticket);
+/* The self-check's totals since start-up: draws compared and draws whose arrays differed from the queued copy. */
+void gfx_split_ref_counts(unsigned int *compared, unsigned int *differ);
 void gfx_split_texture_upload(GfxTexture *tex);
 void gfx_split_texture_share(GfxTexture *dst, const GfxTexture *src);
 void gfx_split_texture_free(GfxTexture *tex);

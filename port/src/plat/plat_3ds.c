@@ -256,7 +256,9 @@ void bugreport_watch_thread(const char *name);
 
 static volatile int sQuitting;
 static volatile int sRendererParked;
-static volatile int sPauseRequested;
+static volatile int sPauseRequested; // sAwayPause || sNetHold
+static volatile int sAwayPause;      // HOME menu or sleep (plat_3ds_pause_renderer)
+static volatile int sNetHold;        // A network transfer (plat_3ds_hold_game_for_net)
 static volatile int sRendererPaused;
 
 /*
@@ -305,13 +307,52 @@ int plat_3ds_renderer_should_park(void) {
  */
 void plat_3ds_pause_renderer(int pause) {
     unsigned long long start = plat_time_ns();
-    sPauseRequested = pause;
+    sAwayPause = pause;
+    sPauseRequested = sAwayPause || sNetHold;
     if (!pause) {
         return;
     }
     while (!sRendererPaused && plat_time_ns() - start < 2000000000ULL) {
         svcSleepThread(1000000);
     }
+}
+
+/*
+ * DKR_NET_HOLD (default 1 on an Old 3DS, 0 on a New 3DS): a bug report's upload or an update's download holds the game
+ * while it runs, as the HOME menu does. On an Old 3DS the race keeps both cores busy: the game's core, where the TLS
+ * work, gzip and SHA-256 run, and the system core, whose share the two-core renderer raises to 80% while the
+ * network's own services (sockets, Wi-Fi) run there too. Held, the renderer stops at the start of a frame (the game
+ * and its sound wait for it) and gives the system core's share back (plat_3ds_quit_point), so the transfer gets both
+ * cores. A race is paused first, as START would, so it does not carry on the moment the transfer ends. Not during a
+ * test run (its progress reports go out between races, and a held race would spoil its timings). The bottom screen's
+ * own thread still draws the progress. Calls nest: the last release lets the game go.
+ */
+long port_autorun_enabled(void);
+
+void plat_3ds_hold_game_for_net(int hold) {
+    static LightLock sHoldLock = 1; // Unlocked
+    static int sHolds, sHolding;
+    LightLock_Lock(&sHoldLock);
+    if (hold) {
+        if (sHolds++ == 0 && plat_switch("DKR_NET_HOLD", !sNew3DS) != 0 && !port_autorun_enabled()) {
+            unsigned long long start = plat_time_ns();
+            plat_log("network: holding the game while it runs (DKR_NET_HOLD)");
+            plat_request_game_pause();
+            svcSleepThread(100 * 1000 * 1000); // A few frames for a race to take the pause
+            sHolding = 1;
+            sNetHold = 1;
+            sPauseRequested = 1;
+            while (!sRendererPaused && plat_time_ns() - start < 2000000000ULL) {
+                svcSleepThread(1000000);
+            }
+        }
+    } else if (sHolds > 0 && --sHolds == 0 && sHolding) {
+        sHolding = 0;
+        sNetHold = 0;
+        sPauseRequested = sAwayPause;
+        plat_log("network: game released");
+    }
+    LightLock_Unlock(&sHoldLock);
 }
 
 void port_audio_output_exit(void);

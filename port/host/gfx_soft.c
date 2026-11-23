@@ -1010,6 +1010,9 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
             }
         }
     }
+    if (sFragStats == 4) {
+        frag_first_draw(state, verts, numTriangles * 3, numTriangles);
+    }
     if (sFragStats == 2 && (sFragKind == 5 || sFragKind == 6 || sFragKind == 0) &&
         sFramesRendered % 60 == 0 && sDrawRaster > W * H / 50) {
         const GfxTexture *t = state->textures[0];
