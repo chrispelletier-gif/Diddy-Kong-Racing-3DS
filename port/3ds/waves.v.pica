@@ -13,7 +13,10 @@
 ;   waveb = (unk44, (1 - unk44) / 255, unk48, shade / 128)
 ;   wavec = (ai, aj, bi, bj): the scale table row's index is min(i * ai + bi, j * aj + bj), clamped to 0..11
 ;   waved = (u base, v base, u step, v step): the texture coordinates in the game's units
-;   wtab[47]: the height table, four entries a row; wsc[3]: the scale table (sp34 in func_800BC6C8), four a row
+;   stab[0..46]: the height table, four entries a row; stab[47..49]: the scale table (sp34 in func_800BC6C8), four a
+;   row. stab is the sprite table shader's uniform array (sprite_table.v.pica): the blob's uniforms are given registers
+;   by name across every program, and there is room for one 75-row table, not two, so the waves borrow its rows and
+;   gfx_c3d.c writes them again after any sprite table draw.
 ; The game's sums (waves.c, xlu water, no wave generators):
 ;   y = (T[i0] + T[i1]) * magnitude * scale;  v = c * 2;  if v < 255: y *= unk44 + v * (1 - unk44) / 255
 ;   v += trunc(y * unk48), clamped to 0..255;  v += (255 - v) * shade >> 7
@@ -40,8 +43,7 @@
 .fvec waveb
 .fvec wavec
 .fvec waved
-.fvec wtab[47]
-.fvec wsc[3]
+.fvec stab[75]
 
 ; Constants
 .constf wk0(0.00392156862745098, 0.0, 1.0, 0.5)
@@ -89,8 +91,8 @@
 	add r5, r5, -r6
 
 	; The two heights, their sum times the magnitude
-	dp4 r7.x, wtab[a0.x], r4
-	dp4 r7.y, wtab[a0.y], r5
+	dp4 r7.x, stab[a0.x], r4
+	dp4 r7.y, stab[a0.y], r5
 	add r7.x, r7.x, r7.y
 	mul r7.x, wavea.wwww, r7.x
 
@@ -108,7 +110,7 @@
 	slt r11, wk2, r10.xxxx
 	slt r12, wk3, r10.xxxx
 	add r11, r11, -r12
-	dp4 r8.x, wsc[a0.x], r11
+	dp4 r8.x, stab[a0.x+47], r11
 	mul r7.x, r7.x, r8.x
 
 	; v = c * 2; below 255 the height is also scaled by unk44 + v * (1 - unk44) / 255

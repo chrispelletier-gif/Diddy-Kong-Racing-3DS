@@ -207,6 +207,8 @@ void port_boot(void) {
     }
     gPortGameStage = "starting: saves";
     port_si_init();
+    gPortGameStage = "starting: time trial bests";
+    port_race_hud_boot(); // P58: their index, before the game thread runs
     gPortGameStage = "starting: vi and rcp threads";
     port_vi_init();
     port_rcp_init();

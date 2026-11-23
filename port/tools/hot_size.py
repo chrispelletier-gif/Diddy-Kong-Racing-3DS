@@ -48,7 +48,12 @@ import sys
 # Then #590 (P61 W) and the run 50 Old 3DS defaults (#592): hot_span 80,560 in master 5c5a6e7's CI debug build.
 # P62 M (GPU census, 2026-11-22): no hot code added, but the census's data moved the walk's globals, and
 # native_sprite_free came out 16 bytes longer (its addresses' constants): hot_span 80,576 in that branch's debug build.
-BUDGETS = {"hot_span": 80576, "walk_set": 22912, "backend_set": 21200}
+# P55 S4 step 1 (DKR_FLAT_FRAME, 2026-11-23): the flat dispatcher's record path (native_record_flat, ~9.6 KB; the
+# record path without step marks, census notes, kart counts or remote vertex maths) and run_flat_frame are a second
+# copy beside native_record and run_native_frame in .text.hot.game. A frame runs one copy or the other, so the code a
+# frame executes doesn't grow (on the host's 16 KB cache model it took 28% fewer instruction cache misses); hot_span
+# grows by the copy: 85,192 in the branch's CI debug build (75,056 before).
+BUDGETS = {"hot_span": 85192, "walk_set": 22912, "backend_set": 21200}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024

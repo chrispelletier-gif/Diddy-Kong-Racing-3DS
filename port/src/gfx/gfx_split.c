@@ -21,12 +21,24 @@
 #include "plat/plat.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "gfx_frame_parts.h"
 #include "plat/profile.h"
 
 /* The queue's size, a power of two (the ring's offsets wrap with the unsigned counters): 2 MB on a New 3DS, 1 MB on
  * an Old 3DS, where a crowded frame queues about 200 KB and the heap is tight. Set before the queue is allocated. */
 static unsigned int sRingBytes = 2u * 1024u * 1024u;
 #define SPLIT_RING_BYTES sRingBytes
+/*
+ * DKR_SPLIT_MASK (default 1): a position in the ring as head & (size - 1) instead of head % size. sRingBytes is a
+ * variable (1 or 2 MB by console), so the compiler made every % a call to the ARM11's software divide
+ * (__aeabi_uidivmod, ~30-50 cycles), once per record on the walk and twice on the backend
+ * (proposals/3ds-arm11-c-tips-audit.md item 1; estimated -0.05..-0.25 ms Old 3DS game core). The ring is always a
+ * power of two, so both give the same position. Read at each frame's start on the walk's thread; the backend uses
+ * whichever it last saw, which is safe because the two agree.
+ */
+static unsigned int sRingMask;          // sRingBytes - 1
+static volatile int sRingMaskOn;        // DKR_SPLIT_MASK
+#define RING_AT(pos) (sRingMaskOn ? (pos) & sRingMask : (pos) % SPLIT_RING_BYTES)
 #define SPLIT_FRAMES_AHEAD 2
 
 enum {
@@ -44,6 +56,7 @@ enum {
     OP_MESH_FREE,
     OP_CALL, // v28: a function of the walk's run on the backend thread with the record's bytes (gfx_split_call_reserve)
     OP_INDEXED_REF, // P63 DKR_SPLIT_REF: an indexed draw whose arrays stay the walk's (gfx_split_draw_indexed_ref)
+    OP_MODEL2, // P68 DKR_KART_BATCH bit 2: one model vertex array, two cull groups' indices (gfx_split_model2_begin)
     OP_WRAP // The rest of the ring up to its end is unused: the next record is at the start.
 };
 
@@ -93,6 +106,31 @@ typedef struct SplitModel {
     GfxModelParams params;
     int numVerts, numTriangles;
 } SplitModel;
+
+/*
+ * OP_MODEL2 (P68): followed by the params (all of them, or with full clear only the texture factors, texScale then
+ * texOffset: the rest are the last OP_MODEL2's), then with check set the walk's whole params again (the self-check's
+ * copy), then numVerts model vertices, then n[0] triangles' indices drawn with no culling and n[1] drawn with cull1.
+ */
+typedef struct SplitModel2 {
+    GfxDrawState state;
+    int numVerts;
+    unsigned short n[2];
+    unsigned char cull1, full, check, pad; // check: 1 compare, 2 compare and leave the texture factors stale (K6)
+} SplitModel2;
+_Static_assert(sizeof(SplitModel2) % 4 == 0 && sizeof(GfxModelParams) % 4 == 0 && sizeof(GfxModelVertex) == 16,
+               "OP_MODEL2's parts stay 4-byte aligned");
+#define MODEL2_TEX_OFFSET __builtin_offsetof(GfxModelParams, texScale)
+#define MODEL2_TEX_BYTES (sizeof(float) * 8)
+_Static_assert(__builtin_offsetof(GfxModelParams, texOffset) == __builtin_offsetof(GfxModelParams, texScale) + 16,
+               "texScale then texOffset");
+
+/* The walk's last OP_MODEL2 params of this frame (gfx_split_model2_begin) and the backend's (the record's replay). */
+static GfxModelParams sWalkModel2Last, sBackendModel2Last;
+static int sWalkModel2LastOk;
+static void *sWalkModel2Open;
+static int sWalkModel2BreakArmed = 1;
+static volatile unsigned int sModel2Records, sModel2Slim, sModel2Compared, sModel2Wrong;
 
 typedef struct SplitTexture {
     GfxTexture *tex;
@@ -200,6 +238,7 @@ static int mix_kind(unsigned int op, const void *p) {
         case OP_INDEXED_REF:
             return MIX_DRAWS;
         case OP_MODEL:
+        case OP_MODEL2:
         case OP_MESHES:
         case OP_MESH_FREE:
             return MIX_MODELS;
@@ -269,6 +308,70 @@ int gfx_split_backend_mix(int reader, char *out, int size) {
     }
     return at < size ? at : size - 1;
 }
+/*
+ * P57 E: the frame start/end bucket's parts (gfx_backend.h GFXB_FPART_*), ms a frame on the timed frames since this
+ * reader last read, the clock reads' cost taken off each part by its share; and the self-check (gfx_frame_parts.h):
+ * the parts' sum against the bucket's own time on the same frames (DKR_FRAME_PARTS_CHECK: 1 on, 2 broken on purpose
+ * by leaving the largest part out, rule K6; 0 off). Returns the length written, 0 if no frame was timed.
+ */
+static const char *const sFpartNames[GFXB_FPART_COUNT] = {
+    "capture/screen", "start GPU wait", "set-up", "texture promote", "start rest", "end tallies", "vertex flush",
+    "logs", "end GPU wait", "fills", "command lists", "present", "screen watch", "C3D_FrameEnd", "after"};
+static unsigned long long sFpartRead[2][GFXB_FPART_COUNT], sFpartBucketRead[2];
+static unsigned int sFpartReadFrames[2], sFpartReadReads[2], sFpartReadLists[2];
+
+int gfx_split_frame_parts(int reader, char *out, int size) {
+    unsigned long long ticks[GFXB_FPART_COUNT], delta[GFXB_FPART_COUNT], bucket, all = 0, readTicks;
+    unsigned int frames, reads, lists, k;
+    double perTick = 1e3 / (double) plat_ticks_per_second(), scale;
+    long long outside;
+    int at, check, agree, drop = -1;
+    gfxb_frame_parts_totals(ticks, &frames, &reads, &lists);
+    bucket = sMixTicks[MIX_FRAME] - sFpartBucketRead[reader];
+    sFpartBucketRead[reader] = sMixTicks[MIX_FRAME];
+    for (k = 0; k < GFXB_FPART_COUNT; k++) {
+        delta[k] = ticks[k] - sFpartRead[reader][k];
+        all += delta[k];
+        sFpartRead[reader][k] = ticks[k];
+    }
+    readTicks = (unsigned long long) (reads - sFpartReadReads[reader]) * prof_clock_read_cost() / 256;
+    lists -= sFpartReadLists[reader];
+    frames -= sFpartReadFrames[reader];
+    sFpartReadFrames[reader] += frames;
+    sFpartReadReads[reader] = reads;
+    sFpartReadLists[reader] += lists;
+    if (size <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (frames == 0) {
+        return 0;
+    }
+    scale = all > 0 ? (double) (all > readTicks ? all - readTicks : 0) / (double) all : 1.0;
+    at = plat_snprintf(out, size, "backend frame start/end (ms a frame):");
+    for (k = 0; k < GFXB_FPART_COUNT && at < size; k++) {
+        at += plat_snprintf(out + at, size - at, "%s %s %.2f", k ? "," : "", sFpartNames[k],
+                            delta[k] * scale * perTick / frames);
+    }
+    check = plat_switch("DKR_FRAME_PARTS_CHECK", 1);
+    if (check != 0 && at < size) {
+        if (check == 2) {
+            drop = gfx_frame_parts_largest(delta, GFXB_FPART_COUNT); // Broken on purpose (rule K6)
+        }
+        agree = gfx_frame_parts_agree(bucket, delta, GFXB_FPART_COUNT, drop, &outside);
+        if (reader == 1) {
+            plat_check_report("frame parts", !agree); // Once a race (the core window): the results' chk columns
+        }
+        at += plat_snprintf(out + at, size - at, "; %.1f list parts; check%s: %.2f of %.2f ms outside the parts, %s",
+                            (double) lists / frames, drop >= 0 ? " (broken on purpose)" : "",
+                            outside * perTick / frames, bucket * perTick / frames, agree ? "ok" : "WRONG");
+    }
+    if (at < size) {
+        at += plat_snprintf(out + at, size - at, " (%u frames timed)", frames);
+    }
+    return at < size ? at : size - 1;
+}
+
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
@@ -345,7 +448,7 @@ static void wait_for_room(unsigned int bytes) {
 /* Room for a record of payload bytes, at a position that doesn't wrap; its payload. */
 static void *reserve(unsigned int op, unsigned int payload) {
     unsigned int bytes = sizeof(SplitRecord) + round8(payload);
-    unsigned int at = sWalk.head % SPLIT_RING_BYTES;
+    unsigned int at = RING_AT(sWalk.head);
     SplitRecord *rec;
     if (at + bytes > SPLIT_RING_BYTES) {
         unsigned int rest = SPLIT_RING_BYTES - at;
@@ -405,6 +508,42 @@ static void commit(void *payload) {
     wake_backend(op);
 }
 
+/* OP_MODEL2 on the backend thread: the params made whole again from the last record's, then one model draw for each
+ * cull group with triangles (as gfx_split_draw_model would have made them, the vertices sent with each). */
+static void model2_replay(const void *payload) {
+    const SplitModel2 *m = payload;
+    const unsigned char *at = (const unsigned char *) (m + 1);
+    const GfxModelVertex *verts;
+    const unsigned short *idx;
+    GfxDrawState state = m->state;
+    if (m->full) {
+        memcpy(&sBackendModel2Last, at, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    } else {
+        if (m->check != 2) { // (2: rule K6's break, the texture factors left as the last record's)
+            memcpy((unsigned char *) &sBackendModel2Last + MODEL2_TEX_OFFSET, at, MODEL2_TEX_BYTES);
+        }
+        at += MODEL2_TEX_BYTES;
+    }
+    if (m->check) {
+        int wrong = __builtin_memcmp(&sBackendModel2Last, at, sizeof(GfxModelParams)) != 0;
+        sModel2Wrong += (unsigned int) wrong;
+        sModel2Compared++;
+        plat_check_report("kart batch params", wrong); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
+        at += sizeof(GfxModelParams);
+    }
+    verts = (const GfxModelVertex *) at;
+    idx = (const unsigned short *) (verts + m->numVerts);
+    if (m->n[0] > 0) {
+        state.cullMode = 0;
+        gfxb_draw_model(&state, &sBackendModel2Last, verts, m->numVerts, idx, m->n[0]);
+    }
+    if (m->n[1] > 0) {
+        state.cullMode = m->cull1;
+        gfxb_draw_model(&state, &sBackendModel2Last, verts, m->numVerts, idx + 3 * m->n[0], m->n[1]);
+    }
+}
+
 /* The backend's DKR_SPLIT_LINES settings (from the OP_START records) and the check's records run and their sum: shared
  * by both backend threads, as the queue (and the counting) is handed from one to the other (choose_backend). */
 static int sBackendLines, sBackendCheck;
@@ -443,7 +582,7 @@ static void backend_thread(void *arg) {
             unsigned long long mixStart;
             int mixKind = MIX_OTHER;
             void *p;
-            rec = (SplitRecord *) (sRing + tail % SPLIT_RING_BYTES);
+            rec = (SplitRecord *) (sRing + RING_AT(tail));
             op = rec->op;
             bytes = rec->bytes;
             p = rec + 1;
@@ -451,12 +590,13 @@ static void backend_thread(void *arg) {
                 sMixOn = plat_switch("DKR_BACKEND_MIX", 1) && prof_enabled() &&
                          (!plat_old_3ds() || ++sMixCount % 8 == 0);
                 gGfxbModelSplitOn = sMixOn; // P61 M3: the model draws' parts too
+                gGfxbFramePartsOn = sMixOn; // P57 E: the frame start and end's parts
             }
             mixStart = sMixOn ? plat_ticks() : 0;
             if (sBackendPrefetch && tail + bytes != head) {
                 // v31 (DKR_BACKEND_PREFETCH): the next record's first 256 bytes (a native piece's header: state,
                 // matrices, axes) start coming over from the walk's core under this record's work. A hint only.
-                const unsigned char *next = (const unsigned char *) sRing + (tail + bytes) % SPLIT_RING_BYTES;
+                const unsigned char *next = (const unsigned char *) sRing + RING_AT(tail + bytes);
                 int k;
                 for (k = 0; k < 256; k += 32) {
                     __builtin_prefetch(next + k);
@@ -558,6 +698,9 @@ static void backend_thread(void *arg) {
                                     (const unsigned short *) (verts + m->numVerts), m->numTriangles);
                     break;
                 }
+                case OP_MODEL2:
+                    model2_replay(p);
+                    break;
                 case OP_MESHES: {
                     SplitModel *m = p;
                     gfxb_draw_meshes(&m->state, &m->params, (const GfxMeshPart *) (m + 1), m->numVerts);
@@ -589,6 +732,7 @@ static void backend_thread(void *arg) {
                 if (op == OP_END) {
                     sMixFrames++;
                     sMixOn = 0;
+                    gGfxbFramePartsOn = 0;
                 }
             }
             if (sBackendCheck) {
@@ -626,6 +770,7 @@ static int start_backend(void) {
         return FALSE;
     }
     sRingBytes = plat_old_3ds() ? 1024u * 1024u : 2u * 1024u * 1024u;
+    sRingMask = sRingBytes - 1u; // Used only while sRingBytes is a power of two (split_frame_start)
     sRing = plat_malloc(SPLIT_RING_BYTES);
     if (sRing == NULL) {
         plat_log("two-core renderer: no memory for its queue");
@@ -739,6 +884,7 @@ static void lines_frame_start(void) {
         sLinesCheck = check;
     }
     sLines = check != 0 || plat_switch("DKR_SPLIT_LINES", 0) != 0;
+    sRingMaskOn = (sRingBytes & (sRingBytes - 1u)) == 0 && plat_switch("DKR_SPLIT_MASK", 1) != 0;
     sPublishBytes = (unsigned int) plat_switch("DKR_SPLIT_PUBLISH_KB", 2) * 1024u;
     if (!sLinesCheck) {
         return;
@@ -804,6 +950,7 @@ int gfx_split_frame_start(int direct, int holdCores) {
         sWalkWaitNs += plat_time_ns() - start;
             sWalkWaitTotalNs = sWalkWaitNs + sWalkWaitTakenNs;
     }
+    sWalkModel2LastOk = 0; // P68: each frame's first OP_MODEL2 carries all its params
     {
         SplitStart *st = reserve(OP_START, sizeof(SplitStart));
         st->lines = sLines;
@@ -963,6 +1110,56 @@ void gfx_split_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts
     gfx_split_call_commit(s);
 }
 
+/* P65 rank 1 (DKR_SPRITE_TABLE): a sprite table batch, as a call of the backend's in the queue (its groups, then its
+ * vertices), or expanded here into an indexed draw for a backend that doesn't take tables (the host's). */
+typedef struct SplitTable {
+    GfxDrawState state;
+    float fogMul, fogOffset;
+    int numGroups, numVerts;
+} SplitTable;
+
+static void table_call(void *payload) {
+    const SplitTable *s = (const SplitTable *) payload;
+    const GfxTabGroup *groups = (const GfxTabGroup *) (s + 1);
+    gfxb_draw_sprite_table(&s->state, groups, s->numGroups, s->fogMul, s->fogOffset,
+                           (const GfxTabVertex *) (groups + s->numGroups), s->numVerts);
+}
+
+void gfx_split_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                                 float fogOffset, const GfxTabVertex *verts, int numVerts) {
+    static GfxVertex sVerts[GFX_TAB_MAX_VERTS];
+    static unsigned short sIndices[GFX_TAB_MAX_VERTS];
+    unsigned int groupBytes, vertBytes;
+    SplitTable *s;
+    if (numVerts <= 0 || numGroups <= 0) {
+        return;
+    }
+    if (numVerts > GFX_TAB_MAX_VERTS) {
+        numVerts = GFX_TAB_MAX_VERTS - GFX_TAB_MAX_VERTS % 3;
+    }
+    if (!gfxb_sprite_table()) {
+        gfx_tab_expand(groups, fogMul, fogOffset, verts, numVerts, sVerts, sIndices);
+        gfx_split_draw_indexed(state, sVerts, numVerts, sIndices, numVerts / 3);
+        return;
+    }
+    groupBytes = (unsigned int) numGroups * sizeof(GfxTabGroup);
+    vertBytes = (unsigned int) numVerts * sizeof(GfxTabVertex);
+    s = gfx_split_call_reserve(table_call, sizeof(SplitTable) + groupBytes + vertBytes);
+    if (s == NULL) {
+        gfx_split_drain();
+        gfxb_draw_sprite_table(state, groups, numGroups, fogMul, fogOffset, verts, numVerts);
+        return;
+    }
+    s->state = *state;
+    s->fogMul = fogMul;
+    s->fogOffset = fogOffset;
+    s->numGroups = numGroups;
+    s->numVerts = numVerts;
+    memcpy(s + 1, groups, groupBytes);
+    memcpy((unsigned char *) (s + 1) + groupBytes, verts, vertBytes);
+    gfx_split_call_commit(s);
+}
+
 /*
  * P63 DKR_SPLIT_REF (gfx_split.h): the same as gfx_split_draw_indexed but for the copy, which the walk's bucket draws
  * spent ~1.2 ms a frame on in the Old 3DS's game core (run 50). The backend reads the walk's arrays inside
@@ -1104,6 +1301,83 @@ void gfx_split_draw_model(const GfxDrawState *state, const GfxModelParams *param
     memcpy(m + 1, verts, vertBytes);
     memcpy((unsigned char *) (m + 1) + vertBytes, indices, indexBytes);
     commit(m);
+}
+
+/*
+ * P68 (DKR_KART_BATCH bit 2): an OP_MODEL2 record reserved in the queue, for the walk to write its vertices and indices
+ * into (gfx_split_model2_end hands it over). The params are queued whole only when the matrix, fog or light differ
+ * from the frame's last OP_MODEL2 (a kart's batches share them): else only the texture factors. NULL when this frame's
+ * calls aren't queued or the record is too big for the ring: the caller draws as before (gfx_split_draw_model).
+ * check: 0 none, 1 the backend compares the params it made with the walk's, 3 the same, and once the backend leaves
+ * a record's texture factors stale (rule K6's break, which the compare must report).
+ */
+GfxModelVertex *gfx_split_model2_begin(const GfxDrawState *state, const GfxModelParams *params, int numVerts, int n0,
+                                       int n1, unsigned char cull1, int check, unsigned short **indices) {
+    SplitModel2 *m;
+    unsigned char *at;
+    int full;
+    unsigned int bytes;
+    if (!sActive || sWalkModel2Open != NULL) {
+        return NULL;
+    }
+    full = !sWalkModel2LastOk || __builtin_memcmp(params->mtx, sWalkModel2Last.mtx, sizeof(params->mtx)) != 0 ||
+           __builtin_memcmp((const unsigned char *) params + MODEL2_TEX_OFFSET + MODEL2_TEX_BYTES,
+                  (const unsigned char *) &sWalkModel2Last + MODEL2_TEX_OFFSET + MODEL2_TEX_BYTES,
+                  sizeof(GfxModelParams) - MODEL2_TEX_OFFSET - MODEL2_TEX_BYTES) != 0;
+    bytes = sizeof(SplitModel2) + (full ? sizeof(GfxModelParams) : MODEL2_TEX_BYTES) +
+            (check ? sizeof(GfxModelParams) : 0) + (unsigned int) numVerts * sizeof(GfxModelVertex) +
+            (unsigned int) (n0 + n1) * 3u * sizeof(unsigned short);
+    if (bytes + 64u > SPLIT_RING_BYTES / 4u) {
+        return NULL;
+    }
+    m = reserve(OP_MODEL2, bytes);
+    m->state = *state;
+    m->numVerts = numVerts;
+    m->n[0] = (unsigned short) n0;
+    m->n[1] = (unsigned short) n1;
+    m->cull1 = cull1;
+    m->full = (unsigned char) full;
+    m->check = check ? 1 : 0;
+    m->pad = 0;
+    at = (unsigned char *) (m + 1);
+    if (full) {
+        memcpy(at, params, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    } else {
+        if (check == 3 && sWalkModel2BreakArmed &&
+            __builtin_memcmp(params->texScale, sWalkModel2Last.texScale, MODEL2_TEX_BYTES) != 0) {
+            sWalkModel2BreakArmed = 0;
+            m->check = 2; // Stale factors that differ from these: the compare must see it
+        }
+        memcpy(at, params->texScale, MODEL2_TEX_BYTES);
+        at += MODEL2_TEX_BYTES;
+        sModel2Slim++;
+    }
+    if (check) {
+        memcpy(at, params, sizeof(GfxModelParams));
+        at += sizeof(GfxModelParams);
+    }
+    sWalkModel2Last = *params;
+    sWalkModel2LastOk = 1;
+    sWalkModel2Open = m;
+    sModel2Records++;
+    *indices = (unsigned short *) ((GfxModelVertex *) at + numVerts);
+    return (GfxModelVertex *) at;
+}
+
+void gfx_split_model2_end(void) {
+    void *m = sWalkModel2Open;
+    if (m != NULL) {
+        sWalkModel2Open = NULL;
+        commit(m);
+    }
+}
+
+void gfx_split_model2_counts(unsigned int *records, unsigned int *slim, unsigned int *compared, unsigned int *wrong) {
+    *records = sModel2Records;
+    *slim = sModel2Slim;
+    *compared = sModel2Compared;
+    *wrong = sModel2Wrong;
 }
 
 void gfx_split_draw_meshes(const GfxDrawState *state, const GfxModelParams *params, const GfxMeshPart *parts,

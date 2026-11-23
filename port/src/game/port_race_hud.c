@@ -436,8 +436,81 @@ typedef struct BestRun {
 static BestRun sBest;
 static s32 sBestLevel = -1, sBestVehicle = -1, sBestSaved;
 
+/*
+ * The tracks menu's companion shows each track's best total as the cursor moves. Opening a file on the SD card for
+ * every move held the game thread for 150 ms and more (bug report #217: the data directory keeps every bug report
+ * snapshot, and looking up a name that isn't there reads all of it), so the totals are read once, the first time a
+ * menu shows a companion: one pass over the directory, opening only the ttbest files it has.
+ */
+#define BEST_LEVELS 128
+#define BEST_VEHICLES 3
+static s32 sBestTotals[BEST_LEVELS][BEST_VEHICLES]; // 0: none.
+static s32 sBestTotalsRead;
+
+/*
+ * P58 S1 (DKR_TTBEST_INDEX, default 1; 2026-11-23, proposals/3ds-sd-access-vs-kohjoh-pak.md): the bests off the game
+ * thread's race and menu frames. On the 3DS the cost of a small SD file is its open (~70-100 ms on the owner's card,
+ * a missing name 51-166 ms), and the old way paid it on the game thread three times: the menu's first companion
+ * frame scanned the folder and opened every ttbest file (15-313 ms with none), a time trial's first HUD frame opened
+ * its track's file (on the frame of the race-start hitch), and a new best was written at the finish line with the
+ * temp file, remove and rename (227-569 ms measured on the writer).
+ *   - ttbest_index.bin holds every track's best total (BestIndex). It is read once at boot, on the main thread before
+ *     the game starts (port_race_hud_boot), so the menus never scan. When it is missing (the first start with this
+ *     build) it is made once from the ttbest files (the old scan) and saved.
+ *   - A time trial's best run is read during the level load, behind the black screen (port_race_hud_loaded), and not
+ *     at all when the index says the track has none.
+ *   - A new best and the index are saved by the writer thread (plat_save_file_later: temp file and rename there).
+ * 0 = the old way. The ttbest files stay as they were in both ways: nothing is deleted.
+ *
+ * A test run's time trials (DKR_AUTORUN_TIME_TRIAL) keep their bests apart (ttbench_*, best_store), so a test run
+ * never replaces a player's best; there every finish saves, so each race measures the write.
+ *
+ * The self-check (DKR_TTBEST_CHECK, default 1 in a debug build, 0 in a player's): at boot, after the index is read,
+ * it is compared with the files themselves (the old scan): "time trial bests check: N files, M differ" in log.txt
+ * and the checks cells. So each start of a test build checks what the last session's saves left on the card, with no
+ * button or race needed (the switch bench can't race time trials: the AI doesn't drive the player's kart in one).
+ * 2 is the check broken on purpose (rule K6): a new best's file is saved but the index is not told, so the next check must report it (the
+ * host test, DKR_TTBEST_TEST, does exactly that in CI).
+ */
+#define BEST_CHECK_DEFAULT PLAT_DEBUG_TOOLS
+#define BEST_INDEX_MAGIC 0x54544931 // "TTI1"
+typedef struct BestIndex {
+    s32 magic;
+    s32 levels, vehicles; // BEST_LEVELS, BEST_VEHICLES
+    s32 totals[BEST_LEVELS][BEST_VEHICLES];
+} BestIndex;
+
+static const char *sBestPrefix = "ttbest"; // The store: "ttbest" the player's, "ttbench" a test run's
+static s32 sBestOpens;                     // Files opened (or looked for) by the bests, for the host test
+static s32 sBestScans;                     // Folder scans, for the host test
+static s32 sBestStoreFixed;                // The host test's store ("tttest") stays whatever runs
+
+static s32 best_index_on(void) {
+    return plat_switch("DKR_TTBEST_INDEX", 1) != 0;
+}
+
 static void best_path(char *out, s32 size, s32 level, s32 vehicle) {
-    plat_snprintf(out, size, "%s/ttbest_%d_%d.bin", plat_data_dir(), (int) level, (int) vehicle);
+    plat_snprintf(out, size, "%s/%s_%d_%d.bin", plat_data_dir(), sBestPrefix, (int) level, (int) vehicle);
+}
+
+static void best_index_path(char *out, s32 size) {
+    plat_snprintf(out, size, "%s/%s_index.bin", plat_data_dir(), sBestPrefix);
+}
+
+static void *best_open(const char *path, unsigned int *size) {
+    sBestOpens++;
+    return plat_load_file(path, size);
+}
+
+/* A test run's time trials keep their own bests (switching store forgets what was read from the other). */
+static void best_store(void) {
+    const char *wanted = port_autorun_active() ? "ttbench" : "ttbest";
+    if (!sBestStoreFixed && wanted != sBestPrefix) {
+        sBestPrefix = wanted;
+        sBestTotalsRead = FALSE;
+        sBestLevel = sBestVehicle = -1;
+        sBest.magic = 0;
+    }
 }
 
 static void best_load(s32 level, s32 vehicle) {
@@ -450,24 +523,17 @@ static void best_load(s32 level, s32 vehicle) {
     sBestLevel = level;
     sBestVehicle = vehicle;
     sBest.magic = 0;
+    if (best_index_on() && sBestTotalsRead && level >= 0 && level < BEST_LEVELS && vehicle >= 0 &&
+        vehicle < BEST_VEHICLES && sBestTotals[level][vehicle] <= 0) {
+        return; // P58: the index says there is none, so no SD lookup for a name that isn't there.
+    }
     best_path(path, sizeof(path), level, vehicle);
-    data = plat_load_file(path, &size);
+    data = best_open(path, &size);
     if (data != NULL && size == sizeof(BestRun) && ((BestRun *) data)->magic == BEST_MAGIC) {
         sBest = *(BestRun *) data;
     }
     free(data);
 }
-
-/*
- * The tracks menu's companion shows each track's best total as the cursor moves. Opening a file on the SD card for
- * every move held the game thread for 150 ms and more (bug report #217: the data directory keeps every bug report
- * snapshot, and looking up a name that isn't there reads all of it), so the totals are read once, the first time a
- * menu shows a companion: one pass over the directory, opening only the ttbest files it has.
- */
-#define BEST_LEVELS 128
-#define BEST_VEHICLES 3
-static s32 sBestTotals[BEST_LEVELS][BEST_VEHICLES]; // 0: none.
-static s32 sBestTotalsRead;
 
 /* Reads a number at *text and moves past it; -1 if there is none. */
 static s32 best_number(const char **text) {
@@ -479,16 +545,18 @@ static s32 best_number(const char **text) {
     return value;
 }
 
-static void best_totals_read(void) {
+/* The old way: one pass over the directory, opening each of the store's files. Returns how many were read. */
+static s32 best_totals_scan(s32 totals[BEST_LEVELS][BEST_VEHICLES]) {
     static char sNames[BEST_LEVELS * BEST_VEHICLES][24];
-    char path[256];
-    unsigned long long start = plat_time_ns();
-    s32 count, found = 0, i;
-    sBestTotalsRead = TRUE;
-    count = plat_list_dir_prefix(plat_data_dir(), "ttbest_", sNames[0], sizeof(sNames[0]), ARRAY_COUNT(sNames));
+    char path[256], prefix[16];
+    s32 count, found = 0, i, prefixLength;
+    bzero(totals, sizeof(s32) * BEST_LEVELS * BEST_VEHICLES);
+    prefixLength = plat_snprintf(prefix, sizeof(prefix), "%s_", sBestPrefix);
+    sBestScans++;
+    count = plat_list_dir_prefix(plat_data_dir(), prefix, sNames[0], sizeof(sNames[0]), ARRAY_COUNT(sNames));
     for (i = 0; i < count; i++) {
-        // ttbest_LEVEL_VEHICLE.bin
-        const char *text = sNames[i] + 7;
+        // ttbest_LEVEL_VEHICLE.bin (ttbest_index.bin has no number, so it is passed over)
+        const char *text = sNames[i] + prefixLength;
         s32 level = best_number(&text), vehicle = -1;
         unsigned int size = 0;
         void *data;
@@ -501,21 +569,98 @@ static void best_totals_read(void) {
             continue;
         }
         best_path(path, sizeof(path), level, vehicle);
-        data = plat_load_file(path, &size);
+        data = best_open(path, &size);
         if (data != NULL && size == sizeof(BestRun) && ((BestRun *) data)->magic == BEST_MAGIC) {
-            sBestTotals[level][vehicle] = ((BestRun *) data)->total;
+            totals[level][vehicle] = ((BestRun *) data)->total;
             found++;
         }
         free(data);
     }
+    return found;
+}
+
+/* Queues the index (sBestTotals) for the writer thread. */
+static void best_index_save(void) {
+    char path[256];
+    BestIndex *index = malloc(sizeof(BestIndex));
+    if (index == NULL) {
+        return;
+    }
+    index->magic = BEST_INDEX_MAGIC;
+    index->levels = BEST_LEVELS;
+    index->vehicles = BEST_VEHICLES;
+    bcopy(sBestTotals, index->totals, sizeof(index->totals));
+    best_index_path(path, sizeof(path));
+    plat_save_file_later(path, index, sizeof(BestIndex));
+}
+
+static void best_totals_read(void) {
+    unsigned long long start = plat_time_ns();
+    s32 found = 0, i, j;
+    sBestTotalsRead = TRUE;
+    if (best_index_on()) {
+        char path[256];
+        unsigned int size = 0;
+        BestIndex *index;
+        best_index_path(path, sizeof(path));
+        index = best_open(path, &size);
+        if (index != NULL && size == sizeof(BestIndex) && index->magic == BEST_INDEX_MAGIC &&
+            index->levels == BEST_LEVELS && index->vehicles == BEST_VEHICLES) {
+            bcopy(index->totals, sBestTotals, sizeof(sBestTotals));
+            free(index);
+            for (i = 0; i < BEST_LEVELS; i++) {
+                for (j = 0; j < BEST_VEHICLES; j++) {
+                    found += sBestTotals[i][j] > 0;
+                }
+            }
+            plat_log("time trial bests: %s index, %d bests, read in %d ms", sBestPrefix, (int) found,
+                     (int) ((plat_time_ns() - start) / 1000000ULL));
+            return;
+        }
+        free(index);
+        found = best_totals_scan(sBestTotals);
+        best_index_save();
+        plat_log("time trial bests: %s index made from %d files in %d ms", sBestPrefix, (int) found,
+                 (int) ((plat_time_ns() - start) / 1000000ULL));
+        return;
+    }
+    found = best_totals_scan(sBestTotals);
     plat_log("time trial bests: %d read in %d ms", (int) found, (int) ((plat_time_ns() - start) / 1000000ULL));
+}
+
+/* DKR_TTBEST_CHECK: the index as held against the files. Returns how many tracks differ. */
+static s32 best_check(void) {
+    static s32 sFiles[BEST_LEVELS][BEST_VEHICLES];
+    s32 found, differ = 0, i, j;
+    if (!sBestTotalsRead) {
+        best_totals_read();
+    }
+    plat_saves_drain(); // The queued bests on the card first
+    found = best_totals_scan(sFiles);
+    for (i = 0; i < BEST_LEVELS; i++) {
+        for (j = 0; j < BEST_VEHICLES; j++) {
+            if ((sFiles[i][j] > 0 ? sFiles[i][j] : 0) != (sBestTotals[i][j] > 0 ? sBestTotals[i][j] : 0)) {
+                if (differ < 4) {
+                    plat_log("time trial bests check: %s_%d_%d: file %d, index %d", sBestPrefix, (int) i, (int) j,
+                             (int) sFiles[i][j], (int) sBestTotals[i][j]);
+                }
+                differ++;
+            }
+        }
+    }
+    plat_log("time trial bests check: %d files, %d differ", (int) found, (int) differ);
+    plat_check_report("time trial bests", differ != 0);
+    return differ;
 }
 
 /* At the finish: this run becomes the best if it is (the stamps are the player's, sStamps[playerIndex]). */
 static void best_finish(s32 playerIndex, const RaceHud *hud) {
     char path[256];
-    s32 i;
-    if (sBestSaved || hud->raceTime <= 0 || (sBest.magic == BEST_MAGIC && sBest.total <= hud->raceTime)) {
+    s32 i, index = best_index_on(), bench;
+    best_store();
+    bench = sBestPrefix[2] == 'b' && sBestPrefix[3] == 'e'; // "ttbench": every finish saves, to measure the write
+    if (sBestSaved || hud->raceTime <= 0 ||
+        (!bench && sBest.magic == BEST_MAGIC && sBest.total <= hud->raceTime)) {
         sBestSaved = TRUE;
         return;
     }
@@ -532,10 +677,62 @@ static void best_finish(s32 playerIndex, const RaceHud *hud) {
         sBest.stamps[i] = (u16) (t > 0xFFFF ? 0xFFFF : t);
     }
     best_path(path, sizeof(path), sBestLevel, sBestVehicle);
-    plat_save_file(path, &sBest, sizeof(sBest));
+    if (index) {
+        // P58: the writer thread saves the run, then the index (in that order: a stop in between leaves the index
+        // one best behind, which the next best or DKR_TTBEST_CHECK puts right).
+        BestRun *copy = malloc(sizeof(BestRun));
+        if (copy != NULL) {
+            *copy = sBest;
+            plat_save_file_later(path, copy, sizeof(BestRun));
+        }
+        if (!sBestTotalsRead) {
+            best_totals_read();
+        }
+        if (plat_switch("DKR_TTBEST_CHECK", BEST_CHECK_DEFAULT) == 2) {
+            plat_log("time trial bests: check broken on purpose (rule K6): the index misses %s_%d_%d", sBestPrefix,
+                     (int) sBestLevel, (int) sBestVehicle);
+            return;
+        }
+    } else {
+        plat_save_file(path, &sBest, sizeof(sBest));
+    }
     if (sBestLevel >= 0 && sBestLevel < BEST_LEVELS && sBestVehicle >= 0 && sBestVehicle < BEST_VEHICLES) {
         sBestTotals[sBestLevel][sBestVehicle] = sBest.total;
     }
+    if (index) {
+        best_index_save();
+    }
+}
+
+/* P58: at boot, on the main thread before the game threads start (src/port_main.c): the player's bests index. */
+void port_race_hud_boot(void) {
+    if (best_index_on()) {
+        best_totals_read(); // The player's store (a test run's is picked later, best_store: not at boot)
+        if (plat_switch("DKR_TTBEST_CHECK", BEST_CHECK_DEFAULT) != 0) {
+            best_check();
+        }
+    }
+}
+
+/* P58: at the end of a level load (port_loadtime.c, the game's loads only), behind the black screen: a time trial's
+ * best run, so its first HUD frame opens nothing. FALSE when not a time trial (nothing done). */
+s32 port_race_hud_loaded(void) {
+    Object *player;
+    Object_Racer *me;
+    if (!is_in_time_trial()) {
+        return FALSE;
+    }
+    best_store();
+    player = get_racer_object_by_port(PLAYER_ONE);
+    if (!best_index_on() || player == NULL) {
+        return TRUE;
+    }
+    me = player->racer;
+    if (!sBestTotalsRead) {
+        best_totals_read();
+    }
+    best_load(level_id(), me->vehicleID);
+    return TRUE;
 }
 
 /* The bosses' rematches (the second race in each world). */
@@ -618,6 +815,7 @@ static void time_trial_progress(RaceHud *hud, Object_Racer *me, LevelModel *mode
     if (timetrial_ghost_staff() != NULL) {
         hud->staffTime = gTTGhostTimeToBeat;
     }
+    best_store();
     best_load(level_id(), vehicle);
     if (sBest.magic == BEST_MAGIC) {
         hud->bestTotal = sBest.total;
@@ -651,6 +849,7 @@ static s32 menu_companion(RaceHud *hud) {
     if (get_game_mode() != GAMEMODE_MENU) {
         return FALSE;
     }
+    best_store();
     if (!sBestTotalsRead) {
         best_totals_read();
     }
@@ -954,3 +1153,116 @@ const char *race_hud_option_hint(int index) {
             return "Standings, item and map below";
     }
 }
+
+#ifndef __3DS__
+/*
+ * Host only, CI (host_main.c, DKR_TTBEST_TEST=1, with DKR_DATA_DIR an empty folder): P58's time trial bests index
+ * against the files, in a store of its own (tttest_*): the index made once from the files, then read without a scan;
+ * no SD lookup for a track without a best; a new best saved with the index and the self-check clean; then the
+ * self-check broken on purpose (rule K6: DKR_TTBEST_CHECK=2, the index not told of a new best), which must report it;
+ * and the old way (DKR_TTBEST_INDEX=0) still opening the file. Returns the number of failures, described in report.
+ */
+static void ttbest_test_expect(char *report, int size, int *at, int *failed, int ok, const char *what) {
+    if (*at < size - 1) {
+        *at += plat_snprintf(report + *at, size - *at, "%s: %s\n", ok ? "ok" : "FAILED", what);
+        if (*at > size - 1) {
+            *at = size - 1;
+        }
+    }
+    *failed += !ok;
+}
+
+static void ttbest_test_write(s32 level, s32 vehicle, s32 total) {
+    static BestRun sRun;
+    char path[256];
+    bzero(&sRun, sizeof(sRun));
+    sRun.magic = BEST_MAGIC;
+    sRun.total = total;
+    best_path(path, sizeof(path), level, vehicle);
+    plat_save_file(path, &sRun, total > 0 ? sizeof(sRun) : 0);
+}
+
+int port_race_hud_ttbest_test(char *report, int size) {
+    static RaceHud sHud;
+    char path[256];
+    int at = 0, failed = 0;
+    s32 opens, differ;
+    report[0] = '\0';
+    sBestStoreFixed = TRUE;
+    sBestPrefix = "tttest";
+    plat_override_switch("DKR_TTBEST_INDEX", 1);
+    best_index_path(path, sizeof(path));
+    plat_save_file(path, "x", 1); // Not an index: made again from the files
+    ttbest_test_write(9, 1, 0);
+    ttbest_test_write(11, 0, 0);
+    ttbest_test_write(5, 0, 1000);
+    ttbest_test_write(7, 2, 2000);
+
+    sBestTotalsRead = FALSE;
+    sBestScans = 0;
+    best_totals_read();
+    ttbest_test_expect(report, size, &at, &failed,
+                       sBestTotals[5][0] == 1000 && sBestTotals[7][2] == 2000 && sBestTotals[9][1] == 0 &&
+                           sBestScans == 1,
+                       "no index: made from the files (one scan)");
+    bzero(sBestTotals, sizeof(sBestTotals));
+    sBestTotalsRead = FALSE;
+    sBestScans = 0;
+    best_totals_read();
+    ttbest_test_expect(report, size, &at, &failed,
+                       sBestTotals[5][0] == 1000 && sBestTotals[7][2] == 2000 && sBestScans == 0,
+                       "the index read back, no scan");
+
+    sBestLevel = -1;
+    opens = sBestOpens;
+    best_load(9, 1);
+    ttbest_test_expect(report, size, &at, &failed, sBestOpens == opens && sBest.magic != BEST_MAGIC,
+                       "a track without a best: no file opened");
+    opens = sBestOpens;
+    best_load(5, 0);
+    ttbest_test_expect(report, size, &at, &failed,
+                       sBestOpens == opens + 1 && sBest.magic == BEST_MAGIC && sBest.total == 1000,
+                       "a track with a best: its file read");
+
+    best_load(9, 1);
+    bzero(&sHud, sizeof(sHud));
+    sHud.raceTime = 1500;
+    sHud.lapsTimed = 1;
+    sHud.lapTimes[0] = 1500;
+    sReached[0] = 0;
+    sBestSaved = FALSE;
+    best_finish(0, &sHud);
+    differ = best_check();
+    ttbest_test_expect(report, size, &at, &failed, differ == 0, "a new best saved with the index: check 0 differ");
+    bzero(sBestTotals, sizeof(sBestTotals));
+    sBestTotalsRead = FALSE;
+    sBestScans = 0;
+    best_totals_read();
+    ttbest_test_expect(report, size, &at, &failed, sBestTotals[9][1] == 1500 && sBestScans == 0,
+                       "the saved index holds the new best");
+
+    plat_override_switch("DKR_TTBEST_CHECK", 2);
+    best_load(5, 0);
+    sHud.raceTime = 900;
+    sBestSaved = FALSE;
+    best_finish(0, &sHud);
+    plat_override_switch("DKR_TTBEST_CHECK", -1);
+    differ = best_check();
+    ttbest_test_expect(report, size, &at, &failed, differ == 1,
+                       "rule K6: the check broken on purpose (index not told of a best) reports 1 differ");
+
+    plat_override_switch("DKR_TTBEST_INDEX", 0);
+    sBestLevel = -1;
+    opens = sBestOpens;
+    best_load(11, 0);
+    ttbest_test_expect(report, size, &at, &failed, sBestOpens == opens + 1, "the old way: the file looked for");
+    plat_override_switch("DKR_TTBEST_INDEX", -1);
+
+    sBestStoreFixed = FALSE;
+    sBestPrefix = "ttbest";
+    sBestTotalsRead = FALSE;
+    sBestLevel = sBestVehicle = -1;
+    sBest.magic = 0;
+    return failed;
+}
+#endif

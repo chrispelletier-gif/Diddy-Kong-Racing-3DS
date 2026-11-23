@@ -244,6 +244,20 @@ controls) work there, as do these renderer switches:
   frames. `DKR_SPLIT_REF_CHECK=1` (implies the switch) queues a copy of each handed block for the backend to compare
   before drawing (chk cells, `0 differ` expected), `=2` also fills returned blocks with 0xA5, `=3` is mode 2 broken on
   purpose (blocks returned one draw early; it must report differences))
+- `DKR_KART_BATCH` (roadmap P68, off by default; proposals/3ds-kart-draw-batching-plan.md): the karts' GPU-maths draws
+  (`DKR_NATIVE_GPU`) batched on the CPU side. `1`: records that follow one another with the same material and one
+  vertex load (a kart's batches of one texture) are drawn as one model draw, one box, check, state and params for the
+  run (opaque depth-tested states only, and a run stops before a record would put an uncull triangle after a culled
+  one, so the GPU gets the triangles in the same order). `2` (or `3`) adds slim records: each mesh's index lists for its two cull
+  groups made once, the corners and indices written straight into the two-core renderer's queue as one record for both
+  groups (`OP_MODEL2`), and the matrix, fog and light queued only when they differ from the last record's (the texture
+  factors alone otherwise). Same draws, same frames. Logs `kart batching (DKR_KART_BATCH n): ...` every 600 frames
+  after the `native GPU maths` line. `DKR_KART_BATCH_CHECK=1` (test builds; turns `DKR_KART_BATCH=3` on when it is
+  unset) draws each run the old way too and compares it triangle by triangle, and has the backend compare the params
+  it made whole with the walk's (chk cells, `0 wrong` expected; log `kart batch check: N runs compared, M wrong
+  (backend params: P compared, Q wrong)`). Broken on purpose (rule K6), each must report 1 wrong: `=2` leaves one run's
+  last record out, `=3` has the backend keep one record's old texture factors, `=4` adds no base to one record's
+  ready-made index list
 - `DKR_SPLIT_LINES=1` (roadmap P66, off by default: the two-core renderer's queue hands its head to the backend every
   `DKR_SPLIT_PUBLISH_KB` (default 2; 0 = every record, as before) instead of after every record, the walk reads the
   backend's tail only when its copy says the queue is short of room, and the backend reads the head only when it has
@@ -268,6 +282,21 @@ controls) work there, as do these renderer switches:
   shader's sums on its mesh and with the renderer's own CPU way (chk cells; logs `wave shader check: N vertices ...
   differ on 0 ..., the CPU way on 0`); `=2` is broken on purpose (rule K6: every index one step on; must report most
   vertices))
+- `DKR_FRAME_PARTS=1` (roadmap P57 E, on by default; Old 3DS two-core renderer with the profiler on): the backend's
+  "frame start/end" bucket of the `backend records` line timed in 15 named parts on the mix's timed frames (1 in 8 on
+  an Old 3DS), logged as `backend frame start/end (ms a frame): capture/screen, start GPU wait, set-up, texture
+  promote, start rest, end tallies, vertex flush, logs, end GPU wait, fills, command lists, present, screen watch,
+  C3D_FrameEnd, after` with the command list parts a frame, on its own log line and in `autorun_cores.txt`.
+  `DKR_FRAME_PARTS_CHECK=1` (default) checks the parts add up to the bucket within 5% (chk cells, `ok`/`WRONG`);
+  `=2` is broken on purpose (rule K6: the largest part left out of the sum; must report WRONG); `0` off
+- `DKR_FLAT_FRAME=1` (roadmap P55 S4 step 1, off by default: race frames on the flat dispatcher, `nframe.c`
+  `run_flat_frame`: the record dispatcher with the record tag tested first, state ops straight to `native_op` and the
+  record path built a second time without the step marks, census notes, kart counts and remote vertex maths
+  (`native_record_flat`). It runs only on frames that use none of those (no `DKR_WALK_STEPS` frame being timed, no
+  `DKR_WALK_CENSUS`, no `DKR_KART_COUNTS`, `DKR_NATIVE_REMOTE` 0); other frames take the record dispatcher. Same draws,
+  same frames, fewer instruction cache misses. `DKR_FLAT_FRAME_CHECK=1` (test builds) checks at every flat record that
+  those conditions still hold (chk cells; logs `flat frame: N frames flat, M not, K records checked, 0 wrong` every 600
+  frames); `=2` is broken on purpose (rule K6: turns the kart counts on mid-frame, so every later record is reported))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
@@ -474,7 +503,9 @@ triangles are timed apart from the other roads (`billboard corners`, `billboard 
 goes on in `walk steps (more):` lines. `DKR_KART_COUNTS=1` (P65 rank 2) logs every 600 frames `kart batches (a frame,
 ...)`: the native kart batches by road (one vertex load, two, made anew each frame, billboard, no tables), their
 corners, vertices and triangles, and the share of vertices that moved since that vertex buffer was last drawn (what
-animation rewrites). On the
+animation rewrites). With `DKR_KART_BATCH` (P68) the GPU-maths kart draws leave "other paths" for `kart set-up` (box,
+matrix, check, state, params), `kart corners` (the corner repack and index lists) and `kart queue` (the flushes and the
+split ring record). On the
 backend mix's timed frames (`DKR_BACKEND_MIX`) the backend's model and mesh draws (GPU vertex maths: `DKR_NATIVE_GPU`,
 the native track) are also split into their parts (`backend model/mesh draws: N a frame, drain, state, settings
 twice, uniforms, copies, indices, draw, other`), after the `backend records` line.

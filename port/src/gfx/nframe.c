@@ -40,13 +40,17 @@ typedef struct NFrameReturn {
     s32 remaining;
 } NFrameReturn;
 
-/* PLAT_HOT_GAME: the game core runs it every frame on an Old 3DS (plat.h, P57 D); out of line, so that it lies in
- * that stretch rather than inlined into port_gfx_run_frame. */
-PLAT_HOT_GAME PLAT_NOINLINE void run_native_frame(const Gfx *dl) {
+/*
+ * The dispatcher, built twice from this one source (always inlined into each entry below). flat = 1 is P55 S4's flat
+ * dispatcher (DKR_FLAT_FRAME, run_flat_frame): no census test per word, a record tag into the flat record path
+ * (gfx_frame_tag_flat: native_record_flat, the commonest tag first) and a state op to native_op directly. Only on
+ * frames gfx_rdp.c's flat_frame_ok allows: nothing timed by step, counted or sent to the backend's vertex maths.
+ */
+static inline __attribute__((always_inline)) void native_frame_body(const Gfx *dl, const s32 flat) {
     NFrameReturn stack[GFX_LIST_DEPTH];
     s32 depth = 0;
     s32 remaining = NO_LIMIT;
-    s32 census = gfx_frame_census_on();
+    s32 census = flat ? FALSE : gfx_frame_census_on();
 
     for (;;) {
         u32 w0, w1;
@@ -108,13 +112,17 @@ PLAT_HOT_GAME PLAT_NOINLINE void run_native_frame(const Gfx *dl) {
 
         if (!(w0 & NOP_MARK)) {
             // A tag: DRAW, RECT, MTXF, KIND, MATERIAL and the rest (gfx_rdp.c run_tag).
-            s32 used = gfx_frame_tag(dl, w1, remaining, depth);
+            s32 used = flat ? gfx_frame_tag_flat(dl, w1, remaining, depth) : gfx_frame_tag(dl, w1, remaining, depth);
             dl += used;
             remaining -= used;
             continue;
         }
         if (((w0 >> 19) & 15) != NOP_EXT) {
-            gfx_frame_op(w0, w1); // STATE and FILL
+            if (flat) {
+                gfx_frame_op_flat(w0, w1); // STATE and FILL
+            } else {
+                gfx_frame_op(w0, w1);
+            }
             continue;
         }
         switch ((w0 >> 15) & 15) {
@@ -161,4 +169,15 @@ PLAT_HOT_GAME PLAT_NOINLINE void run_native_frame(const Gfx *dl) {
         dl = stack[depth].dl;
         remaining = stack[depth].remaining;
     }
+}
+
+/* PLAT_HOT_GAME: the game core runs it every frame on an Old 3DS (plat.h, P57 D); out of line, so that it lies in
+ * that stretch rather than inlined into port_gfx_run_frame. */
+PLAT_HOT_GAME PLAT_NOINLINE void run_native_frame(const Gfx *dl) {
+    native_frame_body(dl, 0);
+}
+
+/* P55 S4 (DKR_FLAT_FRAME): the flat dispatcher. */
+PLAT_HOT_GAME PLAT_NOINLINE void run_flat_frame(const Gfx *dl) {
+    native_frame_body(dl, 1);
 }

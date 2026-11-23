@@ -130,7 +130,7 @@ def run(sim, argv):
                 "waveb": (unk44, temp, unk48, shade / 128.0),
                 "wavec": (ai, aj, bi, bj),
                 "waved": (rng.randrange(0, 4096), rng.randrange(0, 4096), rng.randrange(1, 900), rng.randrange(1, 900)),
-                "wtab": wtab, "wsc": wsc,
+                "stab": wtab + wsc + [(0.0, 0.0, 0.0, 0.0)] * (75 - 47 - 3),
             }
             for i in range(sub + 1):
                 for j in range(sub + 1):

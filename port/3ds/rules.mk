@@ -3,16 +3,29 @@
 ifeq ($(TARGET),3ds)
 
 TOOLS_BIN   := $(DEVKITPRO)/tools/bin
-# The order is the DVLE order gfx_c3d.c expects: 0 pass-through, 1 transform, 2-3 sprite GS, 4 slim track (P65 5b),
-# 5 waves (P65 rank 3).
-SHADER_SRC  := 3ds/shader.v.pica 3ds/transform.v.pica 3ds/sprite.v.pica 3ds/sprite.g.pica 3ds/track.v.pica \
-               3ds/waves.v.pica
+# The order is the DVLE order gfx_c3d.c expects: 0 pass-through, 1 transform, 2-3 sprite GS, 4 sprite table,
+# 5 slim track (P65 5b), 6 waves (P65 rank 3).
+SHADER_SRC  := 3ds/shader.v.pica 3ds/transform.v.pica 3ds/sprite.v.pica 3ds/sprite.g.pica 3ds/sprite_table.v.pica \
+               3ds/track.v.pica 3ds/waves.v.pica
 SHADER_BIN  := $(BUILD_DIR)/shader/shader.shbin
 SHADER_ASM  := $(BUILD_DIR)/shader/shader_shbin.s
 SHADER_HDR  := $(BUILD_DIR)/shader/shader_shbin.h
 SHADER_OBJS := $(BUILD_DIR)/shader/shader_shbin.o
 
 APP_TITLE       := Diddy Kong Racing
+# The .cia's title. The profile-guided builds (PGO=use, PGO=gen) install as titles of their own next to the usual
+# one, so the same test runs can be compared on one console; they share its data folder (ROM, saves, settings).
+CIA_UNIQUE_ID   := 0xD4B52
+CIA_PRODUCT     := CTR-H-DKRP
+ifeq ($(PGO),use)
+  APP_TITLE     := DKR PGO
+  CIA_UNIQUE_ID := 0xD4B53
+  CIA_PRODUCT   := CTR-H-DKRG
+else ifeq ($(PGO),gen)
+  APP_TITLE     := DKR PGO training
+  CIA_UNIQUE_ID := 0xD4B54
+  CIA_PRODUCT   := CTR-H-DKRT
+endif
 APP_DESCRIPTION := Native port of the DKR decompilation, version $(PORT_VERSION)
 APP_AUTHOR      := DKR decomp contributors
 APP_ICON        := $(firstword $(wildcard 3ds/icon.png) $(CTRULIB)/default_icon.png)
@@ -91,6 +104,7 @@ $(BUILD_DIR)/dkr.cia: $(EXE) $(BUILD_DIR)/dkr.smdh $(BUILD_DIR)/dkr.bnr $(CIA_DI
 	@echo "CIA $@"
 	@$(MAKEROM) -f cia -o $@ -elf $(EXE) -rsf $(CIA_DIR)/dkr.rsf -icon $(BUILD_DIR)/dkr.smdh \
 		-banner $(BUILD_DIR)/dkr.bnr -exefslogo -target t \
+		-DAPP_TITLE="$(APP_TITLE)" -DAPP_PRODUCT_CODE=$(CIA_PRODUCT) -DAPP_UNIQUE_ID=$(CIA_UNIQUE_ID) \
 		-major $(PORT_VERSION_MAJOR) -minor $(PORT_VERSION_MINOR) -micro $(PORT_VERSION_MICRO)
 
 .PHONY: cia

@@ -91,6 +91,7 @@ typedef struct C3DVertexOld { // VFMT_OLD
 /* VFMT_MODEL is the game's own vertices for GPU vertex maths (P30, GfxModelVertex): s16 position and texture
  * coordinates and byte colours, 16 bytes; the second coordinates come from the fixed attribute. */
 /* VFMT_SPRITE is a sprite point for the geometry shader (P60 D, SpriteGpuPoint below): seven attributes, v0 to v6. */
+/* VFMT_STAB is a sprite table vertex (P65 rank 1, gfx_backend.h GfxTabVertex): two s16 x 4 and a byte x 4 attribute. */
 typedef struct SpriteGpuPoint {
     float p[4], e1[4], e2[4]; // In the 3DS screen's clip space (to_screen's, z not yet pinned)
     float tc[4];              // p's texture coordinates, then e1's
@@ -98,9 +99,9 @@ typedef struct SpriteGpuPoint {
     u8 color[4];              // The colour, with p's alpha
     u8 alpha[4];              // q's, r's and d's alpha, then 0
 } SpriteGpuPoint;
-enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_SPRITE, VFMT_COUNT };
+enum { VFMT_SHORT, VFMT_LONG, VFMT_OLD, VFMT_MODEL, VFMT_SPRITE, VFMT_STAB, VFMT_COUNT };
 static const int sVfmtStride[VFMT_COUNT] = { sizeof(C3DVertex), sizeof(C3DVertex2), sizeof(C3DVertexOld),
-                                             sizeof(GfxModelVertex), sizeof(SpriteGpuPoint) };
+                                             sizeof(GfxModelVertex), sizeof(SpriteGpuPoint), sizeof(GfxTabVertex) };
 _Static_assert(sizeof(SpriteGpuPoint) == 88, "the sprite point format's attributes must add up to its stride");
 _Static_assert(sizeof(GfxModelVertex) == 16, "the model vertex format's attributes must add up to its stride");
 static C3D_AttrInfo sVfmtAttr[VFMT_COUNT];
@@ -582,6 +583,12 @@ PLAT_COLD static void init_vertex_formats(void) {
     for (i = 0; i < VFMT_COUNT; i++) {
         attr = &sVfmtAttr[i];
         AttrInfo_Init(attr);
+        if (i == VFMT_STAB) {
+            AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
+            AttrInfo_AddLoader(attr, 1, GPU_SHORT, 4);
+            AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4);
+            continue;
+        }
         if (i == VFMT_SPRITE) {
             int k;
             for (k = 0; k < 5; k++) {
@@ -635,8 +642,8 @@ static void __attribute__((noinline)) bind_vertex_format(int fmt) {
     }
     BufInfo_Init(buf);
     BufInfo_Add(buf, sVbo + sVfmtBase, sVfmtStride[fmt],
-                fmt == VFMT_SPRITE ? 7 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 3 : 4,
-                fmt == VFMT_SPRITE ? 0x6543210 : fmt == VFMT_SHORT || fmt == VFMT_MODEL ? 0x210 : 0x3210);
+                fmt == VFMT_SPRITE ? 7 : fmt == VFMT_SHORT || fmt == VFMT_MODEL || fmt == VFMT_STAB ? 3 : 4,
+                fmt == VFMT_SPRITE ? 0x6543210 : fmt == VFMT_SHORT || fmt == VFMT_MODEL || fmt == VFMT_STAB ? 0x210 : 0x3210);
     sBufMesh = NULL;
     if (sVfmtBound >= 0) {
         sVfmtSwitches++;
@@ -674,6 +681,9 @@ static void transform_frame_drawn(int frame);
 static void sprite_gs_init(void);
 static void sprite_gs_frame_drawn(int frame);
 static void sprite_gs_log(void);
+static void sprite_table_init(void);
+static void sprite_table_frame_drawn(int frame);
+static void sprite_table_log(void);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
 void C3Di_UpdateContext(void);
 
@@ -1782,9 +1792,14 @@ static void apply_screen_mode(void) {
     if (stereo && slider <= 0.0f) {
         slider = 1.0f;
     }
-    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sWideUnsupported;
+    // The Old 3DS 60 fps mode (plat.h plat_o3ds_60_live): its 60 fps frames drop anti-aliasing and 800 pixels
+    // (DKR_O3DS_60_AA=1, the 60 fps bench's row, keeps them, to measure what they cost); 3D frames run at 30.
+    int sixty;
+    gPlatStereoFrames = stereo;
+    sixty = plat_o3ds_60_mode() && plat_frame_retraces() == 1 && !plat_switch("DKR_O3DS_60_AA", 0);
+    int wide800 = plat_switch("BENCH_WIDE800", s800Setting) && !stereo && !sixty && !sWideUnsupported;
     int depth24 = plat_switch("DKR_DEPTH24", 0) != 0;
-    int aa = stereo ? PLAT_AA_OFF : sWantedAa;
+    int aa = stereo || sixty ? PLAT_AA_OFF : sWantedAa;
     int scale = aa != PLAT_AA_OFF ? 2 : 1;
     int across = (aa == PLAT_AA_4X || wide800) ? 2 : 1;
     int newTarget;
@@ -1943,6 +1958,7 @@ void gfxb_init(void) {
     init_transform();
     init_model_programs();
     sprite_gs_init();
+    sprite_table_init();
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -3857,6 +3873,7 @@ static void wait_for_gpu(int measure) {
         transform_frame_drawn(sSlots[sOnGpu].frame);
         model_programs_frame_drawn(sSlots[sOnGpu].frame);
         sprite_gs_frame_drawn(sSlots[sOnGpu].frame);
+        sprite_table_frame_drawn(sSlots[sOnGpu].frame);
         adaptive_observe(&sSlots[sOnGpu], C3D_GetDrawingTime());
     }
     timeline_take(sOnGpu); // gpu_cuts.inc
@@ -4221,10 +4238,10 @@ static void transform_frame_drawn(int frame) {
  * Slimmer vertex shaders for some kinds of model draws (custom shader plan P65, proposals/3ds-custom-shader-plan.md
  * 5b and rank 3). Both are in the game's blob next to transform.v.pica and share its uniforms (picasso gives uniforms
  * of the same name the same registers), so a switch between them keeps every uniform the GPU has:
- *  - track.v.pica (DVLE 4, DKR_TRACK_SLIM): the native track's batches (gfx_rdp.c native_track marks them
+ *  - track.v.pica (DVLE 5, DKR_TRACK_SLIM): the native track's batches (gfx_rdp.c native_track marks them
  *    GFX_MODEL_PROG_TRACK) without the light path and second texture factor the track never uses: 26 instructions of
  *    the 39, the same results bit for bit (port/tools/pica_sim.py checks it in CI);
- *  - waves.v.pica (DVLE 5, DKR_WAVE_SHADER): wave tiles' heights and colours worked out on the GPU (gfxb_draw_waves).
+ *  - waves.v.pica (DVLE 6, DKR_WAVE_SHADER): wave tiles' heights and colours worked out on the GPU (gfxb_draw_waves).
  * The program is switched only where the kind of draw changes: the sorted opaque track is drawn as a run of buckets,
  * and the waves as a run of tiles, so a frame has a few switches. Each switch is written twice (the GPU misses some
  * settings written right after a draw, see drain_before_draw) and its draw's settings and uniforms too.
@@ -4308,11 +4325,12 @@ static int PLAT_COLD same_uniforms(shaderProgram_s *p) {
 }
 
 /*
- * The wave shader's uniforms (waves.v.pica: wavea..waved, wtab, wsc; gfx_backend.h gfxb_wave_*). Only that program reads
- * them, at registers no other program of the blob uses (picasso gives every name its own), so they are written as words
- * when a wave tile is drawn: the tile's four each wave draw, the tables at the first wave draw of a frame (and when
- * they change), each twice, as the other uniforms are (unif_write_twice). citro3d's copy is kept for after the HOME
- * menu but not marked.
+ * The wave shader's uniforms (waves.v.pica: wavea..waved, and its tables in stab rows 0..49; gfx_backend.h gfxb_wave_*).
+ * wavea..waved are read by that program only; stab is shared with the sprite table program (the blob has room for one
+ * 75-row table), which rewrites it on each of its draws, so draw_table_gpu marks the wave tables as needing writing
+ * again. They are written as words when a wave tile is drawn: the tile's four each wave draw, the tables at the first
+ * wave draw of a frame (and when they change or a sprite table draw came between), each twice, as the other uniforms
+ * are (unif_write_twice). citro3d's copy is kept for after the HOME menu but not marked.
  */
 static int sWaveLocTile = -1, sWaveLocTab = -1, sWaveLocSc = -1;
 static C3D_FVec sWaveTileVec[4], sWaveTabVec[GFX_WAVE_TABLE_MAX / 4], sWaveScVec[GFX_WAVE_SCALES / 4];
@@ -4320,13 +4338,13 @@ static int sWaveTileNew, sWaveTabFrame = -1, sWaveTabGiven;
 
 static void PLAT_COLD wave_init_uniforms(void) {
     sWaveLocTile = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wavea");
-    sWaveLocTab = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wtab");
-    sWaveLocSc = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "wsc");
-    if (sWaveLocTile < 0 || sWaveLocTab < 0 || sWaveLocSc < 0 ||
+    sWaveLocTab = shaderInstanceGetUniformLocation(sProgramW.vertexShader, "stab");
+    sWaveLocSc = sWaveLocTab < 0 ? -1 : sWaveLocTab + GFX_WAVE_TABLE_MAX / 4;
+    if (sWaveLocTile < 0 || sWaveLocTab < 0 || sWaveLocSc + GFX_WAVE_SCALES / 4 > 96 ||
         shaderInstanceGetUniformLocation(sProgramW.vertexShader, "waved") != sWaveLocTile + 3) {
         sProgramWUsable = 0;
     }
-    plat_log("wave shader: uniforms wavea %d wtab %d wsc %d", sWaveLocTile, sWaveLocTab, sWaveLocSc);
+    plat_log("wave shader: uniforms wavea %d stab %d scales %d", sWaveLocTile, sWaveLocTab, sWaveLocSc);
 }
 
 static void wave_vecs(C3D_FVec *out, const float *in, int count) {
@@ -4403,10 +4421,10 @@ static void PLAT_COLD wave_uniforms_write(void) {
 static void PLAT_COLD init_model_programs(void) {
     shaderProgramInit(&sProgramK);
     shaderProgramInit(&sProgramW);
-    sProgramKUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 5 &&
-                      shaderProgramSetVsh(&sProgramK, &sShaderDvlb->DVLE[4]) == 0 && same_uniforms(&sProgramK);
-    sProgramWUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 6 &&
-                      shaderProgramSetVsh(&sProgramW, &sShaderDvlb->DVLE[5]) == 0 && same_uniforms(&sProgramW);
+    sProgramKUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 6 &&
+                      shaderProgramSetVsh(&sProgramK, &sShaderDvlb->DVLE[5]) == 0 && same_uniforms(&sProgramK);
+    sProgramWUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 7 &&
+                      shaderProgramSetVsh(&sProgramW, &sShaderDvlb->DVLE[6]) == 0 && same_uniforms(&sProgramW);
     if (sProgramWUsable) {
         wave_init_uniforms();
     }
@@ -4551,7 +4569,9 @@ static void read_switches(void) {
     // Off on an Old 3DS: switch bench run 22 (v46) counted no Jungle Falls tunnel flashes in two races with the depth
     // clear drawn, 5-11 in every other pair (#306: walls and ceiling missing for a frame or two).
     sDepthFill = plat_switch("DKR_DEPTH_FILL", !plat_old_3ds()) != 0;
-    sFillWait = plat_switch("DKR_FILL_WAIT", 0) != 0;
+    // On by default on an Old 3DS, where the native track is (gfx_rdp.c; run 54: with it, -0.7 ms game core and -1.0 ms
+    // renderer core against the usual races, the best of the native track rows).
+    sFillWait = plat_switch("DKR_FILL_WAIT", plat_old_3ds()) != 0;
     sCheckBandSafe = plat_switch("DKR_CHECK_BAND", 1) != 0;
     sBackendLoadMs = plat_switch("DKR_BACKEND_LOAD", 0);
     sFastState = plat_switch("DKR_FAST_STATE", 1) != 0;
@@ -4584,7 +4604,7 @@ static void read_switches(void) {
     // GPU vertex maths (P30) and stereo frames made once (P33): Settings > Picture rows, off by default.
     // The native track (NR4, gfx_rdp.c native_track) draws with GPU vertex maths, whatever DKR_GPU_TRANSFORM says.
     sTransformWanted = plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 ||
-                       plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
+                       plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
                        plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0 ||
                        plat_switch("DKR_WAVE_SHADER", 0) != 0; // P65 rank 3: wave tiles need it too
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
@@ -4632,8 +4652,42 @@ static void read_switches(void) {
 
 static void walk_publish_consts(void);
 
+/*
+ * P57 E (gfx_backend.h GFXB_FPART_*, DKR_FRAME_PARTS default 1): the frame start and end in named parts, on the
+ * backend mix's timed frames only (an Old 3DS's 1 in 8). Each mark adds the span since the last to its part, so the
+ * parts cover the two functions end to end; gfx_split.c checks their sum against its own "frame start/end" bucket.
+ */
+volatile int gGfxbFramePartsOn;
+static int sFpOn;
+static unsigned long long sFpLast, sFpTicks[GFXB_FPART_COUNT];
+static unsigned int sFpFrames, sFpReads, sFpListParts;
+
+static inline void fpart(int part) {
+    unsigned long long now;
+    if (__builtin_expect(!sFpOn, 1)) {
+        return;
+    }
+    now = plat_ticks();
+    sFpTicks[part] += now - sFpLast;
+    sFpLast = now;
+    sFpReads++;
+}
+
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts) {
+    memcpy(ticks, sFpTicks, sizeof(sFpTicks)); // (another core's: a torn value is one rough frame)
+    *frames = sFpFrames;
+    *reads = sFpReads;
+    *listParts = sFpListParts;
+}
+
 void gfxb_start_frame(void) {
     FrameSlot *slot;
+    sFpOn = gGfxbFramePartsOn && plat_switch("DKR_FRAME_PARTS", 1) != 0;
+    if (sFpOn) {
+        sFpLast = plat_ticks();
+        sFpReads++;
+    }
 #if PLAT_DEBUG_TOOLS
     // P56 K2 (DKR_PMU): the renderer's core counted once a frame, when it is not the game's (a New 3DS's renderer, or
     // an Old 3DS's two-core renderer backend on the system core). Once a frame: a few system calls.
@@ -4646,6 +4700,7 @@ void gfxb_start_frame(void) {
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
     adaptive_pick();
+    fpart(GFXB_FPART_CAPTURE);
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     // A suspend or exit asked for while the renderer was idle (the HOME hook stops waiting after 2 s) is taken here,
@@ -4656,6 +4711,7 @@ void gfxb_start_frame(void) {
         // The application is closing or suspended: stop here, with the GPU idle and no frame being built.
         plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
     }
+    fpart(GFXB_FPART_START_WAIT);
     gPlatGfxStage = "drawing";
 
     slot = &sSlots[sRec];
@@ -4702,7 +4758,9 @@ void gfxb_start_frame(void) {
     }
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     set_frame_band();
+    fpart(GFXB_FPART_SETUP);
     promote_textures();
+    fpart(GFXB_FPART_PROMOTE);
     forget_gpu_state();
     // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
     sGuardBandFrame = plat_3ds_guard_band_setting();
@@ -4724,6 +4782,7 @@ void gfxb_start_frame(void) {
     sFrameStarted = 1;
     walk_publish_consts(); // DKR_WALK_VERTS: this frame's settings, for the walk
     raw_frame_start();     // DKR_RAW_REGS
+    fpart(GFXB_FPART_START_REST);
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -4845,6 +4904,11 @@ static void fill_wait(void) {
 }
 
 void gfxb_end_frame(void) {
+    if (sFpOn) {
+        // The span since the start's last mark is the frame's draws (other records): not a part of the start or end.
+        sFpLast = plat_ticks();
+        sFpReads++;
+    }
     if (sBackendLoadMs > 0) {
         // DKR_BACKEND_LOAD (tunnel bench): this core kept busy that long, as a heavier frame would.
         unsigned long long until = plat_time_ns() + (unsigned long long) sBackendLoadMs * 1000000ULL;
@@ -4878,6 +4942,7 @@ void gfxb_end_frame(void) {
         float usage;
         int i;
 
+        fpart(GFXB_FPART_TALLIES);
         if (full_flush()) {
             gpu_flush(sVbo, sVboUsed);
             if (sIboUsed > 0) {
@@ -4886,6 +4951,7 @@ void gfxb_end_frame(void) {
         } else {
             flush_new_vertices();
         }
+        fpart(GFXB_FPART_VERTICES);
         slot->words = (u32) (gpuCmdBuf + gpuCmdBufOffset - slot->cmd);
         usage = (float) slot->words / sCmdWords;
         if (usage > sMaxUsage) {
@@ -4898,6 +4964,7 @@ void gfxb_end_frame(void) {
         }
         if (sFrameCount % 600 == 1) {
             sprite_gs_log();
+            sprite_table_log();
         }
         {
             static u32 sLoggedVramBytes;
@@ -4907,6 +4974,7 @@ void gfxb_end_frame(void) {
                          (unsigned long) (vramSpaceFree() / 1024));
             }
         }
+        fpart(GFXB_FPART_LOGS);
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
             unsigned long long start = prof_enabled() ? plat_time_ns() : 0;
@@ -4917,6 +4985,7 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
+        fpart(GFXB_FPART_END_WAIT);
         if (colour_fill_queue()) {
             // The colour clear's fill, with the depth clear's if it is one too (gpu_cuts.inc).
             fill_wait();
@@ -4931,6 +5000,10 @@ void gfxb_end_frame(void) {
         if (!sFull && sFlushTest == 1) {
             heap_flush();
         }
+        fpart(GFXB_FPART_FILLS);
+        if (sFpOn) {
+            sFpListParts += slot->numParts;
+        }
         for (i = 0; i < slot->numParts; i++) {
             if (sSvcFlush) {
                 gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
@@ -4940,6 +5013,7 @@ void gfxb_end_frame(void) {
             }
             probe_after_part(i);
         }
+        fpart(GFXB_FPART_LISTS);
         adaptive_link(slot);
         sTarget->used = true;
         if (sStereo) {
@@ -4956,11 +5030,13 @@ void gfxb_end_frame(void) {
         if (!triple_choose()) {
             wait_for_present();
         }
+        fpart(GFXB_FPART_PRESENT);
         find_recent_screen();
         history_sample();
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         timeline_arm();
+        fpart(GFXB_FPART_SCREEN);
         if (full_flush()) {
             heap_flush(); // What C3D_FrameEnd(0) would do, timed
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -4974,6 +5050,7 @@ void gfxb_end_frame(void) {
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
+        fpart(GFXB_FPART_C3D_END);
         sTripleGet = 0;
         timeline_expect(); // gpu_cuts.inc
         history_note_copy();
@@ -4986,6 +5063,11 @@ void gfxb_end_frame(void) {
         wait_for_gpu(0);
         plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
         C3D_FrameEnd(GX_CMDLIST_FLUSH); // Empty: ends the frame wait_for_gpu began.
+    }
+    if (sFpOn) {
+        fpart(GFXB_FPART_AFTER);
+        sFpFrames++;
+        sFpOn = 0;
     }
 }
 
@@ -7517,6 +7599,292 @@ static PLAT_COLD void sprite_gs_log(void) {
              (sSpriteGsStats[3] & 4) ? " GPU maths/format" : "", (sSpriteGsStats[3] & 8) ? " band" : "",
              (sSpriteGsStats[3] & 16) ? " room" : "", (sSpriteGsStats[3] & 32) ? " cap" : "");
     memset(sSpriteGsStats, 0, sizeof(sSpriteGsStats));
+}
+
+/******************************** Sprite tables (P65 rank 1) ********************************/
+
+/*
+ * Roadmap P65 rank 1 (DKR_SPRITE_TABLE, default off; proposals/3ds-sprite-table-plan.md): billboard sprite tiles come
+ * as the game's own vertices with a 4x4 matrix per load (gfx_backend.h GfxTabGroup), and sprite_table.v.pica works out
+ * the corners from a table of uniforms, so the game's core no longer does. Each draw writes its groups' rows (the
+ * matrix mapped as to_screen maps a position, and the texture axes with the padded size and flipped t of
+ * write_vertices), binds the table program, draws the triangles straight from its vertices (no indices) and binds the
+ * frame's program back. The rows sit in registers of their own (sprite_table.v.pica), so the other programs' uniforms
+ * stay as they were. They are written twice, as unif_write_twice writes uniforms changed right after a draw.
+ *
+ * Where it can't take a draw (3D, the 48-byte vertex format, a group whose box reaches past the guard band, no room,
+ * the program not found, or after a hang) gfx_tab_expand makes the corners on this core and the draw goes the usual
+ * way. Its first frames are watched as GPU vertex maths' were: sprite_table.txt says "testing" from the first frame
+ * drawn with it until 600 frames have been drawn, then "passed"; a start that finds "testing" writes "hung" and leaves
+ * it off until SPRITE_TABLE_TEST_VERSION changes.
+ */
+#define SPRITE_TABLE_TEST_VERSION 1
+#define SPRITE_TABLE_TEST_FRAMES 600
+
+static shaderProgram_s sProgramST;
+static int sSpriteTableUsable, sSpriteTableHung, sSpriteTableTestFrame = -1;
+static int sStabLoc = -1, sStfogLoc = -1;
+static unsigned long sStabStats[5]; // Draws by the shader, vertices, draws by the CPU, why not (bits), model draws
+
+static void sprite_table_marker_path(char *out, size_t size) {
+    snprintf(out, size, "%s/sprite_table.txt", plat_data_dir());
+}
+
+static void sprite_table_marker_write(const char *what) {
+    char path[256], text[32];
+    sprite_table_marker_path(path, sizeof(path));
+    snprintf(text, sizeof(text), "%s %d\n", what, SPRITE_TABLE_TEST_VERSION);
+    plat_save_file(path, text, strlen(text));
+}
+
+static PLAT_COLD void sprite_table_init(void) {
+    char path[256], text[32];
+    int got;
+    shaderProgramInit(&sProgramST);
+    sSpriteTableUsable = sShaderDvlb->numDVLE >= 5 && shaderProgramSetVsh(&sProgramST, &sShaderDvlb->DVLE[4]) == 0;
+    if (sSpriteTableUsable) {
+        sStabLoc = shaderInstanceGetUniformLocation(sProgramST.vertexShader, "stab");
+        sStfogLoc = shaderInstanceGetUniformLocation(sProgramST.vertexShader, "stfog");
+        sSpriteTableUsable = sStabLoc >= 0 && sStfogLoc >= 0 && sStabLoc + GFX_TAB_GROUPS * GFX_TAB_ROWS <= 96;
+    }
+    sprite_table_marker_path(path, sizeof(path));
+    got = plat_load_file_start(path, text, sizeof(text) - 1);
+    if (got > 0) {
+        text[got] = '\0';
+        if ((strncmp(text, "testing ", 8) == 0 && atoi(text + 8) == SPRITE_TABLE_TEST_VERSION) ||
+            (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == SPRITE_TABLE_TEST_VERSION)) {
+            sSpriteTableHung = 1;
+            sprite_table_marker_write("hung");
+        }
+    }
+    plat_log("sprite table shader: %s, uniforms stab %d stfog %d%s", sSpriteTableUsable ? "found" : "NOT usable",
+             sStabLoc, sStfogLoc,
+             sSpriteTableHung ? "; LEFT OFF: the console locked with it in an earlier run (sprite_table.txt)" : "");
+}
+
+static void sprite_table_frame_drawn(int frame) {
+    if (sSpriteTableTestFrame >= 0 && frame >= sSpriteTableTestFrame + SPRITE_TABLE_TEST_FRAMES) {
+        sSpriteTableTestFrame = -2;
+        sprite_table_marker_write("passed");
+        plat_log("sprite table shader: %d frames drawn, it works on this console", SPRITE_TABLE_TEST_FRAMES);
+    }
+}
+
+int gfxb_sprite_table(void) {
+    return 1;
+}
+
+/* Whether every group's box lies inside the guard band (the CPU's cutting would leave its triangles as they are). */
+static int table_groups_in_band(const GfxTabGroup *groups, int numGroups) {
+    const float bandX = sBandX, bandY = sBandY;
+    int i, k;
+    for (i = 0; i < numGroups; i++) {
+        const GfxTabGroup *gr = &groups[i];
+        for (k = 0; k < 8; k++) {
+            float x = (k & 1) ? gr->boxMax[0] : gr->boxMin[0], y = (k & 2) ? gr->boxMax[1] : gr->boxMin[1];
+            float z = (k & 4) ? gr->boxMax[2] : gr->boxMin[2];
+            GfxVertex v;
+            v.x = x * gr->m[0][0] + y * gr->m[0][1] + z * gr->m[0][2] + gr->m[0][3];
+            v.y = x * gr->m[1][0] + y * gr->m[1][1] + z * gr->m[1][2] + gr->m[1][3];
+            v.w = x * gr->m[3][0] + y * gr->m[3][1] + z * gr->m[3][2] + gr->m[3][3];
+            if (outside_band_of(&v, bandX, bandY)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Writes uniform rows from first on, at most 16 rows a command. */
+static void table_write_rows(int first, const C3D_FVec *rows, int count) {
+    while (count > 0) {
+        int n = count > 16 ? 16 : count;
+        GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | (u32) first);
+        GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, (u32 *) rows, (u32) n * 4);
+        first += n;
+        rows += n;
+        count -= n;
+    }
+}
+
+/* The draw by the table shader; 0: it can't be (nothing done). */
+static int __attribute__((noinline)) draw_table_gpu(const GfxDrawState *state, const GfxTabGroup *groups,
+                                                    int numGroups, float fogMul, float fogOffset,
+                                                    const GfxTabVertex *verts, int numVerts) {
+    static C3D_FVec sRows[GFX_TAB_GROUPS * GFX_TAB_ROWS];
+    HangDraw *hangDraw;
+    float su0, sv0, su1, sv1;
+    const float scale3D = sScale3D;
+    int first, vertex, i, k, why = 0, tris = numVerts / 3, bytes = numVerts * (int) sizeof(GfxTabVertex);
+    C3D_FVec fogv;
+    if (!sSpriteTableUsable || sSpriteTableHung) {
+        why = 1;
+    } else if (sStereo || sVfmtOld) {
+        why = 2;
+    } else if (numGroups > GFX_TAB_GROUPS) {
+        why = 4;
+    } else if (sGuardBandFrame && !table_groups_in_band(groups, numGroups)) {
+        why = 8;
+    } else if (sVboUsed + 15 + bytes > VBO_BYTES || gpuCmdBufSize - gpuCmdBufOffset < sCmdWords / 16) {
+        why = 16;
+    }
+    if (why) {
+        sStabStats[3] |= (unsigned long) why;
+        return 0;
+    }
+    dp_draw(state, tris, 0, NULL, 0);
+    texture_scales(state->textures[0], &su0, &sv0);
+    su1 = sv1 = 1.0f;
+    hangDraw = hang_draw_start(state, tris);
+    first = drain_before_draw(state, tris);
+    if (first) {
+        forget_gpu_state();
+    }
+    set_all_state(state, &su0, &sv0, &su1, &sv1);
+    if (first) {
+        write_settings_twice(state, &su0, &sv0, &su1, &sv1);
+    }
+    C3D_BindProgram(&sProgramST);
+    C3Di_UpdateContext();
+    // Each group's rows: the matrix as to_screen maps a position (x' = y, y' = -x * 3D width, z' = (z - w) / 2), then
+    // the texture row: s = u * x + y, t = v * z + w with the padded size and flipped t (write_vertices).
+    for (i = 0; i < numGroups; i++) {
+        const GfxTabGroup *gr = &groups[i];
+        C3D_FVec *r = &sRows[i * GFX_TAB_ROWS];
+        for (k = 0; k < 4; k++) {
+            r[0].c[3 - k] = gr->m[1][k];
+            r[1].c[3 - k] = -gr->m[0][k] * scale3D;
+            r[2].c[3 - k] = 0.5f * (gr->m[2][k] - gr->m[3][k]);
+            r[3].c[3 - k] = gr->m[3][k];
+        }
+        r[4].x = gr->tex[0] * su0;
+        r[4].y = -gr->tex[1] * su0;
+        r[4].z = -gr->tex[2] * sv0;
+        r[4].w = 1.0f + gr->tex[3] * sv0;
+    }
+    // The shader has z' = (z - w) / 2, so z / w = 2 z' / w + 1 (as set_model_uniforms).
+    fogv.x = 2.0f * fogMul / 255.0f;
+    fogv.y = (fogMul + fogOffset) / 255.0f;
+    fogv.z = 0.0f;
+    fogv.w = 0.0f;
+    for (k = 0; k < 2; k++) {
+        table_write_rows(sStabLoc, sRows, numGroups * GFX_TAB_ROWS);
+        table_write_rows(sStfogLoc, &fogv, 1);
+    }
+    sWaveTabFrame = -1; // the wave tables share stab's rows (waves.v.pica): written again at the next wave draw
+    if (sVfmtBound != VFMT_STAB) {
+        bind_vertex_format(VFMT_STAB);
+    }
+    vertex = (sVboUsed - sVfmtBase) / (int) sizeof(GfxTabVertex);
+    memcpy(sVbo + sVboUsed, verts, (size_t) bytes);
+    sFrameDraws++;
+    C3D_DrawArrays(GPU_TRIANGLES, vertex, numVerts);
+    if (hangDraw != NULL) {
+        hangDraw->cmdEnd = cmd_position();
+    }
+    sVboUsed += bytes;
+    sFrameTriangles += tris;
+    // Back to the frame's program, set on the GPU now.
+    C3D_BindProgram(sTransformOn ? &sProgramT : &sProgram);
+    C3Di_UpdateContext();
+    sStabStats[0]++;
+    sStabStats[1] += (unsigned long) numVerts;
+    if (sSpriteTableTestFrame == -1) {
+        sSpriteTableTestFrame = sFrameCount;
+        sprite_table_marker_write("testing");
+    }
+    return 1;
+}
+
+/*
+ * A group's triangles as a model draw of the frame's transform program (transform.v.pica, GPU vertex maths: the Old
+ * 3DS's karts since #592), which needs no program switch: most sprite table draws hold one load, as the tiles before
+ * and after it are drawn with other textures. The group's matrix is the model draw's (rows to columns), its texture
+ * axes the draw's factors; gfxb_draw_model does the rest (3D included). verts: the group's, numVerts of them.
+ */
+static void draw_table_model(const GfxDrawState *state, const GfxTabGroup *gr, float fogMul, float fogOffset,
+                             const GfxTabVertex *verts, int numVerts) {
+    static GfxModelVertex sMv[GFX_TAB_MAX_VERTS];
+    static u16 sMi[GFX_TAB_MAX_VERTS];
+    GfxModelParams p;
+    int i, k;
+    for (i = 0; i < 4; i++) {
+        for (k = 0; k < 4; k++) {
+            p.mtx[i][k] = gr->m[k][i];
+        }
+    }
+    p.texScale[0] = gr->tex[0], p.texOffset[0] = -gr->tex[1];
+    p.texScale[1] = gr->tex[2], p.texOffset[1] = -gr->tex[3];
+    p.texScale[2] = p.texScale[3] = p.texOffset[2] = p.texOffset[3] = 0.0f;
+    p.fogMul = (short) fogMul;
+    p.fogOffset = (short) fogOffset;
+    p.fog = verts[0].fog != 0;
+    p.pad[0] = p.pad[1] = p.pad[2] = 0;
+    p.light[0] = p.light[1] = p.light[2] = p.light[3] = 0.0f;
+    for (i = 0; i < numVerts; i++) {
+        const GfxTabVertex *s = &verts[i];
+        GfxModelVertex *o = &sMv[i];
+        o->x = s->x, o->y = s->y, o->z = s->z, o->one = 1;
+        o->u = s->u, o->v = s->v;
+        o->r = s->r, o->g = s->g, o->b = s->b, o->a = s->a;
+        sMi[i] = (u16) i;
+    }
+    gfxb_draw_model(state, &p, sMv, numVerts, sMi, numVerts / 3);
+    sStabStats[4]++;
+}
+
+/* A sprite table batch (the walk's flush_table_batch). DKR_SPRITE_TABLE: 1 one-load draws by the transform program and
+ * the rest by the table shader, 2 all by the table shader, 3 all by the transform program (one draw per load). */
+void gfxb_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                            float fogOffset, const GfxTabVertex *verts, int numVerts) {
+    static GfxVertex sVerts[GFX_TAB_MAX_VERTS];
+    static u16 sIdx[GFX_TAB_MAX_VERTS];
+    static int sEpoch = -1, sMode;
+    if (numVerts <= 0) {
+        return;
+    }
+    if (numVerts > GFX_TAB_MAX_VERTS) {
+        numVerts = GFX_TAB_MAX_VERTS - GFX_TAB_MAX_VERTS % 3;
+    }
+    if (sEpoch != gPlatSwitchEpoch) {
+        sEpoch = gPlatSwitchEpoch;
+        sMode = plat_switch("DKR_SPRITE_TABLE", 0);
+    }
+    if (sTransformOn && (sMode == 3 || (sMode != 2 && numGroups == 1)) &&
+        (!sGuardBandFrame || table_groups_in_band(groups, numGroups))) {
+        int i = 0;
+        while (i < numVerts) {
+            int row = verts[i].row, n = 0;
+            while (i + n < numVerts && verts[i + n].row == row) {
+                n++;
+            }
+            draw_table_model(state, &groups[row / GFX_TAB_ROWS], fogMul, fogOffset, &verts[i], n - n % 3);
+            i += n;
+        }
+        return;
+    }
+    if (skip_invisible(state)) {
+        return;
+    }
+    if (draw_table_gpu(state, groups, numGroups, fogMul, fogOffset, verts, numVerts)) {
+        return;
+    }
+    sStabStats[2]++;
+    gfx_tab_expand(groups, fogMul, fogOffset, verts, numVerts, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numVerts, sIdx, numVerts / 3);
+}
+
+/* The profiler's log line (every 600 frames, from gfxb_end_frame's logs). */
+static PLAT_COLD void sprite_table_log(void) {
+    if (sStabStats[0] + sStabStats[2] + sStabStats[4] == 0) {
+        return;
+    }
+    plat_log("sprite table draws: %lu by the transform program, %lu by the table shader (%lu vertices), %lu by the CPU "
+             "(not shader:%s%s%s%s%s)",
+             sStabStats[4], sStabStats[0], sStabStats[1], sStabStats[2], (sStabStats[3] & 1) ? " off/hung" : "",
+             (sStabStats[3] & 2) ? " 3D/format" : "", (sStabStats[3] & 4) ? " groups" : "",
+             (sStabStats[3] & 8) ? " band" : "", (sStabStats[3] & 16) ? " room" : "");
+    memset(sStabStats, 0, sizeof(sStabStats));
 }
 
 /*
