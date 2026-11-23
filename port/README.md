@@ -164,6 +164,7 @@ environment variables:
 | `DKR_DUMP_EVERY`    | Write every Nth frame to `DKR_DUMP_DIR/frame_NNNNN.png`. |
 | `DKR_INPUT`         | Scripted input, e.g. `"700:START 710: 900:A 910: 1250:STICK=0,-80 1262:"`: each step holds the listed buttons from that poll number until the next step. |
 | `DKR_WALK_CENSUS=1` | Counts the display list walk's commands per frame by kind and class (records, state, vertex-slot draws, texture ops, matrices, list calls, raw N64). On the host also writes `census.csv` with the game's `file:line` for each; `port/tools/census_run.py` plays the scenarios in `port/host/scenarios/` and `port/tools/census_report.py` turns the CSV into the to-do lists for the native-renderer stages. On the 3DS it adds a `census` line to the profiler log. |
+| `DKR_OCCL_COUNT=1`  | Counts, per frame, the track batches the game draws that show no pixel or are hidden behind the track's own opaque batches, and per camera segment the ones never seen over the run (`occl count` log lines; P64 candidate 2, `host/occl_count.c`). `DKR_OCCL_COUNT_CHECK=1` with `DKR_FRAG_STATS=1` compares its pixels with the renderer's (`occl check` lines); `DKR_OCCL_BREAK=1` breaks it on purpose. |
 | `DKR_DUMP_AUDIO`    | Write the audio output to this file as raw 16 bit stereo PCM (22050 Hz with the CPU mixer, 32728 Hz with the DSP voices). |
 | `DKR_AUDIO_DSP`     | `0` runs the CPU mixer instead of the DSP voices (see Sound). |
 | `DKR_TRACE_FRAME`   | Log every display list command and draw of this frame. |
@@ -236,6 +237,13 @@ controls) work there, as do these renderer switches:
   `DKR_RAW_REGS_CHECK=1` compares every reuse with citro3d), `DKR_NATIVE_GPU` (1: the karts' vertex maths on the GPU;
   2 adds the objects) and `DKR_VERTEX_ASM` (the native draws' vertex passes as one VFP loop; `DKR_VERTEX_ASM_CHECK=1`
   compares it with the C). The checks count in the test run results' chk cells.
+- `DKR_SPLIT_REF=1` (roadmap P63, off by default: the walk's opaque buckets go to the two-core renderer's backend by
+  pointer instead of being copied into its queue; the bucket takes a fresh block from a pool of
+  `DKR_SPLIT_REF_BLOCKS` (default 16, ~29 KB each) and gets the old one back once the backend has drawn it; with no
+  free block it is copied as before. Same draws, same frames. Logs `split ref: N handed over, M fallbacks` every 600
+  frames. `DKR_SPLIT_REF_CHECK=1` (implies the switch) queues a copy of each handed block for the backend to compare
+  before drawing (chk cells, `0 differ` expected), `=2` also fills returned blocks with 0xA5, `=3` is mode 2 broken on
+  purpose (blocks returned one draw early; it must report differences))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)
@@ -456,6 +464,15 @@ with the VFP in RunFast mode (flush-to-zero and default NaN on, exception traps 
 off the kernel's slow support code; each of those threads logs its starting mode once (`VFP mode, game thread:
 FPSCR ...`).
 
+Page lookups (roadmap P64, 2026-11-22). `DKR_PMU=5` counts the data micro TLB misses and `DKR_PMU=6` the
+instruction micro TLB misses, each with the main TLB misses: events, not stalls, so the summary line reads `TLB misses
+a frame: game core data micro Nk, main Nk`, the results' stall column holds the micro misses in thousands a frame (kind
+`dtlb` / `itlb`, marked `T` / `I` in the switch bench table) and the PMN1 column the main ones. The first frame of
+each kind logs a `TLB probe` line: the main TLB misses a pass over 1 MB of the heap (the game's pool and the ROM) and of
+linear memory read a page at a time, about 256 for memory mapped in 4 KB pages and only a few for large pages. The
+walk steps (`DKR_WALK_STEPS`) split sprite records into `sprites` (checks, state and axes), `sprite corners` (their
+vertex maths) and `sprite tris` (their drawing).
+
 The walk's exact data cuts (roadmap P61 W, 2026-11-22), each its own switch, `0` the old way:
 `DKR_WALK_BACKFACE` (default 1) reads each triangle's back-face flag from the mesh's 1-byte table instead of its
 16-byte triangle copy; `DKR_NMAT_ONCE` (default 1) checks a material's textures (still in the cache, the same
@@ -527,6 +544,9 @@ progress bar. Your saves are not written while it runs. Tap Stop test (next to S
   stages, worst frames), `autorun_problems.txt`, `autorun_hitches.txt` and `autorun_drawmix.csv` (every test run and
   bench: per race a row per kind drawn, per costly object kind and for the scene, as on the monitor's pages); the
   issue sums the draw mix up under "Where the time goes".
+- New 3DS switch bench and boss fights (or any test run with `DKR_GPU_CENSUS=1`): `autorun_gpudraws.txt`, each race's
+  GPU picture: the GPU timeline (fills, command lists, copies; ms a frame), the command lists by kind, the costliest
+  draws, and the detail (box, colours, combiner, scissor) of the 3 costliest single draws and of the frame's first 3.
 - When the run ends or is stopped, and bug reports are set up, the results are sent as an issue titled
   "[3DS test run]". `python3 port/tools/bugreport_fetch.py <issue>` saves its files, and
   `python3 port/tools/autorun_report.py bugreport_<issue>/autorun_results.csv` turns them into tables by track and

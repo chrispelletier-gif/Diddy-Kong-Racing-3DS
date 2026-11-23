@@ -10,7 +10,15 @@
  * DKR_FRAG_STATS=2 also lists the sky's draws (each with its pixels and settings) once a second.
  * DKR_FRAG_STATS=3 also writes every frame's pixels and triangles by kind to frag_frames.csv (in the data directory),
  * to find the frames whose GPU work spikes (Old 3DS Whale Bay, quick test #475: 17-24 ms GPU frames against 10).
+ * DKR_FRAG_STATS=4 (P62 M4, 2026-11-22) also lists the frame's first FRAG_FIRST_DRAWS draws once a second: each one's
+ * pixels, kind, settings, colours, box and the code that drew it (the call stack, for addr2line), to say what the
+ * New 3DS's costly frame-start flat draws are (bench #570, Whale Bay: "menus/other" #0-#2, 1.2 / 1.0 / 1.9 ms).
  */
+#define FRAG_FIRST_DRAWS 4
+#if defined(__GLIBC__)
+#include <execinfo.h>
+#endif
+static int sFragDrawNo; // This frame's draws so far (DKR_FRAG_STATS=4)
 static int sFragStats = -1, sFragKind;
 static uint8_t sFragLast[MAX_W * H]; // The kind that last wrote each pixel this frame, +1 (0: the clear)
 static uint8_t sFragSky[MAX_W * H];  // Sky fragments rasterized at each pixel this frame
@@ -19,6 +27,10 @@ static unsigned long long sFragRaster[PROF_KINDS + 2], sFragPass[PROF_KINDS + 2]
     sFragBlend[PROF_KINDS + 2], sFragNoDepth[PROF_KINDS + 2], sFragTris[PROF_KINDS + 2], sFragDraws[PROF_KINDS + 2];
 static unsigned long long sFragClear, sFragFrames, sFragCovered;
 static unsigned long long sDrawRaster; // This draw's (DKR_FRAG_STATS=2)
+#ifdef PORT_OCCL_COUNT // Host only (gfx_ref.c on the 3DS includes this file too)
+static uint8_t sFragTrackMask[MAX_W * H]; // This frame's pixels the track kind rasterized (occl_count.c's check)
+void port_occl_renderer_frame(const uint8_t *mask, int w, int h);
+#endif
 #define FRAG_CLEAR_KIND (PROF_KINDS + 1)
 #define PORT_DRAW_SKY_KIND 4 // port_drawtag.h PORT_DRAW_SKY
 
@@ -120,8 +132,13 @@ static void frag_frame_end(void) {
             memset(sPrevDraws, 0, sizeof(sPrevDraws));
         }
     }
+#ifdef PORT_OCCL_COUNT
+    port_occl_renderer_frame(sFragTrackMask, W, H);
+    memset(sFragTrackMask, 0, sizeof(sFragTrackMask));
+#endif
     memset(sFragLast, 0, sizeof(sFragLast));
     memset(sFragSky, 0, sizeof(sFragSky));
+    sFragDrawNo = 0;
     if (++sFragFrames % 300 != 0) {
         return;
     }
@@ -153,4 +170,54 @@ static void frag_frame_end(void) {
     memset(sFragTris, 0, sizeof(sFragTris));
     memset(sFragDraws, 0, sizeof(sFragDraws));
     sFragClear = sFragFrames = sFragCovered = 0;
+}
+
+/* DKR_FRAG_STATS=4: after one of the frame's first FRAG_FIRST_DRAWS draws, once a second, what it was and who drew it. */
+static void frag_first_draw(const GfxDrawState *st, const GfxVertex *v, int numVerts, int numTriangles) {
+    int no = sFragDrawNo++;
+    if (sFragStats != 4 || no >= FRAG_FIRST_DRAWS || sFramesRendered % 60 != 0) {
+        return;
+    }
+    {
+        static const char *const sNames[] = { "other", "track", "racers", "objects", "sky", "see-through", "effects",
+                                              "shadows", "HUD" };
+        const GfxTexture *t = st->textures[0];
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        int i;
+        void *stack[12];
+        char **names;
+        int depth;
+        for (i = 0; i < numVerts && i < 64; i++) {
+            float w = v[i].w != 0.0f ? v[i].w : 1.0f, x = v[i].x / w, y = v[i].y / w;
+            x0 = x < x0 ? x : x0;
+            x1 = x > x1 ? x : x1;
+            y0 = y < y0 ? y : y0;
+            y1 = y > y1 ? y : y1;
+        }
+        plat_log("frag first draw #%d (frame %d): %s, %d tris, %.3f screens rasterized, tex %dx%d fmt %d, blend %d depth "
+                 "%d/%d alpha test %d fog %d cycles %d flat %d, box x %.2f..%.2f y %.2f..%.2f, scissor %d,%d-%d,%d, "
+                 "vertex 0 rgba %d,%d,%d,%d prim %d,%d,%d,%d env %d,%d,%d,%d, colour (%d-%d)*%d+%d alpha (%d-%d)*%d+%d",
+                 no, sFramesRendered, sFragKind < 9 ? sNames[sFragKind] : "?", numTriangles,
+                 (double) sDrawRaster / (W * H), t ? (int) t->width : 0, t ? (int) t->height : 0,
+                 t ? (int) t->format : -1, st->blend, st->depthTest, st->depthWrite, st->alphaTest, st->fogEnabled,
+                 st->combiner.numCycles, st->flat, x0, x1, y0, y1, st->scissor[0], st->scissor[1], st->scissor[2],
+                 st->scissor[3], v[0].r, v[0].g, v[0].b, v[0].a, st->prim[0], st->prim[1], st->prim[2], st->prim[3],
+                 st->env[0], st->env[1], st->env[2], st->env[3], st->combiner.rgb[0].a, st->combiner.rgb[0].b,
+                 st->combiner.rgb[0].c, st->combiner.rgb[0].d, st->combiner.alpha[0].a, st->combiner.alpha[0].b,
+                 st->combiner.alpha[0].c, st->combiner.alpha[0].d);
+#if defined(__GLIBC__)
+        depth = backtrace(stack, 12);
+        names = backtrace_symbols(stack, depth);
+        if (names != NULL) {
+            for (i = 1; i < depth; i++) {
+                plat_log("    at %s", names[i]);
+            }
+            free(names);
+        }
+#else
+        (void) stack;
+        (void) names;
+        (void) depth;
+#endif
+    }
 }

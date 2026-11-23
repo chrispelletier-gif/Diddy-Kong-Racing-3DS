@@ -1,6 +1,7 @@
 /* Bug reports as GitHub issues (see bugreport.h). Platform independent apart from the caller's network setup. */
 #include "bugreport.h"
 #include "curl_common.h"
+#include "plat.h"
 #include "strbuf.h"
 
 #include <curl/curl.h>
@@ -55,11 +56,46 @@ static size_t write_response(char *data, size_t size, size_t count, void *user) 
     return size * count;
 }
 
+/*
+ * DKR_NET_REUSE (default 1): one libcurl handle serves every request of a report, so the connection to api.github.com
+ * and its TLS session are kept between them. A report is an issue plus a comment per 56 KB of attachment (twenty or
+ * more for a full one), and each new connection cost a TCP connect and a TLS handshake: a second or more on the 3DS,
+ * several on an Old 3DS. With 0 each request makes its own connection, as before. The updater already reuses its
+ * handle (update_3ds.c http_get).
+ */
+static CURL *sCurl;
+static int sReuse;
+
+static CURL *curl_take(void) {
+    if (!sReuse) {
+        return curl_easy_init();
+    }
+    if (sCurl == NULL) {
+        sCurl = curl_easy_init();
+    } else {
+        curl_easy_reset(sCurl); // Keeps the open connection and the TLS session.
+    }
+    return sCurl;
+}
+
+static void curl_give_back(CURL *curl) {
+    if (!sReuse) {
+        curl_easy_cleanup(curl);
+    }
+}
+
+static void curl_done(void) {
+    if (sCurl != NULL) {
+        curl_easy_cleanup(sCurl);
+        sCurl = NULL;
+    }
+}
+
 /* Sends JSON to apiUrl + path with method (NULL: POST). Returns the HTTP status (0 if the request failed), with the
  * response in response. */
 static long send_json(const BugReportConfig *config, const char *method, const char *path, const char *json,
                       StrBuf *response, char *error, size_t errorSize) {
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_take();
     struct curl_slist *headers = NULL;
     char url[512], auth[512], curlError[CURL_ERROR_SIZE];
     long status = 0;
@@ -91,7 +127,7 @@ static long send_json(const BugReportConfig *config, const char *method, const c
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     }
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    curl_give_back(curl);
     return status;
 }
 
@@ -279,9 +315,9 @@ static int post_file(const BugReportConfig *config, const char *commentsPath, co
     return 0;
 }
 
-int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
-                      const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
-                      BugReportProgress progress, char *result, size_t resultSize) {
+static int send_report(const BugReportConfig *config, const char *issue, const char *title, const char *body,
+                       const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
+                       BugReportProgress progress, char *result, size_t resultSize) {
     StrBuf json = { 0 }, response = { 0 }, skipped = { 0 };
     char path[256], number[32], url[256], curlError[CURL_ERROR_SIZE];
     unsigned int budget = maxAttachmentBytes;
@@ -381,4 +417,14 @@ attach:
     sb_free(&skipped);
     snprintf(result, resultSize, "%s", url);
     return 0;
+}
+
+int bugreport_send_to(const BugReportConfig *config, const char *issue, const char *title, const char *body,
+                      const BugReportFile *files, int fileCount, unsigned int maxAttachmentBytes,
+                      BugReportProgress progress, char *result, size_t resultSize) {
+    int status;
+    sReuse = plat_switch("DKR_NET_REUSE", 1) != 0;
+    status = send_report(config, issue, title, body, files, fileCount, maxAttachmentBytes, progress, result, resultSize);
+    curl_done();
+    return status;
 }

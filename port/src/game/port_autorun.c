@@ -126,6 +126,7 @@
 #define HITCH_FILE "autorun_hitches.txt" // Every hitch of the run, with its cause (the flight recorder, plat/recorder.h)
 #define DRAWMIX_FILE "autorun_drawmix.csv" // Each race's cost per kind of thing drawn and per object kind (profile.h)
 #define CORES_FILE "autorun_cores.txt" // Each race's core times, uncapped ceiling and game core breakdown (profile.h)
+#define GPUDRAWS_FILE "autorun_gpudraws.txt" // P62 M1: each race's GPU timeline, kinds and costliest draws (New 3DS)
 #define HANG_FILE "autorun_hang.txt"
 #define BENCH_STATE_FILE "gpu_bench_state.txt"
 #define BENCH_RESULTS_FILE "gpu_bench_results.csv"
@@ -307,6 +308,14 @@ static const BenchSwitch sSwitchesNative[] = {
     { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
     // P55 S3 (gpu_raw.inc): GPU settings and draws as raw register words (see the Old 3DS list); renderer core ms.
     { "GPU settings and draws as raw register words (S3)", { "DKR_RAW_REGS", NULL, NULL }, 0, 1, 1, 0 },
+    // P62 M2 (2026-11-22, proposals/3ds-n3ds-gpu-headroom-plan.md): measurements for the New 3DS GPU headroom plan,
+    // left out of the all-together race. 3D at 60 fps (DKR_STEREO3D=2 draws in 3D whatever the slider says; 3D has no
+    // anti-aliasing, so two 400x240 eyes with every draw sent twice): the GPU time in 3D on today's build (last measured
+    // on bench #240), which says whether 3D with anti-aliasing could fit. 400 pixels with 2x anti-aliasing (BENCH_400):
+    // the floor under the usual 800 pixels and 4x. Each race's GPU picture is in autorun_gpudraws.txt (DKR_GPU_CENSUS;
+    // the 3D races have the timeline only: draws aren't timed one by one in 3D).
+    { "3D at 60 fps (GPU time in 3D)", { "DKR_STEREO3D", NULL, NULL }, 0, 2, 1, 0 },
+    { "400 px, 2x anti-aliasing (the floor)", { "BENCH_400", NULL, NULL }, 0, 1, 1, 0 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 #define sSwitchesNew3ds sSwitchesNative
@@ -338,6 +347,26 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // read misses.
     { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
+    // P64 (2026-11-22, proposals/3ds-breakthrough-candidates.md). The walk steps rows above also split the sprites step
+    // (candidate 4; with P65's finer split): "sprites" (the record's checks, state and axes), "sprite corners" (their
+    // vertex maths) and "sprite tris" (their drawing): corners + tris is what a vertex shader table of sprites would
+    // replace; under half the sprites time in corners + tris, stop.
+    // Candidate 1: the native track (NR4, DKR_NATIVE_TRACK: the track's vertices kept on the GPU, its vertex shader
+    // doing the maths) lost in runs 45, 48 and 50, but always without raw register words, which turned the karts' GPU
+    // maths from a renderer core loss into -3.6 ms. Raw words are the Old 3DS default now, so these rows race the track
+    // with them, alone and with the frame's fills finished first (DKR_FILL_WAIT, the Jungle Falls tunnel fix, T1).
+    // Read both cores and the race start (meshes are still made the first time a batch is seen): if both cores drop,
+    // the next step is building them during the level load.
+    { "native track with raw words (P64 1)", { "DKR_NATIVE_TRACK", NULL, NULL }, -1, 1, 1, 0 },
+    { "native track with raw words, fills finished first (P64 1)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1,
+      1, 1, 0 },
+    // Candidate 3: page lookups. PMU 5 counts the data micro TLB misses and PMU 6 the instruction ones, both with the
+    // main TLB misses (the log's "TLB misses a frame" line; the results' pmn1 column, thousands a frame, and the CPU
+    // cell marked T / I for the micro ones). Their first frame logs a "TLB probe" line: main TLB misses a pass over
+    // 1 MB of the heap (the game's pool) and of linear memory, ~256 for 4 KB pages, a few for large ones. Gate: over
+    // about 5k main TLB misses a frame on the game core, and linear memory in large pages, plan moving the pool there.
+    { "TLB misses, data micro + main (PMU 5, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 5, 1, 1 },
+    { "TLB misses, instruction micro + main (PMU 6, 1 lap)", { "DKR_PMU", NULL, NULL }, 0, 6, 1, 1 },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
@@ -359,6 +388,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // usual races and every other row, and run 52 raced the new defaults without raw words.
     { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
       1 },
+    // P63 (2026-11-22, proposals/3ds-old3ds-bucket-handoff-plan.md): the opaque buckets handed to the backend by pointer
+    // instead of copied into the split ring on the game core (DKR_SPLIT_REF; estimated -0.4..-0.7 ms game core, judged
+    // on the 4-track mean; the renderer core should not move). The log's "split ref: N handed over, M fallbacks" lines
+    // say how often the pool ran dry. The timed row's "split copy" step and write misses (PMU 4: the load/store unit
+    // stall and D-cache write misses) read against the walk steps rows above; the self-check row must say 0 wrong.
+    { "buckets handed over without copying", { "DKR_SPLIT_REF", NULL, NULL }, 0, 1, 0, 0 },
+    { "buckets handed over, walk steps timed (PMU 4, 1 lap)", { "DKR_SPLIT_REF", "DKR_WALK_STEPS", "DKR_PMU", NULL },
+      0, 4, 1, 1 },
+    { "buckets handed over, self-check (1 lap, chk: 0 wrong)", { "DKR_SPLIT_REF_CHECK", NULL, NULL }, 0, 2, 1, 1 },
     // P65 (2026-11-22, proposals/3ds-custom-shader-plan.md section 6, steps 0 and 1). The two walk steps rows above now
     // also split the sprite tiles' step ("sprites" set-up, "sprite corners", "sprite tris") and time billboards apart
     // ("billboard corners", "billboard tris", out of "other paths"): rank 1's uniform-table sprite shader goes ahead
@@ -371,7 +409,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // kind's GPU ms grows with its vertices (same pixels both ways), so the difference is the vertex cost a slimmer
     // track shader could cut. Both are measurements (left out of the all-together race).
     { "GPU time by kind (usual)", { "DKR_GPU_KINDS", NULL, NULL }, 0, 1, 1, 0 },
-    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK", NULL }, 0, 1, 1, 0 },
+    { "GPU time by kind, native track on the GPU", { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", NULL }, 0, 1, 1, 0 },
     // Step 1, rank 2: the native kart batches by road (one load / two loads / dynamic / billboard / no tables), their
     // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
@@ -388,7 +426,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
       0, 1, 1, 1 },
     { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
       0, 4, 1, 1 },
-    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, 0, 2, 1, 1 },
+    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, -1, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -486,6 +524,24 @@ static s32 switch_race_laps(s32 config) {
 
 static s32 sMode; // enum Mode
 
+/* The bench's own render settings (apply_config), set in every switch bench race before the rows' usual settings, so
+ * a row's usual setting of one of these variables replaces it (the conflict check below reports that). */
+typedef struct BenchPin {
+    const char *name;
+    s8 value;
+} BenchPin;
+static const BenchPin sBenchRender[] = {
+    { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
+    { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
+};
+static const BenchPin sBenchRenderBoth[] = {
+    { "BENCH_RENDER_AHEAD", 1 }, { "BENCH_WIDESCREEN", 2 }, { "BENCH_AA", PLAT_AA_2X },
+};
+// A New 3DS races at the player's GPU-bound settings (2026-10-31): 800 pixels, 4x anti-aliasing, colour boost.
+static const BenchPin sBenchRenderNew3ds[] = {
+    { "BENCH_WIDE800", 1 }, { "BENCH_COLOUR", 1 }, { "BENCH_AA", PLAT_AA_4X },
+};
+
 static s32 config_count(void);
 static const char *config_name(s32 config);
 
@@ -508,28 +564,14 @@ static void apply_config(s32 config) {
         // where the renderer runs (an Old 3DS's Renderer row) needs a restart, so that one is the player's, and the
         // results' graphics column says which. Then every variable at its usual setting, then the race's switches: a
         // variable several switches share (the GPU route's rows) keeps the race's test setting.
-        static const struct {
-            const char *name;
-            s8 value;
-        } sBenchRender[] = {
-            { "BENCH_WIDE800", 0 },     { "BENCH_MIPMAPS", 1 },  { "BENCH_COLOUR", 0 },    { "BENCH_GUARD_BAND", 1 },
-            { "DKR_STEREO3D", 0 },      { "DKR_GPU_TRANSFORM", 0 }, { "DKR_TRACK_MESH", 0 }, { "DKR_MODEL_MESH", 0 },
-        };
-        // A New 3DS races at the player's GPU-bound settings (2026-10-31): 800 pixels, 4x anti-aliasing, colour boost.
-        static const struct {
-            const char *name;
-            s8 value;
-        } sBenchRenderNew3ds[] = {
-            { "BENCH_WIDE800", 1 }, { "BENCH_COLOUR", 1 }, { "BENCH_AA", PLAT_AA_4X },
-        };
         plat_set_60fps(!plat_old_3ds());
         for (i = 0; i < (s32) ARRAY_COUNT(sBenchRender); i++) {
             plat_override_switch(sBenchRender[i].name, sBenchRender[i].value);
         }
         lean_apply(); // The lean bench only (v34; DKR_BENCH_FULL_PROFILE=1 keeps the profiler's lines and frame history)
-        plat_override_switch("BENCH_RENDER_AHEAD", 1);
-        plat_override_switch("BENCH_WIDESCREEN", 2);
-        plat_override_switch("BENCH_AA", PLAT_AA_2X);
+        for (i = 0; i < (s32) ARRAY_COUNT(sBenchRenderBoth); i++) {
+            plat_override_switch(sBenchRenderBoth[i].name, sBenchRenderBoth[i].value);
+        }
         if (!plat_old_3ds()) {
             for (i = 0; i < (s32) ARRAY_COUNT(sBenchRenderNew3ds); i++) {
                 plat_override_switch(sBenchRenderNew3ds[i].name, sBenchRenderNew3ds[i].value);
@@ -565,8 +607,115 @@ static void apply_config(s32 config) {
     plat_set_60fps(sBenchConfigs[config].fps60);
 }
 
+/*
+ * Switch bench conflicts (run 52 on 36913ec, proposals/3ds-switch-bench-36913ec-o3ds-results.md): apply_config sets
+ * every row's variables to the row's usual setting, rows in order, so when two rows give one variable different usual
+ * settings the later row's silently wins in every race but their own (the raw self-check's DKR_RAW_REGS usual 0 turned
+ * raw words off in all of run 52's usual races). Reports, for one list:
+ *   - two rows giving one variable different usual settings ("NAME=value" variables count as usual -1);
+ *   - a row's usual setting replacing one of the bench's own render settings (sBenchRender..., set before the rows;
+ *     DKR_FPS_PIN is set after them on purpose, so the uncapped rows' usual -1 is not a conflict);
+ *   - two rows in the all-together race giving one variable different test settings (the later row's wins).
+ * Diagnostic only: nothing about the races changes. Logged at the start of each switch bench run ("switch bench
+ * conflict" lines) and checked in CI by port_autorun_override_check. Returns the number of conflicts.
+ */
+static s32 bench_same_name(const char *a, const char *b) { // (the game's string.h has no strcmp)
+    while (*a != '\0' && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static s32 bench_pin_conflicts(const BenchSwitch *row, const char *name, s32 usual, const BenchPin *pins, s32 count,
+                               char *report, s32 size, s32 *at) {
+    s32 p, conflicts = 0;
+    for (p = 0; p < count; p++) {
+        if (bench_same_name(name, pins[p].name) && usual != pins[p].value) {
+            conflicts++;
+            *at += plat_snprintf(report + *at, size - *at,
+                                 "switch bench conflict: %s: row \"%s\" usual %d replaces the bench's own %d\n", name,
+                                 row->name, (int) usual, (int) pins[p].value);
+            if (*at >= size - 1) {
+                *at = size - 1;
+            }
+        }
+    }
+    return conflicts;
+}
+
+static s32 bench_conflicts(const BenchSwitch *list, s32 old3ds, char *report, s32 size) {
+    s32 i, j, k, m, at = 0, conflicts = 0;
+    report[0] = '\0';
+    for (i = 0; list[i].name != NULL; i++) {
+        for (k = 0; k < BENCH_SWITCH_VARS && list[i].env[k] != NULL; k++) {
+            s32 fixedA, usualA, testA;
+            const char *nameA = bench_var(list[i].env[k], &fixedA);
+            usualA = fixedA != BENCH_VAR_PLAIN ? -1 : list[i].usual;
+            testA = fixedA != BENCH_VAR_PLAIN ? fixedA : list[i].test;
+            conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRender, ARRAY_COUNT(sBenchRender), report,
+                                             size, &at);
+            conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRenderBoth, ARRAY_COUNT(sBenchRenderBoth),
+                                             report, size, &at);
+            if (!old3ds) {
+                conflicts += bench_pin_conflicts(&list[i], nameA, usualA, sBenchRenderNew3ds,
+                                                 ARRAY_COUNT(sBenchRenderNew3ds), report, size, &at);
+            }
+            for (j = i + 1; list[j].name != NULL; j++) {
+                for (m = 0; m < BENCH_SWITCH_VARS && list[j].env[m] != NULL; m++) {
+                    s32 fixedB, usualB, testB;
+                    const char *nameB = bench_var(list[j].env[m], &fixedB);
+                    if (!bench_same_name(nameA, nameB)) {
+                        continue;
+                    }
+                    usualB = fixedB != BENCH_VAR_PLAIN ? -1 : list[j].usual;
+                    testB = fixedB != BENCH_VAR_PLAIN ? fixedB : list[j].test;
+                    if (usualA != usualB) {
+                        conflicts++;
+                        at += plat_snprintf(report + at, size - at,
+                                            "switch bench conflict: %s: row \"%s\" usual %d, row \"%s\" usual %d (the "
+                                            "second wins in every race but their own)\n",
+                                            nameA, list[i].name, (int) usualA, list[j].name, (int) usualB);
+                    }
+                    if (!list[i].alone && !list[j].alone && testA != testB) {
+                        conflicts++;
+                        at += plat_snprintf(report + at, size - at,
+                                            "switch bench conflict: %s: rows \"%s\" test %d and \"%s\" test %d in the "
+                                            "all-together race (the second wins)\n",
+                                            nameA, list[i].name, (int) testA, list[j].name, (int) testB);
+                    }
+                    if (at >= size - 1) {
+                        at = size - 1;
+                    }
+                }
+            }
+        }
+    }
+    return conflicts;
+}
+
+/* At the start of a switch bench run: one log line per conflict, then the count (0 when the list is clean). */
+static void log_bench_conflicts(void) {
+    static char report[2048];
+    s32 conflicts = bench_conflicts(sSwitches, plat_old_3ds(), report, (s32) sizeof(report));
+    char *line = report;
+    while (*line != '\0') {
+        char *end = strchr(line, '\n');
+        if (end != NULL) {
+            *end = '\0';
+        }
+        port_log("autorun: %s", line);
+        if (end == NULL) {
+            break;
+        }
+        line = end + 1;
+    }
+    port_log("autorun: switch bench settings: %d conflicts", (int) conflicts);
+}
+
 static void set_phase(s32 phase);
 static void turn_off(const char *why);
+static void census_start(void);
 
 enum Phase {
     PHASE_OFF,
@@ -1560,12 +1709,14 @@ static s32 core_summary(char *out, s32 size) {
  * (DKR_PMU, profile.h ProfCpuStats; the renderer's "-" when it shares the game's core, kind icache or dcache);
  * P60 A1: kind datastall (DKR_PMU=3: the stall % column is the data hazard stall, PMN1 the instructions executed, in
  * thousands) or lsufull (DKR_PMU=4: the load/store unit full stall, PMN1 the data cache write misses);
+ * P64: kind dtlb (DKR_PMU=5) or itlb (6): the stall % column holds the data / instruction micro TLB misses a frame in
+ * thousands (events, not a share of cycles) and PMN1 the main TLB misses a frame in thousands;
  * ,shown,<pictures replaced before they reached the screen in the race>,<longest gap between two shown, ms>;
  * ,sndcb,<the DSP frame callback, ms a game frame>; ,clk,<plat_time_ns calls a game frame>. "-" where not measured.
  * Then (2026-11-20, DKR_WALK_VERTS coverage) ,wv,<draws the walk made>,<draws it left to the backend>,<left out for
  * room>, each a walked frame over the race ("-" when the walk made no frames: the switch off, or not a 3DS).
  */
-static const char *const sPmuKindNames[5] = { "-", "icache", "dcache", "datastall", "lsufull" };
+static const char *const sPmuKindNames[7] = { "-", "icache", "dcache", "datastall", "lsufull", "dtlb", "itlb" };
 
 static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
     const ProfCpuStats *c = stats != NULL ? &stats->cpu : NULL;
@@ -1576,13 +1727,16 @@ static void pmu_cells(char *out, s32 size, const ProfStats *stats) {
         u32 n = c != NULL ? c->pmuFrames[k] : 0;
         if (c != NULL && c->pmuKind && n > 0) {
             // (Zeros are written as zeros: counters that read 0 on the hardware are the finding, not "not measured")
+            // (P64: kinds 5 and 6 put PMN0's misses, thousands a frame, where the stall share goes)
             at += plat_snprintf(out + at, size - at, ",%.2f,%.1f,%.1f", c->cycles[k] / 1e6 / n,
-                                c->cycles[k] ? c->fetchStall[k] * 100.0 / c->cycles[k] : 0.0, c->pmn1[k] / 1e3 / n);
+                                c->pmuKind >= 5 ? c->fetchStall[k] / 1e3 / n
+                                : c->cycles[k] ? c->fetchStall[k] * 100.0 / c->cycles[k] : 0.0,
+                                c->pmn1[k] / 1e3 / n);
         } else {
             at += plat_snprintf(out + at, size - at, ",-,-,-");
         }
     }
-    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || c->pmuKind < 1 || c->pmuKind > 4 ? "-"
+    at += plat_snprintf(out + at, size - at, ",%s", c == NULL || c->pmuKind < 1 || c->pmuKind > 6 ? "-"
                                                     : sPmuKindNames[c->pmuKind]);
     if (c != NULL && c->shownMeasured) {
         at += plat_snprintf(out + at, size - at, ",shown,%u,%.1f", c->replaced, c->longestShownGapUs / 1000.0);
@@ -1954,12 +2108,16 @@ static void init(void) {
     }
     plat_free(state);
     port_log("autorun: run %d, %d races, starting at %d", (int) sRun, (int) sNumRaces, (int) sNext + 1);
+    if (sMode == MODE_SWITCH) {
+        log_bench_conflicts(); // (Diagnostic: a row silently replacing another's usual setting, run 52)
+    }
     reset_hitches();
     reset_draw_mix();
     sCoreLineCount = 0;
     if (sNext == 0) {
         io_queue(HITCH_FILE, "", NULL, FALSE); // A new run: the last one's hitches went with its issue.
         io_queue(DRAWMIX_FILE, "", NULL, FALSE);
+        io_queue(GPUDRAWS_FILE, "", NULL, FALSE);
         io_queue(RUN_ISSUE_FILE, "", NULL, FALSE); // Its progress reports make a new issue.
     }
     set_phase(PHASE_TITLE);
@@ -2253,6 +2411,7 @@ static void start_menu_pass(void) {
     sDriving = TRUE;
     sRaceLevel = level_id();
     prof_window_start(PROF_WINDOW_SESSION);
+    census_start();
     prof_core_window_start();
     prof_draw_mix_window(NULL, NULL, TRUE);
     sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
@@ -2358,6 +2517,66 @@ int port_autorun_input(unsigned short *buttons, signed char *stickX, signed char
 /* An instrumented build (profile-guided compiling) saves its counters here; nothing otherwise. */
 __attribute__((weak)) void port_autorun_section_done(const char *section) {
     (void) section;
+}
+
+/*
+ * P62 M1 (DKR_GPU_CENSUS; 2026-11-22, proposals/3ds-n3ds-gpu-headroom-plan.md): each race's GPU picture into
+ * GPUDRAWS_FILE, attached to the run's issue: the GPU timeline (memory fills, command lists, copies), the command
+ * lists by kind, the costliest draws and the detail of the 3 costliest and of the frame's first 3 (the New 3DS
+ * renderer's gpu_cuts.inc section 8 keeps them, from the frames it already times by draw). A measurement only: on by
+ * default in the New 3DS's switch bench and boss fights, off everywhere else (DKR_GPU_CENSUS=1 turns it on in any
+ * test run, 0 off). The renderer answers port_gpu_census: 1 starts counting (TRUE when the platform has a census),
+ * 2 stops, 3 writes the stopped race's lines into out (their length, or -1 while the renderer hasn't stopped yet).
+ * None on other platforms (this weak one).
+ */
+__attribute__((weak)) int port_gpu_census(int request, char *out, int size) {
+    (void) request;
+    (void) out;
+    (void) size;
+    return 0;
+}
+
+static s32 sCensusOn;        // Counting this race
+static s32 sCensusWaiting;   // Frames waited for the stopped race's lines (0: none pending)
+static char sCensusHead[256]; // The race's heading in GPUDRAWS_FILE
+
+static void census_start(void) {
+    sCensusOn = plat_switch("DKR_GPU_CENSUS", (sMode == MODE_SWITCH || sMode == MODE_BOSS) && !plat_old_3ds()) != 0 &&
+                port_gpu_census(1, NULL, 0);
+    sCensusWaiting = 0;
+}
+
+static void census_stop(const char *heading) {
+    if (!sCensusOn) {
+        return;
+    }
+    sCensusOn = FALSE;
+    port_gpu_census(2, NULL, 0);
+    plat_snprintf(sCensusHead, sizeof(sCensusHead), "%s", heading);
+    sCensusWaiting = 1;
+}
+
+/* Every frame: the stopped race's lines, once the renderer has stopped counting (it does at its next frame). */
+static void census_poll(void) {
+    static char text[8 * 1024];
+    s32 length, at;
+    if (sCensusWaiting == 0) {
+        return;
+    }
+    at = plat_snprintf(text, sizeof(text), "\n## %s\n\n", sCensusHead);
+    length = port_gpu_census(3, text + at, (int) sizeof(text) - at);
+    if (length < 0) {
+        if (++sCensusWaiting < 180) {
+            return;
+        }
+        length = plat_snprintf(text + at, sizeof(text) - at, "(none: the renderer never stopped counting)\n");
+    }
+    sCensusWaiting = 0;
+    append_file(GPUDRAWS_FILE, text,
+                "# The GPU in each race of the test runs (New 3DS, DKR_GPU_CENSUS; port/3ds/gpu_cuts.inc sections 1, 6 "
+                "and 8): the GPU timeline (ms a frame), the command lists cut at each kind (one frame in 60), the "
+                "costliest draws (one frame in 60 is cut before each of a window of draws) and the detail of the 3 "
+                "costliest single draws and of the frame's first 3.\n");
 }
 
 static s32 whole_ready(void);
@@ -2701,7 +2920,8 @@ static const char *timeline_cell(const BenchGroup *g) {
 
 /* P56: the switch bench's CPU cell: the fetch stall % of the game's core / the renderer's (DKR_PMU, "-" without), and the
  * pictures replaced before they reached the screen a race. P60 A1: a row that counted only another stall (DKR_PMU 3 or
- * 4) shows that one instead, marked D (data hazard) or L (load/store unit full), e.g. "D 12.3 / D 4.0". */
+ * 4) shows that one instead, marked D (data hazard) or L (load/store unit full), e.g. "D 12.3 / D 4.0". P64: DKR_PMU 5
+ * and 6 show the data (T) or instruction (I) micro TLB misses a frame in thousands, e.g. "T 4.1 / T 2.0". */
 static const char *cpu_cells(const BenchGroup *g) {
     static char cell[48];
     char a[16], b[16], r[12];
@@ -2909,7 +3129,12 @@ static void bench_summary(char *out, s32 size) {
                 // ,pmu,game mcycles,stall %,pmn1 k,render mcycles,stall %,pmn1 k,kind (pmu_cells)
                 s32 core;
                 // P60 A1: DKR_PMU 3 and 4 count another stall in the same column; kept apart from the fetch stall
-                s32 other = str_equal(fields[i + 7], "datastall") ? 'D' : str_equal(fields[i + 7], "lsufull") ? 'L' : 0;
+                // P64: DKR_PMU 5 and 6 put micro TLB misses (thousands a frame) there, marked T (data) and I
+                s32 other = str_equal(fields[i + 7], "datastall") ? 'D'
+                            : str_equal(fields[i + 7], "lsufull") ? 'L'
+                            : str_equal(fields[i + 7], "dtlb")    ? 'T'
+                            : str_equal(fields[i + 7], "itlb")    ? 'I'
+                                                                  : 0;
                 for (core = 0; core < 2; core++) {
                     if (fields[i + 2 + 3 * core][0] == '-') {
                         continue;
@@ -3500,6 +3725,15 @@ static void end_race(const char *outcome, s32 position) {
     record_result(outcome, position, sPhase == PHASE_RACING ? &sRaceStats : NULL);
     record_hitches(outcome);
     record_draw_mix(outcome);
+    {
+        Race *race = &sRaces[sNext];
+        char heading[256];
+        plat_snprintf(heading, sizeof(heading), "run %d race %d/%d: %s, %s, %s, %s, config %d (%s): %s", (int) sRun,
+                      (int) sNext + 1, (int) sNumRaces, stop_name(race), sCharacterNames[(s32) race->character],
+                      sVehicleNames[(s32) race->vehicle], graphics_setup(), is_bench() ? (int) race->config : -1,
+                      is_bench() ? config_name(race->config) : "-", outcome);
+        census_stop(heading);
+    }
     if (outcome_ok(outcome)) {
         if (sRaceStats.elapsedNs > 0) {
             sFpsSum += sRaceStats.gameFrames * 1e9 / sRaceStats.elapsedNs;
@@ -3687,6 +3921,7 @@ void port_autorun_frame(s32 updateRate) {
     if (sIoHeld > 0 && !io_quiet()) {
         io_release(); // P57 A2: the quiet window after the race start is over
     }
+    census_poll();
     if (sPhase == PHASE_RACING && sNext < sNumRaces && sRaces[sNext].kind == STOP_MENUS) {
         const char *outcome;
         sRaceRetraces += updateRate;
@@ -3716,6 +3951,7 @@ void port_autorun_frame(s32 updateRate) {
                     level_header()->laps = sRaces[sNext].laps; // The short whole game run: one lap
                 }
                 prof_window_start(PROF_WINDOW_SESSION);
+                census_start();
                 prof_core_window_start();
                 prof_draw_mix_window(NULL, NULL, TRUE);
                 sAudioGapsStart = gPlatCounters[PLAT_COUNTER_AUDIO_UNDERRUN];
@@ -3901,7 +4137,8 @@ s32 port_sweep_level_vertex(const void *vertices) {
  * switches as the bench does (apply_config) and checks that none was turned away by a full override table
  * (gPlatOverridesDropped), and that each row's own race reads each of its variables back at the row's test setting.
  * Until 2026-11-19 the table held 16 and silently dropped the rest, so most rows of both consoles raced the usual
- * settings. Returns the number of failures.
+ * settings. Also fails on any switch bench conflict (bench_conflicts: rows silently replacing each other's settings, as
+ * in run 52) and on a planted list whose three conflicts aren't all found. Returns the number of failures.
  */
 int port_autorun_override_check(char *report, int size) {
     s32 config, k, at = 0, failures = 0, configs;
@@ -3936,6 +4173,40 @@ int port_autorun_override_check(char *report, int size) {
         }
     }
     apply_config(-1);
+    {
+        // Rows silently replacing each other's settings (bench_conflicts): this console's lists, then a planted list
+        // that must report its three conflicts (rule K6: the check is shown to catch them in every CI run).
+        static const BenchSwitch sPlanted[] = {
+            { "planted A", { "DKR_PLANTED_ONE", "DKR_PLANTED_TWO", NULL }, -1, 1, 0, 0 },
+            { "planted B (usual 0 replaces A's -1)", { "DKR_PLANTED_ONE", NULL }, 0, 1, 1, 0 },
+            { "planted C (test 2 against A's 1, all together)", { "DKR_PLANTED_TWO=2", NULL }, -1, 0, 0, 0 },
+            { "planted D (usual 1 replaces the bench's own DKR_STEREO3D 0)", { "DKR_STEREO3D", NULL }, 1, 0, 1, 0 },
+            { NULL, { NULL }, 0, 0 },
+        };
+        static char lines[4096];
+        s32 n, l;
+        const BenchSwitch *lists[2];
+        s32 count = 0;
+        lists[count++] = plat_old_3ds() ? sSwitchesOld3ds : sSwitchesNew3ds;
+        if (!plat_old_3ds()) {
+            lists[count++] = sSwitchesShelved;
+        }
+        for (l = 0; l < count; l++) {
+            n = bench_conflicts(lists[l], plat_old_3ds(), lines, (s32) sizeof(lines));
+            at += plat_snprintf(report + at, size - at, "%s", lines);
+            failures += n;
+        }
+        n = bench_conflicts(sPlanted, plat_old_3ds(), lines, (s32) sizeof(lines));
+        at += plat_snprintf(report + at, size - at, "switch bench conflict self-test (planted list, want 3): %d found%s\n",
+                            (int) n, n == 3 ? ", ok" : ", FAILED");
+        if (n != 3) {
+            failures++;
+            at += plat_snprintf(report + at, size - at, "%s", lines);
+        }
+        if (at >= size - 1) {
+            at = size - 1;
+        }
+    }
     at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
                         plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) configs, (int) (SWITCH_CONFIGS - 1), (int) failures);
     sMode = savedMode;

@@ -61,7 +61,8 @@ def measured(group, key):
 
 
 # P60 A1: DKR_PMU 3 and 4 put another stall in the stall % columns (pmn1_kind datastall / lsufull); marked D or L.
-OTHER_STALLS = {"datastall": "D", "lsufull": "L"}
+# P64: DKR_PMU 5 and 6 put micro TLB misses (thousands a frame, not a %) there (dtlb / itlb); marked T or I.
+OTHER_STALLS = {"datastall": "D", "lsufull": "L", "dtlb": "T", "itlb": "I"}
 
 
 def cpu_cells(group):

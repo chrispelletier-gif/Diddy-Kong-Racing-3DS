@@ -46,7 +46,9 @@ import sys
 # Run 50 (2026-11-22, PR #589): #580 (fused VFP vertex loop), #581 (fog skip) and #583 (raw GPU words) bought ~5 ms of
 # the Old 3DS's limiting core for the growth, so the budgets were reset to the merged tree's CI debug build.
 # Then #590 (P61 W) and the run 50 Old 3DS defaults (#592): hot_span 80,560 in master 5c5a6e7's CI debug build.
-BUDGETS = {"hot_span": 80560, "walk_set": 22912, "backend_set": 21200}
+# P62 M (GPU census, 2026-11-22): no hot code added, but the census's data moved the walk's globals, and
+# native_sprite_free came out 16 bytes longer (its addresses' constants): hot_span 80,576 in that branch's debug build.
+BUDGETS = {"hot_span": 80576, "walk_set": 22912, "backend_set": 21200}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024

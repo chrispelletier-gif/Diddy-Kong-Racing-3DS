@@ -645,6 +645,9 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
             }
             if (sFragStats > 0) {
                 sFragRaster[sFragKind]++;
+#ifdef PORT_OCCL_COUNT
+                sFragTrackMask[y * W + x] |= sFragKind == 1; // PORT_DRAW_TRACK (occl_count.c's check)
+#endif
                 sDrawRaster++;
                 sFragBlend[sFragKind] += st->blend == GFX_BLEND_ALPHA || st->blend == GFX_BLEND_ADD;
                 sFragNoDepth[sFragKind] += !st->depthTest;
@@ -940,6 +943,9 @@ void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, 
                 sTagMaxArea = area > W * H ? W * H : area;
             }
         }
+    }
+    if (sFragStats == 4) {
+        frag_first_draw(state, verts, numTriangles * 3, numTriangles);
     }
     if (sFragStats == 2 && (sFragKind == 5 || sFragKind == 6 || sFragKind == 0) &&
         sFramesRendered % 60 == 0 && sDrawRaster > W * H / 50) {

@@ -1008,6 +1008,7 @@ static void send_test_results(void) {
     }
     add_file(&report, "autorun_drawmix.csv");
     add_file(&report, "autorun_cores.txt"); // Each race's core times and uncapped ceiling (port_autorun.c CORES_FILE)
+    add_file(&report, "autorun_gpudraws.txt"); // P62 M1: each race's GPU timeline, kinds and costliest draws (New 3DS)
 #ifdef PORT_PGO_GEN
     add_file(&report, "pgo_counts.bin"); // The profile-guided build's training counts (make PGO=gen, src/plat/pgo.c)
 #endif
