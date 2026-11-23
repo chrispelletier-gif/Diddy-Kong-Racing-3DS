@@ -58,6 +58,10 @@ static float sBackW[MAX_W * H], sVisW[MAX_W * H];
 // 190, so only something between them (a wall, scenery, another kart) is this close.
 #define NEAR_DISTANCE 30.0f
 static int sDepthBits;
+/* P67 DKR_HIDDEN_SKIP_CHECK (gfxb_hidden_check): the check is on; the pixels counted this frame (each once). */
+static int sHiddenCheck, sHiddenTable, sHiddenFrame; /* sHiddenFrame: bit k, table k was checked this frame */
+static unsigned int sHiddenPixels[8];
+static uint8_t sHiddenMask[MAX_W * H]; /* bit k: counted for table k */
 static float sDepthScale;
 #include "frag_stats.inc"
 
@@ -157,7 +161,75 @@ static void sweep_frame(void) {
     sTagMaxArea = 0.0f;
 }
 
+void gfxb_hidden_check(int value) {
+    static int sTrace = -1;
+    if (sTrace < 0) {
+        sTrace = getenv("DKR_HIDDEN_TRACE") != NULL;
+    }
+    if (sTrace) {
+        plat_log("hidden trace backend: frame %u check %d table %d (pixels so far %u)", sFramesRendered, value & 1,
+                 (value >> 1) & 7, sHiddenPixels[(value >> 1) & 7]);
+    }
+    sHiddenCheck = value & 1;
+    sHiddenTable = (value >> 1) & 7;
+    sHiddenFrame |= sHiddenCheck << sHiddenTable;
+}
+
+void gfxb_hidden_check_call(void *payload) {
+    gfxb_hidden_check(*(int *) payload);
+}
+
+/* DKR_HIDDEN_CHECK_DUMP=<pixels>: a frame whose table 0 check counts at least that many pixels is written as
+ * hidden_check_<frame>.ppm in DKR_DATA_DIR, the counted pixels in magenta (for finding why a bake missed them). */
+static void hidden_check_dump(unsigned int pixels) {
+    static int sMin = -1, sDumps;
+    char path[512];
+    const char *dir = getenv("DKR_DATA_DIR");
+    FILE *f;
+    int i;
+    if (sMin < 0) {
+        const char *e = getenv("DKR_HIDDEN_CHECK_DUMP");
+        sMin = e != NULL ? atoi(e) : 0;
+    }
+    if (sMin <= 0 || pixels < (unsigned int) sMin || sDumps >= 40) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/hidden_check_%06u.ppm", dir != NULL ? dir : ".", sFramesRendered);
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        return;
+    }
+    sDumps++;
+    fprintf(f, "P6\n%d %d\n255\n", W, H);
+    for (i = 0; i < W * H; i++) {
+        uint8_t px[3] = { sColor[i * 4], sColor[i * 4 + 1], sColor[i * 4 + 2] };
+        if ((sHiddenMask[i] & 1) && ((i % W + i / W) & 1)) {
+            px[0] = 255;
+            px[1] = 0;
+            px[2] = 255;
+        }
+        fwrite(px, 1, 3, f);
+    }
+    fclose(f);
+    plat_log("hidden check: frame %u, %u pixels -> %s", sFramesRendered, pixels, path);
+}
+
 void gfxb_end_frame(void) {
+    if (sHiddenFrame) {
+        int k;
+        if (sHiddenFrame & 1) {
+            hidden_check_dump(sHiddenPixels[0]);
+        }
+        for (k = 0; k < 8; k++) {
+            if (sHiddenFrame & (1 << k)) {
+                port_hidden_check_pixels(k, sHiddenPixels[k]);
+            }
+            sHiddenPixels[k] = 0;
+        }
+        memset(sHiddenMask, 0, sizeof(sHiddenMask));
+        sHiddenFrame = 0;
+    }
+    sHiddenCheck = 0;
     sFramesRendered++;
     frag_frame_end();
     if (sSweep != NULL) {
@@ -721,6 +793,15 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 }
             }
             if (st->alphaTest && out[3] * 255.0f < st->alphaRef) {
+                continue;
+            }
+            if (sHiddenCheck) {
+                // P67 check: a pixel of a batch the hidden batch table left out passes the depth test. Count it (once
+                // a frame) and write nothing.
+                if ((!sDepthBits || passQ) && !(sHiddenMask[y * W + x] & (1 << sHiddenTable))) {
+                    sHiddenMask[y * W + x] |= (uint8_t) (1 << sHiddenTable);
+                    sHiddenPixels[sHiddenTable]++;
+                }
                 continue;
             }
             if (sDepthBits) {

@@ -51,6 +51,17 @@ SCENARIOS = [
         "save": "eeprom_complete.bin",
         "env": {"DKR_INPUT": "INPUT"},
     },
+    {
+        # Not in the default run (--only race): P67's DKR_HIDDEN_SKIP identity check needs a real race camera (the
+        # attract demos' cameras count as cutscenes)
+        "name": "race",
+        "about": "an autorun race of Jungle Falls, one lap, AI driving the player too",
+        "frames": 1500,
+        "every": 20,
+        "optional": True,
+        "env": {"DKR_AUTORUN": "1", "DKR_AUTORUN_QUICK": "1", "DKR_AUTORUN_QUICK_TRACKS": "29",
+                "DKR_AUTORUN_QUICK_PASSES": "1", "DKR_AUTORUN_LAPS": "1"},
+    },
 ]
 
 # Levels for the "levels" scenario (ASSET_LEVEL_* ids).
@@ -172,7 +183,7 @@ def main():
     head_env = dict(item.split("=", 1) for item in args.head_env)
 
     prepare_scenarios()
-    scenarios = SCENARIOS
+    scenarios = [s for s in SCENARIOS if not s.get("optional")]
     if args.only:
         names = args.only.split(",")
         scenarios = [s for s in SCENARIOS if s["name"] in names]

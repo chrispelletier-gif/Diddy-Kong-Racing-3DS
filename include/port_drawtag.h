@@ -160,6 +160,10 @@ int port_native_particles(void);
  * TexHandle) and the material captured next takes the decoded texture straight from there: no texture load ops, no
  * hashing. A texture it doesn't know is learned then (or, failing that, its list runs as before). */
 #define PORT_NTEX_TAG 0x50480000 /* "PH" */
+/* P67 DKR_HIDDEN_SKIP_CHECK (tracks.c, hidden_skip.c): PORT_HCHECK_TAG | 1 before the track batches the hidden batch
+ * table left out are drawn again, PORT_HCHECK_TAG | 0 after. In between the renderer writes no colour and no depth and
+ * counts the pixels that pass the depth test (gfxb_hidden_check). */
+#define PORT_HCHECK_TAG 0x50430000 /* "PC" */
 /* A material's capture (after port_nmat_key said so): its settings in full and the PORT_NMAT_TAG, with its texture
  * by handle when DKR_NATIVE_TEXHANDLE is on. For game sites that capture by hand (tracks.c, objects.c). */
 void port_nmat_capture(Gfx **dl, int id, void *texture, int flags, int texOffset);

@@ -24,6 +24,8 @@
 #define gfxb_gpu_kinds_frame refb_gpu_kinds_frame
 #define gfxb_gpu_kind refb_gpu_kind
 #define gfxb_gpu_kind_call refb_gpu_kind_call
+#define gfxb_hidden_check refb_hidden_check
+#define gfxb_hidden_check_call refb_hidden_check_call
 #define gfxb_walk_frame_start refb_walk_frame_start
 #define gfxb_walk_draw_indexed refb_walk_draw_indexed
 #define gfxb_walk_coverage refb_walk_coverage

@@ -422,6 +422,43 @@ jobs:
             exit 1
           fi
 
+      - name: Hidden batch table lookup
+        # P67: the game's table lookup (port/include/port_hidden_skip.h) on a small table: every gate, the row bits and
+        # the checks that refuse a table. Then broken on purpose (rule K6: the pitch gate left out), which must fail.
+        run: |
+          gcc -Wall -Iport/include -o "$RUNNER_TEMP/hidden_table_test" port/tools/hidden_table_test.c
+          "$RUNNER_TEMP/hidden_table_test"
+          gcc -Wall -DHIDDEN_TABLE_TEST_BREAK -Iport/include -o "$RUNNER_TEMP/hidden_table_break" port/tools/hidden_table_test.c
+          if "$RUNNER_TEMP/hidden_table_break" > "$RUNNER_TEMP/hidden_table_break.txt"; then
+            cat "$RUNNER_TEMP/hidden_table_break.txt"; echo "the broken test passed"; exit 1
+          fi
+          tail -1 "$RUNNER_TEMP/hidden_table_break.txt"
+          # Staleness: the committed tables were generated from the committed pose log (a full re-bake takes hours;
+          # that they fit the ROM's model is the geometry hash, checked by the skip run below)
+          python3 port/tools/hidden_bake.py stale
+
+      - name: Hidden batch skip check
+        # P67: DKR_HIDDEN_SKIP leaves out track batches no camera in the cell can see, so the same build must draw
+        # identical frames with it on and off (the race scenario: one lap of Jungle Falls; the attract demos' cameras
+        # count as cutscenes, which never skip). Then one lap of Jungle Falls with the self-check, which draws the
+        # left-out batches again and counts the pixels that pass the depth test: it must say PASS (0 pixels), and broken
+        # on purpose (rule K6: DKR_HIDDEN_SKIP_BREAK also leaves out the biggest seen batch of the camera's segment) it
+        # must say FAILED.
+        run: |
+          python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" --head port/build/host/dkr \
+            --base port/build/host/dkr --head-env DKR_HIDDEN_SKIP=1 --only race --out "$RUNNER_TEMP/hidden-skip" \
+            --max-images 0 --no-repeat-check --fail-on-diff
+          logs=$(find "$RUNNER_TEMP/hidden-skip/runs" -path "*/head/log.txt")
+          grep -h "hidden skip: level" $logs | tail -n 2
+          if ! grep -q "hidden skip: level .* skipped [0-9.]* ([1-9][0-9.]*%)" $logs; then
+            echo "::error::DKR_HIDDEN_SKIP left nothing out in the race scenario (the table never applied)."
+            exit 1
+          fi
+          python3 port/tools/hidden_bake.py check --exe port/build/host/dkr --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --work "$RUNNER_TEMP/hidden-check" --tracks 29
+          python3 port/tools/hidden_bake.py check --exe port/build/host/dkr --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --work "$RUNNER_TEMP/hidden-check-break" --tracks 29 --break
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register
