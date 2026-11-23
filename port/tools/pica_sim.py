@@ -348,6 +348,39 @@ def check_track_slim(sim, transform_i, track_i, count, break_it=False):
     return differ
 
 
+def check_anim(sim, transform_i, anim_i, count, break_it=False):
+    """anim.v.pica (keyframe A, step d, frac) against transform.v.pica fed the position obj_animate makes,
+    A + ((u32) (d * frac) >> 4) as s16: every output identical. break_it (rule K6): the shader is given frac + 1."""
+    rng = random.Random(4321)
+    differ = 0
+    for n in range(count):
+        u = random_model_uniforms(rng, lit=rng.random() < 0.5, texc=rng.random() < 0.5)
+        ins = random_model_inputs(rng)
+        a = [rng.randint(-8000, 8000) for _ in range(3)]
+        d = [rng.randint(-128, 127) for _ in range(3)]
+        frac = rng.randint(0, 15)
+        pos = []
+        for k in range(3):
+            step = ((d[k] * frac) & 0xFFFFFFFF) >> 4
+            step = step & 0xFFFF
+            step = step - 0x10000 if step >= 0x8000 else step
+            pos.append(((a[k] + step + 0x8000) & 0xFFFF) - 0x8000)
+        want = dict(ins)
+        want[0] = (pos[0], pos[1], pos[2], 1)
+        got = dict(ins)
+        got[0] = (a[0], a[1], a[2], 1)
+        got[4] = (d[0], d[1], d[2], 1)
+        ua = dict(u)
+        ua["animf"] = (((frac + 1) if break_it else frac) / 16.0, 0, 0, 0)
+        x = sim.run(transform_i, want, u)
+        y = sim.run(anim_i, got, {k: ua[k] for k in ua if k in sim.dvles[anim_i].uniforms})
+        if x != y:
+            differ += 1
+            if differ <= 3 and not break_it:
+                print("  vertex %d differs (A %s d %s frac %d):\n    transform %s\n    anim      %s" % (n, a, d, frac, x, y))
+    return differ
+
+
 def main(argv):
     if len(argv) < 3 or argv[1] != "check":
         print(__doc__)
@@ -361,7 +394,7 @@ def main(argv):
                        sim.code[d.main] >> 26 == 0x00 and i == 1)
     track_i = None
     for i, d in enumerate(sim.dvles):
-        if i > 1 and not d.geo and "mtx" in d.uniforms and "wavea" not in d.uniforms:
+        if i > 1 and not d.geo and "mtx" in d.uniforms and "wavea" not in d.uniforms and "animf" not in d.uniforms:
             track_i = i
             break
     failed = False
@@ -373,6 +406,15 @@ def main(argv):
         broken = check_track_slim(sim, transform_i, track_i, 200, break_it=True)
         print("  broken on purpose (K6: vertices lit, which only the transform shader does): %d of 200 differ" % broken)
         failed |= broken == 0
+    anim_i = next((i for i, d in enumerate(sim.dvles) if not d.geo and "animf" in d.uniforms), None)
+    if anim_i is not None:
+        differ = check_anim(sim, transform_i, anim_i, 2000)
+        print("anim shader (DVLE %d) against transform (DVLE %d) fed obj_animate's position: 2000 vertices, %d differ" %
+              (anim_i, transform_i, differ))
+        failed |= differ != 0
+        broken = check_anim(sim, transform_i, anim_i, 200, break_it=True)
+        print("  broken on purpose (K6: frac one step on): %d of 200 differ" % broken)
+        failed |= broken < 100
     try:
         import pica_wave_check
         failed |= not pica_wave_check.run(sim, argv[3:])
