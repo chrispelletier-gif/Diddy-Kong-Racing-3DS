@@ -1028,6 +1028,16 @@ void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsign
     *draws = *reads = 0;
 }
 
+volatile int gGfxbFramePartsOn; // P57 E: the 3DS backend's frame start/end parts; this one has none
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts) {
+    int i;
+    for (i = 0; i < GFXB_FPART_COUNT; i++) {
+        ticks[i] = 0;
+    }
+    *frames = *reads = *listParts = 0;
+}
+
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles) {
     static GfxVertex sConverted[GFX_MAX_BATCH_VERTICES];
