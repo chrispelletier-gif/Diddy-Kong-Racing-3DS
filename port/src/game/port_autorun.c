@@ -470,7 +470,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // renderer core (host model; unmeasured). Host, Whale Bay: 135 kart records a frame drawn in 91 draws. The walk
     // steps row splits "other paths" into "kart set-up", "kart corners" and "kart queue"; the self-check row (which
     // turns the batching on itself) must say 0 wrong.
-    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 }, // alone: the all-together race takes 2
+    // (Bit 1 alone is left out of the all-together race, where the slim row below sets the same switch.)
+    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 },
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
