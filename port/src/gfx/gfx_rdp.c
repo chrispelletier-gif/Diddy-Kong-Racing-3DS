@@ -1806,6 +1806,9 @@ static GfxTexture *sRectTex[2];
  * (nmat_capture), so the capture doesn't hash and look up what the handle already names. */
 static GfxTexture *sCapTex;
 static s32 sNativeFrame; // DKR_NATIVE_FRAME (read_switches): the record dispatcher, nframe.c (roadmap R4)
+/* P55 S4 (DKR_FLAT_FRAME, read_switches): the flat dispatcher (nframe.c run_flat_frame) on frames flat_frame_ok allows.
+ * DKR_FLAT_FRAME_CHECK (test builds): its self-check (flat_check_record); 2 breaks the frame's conditions on purpose. */
+static s32 sFlatFrame, sFlatCheck;
 static s32 sTexHandleOn; // DKR_NATIVE_TEXHANDLE (read_switches): 1 on, 2 also checks each capture against a lookup
 /* Textures set by handle; learned during frames; texture lists run all the same (not a plain texture load);
  * captures that took the handle's texture; with DKR_NATIVE_TEXHANDLE=2, captures where it differed from a lookup. */
@@ -2883,6 +2886,9 @@ static COLD void read_switches_now(void) {
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
     sNativeFrame = plat_switch("DKR_NATIVE_FRAME", plat_old_3ds()) != 0;
+    // P55 S4: the flat dispatcher (off until an Old 3DS bench has raced it) and its self-check.
+    sFlatFrame = plat_switch("DKR_FLAT_FRAME", 0) != 0;
+    sFlatCheck = PLAT_DEBUG_TOOLS ? plat_switch("DKR_FLAT_FRAME_CHECK", 0) : 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
     // P60 D: sprite tiles as points, the GPU's geometry shader making their corners (1: the backend's CPU makes them,
     // 2: the geometry shader where it can). Off by default until an Old 3DS bench has raced it.
@@ -6885,7 +6891,17 @@ static COLD void kart_counts_log(void) {
     sKcFrames = sKcTableFull = 0;
 }
 
-static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id) {
+/* P55 S4 (DKR_FLAT_FRAME): the record path built twice from this one source. flat = 1 is the flat dispatcher's
+ * (run_flat_frame): it runs only on frames with no walk steps timed, no census, no kart counts and no remote vertex maths
+ * (port_gfx_run_frame, flat_frame_ok), so those marks and paths are left out of its code, which is all it changes. */
+#define NR_STEP(s) ((flat) ? 0u : walk_step(s))
+#define NR_CENSUS(tag, cls, op)                                                                                        \
+    do {                                                                                                               \
+        if (!(flat)) {                                                                                                 \
+            CENSUS_NOTE(tag, cls, op);                                                                                 \
+        }                                                                                                              \
+    } while (0)
+static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id, const s32 flat) {
     struct {
         const Vertex *src;
         s32 count, dest, matrix;
@@ -6947,7 +6963,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
-        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
+        NR_CENSUS(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: not captured", (unsigned long) id);
         }
@@ -6957,7 +6973,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         mat->valid = FALSE;
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
-        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
+        NR_CENSUS(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
         }
@@ -6965,9 +6981,9 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     }
     if (dl[1].words.w0 & 0x40000) {
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
         }
-        walk_step(WS_SPRITES);
+        NR_STEP(WS_SPRITES);
         native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -6982,12 +6998,12 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         // gets its tables remade in place (native_find).
     } else if (dynamic || g.billboard) {
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
         }
-        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+        if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
             kart_count(g.billboard ? KC_BILLBOARD : KC_DYNAMIC, vtx, numVerts, count, NULL);
         }
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -7013,7 +7029,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     if (total > MAX_VERTICES || count <= 0) {
         return 2;
     }
-    walk_step(WS_FIND);
+    NR_STEP(WS_FIND);
     {
         s32 track = !dynamic; // The level's batches (tracks.c) and models' (render_mesh): see native_find
         mesh = native_find(tris, count, dynamic, track);
@@ -7021,15 +7037,15 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
         }
     }
-    walk_step(WS_BOX);
+    NR_STEP(WS_BOX);
     if (mesh == NULL || mesh->maxVertex >= total) {
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         sNativeDeclined++;
-        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+        if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
             kart_count(KC_NO_TABLES, vtx, total, count, NULL);
         }
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
         }
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured); // No tables: through the slots
         sNDrawStats[0]++;
@@ -7054,8 +7070,8 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             return 2;
         }
     }
-    walk_step(WS_PATHS);
-    if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+    NR_STEP(WS_PATHS);
+    if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
         kart_count(dynamic ? KC_DYNAMIC : numLoads == 1 ? KC_ONE_LOAD : KC_TWO_LOADS, vtx, total, count, mesh);
     }
     if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
@@ -7070,7 +7086,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         sNDrawStats[0]++;
         return 2;
     }
-    if (sRemote && sModelCount == 0 && sMeshPartCount == 0) {
+    if ((!flat && sRemote) && sModelCount == 0 && sMeshPartCount == 0) {
         // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
         // waiting, the walk works out the screen edges first (below), as a draw wholly off the screen leaves it be.
         s32 ordered;
@@ -7129,7 +7145,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         const Vertex *src = loads[i].src;
         s32 c = loads[i].count;
         float(*m)[4] = g.matrices[loads[i].matrix];
-        walk_step(WS_TRANSFORM);
+        NR_STEP(WS_TRANSFORM);
 #ifdef HAVE_VFP_VECTORS
         // The VFP's short vectors, as the old path's loads use them on the Old 3DS (DKR_VFP_VECTORS; the native path
         // had been left on the scalar transform). P61 W3 (a): with the vertices prefetched ahead (DKR_WALK_PLD 1).
@@ -7142,7 +7158,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         {
             transform_vertices(src, c, verts, m);
         }
-        walk_step(WS_COLOUR);
+        NR_STEP(WS_COLOUR);
         for (k = 0; k < c; k++) {
             u32 rgba;
             __builtin_memcpy(&rgba, &src[k].r, 4);
@@ -7163,7 +7179,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
-    walk_step(WS_EDGES);
+    NR_STEP(WS_EDGES);
     {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
         // again (the same sums, so the same values). A batch wholly past one edge is done here.
@@ -7184,7 +7200,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             return 2;
         }
     }
-    walk_step(WS_STATE);
+    NR_STEP(WS_STATE);
     nmat_state(mat, &state, textured);
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
@@ -7220,11 +7236,11 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         su0 = u0.scale, ou0 = u0.offset, sv0 = v0.scale, ov0 = v0.offset;
     }
     direct = opaque_direct_ok(&state);
-    if (direct && sRemote) {
+    if (direct && (!flat && sRemote)) {
         // A batch was waiting (see above): it is drawn, and the backend takes the finished vertices.
         TexAxis ax[4] = {u0, v0, u1, v1};
         s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         flush_batch();
         native_remote_send(mat, &state, ax, vtx, total, count, mesh, numLoads, loads[0].count, matrices, frontCull,
                            FALSE, TRUE);
@@ -7243,7 +7259,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     sBatchGeneration++;
     generation = sBatchGeneration;
     stamp = ++sNativeStamp;
-    walk_step(WS_TRIS);
+    NR_STEP(WS_TRIS);
     for (i = 0; i < count; i++) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
@@ -7278,7 +7294,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         if (direct) {
             if (batchKey != batchedKey || bucket->numTris >= MAX_BATCH_TRIANGLES ||
                 bucket->numVerts + 3 > MAX_BATCH_VERTICES) {
-                u32 ws = walk_step(WS_BUCKET);
+                u32 ws = NR_STEP(WS_BUCKET);
                 if (batchKey != batchedKey) {
                     bucket = opaque_bucket_find(&state);
                     batchedKey = batchKey;
@@ -7293,16 +7309,16 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
                 vcount = &bucket->numVerts;
                 stamp = ++sNativeStamp; // Corner indices are the bucket's
                 sOpaquePending = TRUE;
-                walk_step(ws);
+                NR_STEP(ws);
             }
             out = &bucket->indices[bucket->numTris++ * 3];
             directTris++;
         } else if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
             out = &sBatchIndices[sBatchCount++ * 3];
         } else {
-            u32 ws = walk_step(WS_BUCKET);
+            u32 ws = NR_STEP(WS_BUCKET);
             out = batch_triangle(&state);
-            walk_step(ws);
+            NR_STEP(ws);
             batchedKey = batchKey;
             if (sBatchGeneration != generation) {
                 generation = sBatchGeneration;
@@ -7360,9 +7376,15 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
 /* The record (native_record_body) with its steps timed from its entry (P61 M2, DKR_WALK_STEPS). */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     u32 ws = walk_step(WS_ENTRY);
-    s32 used = native_record_body(dl, remaining, id);
+    s32 used = native_record_body(dl, remaining, id, 0);
     walk_step(ws);
     return used;
+}
+
+/* P55 S4 (DKR_FLAT_FRAME): the flat dispatcher's record, with no step marks, census notes, kart counts or remote
+ * vertex maths (native_record_body with flat = 1). */
+static NOINLINE HOT s32 native_record_flat(const Gfx *dl, s32 remaining, u32 id) {
+    return native_record_body(dl, remaining, id, 1);
 }
 
 /******************************** RDP rectangles ********************************/
@@ -8757,8 +8779,73 @@ static inline void native_particle_end(u32 w1) {
  * own. dl is the word after the tag, remaining the words left in the list from there. Returns the words the tag used
  * after itself. Shared by the walk (run_command_list) and the record dispatcher (nframe.c, through gfx_frame_tag).
  */
-static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth) {
+/*
+ * P55 S4 (DKR_FLAT_FRAME): whether this frame may run on the flat dispatcher. Its record path (native_record_flat) has
+ * the step marks, census notes, kart counts and remote vertex maths compiled out, so it draws exactly what the record
+ * dispatcher draws only while all of those are off. Read once at the frame start (port_gfx_run_frame).
+ */
+static u32 sFlatStats[3]; // Frames run flat; frames that could not be (the conditions below); the check's wrong records
+static u32 sFlatChecked, sFlatLogFrame;
+static s32 sFlatBroken; // DKR_FLAT_FRAME_CHECK=2 has turned the kart counts on in this frame (put back at its end)
+
+static inline s32 flat_frame_conditions(void) {
+    return !sRemote && !sWalkStepsOn && !(sCensusOn > 0 && !sCensusSkip) && !sKartCounts;
+}
+
+static s32 flat_frame_ok(void) {
+    if (!sFlatFrame) {
+        return FALSE;
+    }
+    if (!flat_frame_conditions()) {
+        sFlatStats[1]++;
+        return FALSE;
+    }
+    sFlatStats[0]++;
+    return TRUE;
+}
+
+/*
+ * DKR_FLAT_FRAME_CHECK (test builds, rule K6): at every record the flat dispatcher runs, the conditions flat_frame_ok
+ * found at the frame start must still hold (another thread may turn the census or the profiler's steps on mid-frame,
+ * and a later change could make one of them change inside a frame); a record run flat while one of the paths it lacks
+ * is live is counted wrong (the race's checks_wrong). =2 breaks it on purpose: it turns the kart counts on at the
+ * frame's first record (put back at the frame end), so every later record must be reported. Logs "flat frame: N frames
+ * flat, M not, K records checked, W wrong" every 600 frames.
+ */
+static COLD NOINLINE void flat_check_record(void) {
+    s32 wrong;
+    if (sFlatCheck == 2 && !sFlatBroken) {
+        sFlatBroken = TRUE;
+        sKartCounts = TRUE;
+    }
+    wrong = !flat_frame_conditions();
+    sFlatChecked++;
+    sFlatStats[2] += (u32) wrong;
+    plat_check_report("flat frame", wrong);
+}
+
+static COLD void flat_frame_end(void) {
+    if (sFlatBroken) {
+        sFlatBroken = FALSE;
+        sKartCounts = FALSE;
+    }
+    if ((sFlatFrame || sFlatCheck) && sFrameCount - sFlatLogFrame >= 600) {
+        sFlatLogFrame = sFrameCount;
+        plat_log("flat frame: %lu frames flat, %lu not, %lu records checked, %lu wrong", (unsigned long) sFlatStats[0],
+                 (unsigned long) sFlatStats[1], (unsigned long) sFlatChecked, (unsigned long) sFlatStats[2]);
+    }
+}
+
+static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth,
+                                                         const s32 flat) {
     const Gfx *start = dl;
+    if (flat && (w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+        // P55 S4: the commonest tag first (a race frame's records are ~60% DRAW), into the flat record path.
+        if (UNLIKELY(sFlatCheck)) {
+            flat_check_record();
+        }
+        return native_record_flat(dl, remaining, w1 & 0xFFFF);
+    }
     if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
         kind_switch(w1);
     } else if (w1 == PORT_NATIVE_TAG) {
@@ -8872,7 +8959,7 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
                 }
 #endif
                 {
-                    s32 used = run_tag(dl, w1, remaining, depth);
+                    s32 used = run_tag(dl, w1, remaining, depth, 0);
                     dl += used;
                     remaining -= used;
                 }
@@ -9107,13 +9194,23 @@ static void run_dl(const Gfx *dl, s32 maxCommands) {
  * them: these are its way in (gfx_internal.h). Each does exactly what run_command_list does for the same words.
  */
 HOT s32 gfx_frame_tag(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
-    return run_tag(data, w1, remaining, depth);
+    return run_tag(data, w1, remaining, depth, 0);
 }
 
 void gfx_frame_op(u32 w0, u32 w1) {
     u32 ws = walk_step(WS_OPS);
     native_op(w0, w1);
     walk_step(ws);
+}
+
+/* P55 S4 (DKR_FLAT_FRAME, run_flat_frame): the same, for frames with nothing timed, counted or sent to the backend's
+ * vertex maths (flat_frame_ok), so the record path is native_record_flat and a state op goes to native_op directly. */
+HOT s32 gfx_frame_tag_flat(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
+    return run_tag(data, w1, remaining, depth, 1);
+}
+
+HOT void gfx_frame_op_flat(u32 w0, u32 w1) {
+    native_op(w0, w1);
 }
 
 s32 gfx_frame_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
@@ -9790,9 +9887,16 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     // snapshot, drawn by the reference renderer or op counted keep the walk, which those tools read.
     if (sNativeFrame && gPortNativeOps && sNativeRecords && sTexHandleOn && port_native_leftovers() &&
         port_native_camera() && !sTracing && !snapshot && !REF_ACTIVE() && sOpCountOn <= 0) {
-        run_native_frame((const Gfx *) frameDl);
+        if (flat_frame_ok()) {
+            run_flat_frame((const Gfx *) frameDl); // P55 S4 (DKR_FLAT_FRAME)
+        } else {
+            run_native_frame((const Gfx *) frameDl);
+        }
     } else {
         run_dl((const Gfx *) frameDl, -1);
+    }
+    if (UNLIKELY(sFlatFrame || sFlatCheck)) {
+        flat_frame_end();
     }
     STALL_MARK("track flush", 0, 0);
     track_flush();
