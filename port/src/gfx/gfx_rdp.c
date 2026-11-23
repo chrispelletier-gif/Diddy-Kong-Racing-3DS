@@ -175,6 +175,17 @@ static s32 sSpriteGsCheck; // DKR_SPRITE_GS_CHECK (sprite_point_check)
 /* Points made, sprite tiles left as triangles, draws, corners checked, corners differing, then the tiles left as
  * triangles by reason: opaque (the sorter's), flat, any other */
 static unsigned long sSprStats[8];
+/* P65 rank 1 (DKR_SPRITE_TABLE, sprite_table_try): while set, the batch holds sprite table vertices (sTabVerts, in
+ * sTabGroups' groups) instead of triangles, the triangles and their corners counted as for triangles. */
+static GfxTabVertex sTabVerts[GFX_TAB_MAX_VERTS];
+static GfxTabGroup sTabGroups[GFX_TAB_GROUPS];
+static s32 sBatchTable, sTabVertCount, sTabGroupCount;
+static float sTabFogMul, sTabFogOffset;
+static s32 sSpriteTable;      // DKR_SPRITE_TABLE
+static s32 sSpriteTableCheck; // DKR_SPRITE_TABLE_CHECK (sprite_table_check; 2: the check broken on purpose, rule K6)
+/* Tiles drawn from the table, table draws, tiles left to the old way (by reason: load not noted, anchor, the tile,
+ * the state), loads noted, loads transformed late, corners checked, corners differing */
+static unsigned long sTabStats[10];
 /* The batch of model triangles (GPU vertex maths, P30), see sModelVerts, and the batch of mesh parts (P31, P34),
  * see mesh_part, which share the state and parameters: only one of the three batches holds triangles at a time. */
 static s32 sModelCount;
@@ -2497,6 +2508,26 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
     return b;
 }
 
+/* The sprite table batch (sprite_table_try): one backend call, in the same place in the order of draws. */
+static NOINLINE void flush_table_batch(void) {
+    u32 part = walk_switch(WALK_DRAWS);
+    OPAQUE_FLUSH();
+    gfx_split_draw_sprite_table(&sBatchState, sTabGroups, sTabGroupCount, sTabFogMul, sTabFogOffset, sTabVerts,
+                                sTabVertCount);
+    prof_count(PROF_TRIANGLES, sBatchCount);
+    prof_count(PROF_DRAWS, 1);
+    sMix.kinds[sDrawKind].draws++;
+    sMix.kinds[sDrawKind].tris += sBatchCount;
+    sTabStats[1]++;
+    walk_switch(part);
+    sBatchCount = 0;
+    sBatchVertices = 0;
+    sBatchTable = FALSE;
+    sTabVertCount = 0;
+    sTabGroupCount = 0;
+    sBatchGeneration++;
+}
+
 /* The batch of sprite points (sprite_point_try): one backend call, in the same place in the order of draws. */
 static NOINLINE void flush_point_batch(void) {
     u32 part = walk_switch(WALK_DRAWS);
@@ -2519,6 +2550,10 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         u32 part;
         if (sBatchPoints) {
             flush_point_batch();
+            return;
+        }
+        if (sBatchTable) {
+            flush_table_batch();
             return;
         }
         if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
@@ -2576,8 +2611,8 @@ static inline s32 batch_has_room(void) {
 /* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
  * another state. */
 static HOT void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
-    if (UNLIKELY(sBatchPoints)) {
-        flush_batch(); // Triangles never join a batch of sprite points
+    if (UNLIKELY(sBatchPoints | sBatchTable)) {
+        flush_batch(); // Triangles never join a batch of sprite points or a sprite table
     }
     if (sModelCount > 0 || sMeshPartCount > 0) {
         flush_mesh_batch();
@@ -2889,6 +2924,14 @@ static COLD void read_switches_now(void) {
     sSpriteGs = plat_switch("DKR_SPRITE_GS", 0);
 #if PLAT_DEBUG_TOOLS
     sSpriteGsCheck = plat_switch("DKR_SPRITE_GS_CHECK", 0) != 0;
+#endif
+    // P65 rank 1: billboard sprite tiles handed over as the game's own vertices and one matrix per load, the GPU
+    // working out the corners (gfx_c3d.c: 1 the frame's transform program for one-load draws and sprite_table.v.pica
+    // for the rest, 2 sprite_table.v.pica for all, 3 the transform program for all). Off by default until an Old 3DS
+    // bench has raced it; P60 D's points take precedence when both are on.
+    sSpriteTable = plat_switch("DKR_SPRITE_TABLE", 0) != 0;
+#if PLAT_DEBUG_TOOLS
+    sSpriteTableCheck = plat_switch("DKR_SPRITE_TABLE_CHECK", 0); // 2: broken on purpose (rule K6)
 #endif
 }
 
@@ -4441,6 +4484,20 @@ static COLD void frame_logs_600(void) {
         }
         __builtin_memset(sSprStats, 0, sizeof(sSprStats));
     }
+    if (sSpriteTable) {
+        plat_log("sprite table (DKR_SPRITE_TABLE): %lu tiles in %lu draws, %lu loads noted (%lu transformed late); "
+                 "tiles left the old way: %lu no load, %lu after the table declined, %lu vertices, %lu state",
+                 sTabStats[0], sTabStats[1], sTabStats[7], sTabStats[6], sTabStats[2], sTabStats[3], sTabStats[4],
+                 sTabStats[5]);
+#if PLAT_DEBUG_TOOLS
+        if (sSpriteTableCheck) {
+            plat_log("sprite table check: %lu corners compared, %lu differ%s", sTabStats[8], sTabStats[9],
+                     sTabStats[9] ? " (DIFFER)" : "");
+            plat_check_report("sprite table", sTabStats[9] != 0); /* the race's checks_run / checks_wrong */
+        }
+#endif
+        __builtin_memset(sTabStats, 0, sizeof(sTabStats));
+    }
     if (sNativeGpuSwitch) {
         plat_log("native GPU maths: %u draws by the GPU, %u left out, %u left to the CPU (GPU maths %s)",
                  (unsigned) sNGpuStats[0], (unsigned) sNGpuStats[1], (unsigned) sNGpuStats[2],
@@ -5991,6 +6048,259 @@ static NOINLINE s32 sprite_point_try(const RspVertex *V, const Triangle *tris, s
     return TRUE;
 }
 
+/*
+ * P65 rank 1 (DKR_SPRITE_TABLE, default off; proposals/3ds-sprite-table-plan.md). A billboard load (the vertices after
+ * the anchor in slot 0) is not transformed: it is noted (tab_load_note), with its billboard matrix, anchor and fog
+ * values, and each tile that uses it hands the game's own vertices to the backend with one 4x4 matrix per load (a
+ * group, gfx_backend.h GfxTabGroup): the transform, place_billboard's scale and anchor, and the viewport fold, all
+ * affine in the vertex. The 3DS's vertex shader (sprite_table.v.pica) does the rest. A tile the table can't take
+ * (a vertex not of this load, two textures, the atlas, fog the load didn't work out, the reference renderer, tracing,
+ * audited frames) has the load transformed late (tab_load_resolve, the old code) and is drawn the old way. The walk
+ * doesn't reject tiles off the screen here: the GPU clips them.
+ */
+typedef struct TabLoad {
+    const Vertex *src; // The game's vertices, loaded from slot 1
+    s32 count;
+    float m[4][4];     // The billboard matrix it was loaded with
+    float placed[4][4]; // Its rows after place_billboard (clip x, y, z, w from x, y, z, 1), before the viewport
+    RspVertex anchor;  // Slot 0 then
+    s16 fogMul, fogOffset;
+    u8 fog;            // Loaded with fog (its factors are worked out)
+    u8 pending;        // Not yet transformed into sSprVerts (tab_load_resolve)
+    u32 serial, frame;
+    s16 boxMin[3], boxMax[3];
+} TabLoad;
+static TabLoad sTabLoad;
+static u32 sTabLoadSerial = 1, sTabGroupSerial; // The load the batch's last group is of
+static s32 sTabLoadNoted; // sTabLoad is the sprite frame's current load (sSprValid's)
+
+/* The noted load transformed into sSprVerts as load_vertices_core would have done it when it came. */
+static NOINLINE COLD void tab_load_resolve(void) {
+    s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
+    u8 lightOn = sLightOn;
+    u32 f;
+    g.fogMul = sTabLoad.fogMul;
+    g.fogOffset = sTabLoad.fogOffset;
+    sLightOn = 0;
+    load_vertices_core(sSprVerts, &sTabLoad.anchor, sTabLoad.src, sTabLoad.count, 1, sTabLoad.m, sTabLoad.fog, TRUE,
+                       &f);
+    g.fogMul = fogMul;
+    g.fogOffset = fogOffset;
+    sLightOn = lightOn;
+    sSprFlat = f;
+    sTabLoad.pending = FALSE;
+    sTabStats[6]++;
+}
+
+/* Notes a billboard load of numVerts vertices from slot 1 instead of transforming it (sSprVerts[0] is its anchor). */
+static NOINLINE void tab_load_note(const Vertex *vtx, s32 numVerts, float (*m)[4], s32 fog) {
+    const RspVertex *A = &sSprVerts[0];
+    float scaleY = 1.0f / plat_fov_tan_scale(), scaleX = scaleY / plat_aspect_scale();
+    float scaleZ = plat_camera_near() / 10.0f;
+    s32 i, j;
+    if (sTabLoadNoted && sTabLoad.pending && sTabLoad.count > numVerts) {
+        tab_load_resolve(); // Its slots past the new load stay the old load's, as they would have
+    }
+    sTabLoad.src = vtx;
+    sTabLoad.count = numVerts;
+    __builtin_memcpy(sTabLoad.m, m, sizeof(sTabLoad.m));
+    sTabLoad.anchor = *A;
+    sTabLoad.fogMul = g.fogMul;
+    sTabLoad.fogOffset = g.fogOffset;
+    sTabLoad.fog = fog != 0;
+    sTabLoad.pending = TRUE;
+    sTabLoad.serial = ++sTabLoadSerial;
+    sTabLoad.frame = (u32) sFrameCount;
+    // place_billboard: x * scaleX + anchor x, y * scaleY + anchor y, (z - 1) * scaleZ + 1 + anchor z, w + anchor w
+    for (j = 0; j < 4; j++) {
+        sTabLoad.placed[0][j] = m[j][0] * scaleX;
+        sTabLoad.placed[1][j] = m[j][1] * scaleY;
+        sTabLoad.placed[2][j] = m[j][2] * scaleZ;
+        sTabLoad.placed[3][j] = m[j][3];
+    }
+    sTabLoad.placed[0][3] += A->x;
+    sTabLoad.placed[1][3] += A->y;
+    sTabLoad.placed[2][3] += 1.0f - scaleZ + A->z;
+    sTabLoad.placed[3][3] += A->w;
+    for (j = 0; j < 3; j++) {
+        sTabLoad.boxMin[j] = 0x7FFF;
+        sTabLoad.boxMax[j] = -0x8000;
+    }
+    for (i = 0; i < numVerts; i++) {
+        const s16 *c = &vtx[i].x;
+        for (j = 0; j < 3; j++) {
+            sTabLoad.boxMin[j] = c[j] < sTabLoad.boxMin[j] ? c[j] : sTabLoad.boxMin[j];
+            sTabLoad.boxMax[j] = c[j] > sTabLoad.boxMax[j] ? c[j] : sTabLoad.boxMax[j];
+        }
+    }
+    sTabLoadNoted = TRUE;
+    sSprFlat = 0;
+    sTabStats[7]++;
+}
+
+#if PLAT_DEBUG_TOOLS
+/* DKR_SPRITE_TABLE_CHECK: each corner as gfx_tab_corner makes it (the backend's CPU and the shader's maths) against
+ * the corner the old way would have made (load_vertices_core, then sprite_corner). Counted in the log. */
+static NOINLINE COLD void sprite_table_check(const Triangle *tris, s32 count, const GfxTabVertex *o,
+                                             const GfxTabGroup *gr, s32 fog, s32 textured, const TexAxis *u0,
+                                             const TexAxis *v0) {
+    static RspVertex ref[MAX_VERTICES];
+    s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
+    u8 lightOn = sLightOn;
+    Viewport vp;
+    u32 f;
+    s32 i, k, bad = 0;
+    g.fogMul = sTabLoad.fogMul;
+    g.fogOffset = sTabLoad.fogOffset;
+    sLightOn = 0;
+    ref[0] = sTabLoad.anchor;
+    load_vertices_core(ref, &sTabLoad.anchor, sTabLoad.src, sTabLoad.count, 1, sTabLoad.m, sTabLoad.fog, TRUE, &f);
+    g.fogMul = fogMul;
+    g.fogOffset = fogOffset;
+    sLightOn = lightOn;
+    viewport_init(&vp);
+    for (i = 0; i < count; i++) {
+        for (k = 0; k < 3; k++, o++) {
+            GfxVertex a, b;
+            float ps, ts;
+            s32 da;
+            gfx_tab_corner(&a, o, gr, sTabFogMul, sTabFogOffset);
+            sprite_corner(&b, &ref[tris[i].verticesArray[1 + k]], &vp, fog, u0, v0, tri_uv(&tris[i], k));
+            ps = 1e-4f * ((b.w < 0.0f ? -b.w : b.w) + (b.x < 0.0f ? -b.x : b.x) + (b.y < 0.0f ? -b.y : b.y) + 1.0f);
+            ts = 1e-4f * ((b.u0 < 0.0f ? -b.u0 : b.u0) + (b.v0 < 0.0f ? -b.v0 : b.v0) + 1.0f);
+            da = (s32) a.a - (s32) b.a;
+            if (!sprite_close(a.x, b.x, ps) || !sprite_close(a.y, b.y, ps) || !sprite_close(a.z, b.z, ps) ||
+                !sprite_close(a.w, b.w, ps) || (textured && (!sprite_close(a.u0, b.u0, ts) ||
+                                                             !sprite_close(a.v0, b.v0, ts))) ||
+                a.r != b.r || a.g != b.g || a.b != b.b || da > 1 || da < -1) {
+                if (bad++ == 0 && sTabStats[9] == 0) {
+                    plat_log("sprite table check: first difference: table (%.3f %.3f %.3f %.3f uv %.3f %.3f a %d), "
+                             "walk (%.3f %.3f %.3f %.3f uv %.3f %.3f a %d)", a.x, a.y, a.z, a.w, a.u0, a.v0, a.a, b.x,
+                             b.y, b.z, b.w, b.u0, b.v0, b.a);
+                }
+            }
+        }
+    }
+    sTabStats[8] += (unsigned long) count * 3;
+    sTabStats[9] += (unsigned long) bad;
+}
+#endif
+
+/* Draws the tile from the table (the batch); FALSE leaves it to the old way (the load not yet transformed). */
+static NOINLINE s32 sprite_table_try(const Triangle *tris, s32 count, s32 textured) {
+    GfxDrawState state;
+    TexAxis u0, v0;
+    Viewport vp;
+    GfxTabVertex *o;
+    GfxTabGroup *gr;
+    float tex[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    s32 i, k, fog, group, newGroup;
+    u8 backface;
+    if (!sTabLoadNoted || sTabLoad.frame != (u32) sFrameCount) {
+        sTabStats[2]++;
+        return FALSE;
+    }
+    if (count <= 0 || count * 3 > GFX_TAB_MAX_VERTS || REF_ACTIVE() || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame)) {
+        sTabStats[4]++;
+        return FALSE;
+    }
+    backface = tris[0].flags & BACKFACE_DRAW;
+    for (i = 0; i < count; i++) {
+        const u8 *idx = &tris[i].verticesArray[1];
+        if ((tris[i].flags & BACKFACE_DRAW) != backface || idx[0] < 1 || idx[1] < 1 || idx[2] < 1 ||
+            idx[0] > sTabLoad.count || idx[1] > sTabLoad.count || idx[2] > sTabLoad.count) {
+            sTabStats[4]++;
+            return FALSE; // A vertex not of this load (the anchor, or an older load's), or mixed culling
+        }
+    }
+    fog = (g.geometryMode & G_FOG) != 0;
+    if (fog && UNLIKELY(sFogSkip) && !g.combinerShadeAlpha) {
+        fog = FALSE; // As draw_triangles_impl (P60 C): nothing reads the shade alpha
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    if ((fog && !sTabLoad.fog) || state.textures[1] != NULL ||
+        (state.textures[0] != NULL && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1))) {
+        sTabStats[5]++;
+        return FALSE;
+    }
+    state.cullMode = backface ? 0 : (g.vpScale[0] < 0.0f ? 2 : 1);
+    state.flat = 0;
+    if (state.textures[0] != NULL) {
+        sprite_axes(&state, &u0, &v0);
+        tex[0] = u0.scale, tex[1] = u0.offset, tex[2] = v0.scale, tex[3] = v0.offset;
+        if (u0.divide) {
+            tex[0] /= u0.size, tex[1] /= u0.size;
+        }
+        if (v0.divide) {
+            tex[2] /= v0.size, tex[3] /= v0.size;
+        }
+    }
+    newGroup = sTabGroupCount == 0 || sTabGroupSerial != sTabLoad.serial ||
+               __builtin_memcmp(sTabGroups[sTabGroupCount - 1].tex, tex, sizeof(tex)) != 0;
+    if (!sBatchTable || sTabVertCount + count * 3 > GFX_TAB_MAX_VERTS || (newGroup && sTabGroupCount == GFX_TAB_GROUPS) ||
+        sTabFogMul != (float) sTabLoad.fogMul || sTabFogOffset != (float) sTabLoad.fogOffset ||
+        !draw_states_equal(&state, &sBatchState)) {
+        if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+            flush_batch();
+        }
+        sBatchState = state;
+        sBatchTable = TRUE;
+        sTabVertCount = 0;
+        sTabGroupCount = 0;
+        sTabFogMul = (float) sTabLoad.fogMul;
+        sTabFogOffset = (float) sTabLoad.fogOffset;
+        newGroup = TRUE;
+    }
+    if (newGroup) {
+        const float(*P)[4] = sTabLoad.placed;
+        gr = &sTabGroups[sTabGroupCount++];
+        viewport_init(&vp);
+        for (k = 0; k < 4; k++) {
+            gr->m[0][k] = P[0][k] * vp.scaleX + P[3][k] * vp.transX;
+            gr->m[1][k] = P[1][k] * vp.scaleY + P[3][k] * vp.transY;
+            gr->m[2][k] = P[2][k];
+            gr->m[3][k] = P[3][k];
+        }
+#if PLAT_DEBUG_TOOLS
+        if (sSpriteTableCheck == 2) {
+            gr->m[0][3] -= sTabLoad.anchor.x * vp.scaleX; // Rule K6: the check broken on purpose (the anchor's x left out)
+        }
+#endif
+        __builtin_memcpy(gr->tex, tex, sizeof(tex));
+        __builtin_memcpy(gr->boxMin, sTabLoad.boxMin, sizeof(gr->boxMin));
+        __builtin_memcpy(gr->boxMax, sTabLoad.boxMax, sizeof(gr->boxMax));
+        sTabGroupSerial = sTabLoad.serial;
+    }
+    group = (sTabGroupCount - 1) * GFX_TAB_ROWS;
+    gr = &sTabGroups[sTabGroupCount - 1];
+    o = &sTabVerts[sTabVertCount];
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        for (k = 0; k < 3; k++, o++) {
+            const Vertex *v = &sTabLoad.src[t->verticesArray[1 + k] - 1];
+            TexCoords uv = tri_uv(t, k);
+            o->x = v->x, o->y = v->y, o->z = v->z, o->row = (s16) group;
+            o->u = uv.u, o->v = uv.v, o->fog = (s16) fog, o->pad = 0;
+            o->r = v->r, o->g = v->g, o->b = v->b, o->a = v->a;
+        }
+    }
+#if PLAT_DEBUG_TOOLS
+    if (UNLIKELY(sSpriteTableCheck)) {
+        sprite_table_check(tris, count, &sTabVerts[sTabVertCount], gr, fog, state.textures[0] != NULL, &u0, &v0);
+    }
+#endif
+    sTabVertCount += count * 3;
+    sBatchCount += count;
+    sBatchVertices += count * 3;
+    sObjTris[sDrawObj] += count;
+    sTabStats[0]++;
+    return TRUE;
+}
+
 /* A sprite tile: the vertices it loads go where the frame's appending load would have put them, and the tiles after
  * it that load none (four of five) use them again. Returns FALSE (nothing done) for a tile that loads none with no
  * load of this frame's kept. */
@@ -6016,10 +6326,15 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
         g.tiles[1] = mat->tiles[1];
         g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
         ws = walk_step(WS_SPR_CORNERS); // P65 rank 1's measurement: the corners a vertex shader could make
-        load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
-                           &f);
+        if (sSpriteTable && !sSpriteGs && g.billboard && dest == 1 && !flatBits && !sLightOn && !REF_ACTIVE()) {
+            tab_load_note(vtx, numVerts, g.matrices[g.curMatrix], mat->fog); // P65 rank 1: transformed only if needed
+        } else {
+            sTabLoadNoted = FALSE;
+            load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog,
+                               g.billboard, &f);
+            sSprFlat = flatBits | f;
+        }
         walk_step(ws);
-        sSprFlat = flatBits | f;
         sSprFrame = (u32) sFrameCount;
         sSprValid = TRUE;
     } else if (sSprValid && sSprFrame == (u32) sFrameCount) {
@@ -6033,11 +6348,19 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
     ws = walk_step(WS_SPR_TRIS);
-    if (!sSpriteGs) {
-        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
-    } else if (!sprite_point_try(sSprVerts, tris, count, textured)) {
-        sSprStats[1]++;
-        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    if (sTabLoadNoted && sprite_table_try(tris, count, textured)) {
+        // P65 rank 1: drawn from the table
+    } else {
+        if (sTabLoadNoted && sTabLoad.pending) {
+            tab_load_resolve(); // The old way needs the load's corners
+            sTabStats[3]++;
+        }
+        if (!sSpriteGs) {
+            draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+        } else if (!sprite_point_try(sSprVerts, tris, count, textured)) {
+            sSprStats[1]++;
+            draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+        }
     }
     walk_step(ws);
     sPresetAxes = NULL;

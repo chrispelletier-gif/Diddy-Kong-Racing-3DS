@@ -277,6 +277,64 @@ static inline void gfx_sprite_expand(const GfxSpritePoint *pts, int n, GfxVertex
 int gfxb_sprite_points(void);
 void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints);
 /*
+ * Sprite table (roadmap P65 rank 1, DKR_SPRITE_TABLE, default off; proposals/3ds-sprite-table-plan.md). A billboard
+ * load's corners are an affine function of the game's own vertices (the billboard matrix, place_billboard's scale and
+ * anchor, the viewport fold), so the walk hands over the game's s16 vertices with one 4x4 matrix per load (a group)
+ * instead of working out every corner: the 3DS's vertex shader (sprite_table.v.pica) does the maths, reading its
+ * group's rows from a table of uniforms. Each triangle is three GfxTabVertex (no shared vertices, no indices). The
+ * group also holds the draw's first texture's axes, so a group is one load with one set of axes; up to
+ * GFX_TAB_GROUPS of them a draw. gfx_tab_expand makes the same corners on the CPU (the host's backend, the 3DS's
+ * fallback and the walk's self-check): position and texture coordinates as the shader does them, the fog factor as
+ * the walk's fog_factor does it.
+ */
+#define GFX_TAB_GROUPS 15
+#define GFX_TAB_ROWS 5 /* a group's uniform rows: the matrix's four, then the texture axes */
+#define GFX_TAB_MAX_VERTS (GFX_MAX_BATCH_TRIANGLES * 3)
+typedef struct GfxTabGroup {
+    float m[4][4];              /* rows: clip x, y, z, w = row . (x, y, z, 1), the viewport folded in */
+    float tex[4];               /* s = u * tex[0] - tex[1], t = v * tex[2] - tex[3] (u, v: the game's texture coordinates) */
+    short boxMin[3], boxMax[3]; /* the load's vertices' box, for the backend's guard band test */
+} GfxTabGroup;
+typedef struct GfxTabVertex {
+    short x, y, z, row;     /* the game's vertex; row: its group's first table row (group * GFX_TAB_ROWS) */
+    short u, v, fog, pad;   /* texture coordinates; fog 1: the alpha is the fog factor */
+    unsigned char r, g, b, a;
+} GfxTabVertex;
+typedef char gfx_tab_vertex_is_20_bytes[sizeof(GfxTabVertex) == 20 ? 1 : -1];
+
+/* Whether the backend takes sprite tables itself (gfxb_draw_sprite_table); 0: the frontend expands them. */
+int gfxb_sprite_table(void);
+void gfxb_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                            float fogOffset, const GfxTabVertex *verts, int numVerts);
+
+/* One corner as the table's shader makes it (in the walk's clip space, before the 3DS's screen mapping). */
+static inline void gfx_tab_corner(GfxVertex *o, const GfxTabVertex *s, const GfxTabGroup *gr, float fogMul,
+                                  float fogOffset) {
+    float x = s->x, y = s->y, z = s->z;
+    o->x = x * gr->m[0][0] + y * gr->m[0][1] + z * gr->m[0][2] + gr->m[0][3];
+    o->y = x * gr->m[1][0] + y * gr->m[1][1] + z * gr->m[1][2] + gr->m[1][3];
+    o->z = x * gr->m[2][0] + y * gr->m[2][1] + z * gr->m[2][2] + gr->m[2][3];
+    o->w = x * gr->m[3][0] + y * gr->m[3][1] + z * gr->m[3][2] + gr->m[3][3];
+    o->u0 = s->u * gr->tex[0] - gr->tex[1];
+    o->v0 = s->v * gr->tex[2] - gr->tex[3];
+    o->u1 = 0.0f, o->v1 = 0.0f;
+    o->r = s->r, o->g = s->g, o->b = s->b, o->a = s->a;
+    if (s->fog) {
+        float w = (o->w != 0.0f) ? o->w : 0.0001f, f = (o->z / w) * fogMul + fogOffset;
+        o->a = (f < 0.0f) ? 0 : (f > 255.0f) ? 255 : (unsigned char) f;
+    }
+}
+
+/* The table's triangles as gfxb_draw_indexed takes them: numVerts corners, indices 0 to numVerts - 1. */
+static inline void gfx_tab_expand(const GfxTabGroup *groups, float fogMul, float fogOffset, const GfxTabVertex *verts,
+                                  int numVerts, GfxVertex *out, unsigned short *indices) {
+    int i;
+    for (i = 0; i < numVerts; i++) {
+        gfx_tab_corner(&out[i], &verts[i], &groups[verts[i].row / GFX_TAB_ROWS], fogMul, fogOffset);
+        indices[i] = (unsigned short) i;
+    }
+}
+/*
  * GPU vertex maths. While the backend says so (gfxb_gpu_transform, at the start of each frame), the
  * frontend hands triangles over in the game's own model space where it can, with the draw's matrix, and the GPU
  * transforms them; everything else (billboards, flat draws, triangles whose box may cross the guard band) still comes

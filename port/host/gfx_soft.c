@@ -877,6 +877,23 @@ void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int
     gfxb_draw_indexed(state, sVerts, numPoints * 4, sIdx, numPoints * 2);
 }
 
+/* Sprite tables (P65 rank 1) are the 3DS backend's: here the frontend expands them into indexed draws. */
+int gfxb_sprite_table(void) {
+    return 0;
+}
+
+void gfxb_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                            float fogOffset, const GfxTabVertex *verts, int numVerts) {
+    static GfxVertex sVerts[GFX_TAB_MAX_VERTS];
+    static unsigned short sIdx[GFX_TAB_MAX_VERTS];
+    (void) numGroups;
+    if (numVerts > GFX_TAB_MAX_VERTS) {
+        numVerts = GFX_TAB_MAX_VERTS;
+    }
+    gfx_tab_expand(groups, fogMul, fogOffset, verts, numVerts, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numVerts, sIdx, numVerts / 3);
+}
+
 void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;

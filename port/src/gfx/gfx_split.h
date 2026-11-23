@@ -25,6 +25,10 @@ void gfx_split_draw_indexed(const GfxDrawState *state, const GfxVertex *verts, i
 /* Sprite points (P60 D, gfx_backend.h GfxSpritePoint): to the backend's gfxb_draw_sprites, or expanded into an indexed
  * draw where the backend doesn't take them. */
 void gfx_split_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int numPoints);
+/* Sprite tables (P65 rank 1, gfx_backend.h GfxTabVertex): to the backend's gfxb_draw_sprite_table, or expanded into an
+ * indexed draw where the backend doesn't take them. */
+void gfx_split_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                                 float fogOffset, const GfxTabVertex *verts, int numVerts);
 /*
  * P63 DKR_SPLIT_REF: an indexed draw handed over by pointer instead of copied into the queue. The caller keeps verts and
  * indices unchanged until gfx_split_ref_done says the ticket (*ticket) is done: the backend has drawn them. check
