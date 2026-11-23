@@ -4389,8 +4389,42 @@ static void read_switches(void) {
 
 static void walk_publish_consts(void);
 
+/*
+ * P57 E (gfx_backend.h GFXB_FPART_*, DKR_FRAME_PARTS default 1): the frame start and end in named parts, on the
+ * backend mix's timed frames only (an Old 3DS's 1 in 8). Each mark adds the span since the last to its part, so the
+ * parts cover the two functions end to end; gfx_split.c checks their sum against its own "frame start/end" bucket.
+ */
+volatile int gGfxbFramePartsOn;
+static int sFpOn;
+static unsigned long long sFpLast, sFpTicks[GFXB_FPART_COUNT];
+static unsigned int sFpFrames, sFpReads, sFpListParts;
+
+static inline void fpart(int part) {
+    unsigned long long now;
+    if (__builtin_expect(!sFpOn, 1)) {
+        return;
+    }
+    now = plat_ticks();
+    sFpTicks[part] += now - sFpLast;
+    sFpLast = now;
+    sFpReads++;
+}
+
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts) {
+    memcpy(ticks, sFpTicks, sizeof(sFpTicks)); // (another core's: a torn value is one rough frame)
+    *frames = sFpFrames;
+    *reads = sFpReads;
+    *listParts = sFpListParts;
+}
+
 void gfxb_start_frame(void) {
     FrameSlot *slot;
+    sFpOn = gGfxbFramePartsOn && plat_switch("DKR_FRAME_PARTS", 1) != 0;
+    if (sFpOn) {
+        sFpLast = plat_ticks();
+        sFpReads++;
+    }
 #if PLAT_DEBUG_TOOLS
     // P56 K2 (DKR_PMU): the renderer's core counted once a frame, when it is not the game's (a New 3DS's renderer, or
     // an Old 3DS's two-core renderer backend on the system core). Once a frame: a few system calls.
@@ -4403,6 +4437,7 @@ void gfxb_start_frame(void) {
     capture_pending_frame(); // Outside a frame, so the copy waits for the GPU to finish the previous one.
     apply_screen_mode();
     adaptive_pick();
+    fpart(GFXB_FPART_CAPTURE);
     // The first frame of a render target clears it with the GPU idle, and a snapshot frame is checked once the GPU
     // has drawn it, before the next is built: those wait for the GPU first, as every frame used to.
     // A suspend or exit asked for while the renderer was idle (the HOME hook stops waiting after 2 s) is taken here,
@@ -4413,6 +4448,7 @@ void gfxb_start_frame(void) {
         // The application is closing or suspended: stop here, with the GPU idle and no frame being built.
         plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
     }
+    fpart(GFXB_FPART_START_WAIT);
     gPlatGfxStage = "drawing";
 
     slot = &sSlots[sRec];
@@ -4458,7 +4494,9 @@ void gfxb_start_frame(void) {
     }
     C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
     set_frame_band();
+    fpart(GFXB_FPART_SETUP);
     promote_textures();
+    fpart(GFXB_FPART_PROMOTE);
     forget_gpu_state();
     // The switch bench sets these itself (BENCH_*), so the player's settings don't change what it measures.
     sGuardBandFrame = plat_3ds_guard_band_setting();
@@ -4480,6 +4518,7 @@ void gfxb_start_frame(void) {
     sFrameStarted = 1;
     walk_publish_consts(); // DKR_WALK_VERTS: this frame's settings, for the walk
     raw_frame_start();     // DKR_RAW_REGS
+    fpart(GFXB_FPART_START_REST);
 }
 
 /* DKR_GFX_TEST draws a reference quad: a 16x16 texture, red on top, blue at the bottom, with a green left column. */
@@ -4601,6 +4640,11 @@ static void fill_wait(void) {
 }
 
 void gfxb_end_frame(void) {
+    if (sFpOn) {
+        // The span since the start's last mark is the frame's draws (other records): not a part of the start or end.
+        sFpLast = plat_ticks();
+        sFpReads++;
+    }
     if (sBackendLoadMs > 0) {
         // DKR_BACKEND_LOAD (tunnel bench): this core kept busy that long, as a heavier frame would.
         unsigned long long until = plat_time_ns() + (unsigned long long) sBackendLoadMs * 1000000ULL;
@@ -4634,6 +4678,7 @@ void gfxb_end_frame(void) {
         float usage;
         int i;
 
+        fpart(GFXB_FPART_TALLIES);
         if (full_flush()) {
             gpu_flush(sVbo, sVboUsed);
             if (sIboUsed > 0) {
@@ -4642,6 +4687,7 @@ void gfxb_end_frame(void) {
         } else {
             flush_new_vertices();
         }
+        fpart(GFXB_FPART_VERTICES);
         slot->words = (u32) (gpuCmdBuf + gpuCmdBufOffset - slot->cmd);
         usage = (float) slot->words / sCmdWords;
         if (usage > sMaxUsage) {
@@ -4664,6 +4710,7 @@ void gfxb_end_frame(void) {
                          (unsigned long) (vramSpaceFree() / 1024));
             }
         }
+        fpart(GFXB_FPART_LOGS);
         if (sOverlap) {
             // Built while the GPU drew the last frame: wait for it now, then hand this one over.
             unsigned long long start = prof_enabled() ? plat_time_ns() : 0;
@@ -4674,6 +4721,7 @@ void gfxb_end_frame(void) {
         }
         // C3D_FrameBegin set citro3d's own command buffer: carry on in the slot's, where the frame is.
         GPUCMD_SetBuffer(tail, tailSize, tailOffset);
+        fpart(GFXB_FPART_END_WAIT);
         if (colour_fill_queue()) {
             // The colour clear's fill, with the depth clear's if it is one too (gpu_cuts.inc).
             fill_wait();
@@ -4688,6 +4736,10 @@ void gfxb_end_frame(void) {
         if (!sFull && sFlushTest == 1) {
             heap_flush();
         }
+        fpart(GFXB_FPART_FILLS);
+        if (sFpOn) {
+            sFpListParts += slot->numParts;
+        }
         for (i = 0; i < slot->numParts; i++) {
             if (sSvcFlush) {
                 gpu_flush(slot->partAddr[i], slot->partWords[i] * 4);
@@ -4697,6 +4749,7 @@ void gfxb_end_frame(void) {
             }
             probe_after_part(i);
         }
+        fpart(GFXB_FPART_LISTS);
         adaptive_link(slot);
         sTarget->used = true;
         if (sStereo) {
@@ -4713,11 +4766,13 @@ void gfxb_end_frame(void) {
         if (!triple_choose()) {
             wait_for_present();
         }
+        fpart(GFXB_FPART_PRESENT);
         find_recent_screen();
         history_sample();
         watch_for_line();
         sTripleGet = sTripleFrame; // citro3d's display transfer goes to our buffer (see sTripleFrame)
         timeline_arm();
+        fpart(GFXB_FPART_SCREEN);
         if (full_flush()) {
             heap_flush(); // What C3D_FrameEnd(0) would do, timed
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -4731,6 +4786,7 @@ void gfxb_end_frame(void) {
         } else {
             C3D_FrameEnd(GX_CMDLIST_FLUSH);
         }
+        fpart(GFXB_FPART_C3D_END);
         sTripleGet = 0;
         timeline_expect(); // gpu_cuts.inc
         history_note_copy();
@@ -4743,6 +4799,11 @@ void gfxb_end_frame(void) {
         wait_for_gpu(0);
         plat_3ds_quit_point(PLAT_3DS_PARKED_GPU_IDLE);
         C3D_FrameEnd(GX_CMDLIST_FLUSH); // Empty: ends the frame wait_for_gpu began.
+    }
+    if (sFpOn) {
+        fpart(GFXB_FPART_AFTER);
+        sFpFrames++;
+        sFpOn = 0;
     }
 }
 

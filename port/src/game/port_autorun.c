@@ -436,6 +436,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // marker (sprite_gs_capN.txt, sprite_gs.txt for every batch): a lock in a row leaves "testing", and the next start
     // logs that cap "LEFT OFF" and races it the first way. The log's "sprite points" lines say how many batches went
     // through the geometry shader ("not GS: cap" for the rest). Watch the smoke, sparks and balloons for torn sprites.
+    // P57 E (2026-11-23, proposals/3ds-old3ds-frame-start-end-plan.md): the renderer core's "frame start/end" (3.9 ms
+    // a frame in run 54) split into named parts in every race (DKR_FRAME_PARTS, on with the profiler: the log's and
+    // autorun_cores.txt's "backend frame start/end (ms a frame)": capture/screen, start GPU wait, set-up, texture
+    // promote, ..., command lists, present, C3D_FrameEnd, after), with a self-check that the parts add up to the
+    // bucket (chk: 0 wrong in every usual race). This row breaks the check on purpose (rule K6: the largest part left
+    // out of the sum): its chk must say 1 wrong and the line "check (broken on purpose): ... WRONG".
+    { "frame parts check broken on purpose (K6, 1 lap)", { "DKR_FRAME_PARTS_CHECK", NULL, NULL },
+      -1, 2, 1, 1 },
     { "sprite GS, first batch a frame only (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
       0, 1, 1, 1 },
     { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },

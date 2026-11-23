@@ -407,6 +407,33 @@ enum {
 extern volatile int gGfxbModelSplitOn;
 void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsigned int *draws, unsigned int *reads);
 /*
+ * P57 E (DKR_FRAME_PARTS, default 1): the backend's frame start and end (gfxb_start_frame, gfxb_end_frame: the mix's
+ * "frame start/end", ~3.9 ms a frame on an Old 3DS) split into named parts, timed on the backend mix's timed frames
+ * (gfx_split.c sets gGfxbFramePartsOn at each timed frame's OP_START and clears it after its OP_END). Totals since
+ * start-up, in clock ticks, with the frames timed, the clock reads made and the command list parts handed over.
+ */
+enum {
+    GFXB_FPART_CAPTURE,    // capture_pending_frame, apply_screen_mode, adaptive_pick
+    GFXB_FPART_START_WAIT, // wait_for_gpu at the start (frames not built while the GPU draws)
+    GFXB_FPART_SETUP,      // The slot, read_switches, program, clears, target, viewport, band
+    GFXB_FPART_PROMOTE,    // promote_textures
+    GFXB_FPART_START_REST, // forget_gpu_state to raw_frame_start
+    GFXB_FPART_TALLIES,    // The end's test pattern, snapshot, draw parts, GPU kinds, stereo lists
+    GFXB_FPART_VERTICES,   // The vertex and index cache flushes
+    GFXB_FPART_LOGS,       // The frame, sprite and VRAM log lines
+    GFXB_FPART_END_WAIT,   // wait_for_gpu at the end (the last frame's GPU wait, its texture frees)
+    GFXB_FPART_FILLS,      // The memory fills (colour, depth) and their wait
+    GFXB_FPART_LISTS,      // The command list parts flushed and queued (GX_ProcessCommandList)
+    GFXB_FPART_PRESENT,    // adaptive_link, pace_frame, triple_choose, wait_for_present
+    GFXB_FPART_SCREEN,     // find_recent_screen, history_sample, watch_for_line, timeline_arm
+    GFXB_FPART_C3D_END,    // C3D_FrameEnd (the last list part, the screen copies, the GPU queue started)
+    GFXB_FPART_AFTER,      // history_note_copy, record_recent_frame, the park check
+    GFXB_FPART_COUNT
+};
+extern volatile int gGfxbFramePartsOn;
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts);
+/*
  * Meshes: model vertices copied once to memory the GPU reads, and drawn from there frame
  * after frame. gfxb_mesh_create returns NULL when out of room; a freed mesh goes once the GPU has drawn the frames
  * that use it. gfxb_draw_meshes draws parts of several meshes that share a state and parameters as one draw (a draw

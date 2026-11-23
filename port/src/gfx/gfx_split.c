@@ -21,6 +21,7 @@
 #include "plat/plat.h"
 #include "gfx_backend.h"
 #include "gfx_split.h"
+#include "gfx_frame_parts.h"
 #include "plat/profile.h"
 
 /* The queue's size, a power of two (the ring's offsets wrap with the unsigned counters): 2 MB on a New 3DS, 1 MB on
@@ -280,6 +281,70 @@ int gfx_split_backend_mix(int reader, char *out, int size) {
     }
     return at < size ? at : size - 1;
 }
+/*
+ * P57 E: the frame start/end bucket's parts (gfx_backend.h GFXB_FPART_*), ms a frame on the timed frames since this
+ * reader last read, the clock reads' cost taken off each part by its share; and the self-check (gfx_frame_parts.h):
+ * the parts' sum against the bucket's own time on the same frames (DKR_FRAME_PARTS_CHECK: 1 on, 2 broken on purpose
+ * by leaving the largest part out, rule K6; 0 off). Returns the length written, 0 if no frame was timed.
+ */
+static const char *const sFpartNames[GFXB_FPART_COUNT] = {
+    "capture/screen", "start GPU wait", "set-up", "texture promote", "start rest", "end tallies", "vertex flush",
+    "logs", "end GPU wait", "fills", "command lists", "present", "screen watch", "C3D_FrameEnd", "after"};
+static unsigned long long sFpartRead[2][GFXB_FPART_COUNT], sFpartBucketRead[2];
+static unsigned int sFpartReadFrames[2], sFpartReadReads[2], sFpartReadLists[2];
+
+int gfx_split_frame_parts(int reader, char *out, int size) {
+    unsigned long long ticks[GFXB_FPART_COUNT], delta[GFXB_FPART_COUNT], bucket, all = 0, readTicks;
+    unsigned int frames, reads, lists, k;
+    double perTick = 1e3 / (double) plat_ticks_per_second(), scale;
+    long long outside;
+    int at, check, agree, drop = -1;
+    gfxb_frame_parts_totals(ticks, &frames, &reads, &lists);
+    bucket = sMixTicks[MIX_FRAME] - sFpartBucketRead[reader];
+    sFpartBucketRead[reader] = sMixTicks[MIX_FRAME];
+    for (k = 0; k < GFXB_FPART_COUNT; k++) {
+        delta[k] = ticks[k] - sFpartRead[reader][k];
+        all += delta[k];
+        sFpartRead[reader][k] = ticks[k];
+    }
+    readTicks = (unsigned long long) (reads - sFpartReadReads[reader]) * prof_clock_read_cost() / 256;
+    lists -= sFpartReadLists[reader];
+    frames -= sFpartReadFrames[reader];
+    sFpartReadFrames[reader] += frames;
+    sFpartReadReads[reader] = reads;
+    sFpartReadLists[reader] += lists;
+    if (size <= 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (frames == 0) {
+        return 0;
+    }
+    scale = all > 0 ? (double) (all > readTicks ? all - readTicks : 0) / (double) all : 1.0;
+    at = plat_snprintf(out, size, "backend frame start/end (ms a frame):");
+    for (k = 0; k < GFXB_FPART_COUNT && at < size; k++) {
+        at += plat_snprintf(out + at, size - at, "%s %s %.2f", k ? "," : "", sFpartNames[k],
+                            delta[k] * scale * perTick / frames);
+    }
+    check = plat_switch("DKR_FRAME_PARTS_CHECK", 1);
+    if (check != 0 && at < size) {
+        if (check == 2) {
+            drop = gfx_frame_parts_largest(delta, GFXB_FPART_COUNT); // Broken on purpose (rule K6)
+        }
+        agree = gfx_frame_parts_agree(bucket, delta, GFXB_FPART_COUNT, drop, &outside);
+        if (reader == 1) {
+            plat_check_report("frame parts", !agree); // Once a race (the core window): the results' chk columns
+        }
+        at += plat_snprintf(out + at, size - at, "; %.1f list parts; check%s: %.2f of %.2f ms outside the parts, %s",
+                            (double) lists / frames, drop >= 0 ? " (broken on purpose)" : "",
+                            outside * perTick / frames, bucket * perTick / frames, agree ? "ok" : "WRONG");
+    }
+    if (at < size) {
+        at += plat_snprintf(out + at, size - at, " (%u frames timed)", frames);
+    }
+    return at < size ? at : size - 1;
+}
+
 static int sBackendPrefetch; // v31 DKR_BACKEND_PREFETCH (read at each frame's start on the backend thread)
 
 static inline unsigned int round8(unsigned int n) {
@@ -462,6 +527,7 @@ static void backend_thread(void *arg) {
                 sMixOn = plat_switch("DKR_BACKEND_MIX", 1) && prof_enabled() &&
                          (!plat_old_3ds() || ++sMixCount % 8 == 0);
                 gGfxbModelSplitOn = sMixOn; // P61 M3: the model draws' parts too
+                gGfxbFramePartsOn = sMixOn; // P57 E: the frame start and end's parts
             }
             mixStart = sMixOn ? plat_ticks() : 0;
             if (sBackendPrefetch && tail + bytes != head) {
@@ -600,6 +666,7 @@ static void backend_thread(void *arg) {
                 if (op == OP_END) {
                     sMixFrames++;
                     sMixOn = 0;
+                    gGfxbFramePartsOn = 0;
                 }
             }
             if (sBackendCheck) {

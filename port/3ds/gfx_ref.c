@@ -29,6 +29,8 @@
 #define gfxb_walk_coverage refb_walk_coverage
 #define gfxb_model_split_totals refb_model_split_totals
 #define gGfxbModelSplitOn gRefbModelSplitOn
+#define gfxb_frame_parts_totals refb_frame_parts_totals
+#define gGfxbFramePartsOn gRefbFramePartsOn
 #define gfxb_sprite_points refb_sprite_points
 #define gfxb_draw_sprites refb_draw_sprites
 #define gfxb_sprite_table refb_sprite_table
