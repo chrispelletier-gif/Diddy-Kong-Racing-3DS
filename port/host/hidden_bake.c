@@ -490,6 +490,85 @@ static void do_point(HbWork *w, HbPoint *p) {
     }
 }
 
+/* ---- Checkpoints: a long bake survives a restart (the seen bytes only ever turn on, so a saved state plus the
+ * points not yet done gives the same tables) ---- */
+
+static unsigned char *sDone; /* per point: done */
+static int sDonePrefix;      /* every point before it is done */
+static time_t sLastCkpt;
+static char sCkptPath[512];
+static int sCkptStep[2], sCkptSeconds = 600; /* DKR_HIDDEN_BAKE_CKPT_SECONDS (default 10 minutes) */
+
+static void ckpt_header(int *h) {
+    int c;
+    h[0] = 0x484b4331; /* "HKC1" */
+    h[1] = sLv->level;
+    h[2] = sNumPoints;
+    h[3] = sCkptStep[0];
+    h[4] = sCkptStep[1];
+    h[5] = sLv->totalBatches;
+    h[6] = sNumConfigs;
+    for (c = 0; c < HB_MAX_CONFIGS; c++) {
+        h[7 + c] = c < sNumConfigs ? sConfigs[c].numCells * 64 + sConfigs[c].n * 16 + sConfigs[c].s : 0;
+    }
+}
+
+static void ckpt_save(int prefix) {
+    char tmp[600];
+    int h[7 + HB_MAX_CONFIGS], c, i;
+    FILE *f;
+    snprintf(tmp, sizeof(tmp), "%s.tmp", sCkptPath);
+    f = fopen(tmp, "wb");
+    if (f == NULL) {
+        return;
+    }
+    ckpt_header(h);
+    fwrite(h, sizeof(h), 1, f);
+    fwrite(&prefix, sizeof(prefix), 1, f);
+    for (c = 0; c < sNumConfigs; c++) {
+        for (i = 0; i < sConfigs[c].numCells; i++) {
+            fwrite(sConfigs[c].cells[i].seen, 1, sLv->totalBatches, f);
+        }
+    }
+    if (fclose(f) == 0) {
+        rename(tmp, sCkptPath);
+        plat_log("hidden bake: level %d, checkpoint at %d of %d positions", sLv->level, prefix, sNumPoints);
+    }
+}
+
+/* The point to start from: 0, or where a matching checkpoint left off (its seen bytes loaded). */
+static int ckpt_load(void) {
+    int h[7 + HB_MAX_CONFIGS], g[7 + HB_MAX_CONFIGS], prefix = 0, c, i, ok = 1;
+    FILE *f = fopen(sCkptPath, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    ckpt_header(h);
+    if (fread(g, sizeof(g), 1, f) != 1 || memcmp(g, h, sizeof(h)) != 0 || fread(&prefix, sizeof(prefix), 1, f) != 1 ||
+        prefix < 0 || prefix > sNumPoints) {
+        fclose(f);
+        plat_log("hidden bake: level %d, checkpoint %s does not match this bake: starting over", sLv->level, sCkptPath);
+        return 0;
+    }
+    for (c = 0; c < sNumConfigs && ok; c++) {
+        for (i = 0; i < sConfigs[c].numCells && ok; i++) {
+            ok = fread(sConfigs[c].cells[i].seen, 1, sLv->totalBatches, f) == (size_t) sLv->totalBatches;
+        }
+    }
+    fclose(f);
+    if (!ok) {
+        for (c = 0; c < sNumConfigs; c++) {
+            for (i = 0; i < sConfigs[c].numCells; i++) {
+                memset(sConfigs[c].cells[i].seen, 0, sLv->totalBatches);
+            }
+        }
+        plat_log("hidden bake: level %d, checkpoint %s is cut short: starting over", sLv->level, sCkptPath);
+        return 0;
+    }
+    plat_log("hidden bake: level %d, resumed from the checkpoint at %d of %d positions", sLv->level, prefix, sNumPoints);
+    return prefix;
+}
+
 static void *worker(void *arg) {
     HbWork *w = arg;
     for (;;) {
@@ -501,6 +580,16 @@ static void *worker(void *arg) {
             break;
         }
         do_point(w, &sPoints[i]);
+        pthread_mutex_lock(&sLock);
+        sDone[i] = 1;
+        while (sDonePrefix < sNumPoints && sDone[sDonePrefix]) {
+            sDonePrefix++;
+        }
+        if (time(NULL) - sLastCkpt >= sCkptSeconds) { // (the other threads wait the moment it takes)
+            sLastCkpt = time(NULL);
+            ckpt_save(sDonePrefix);
+        }
+        pthread_mutex_unlock(&sLock);
         if (__atomic_add_fetch(&sVisited, 1, __ATOMIC_RELAXED) % 5000 == 0) {
             plat_log("hidden bake: %llu of %d positions (%ld s)", sVisited, sNumPoints, (long) (time(NULL) - sStart));
         }
@@ -958,7 +1047,16 @@ int hidden_bake_level(const HiddenLevel *lv) {
     }
     // Samples on a lattice that reaches the gates: any allowed eye is within half a step on each axis of one
     sEps = sqrtf(2.0f * (stepXZ * 0.5f) * (stepXZ * 0.5f) + (stepY * 0.5f) * (stepY * 0.5f)) + 1.0f;
-    sNextPoint = 0;
+    sCkptStep[0] = stepXZ;
+    sCkptStep[1] = stepY;
+    snprintf(sCkptPath, sizeof(sCkptPath), "%s/hidden_%d.ckpt", outDir, lv->level);
+    sDone = realloc(sDone, sNumPoints > 0 ? sNumPoints : 1);
+    memset(sDone, 0, sNumPoints > 0 ? sNumPoints : 1);
+    sNextPoint = sDonePrefix = ckpt_load();
+    memset(sDone, 1, sNextPoint);
+    sLastCkpt = time(NULL);
+    e = getenv("DKR_HIDDEN_BAKE_CKPT_SECONDS");
+    sCkptSeconds = e != NULL && atoi(e) > 0 ? atoi(e) : 600;
     sTested = sVisited = 0;
     plat_log("hidden bake: level %d, %d sample positions (%d/%d units, occluders shrunk %.1f), %d threads, cube %d px a "
              "face", lv->level, sNumPoints, stepXZ, stepY, sEps, threads, sRes);
@@ -984,6 +1082,7 @@ int hidden_bake_level(const HiddenLevel *lv) {
         free(work[i].tab);
     }
     free(work);
+    remove(sCkptPath); // the tables are written
     sLevelsLeft[lv->level] = 0;
     if (--sNumLevelsLeft == 0) {
         plat_log("hidden bake: every level done");

@@ -61,6 +61,8 @@ static int sDepthBits;
 /* P67 DKR_HIDDEN_SKIP_CHECK (gfxb_hidden_check): the check is on; the pixels counted this frame (each once). */
 static int sHiddenCheck, sHiddenTable, sHiddenFrame; /* sHiddenFrame: bit k, table k was checked this frame */
 static unsigned int sHiddenPixels[8];
+/* Why a check frame counts pixels: depth writes and depth clears this frame so far, and at each table's check start */
+static unsigned int sCheckNoDepth[8], sFrameDepthWrites, sFrameDepthClears, sCheckDepthWrites[8], sCheckDepthClears[8];
 static uint8_t sHiddenMask[MAX_W * H]; /* bit k: counted for table k */
 static float sDepthScale;
 #include "frag_stats.inc"
@@ -172,6 +174,10 @@ void gfxb_hidden_check(int value) {
     }
     sHiddenCheck = value & 1;
     sHiddenTable = (value >> 1) & 7;
+    if (sHiddenCheck) {
+        sCheckDepthWrites[sHiddenTable] = sFrameDepthWrites;
+        sCheckDepthClears[sHiddenTable] = sFrameDepthClears;
+    }
     sHiddenFrame |= sHiddenCheck << sHiddenTable;
 }
 
@@ -222,14 +228,24 @@ void gfxb_end_frame(void) {
         }
         for (k = 0; k < 8; k++) {
             if (sHiddenFrame & (1 << k)) {
+                if (sHiddenPixels[k] > 0) {
+                    // Where the counted pixels come from: a check that starts before any depth was written this
+                    // frame (no track under it) or after a depth clear is the renderer's, not the table's
+                    plat_log("hidden check diag: frame %u table %d, %u pixels; before the check %u depth writes, %u "
+                             "depth clears; whole frame %u writes, %u clears; %u pixels drawn with the depth test off",
+                             sFramesRendered, k, sHiddenPixels[k], sCheckDepthWrites[k], sCheckDepthClears[k],
+                             sFrameDepthWrites, sFrameDepthClears, sCheckNoDepth[k]);
+                }
                 port_hidden_check_pixels(k, sHiddenPixels[k]);
             }
             sHiddenPixels[k] = 0;
+            sCheckNoDepth[k] = 0;
         }
         memset(sHiddenMask, 0, sizeof(sHiddenMask));
         sHiddenFrame = 0;
     }
     sHiddenCheck = 0;
+    sFrameDepthWrites = sFrameDepthClears = 0;
     sFramesRendered++;
     frag_frame_end();
     if (sSweep != NULL) {
@@ -284,6 +300,7 @@ void gfxb_clear_color(const int16_t rect[4], uint8_t r, uint8_t g, uint8_t b, ui
 void gfxb_clear_depth(const int16_t rect[4]) {
     int x, y, x0, y0, x1, y1;
     clip_rect(rect, &x0, &y0, &x1, &y1);
+    sFrameDepthClears++;
     for (y = y0; y < y1; y++) {
         for (x = x0; x < x1; x++) {
             sDepth[y * W + x] = 1.0f;
@@ -801,6 +818,7 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 if ((!sDepthBits || passQ) && !(sHiddenMask[y * W + x] & (1 << sHiddenTable))) {
                     sHiddenMask[y * W + x] |= (uint8_t) (1 << sHiddenTable);
                     sHiddenPixels[sHiddenTable]++;
+                    sCheckNoDepth[sHiddenTable] += !sDepthBits;
                 }
                 continue;
             }
@@ -814,6 +832,7 @@ static void raster_triangle(const GfxDrawState *st, const ScreenVert *v0, const 
                 }
                 if (st->depthWrite) {
                     sWinQ[y * W + x] = sTriId;
+                    sFrameDepthWrites++;
                 }
             }
             dst = &sColor[(y * W + x) * 4];
