@@ -44,7 +44,7 @@ static s32 sIkeyCheck;        // DKR_INTERP60_CHECK
 static IkeyEntry *sIkeyTab[2]; // [sIkeyCur] this frame's, the other the last frame's
 static s32 sIkeyCur;
 static u32 sIkeyGen = 1, sIkeyUsed;
-static u32 sIkeyBase, sIkeyOrd;
+static u32 sIkeyBase, sIkeyOrd, sIkeyKind; // sIkeyKind: the draw kind and object kind the base was taken at
 static s32 sIkeyWorldNext;    // The next perspective load is the world matrix (PORT_IKEY_TAG world)
 static s32 sIkeyHaveCam, sIkeyBad, sIkeyWorlds; // sIkeyBad: 1 the world's D not sane or new, 2 a second viewport
 static float sIkeyCam[4][4];  // The camera's D (the world matrix's), for things not matched
@@ -259,7 +259,7 @@ static void ikey_apply(const float d[4][4]) {
     if (same) {
         return;
     }
-    flush_batch();
+    flush_batch_for_atlas(); // (Out of line: flush_batch's inlining in the hot walk stays as it was)
     if (sTrackPending) {
         track_flush(); // The native track's waiting pieces were made with the D before
     }
@@ -303,6 +303,12 @@ static COLD NOINLINE void ikey_load(s32 index) {
     }
     sIkeyKeep[index] = 0;
     sIkeyWorldNext = FALSE;
+    if (!world && (u32) (sDrawKind | sDrawObj << 8 | 0x10000) != sIkeyKind) {
+        // A new draw kind (or object kind) since the base was taken: untagged loads are keyed by it
+        sIkeyKind = (u32) (sDrawKind | sDrawObj << 8 | 0x10000);
+        sIkeyBase = ikey_mix(sIkeyKind, 0x4B494E44u);
+        sIkeyOrd = 0;
+    }
     key = world ? ikey_mix(IKEY_WORLD, sIkeyWorlds++) : ikey_mix(sIkeyBase, sIkeyOrd++);
     e = ikey_insert(&key);
     if (e != NULL) {
@@ -335,15 +341,21 @@ static COLD NOINLINE void ikey_tag(u32 w1) {
     if (w1 & 1) {
         sIkeyBase = ikey_mix(w1 & 0xFFFF, 0x4F424A31u);
         sIkeyOrd = 0;
+        sIkeyKind = (u32) (sDrawKind | sDrawObj << 8 | 0x10000); // The object's tag comes after its kind tag
     } else {
         sIkeyWorldNext = TRUE;
     }
 }
 
-/* A draw kind tag: untagged loads after it are keyed by it. */
-static inline void ikey_kind(u32 tag) {
-    sIkeyBase = tag;
-    sIkeyOrd = 0;
+
+/* read_switches_now: the walk's own settings DKR_INTERP60 turns off. Draws keep their order (the opaque sort would draw
+ * them after the deltas they belong with were replaced), and sprites stay triangles (the sprite program has no
+ * delta). */
+static COLD NOINLINE void ikey_switches(void) {
+    if (plat_switch("DKR_INTERP60", 0) != 0) {
+        sOpaqueSortSwitch = 0;
+        sSpriteGs = 0;
+    }
 }
 
 /* The frame's start (after the backend's frame started): whether this frame works deltas out. */
@@ -374,6 +386,7 @@ static COLD NOINLINE void ikey_frame_start(void) {
     sIkeyUsed = 0;
     sIkeyBase = 0;
     sIkeyOrd = 0;
+    sIkeyKind = 0;
     sIkeyWorldNext = FALSE;
     sIkeyHaveCam = FALSE;
     sIkeyBad = FALSE;

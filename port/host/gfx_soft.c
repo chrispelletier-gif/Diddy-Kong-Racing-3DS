@@ -890,6 +890,23 @@ void gfxb_draw_sprites(const GfxDrawState *state, const GfxSpritePoint *pts, int
     gfxb_draw_indexed(state, sVerts, numPoints * 4, sIdx, numPoints * 2);
 }
 
+/* Sprite tables (P65 rank 1) are the 3DS backend's: here the frontend expands them into indexed draws. */
+int gfxb_sprite_table(void) {
+    return 0;
+}
+
+void gfxb_draw_sprite_table(const GfxDrawState *state, const GfxTabGroup *groups, int numGroups, float fogMul,
+                            float fogOffset, const GfxTabVertex *verts, int numVerts) {
+    static GfxVertex sVerts[GFX_TAB_MAX_VERTS];
+    static unsigned short sIdx[GFX_TAB_MAX_VERTS];
+    (void) numGroups;
+    if (numVerts > GFX_TAB_MAX_VERTS) {
+        numVerts = GFX_TAB_MAX_VERTS;
+    }
+    gfx_tab_expand(groups, fogMul, fogOffset, verts, numVerts, sVerts, sIdx);
+    gfxb_draw_indexed(state, sVerts, numVerts, sIdx, numVerts / 3);
+}
+
 void gfxb_draw_triangles(const GfxDrawState *drawState, const GfxVertex *verts, int numTriangles) {
     static int sNullRender = -1;
     int t, i, n;
@@ -1006,7 +1023,7 @@ float gfxb_cpu_cull_margin(void) {
 }
 
 int gfxb_gpu_transform(void) {
-    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", 0) != 0 ||
+    return plat_switch("DKR_GPU_TRANSFORM", plat_gpu_maths_setting() >= 1) != 0 || plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0 ||
            plat_switch("DKR_NATIVE_GPU", plat_old_3ds()) != 0; // as gfx_rdp.c's sNativeGpuSwitch
 }
 
@@ -1042,6 +1059,16 @@ void gfxb_model_split_totals(unsigned long long ticks[GFXB_MSPLIT_COUNT], unsign
         ticks[i] = 0;
     }
     *draws = *reads = 0;
+}
+
+volatile int gGfxbFramePartsOn; // P57 E: the 3DS backend's frame start/end parts; this one has none
+void gfxb_frame_parts_totals(unsigned long long ticks[GFXB_FPART_COUNT], unsigned int *frames, unsigned int *reads,
+                             unsigned int *listParts) {
+    int i;
+    for (i = 0; i < GFXB_FPART_COUNT; i++) {
+        ticks[i] = 0;
+    }
+    *frames = *reads = *listParts = 0;
 }
 
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,

@@ -163,6 +163,14 @@ int plat_frame_retraces(void) {
 int plat_frame_step(void) {
     return plat_frame_retraces();
 }
+/* The Old 3DS 60 fps mode (plat.h): off in the replay, whose recorded frames say what was drawn. */
+volatile int gPlatStereoFrames;
+int plat_o3ds_60_mode(void) {
+    return 0;
+}
+int plat_o3ds_60_live(void) {
+    return 0;
+}
 float plat_camera_near(void) {
     return plat_aspect_scale() > 1.0f ? 2.5f : 10.0f;
 }

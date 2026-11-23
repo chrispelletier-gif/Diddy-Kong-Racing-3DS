@@ -60,14 +60,23 @@ static void interp_use_locations(int interp) {
     memcpy(sUnifLoc, interp ? sUnifLocI : sUnifLocT, sizeof(sUnifLoc));
 }
 
-/* At start-up, after init_transform: interp.v.pica (the shader blob's fifth program). */
+/* At start-up, after init_transform: interp.v.pica (found in the shader blob by its "ipk" uniform). */
 static PLAT_COLD void init_interp(void) {
     static const char *const sNames[] = { "mtx", "camoff", "texa", "texc", "texb", "fogp", "lightv", "dlt" };
     int i;
     memcpy(sUnifLocT, sUnifLoc, sizeof(sUnifLocT));
     shaderProgramInit(&sProgramI);
-    sProgramIUsable = sProgramTUsable && sShaderDvlb->numDVLE >= 5 &&
-                      shaderProgramSetVsh(&sProgramI, &sShaderDvlb->DVLE[4]) == 0;
+    // Found by its uniform "ipk", not by its place in the blob (other threads add programs to SHADER_SRC).
+    sProgramIUsable = 0;
+    for (i = (int) sShaderDvlb->numDVLE - 1; i >= 2 && sProgramTUsable && !sProgramIUsable; i--) {
+        if (shaderProgramSetVsh(&sProgramI, &sShaderDvlb->DVLE[i]) == 0 &&
+            shaderInstanceGetUniformLocation(sProgramI.vertexShader, "ipk") >= 0) {
+            sProgramIUsable = 1;
+        } else {
+            shaderProgramFree(&sProgramI);
+            shaderProgramInit(&sProgramI);
+        }
+    }
     if (sProgramIUsable) {
         sEyeUniformI = shaderInstanceGetUniformLocation(sProgramI.vertexShader, "eye");
         sIpkLoc = shaderInstanceGetUniformLocation(sProgramI.vertexShader, "ipk");

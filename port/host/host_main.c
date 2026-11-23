@@ -10,6 +10,8 @@
  *   DKR_PROF_TERM_CHECK  check that every profiler page fits the terminal font's 47 columns and 14 lines, then exit
  *   DKR_BENCH_OVERRIDE_CHECK  check that every switch bench race's switches reach the game (port_autorun.c), then exit
  *   DKR_CHECKS_CSV_TEST  check that the self-checks' totals reach the test run's results line (port_autorun.c), then exit
+ *   DKR_TTBEST_TEST  check P58's time trial bests index against its files (port_race_hud.c; DKR_DATA_DIR an empty
+ *                    folder), then exit
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,6 +104,15 @@ int main(int argc, char **argv) {
         static char report[32768];
         int failed = prof_term_check(report, (int) sizeof(report));
         fputs(report, stdout);
+        return failed;
+    }
+    if (getenv("DKR_TTBEST_TEST") != NULL) {
+        /* CI (P58, rule K6): the time trial bests index and its self-check, broken once on purpose */
+        int port_race_hud_ttbest_test(char *report, int size);
+        static char report[2048];
+        int failed = port_race_hud_ttbest_test(report, (int) sizeof(report));
+        fputs(report, stdout);
+        printf("time trial bests test: %d failed\n", failed);
         return failed;
     }
     if (getenv("DKR_CHECKS_CSV_TEST") != NULL) {

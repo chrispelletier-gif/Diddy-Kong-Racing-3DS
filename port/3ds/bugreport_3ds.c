@@ -280,6 +280,20 @@ static void add_file(Report *report, const char *name) {
         return;
     }
     snprintf(path, sizeof(path), "%s/%s", DATA_DIR, name);
+    if (strstr(name, "_gpu.bin") == NULL && plat_switch("DKR_NET_STREAM", 1) != 0) {
+        // Read from the SD card a piece at a time as it is sent (bugreport.c post_file_streamed): a long test run's
+        // results files no longer have to fit in the heap at once (Old 3DS runs 52 and 54 sent nothing).
+        struct stat st;
+        if (stat(path, &st) != 0 || st.st_size <= 0) {
+            return;
+        }
+        file = &report->files[report->fileCount++];
+        file->name = strdup(name);
+        file->data = NULL;
+        file->size = (unsigned int) st.st_size;
+        file->path = strdup(path);
+        return;
+    }
     data = plat_load_file(path, &size);
     if (data == NULL) {
         return;
@@ -320,6 +334,8 @@ static void free_report(Report *report) {
     for (i = 0; i < report->fileCount; i++) {
         free((void *) report->files[i].name);
         free((void *) report->files[i].data);
+        free((void *) report->files[i].path);
+        report->files[i].path = NULL;
     }
     free(report->body);
     free(report->recSummary);
@@ -490,11 +506,18 @@ static int send_report_to(const ReportConfig *config, const char *issue, Report 
     return status;
 }
 
-/* Keeps a report that could not be sent, so it is not lost. */
-static void save_unsent(const Report *report) {
+/* The heap's free memory, for a failed send's message (the network buffer and the attachments come from it). */
+static unsigned long heap_free_kb(void) {
+    struct mallinfo info = mallinfo();
+    return (unsigned long) ((info.fordblks + (__ctru_heap_size - info.arena)) / 1024);
+}
+
+/* Keeps a report that could not be sent, so it is not lost, with why it failed (log.txt is quiet in a test run). */
+static void save_unsent(const Report *report, const char *error) {
     FILE *file = fopen(DATA_DIR "/bugreport_unsent.txt", "w");
     if (file != NULL) {
-        fprintf(file, "%s\n\n%s\n", report->title, report->body != NULL ? report->body : "");
+        fprintf(file, "%s\n\n**Not sent:** %s (heap free %lu KB)\n\n%s\n", report->title, error, heap_free_kb(),
+                report->body != NULL ? report->body : "");
         fclose(file);
     }
 }
@@ -521,7 +544,7 @@ static int send_and_show_to(const ReportConfig *config, const char *issue, Repor
         sShow(line);
         plat_log("%s", line);
         if (status < 0) {
-            save_unsent(report);
+            save_unsent(report, result);
             sShow("Saved as sdmc:/3ds/dkr/bugreport_unsent.txt");
         }
     }
@@ -1021,7 +1044,9 @@ static void send_test_results(void) {
         // part of the report went out (its attachments missing).
         FILE *file = fopen(DATA_DIR "/results_unsent.txt", "w");
         if (file != NULL) {
-            fprintf(file, "%s\n%s", sTitle, sSummary);
+            // The error last, so "Send test results again" carries it too.
+            fprintf(file, "%s\n%s\nThe first send failed: %s (heap free %lu KB).\n", sTitle, sSummary, result,
+                    heap_free_kb());
             fclose(file);
         }
     } else {

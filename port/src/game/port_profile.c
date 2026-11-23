@@ -745,7 +745,7 @@ int port_native_track(void) {
     static int epoch = -1, on;
     if (epoch != gPlatSwitchEpoch) {
         epoch = gPlatSwitchEpoch;
-        on = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+        on = plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0; // Old 3DS default: run 54, see gfx_rdp.c
     }
     return on;
 }
@@ -2020,6 +2020,9 @@ static void show_overlay(void) {
                 if (gfx_split_backend_mix(0, mix, sizeof(mix)) > 0) {
                     port_log("%s", mix); // P54 2b-A (DKR_BACKEND_MIX)
                 }
+                if (gfx_split_frame_parts(0, mix, sizeof(mix)) > 0) {
+                    port_log("%s", mix); // P57 E (DKR_FRAME_PARTS), its own line: the log cuts lines at 512
+                }
                 if (gfx_walk_steps(0, mix, sizeof(mix)) > 0) {
                     // P61 M2 (DKR_WALK_STEPS). P65 added steps, so the line is cut after a step where it would pass the
                     // log's 512 characters; the rest follows on "walk steps (more):" lines.
@@ -2142,6 +2145,7 @@ void prof_core_window_start(void) {
     gfx_walk_steps(1, NULL, 0); // P61 M2 (from here)
     sCoreRenderedStart = sRenderedFrames;
     gfx_split_backend_mix(1, NULL, 0); // (from here)
+    gfx_split_frame_parts(1, NULL, 0);
     sCoreOn = TRUE;
 }
 
@@ -2280,6 +2284,17 @@ int prof_core_breakdown(char *out, int size) {
         s32 at = length;
         length += plat_snprintf(out + length, size - length, "; ");
         if (gfx_split_backend_mix(1, out + length, size - length) == 0) {
+            length = at;
+            out[length] = '\0';
+        } else {
+            length += (s32) strlen(out + length);
+        }
+    }
+    if (length < size - 2) {
+        /* P57 E: the frame start/end bucket's parts and their check (DKR_FRAME_PARTS) */
+        s32 at = length;
+        length += plat_snprintf(out + length, size - length, "; ");
+        if (gfx_split_frame_parts(1, out + length, size - length) == 0) {
             length = at;
             out[length] = '\0';
         } else {

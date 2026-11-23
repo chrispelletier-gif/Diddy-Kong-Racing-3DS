@@ -175,6 +175,17 @@ static s32 sSpriteGsCheck; // DKR_SPRITE_GS_CHECK (sprite_point_check)
 /* Points made, sprite tiles left as triangles, draws, corners checked, corners differing, then the tiles left as
  * triangles by reason: opaque (the sorter's), flat, any other */
 static unsigned long sSprStats[8];
+/* P65 rank 1 (DKR_SPRITE_TABLE, sprite_table_try): while set, the batch holds sprite table vertices (sTabVerts, in
+ * sTabGroups' groups) instead of triangles, the triangles and their corners counted as for triangles. */
+static GfxTabVertex sTabVerts[GFX_TAB_MAX_VERTS];
+static GfxTabGroup sTabGroups[GFX_TAB_GROUPS];
+static s32 sBatchTable, sTabVertCount, sTabGroupCount;
+static float sTabFogMul, sTabFogOffset;
+static s32 sSpriteTable;      // DKR_SPRITE_TABLE
+static s32 sSpriteTableCheck; // DKR_SPRITE_TABLE_CHECK (sprite_table_check; 2: the check broken on purpose, rule K6)
+/* Tiles drawn from the table, table draws, tiles left to the old way (by reason: load not noted, anchor, the tile,
+ * the state), loads noted, loads transformed late, corners checked, corners differing */
+static unsigned long sTabStats[10];
 /* The batch of model triangles (GPU vertex maths, P30), see sModelVerts, and the batch of mesh parts (P31, P34),
  * see mesh_part, which share the state and parameters: only one of the three batches holds triangles at a time. */
 static s32 sModelCount;
@@ -327,12 +338,15 @@ enum {
     WS_PATHS,     // Records that leave by another road: through the slots, the GPU's maths, the backend's maths
     WS_BB_CORNERS, // (P65) Billboard records' corners (native_record_slots / _free with g.billboard), out of "paths"
     WS_BB_TRIS,   // (P65) Their triangles into the batch
+    WS_KART_SETUP,  // (P68) GPU-maths kart draws, out of "other paths": box, matrix, check, state, axes, params
+    WS_KART_LOOPS,  // (P68) Their corners repacked and their index lists
+    WS_KART_QUEUE,  // (P68) Their split ring records: reserve, copy and commit
     WS_COUNT
 };
 static const char *const sWalkStepNames[WS_COUNT] = {
     "rest", "entry", "find", "box", "transform", "colour/fog", "edges", "state", "triangles", "buckets",
     "sprites", "sprite corners", "sprite tris", "state commands", "split copy", "opaque flush", "other paths",
-    "billboard corners", "billboard tris",
+    "billboard corners", "billboard tris", "kart set-up", "kart corners", "kart queue",
 };
 static u8 sDrawKind; // The kind being drawn (the draw mix, below)
 static s32 sWalkStepsSwitch; // DKR_WALK_STEPS (read_switches)
@@ -1806,6 +1820,9 @@ static GfxTexture *sRectTex[2];
  * (nmat_capture), so the capture doesn't hash and look up what the handle already names. */
 static GfxTexture *sCapTex;
 static s32 sNativeFrame; // DKR_NATIVE_FRAME (read_switches): the record dispatcher, nframe.c (roadmap R4)
+/* P55 S4 (DKR_FLAT_FRAME, read_switches): the flat dispatcher (nframe.c run_flat_frame) on frames flat_frame_ok allows.
+ * DKR_FLAT_FRAME_CHECK (test builds): its self-check (flat_check_record); 2 breaks the frame's conditions on purpose. */
+static s32 sFlatFrame, sFlatCheck;
 static s32 sTexHandleOn; // DKR_NATIVE_TEXHANDLE (read_switches): 1 on, 2 also checks each capture against a lookup
 /* Textures set by handle; learned during frames; texture lists run all the same (not a plain texture load);
  * captures that took the handle's texture; with DKR_NATIVE_TEXHANDLE=2, captures where it differed from a lookup. */
@@ -2075,12 +2092,10 @@ static COLD void kind_switch_timed(void) {
 static inline void flush_batch(void);
 static s32 sTrackPending;
 static void track_flush(void);
+static s32 sOpaqueSortSwitch; // (Defined with the opaque sort, below)
 #include "gfx_interp.inc" // DKR_INTERP60 (S8 / P39): the 60 Hz picture's deltas
 static inline void kind_switch(u32 tag) {
     u32 obj = ((tag >> 4) & 0xFF) - 1; // No object (0) wraps round to a big number
-    if (UNLIKELY(sIkeyOn)) {
-        ikey_kind(tag);
-    }
     if (UNLIKELY(sTrackPending) && (tag & (PROF_KINDS - 1)) != PORT_DRAW_TRACK) {
         track_flush(); // The sorted opaque track ends with its kind
     }
@@ -2501,6 +2516,26 @@ static OpaqueBucket *opaque_bucket_find(const GfxDrawState *st) {
     return b;
 }
 
+/* The sprite table batch (sprite_table_try): one backend call, in the same place in the order of draws. */
+static NOINLINE void flush_table_batch(void) {
+    u32 part = walk_switch(WALK_DRAWS);
+    OPAQUE_FLUSH();
+    gfx_split_draw_sprite_table(&sBatchState, sTabGroups, sTabGroupCount, sTabFogMul, sTabFogOffset, sTabVerts,
+                                sTabVertCount);
+    prof_count(PROF_TRIANGLES, sBatchCount);
+    prof_count(PROF_DRAWS, 1);
+    sMix.kinds[sDrawKind].draws++;
+    sMix.kinds[sDrawKind].tris += sBatchCount;
+    sTabStats[1]++;
+    walk_switch(part);
+    sBatchCount = 0;
+    sBatchVertices = 0;
+    sBatchTable = FALSE;
+    sTabVertCount = 0;
+    sTabGroupCount = 0;
+    sBatchGeneration++;
+}
+
 /* The batch of sprite points (sprite_point_try): one backend call, in the same place in the order of draws. */
 static NOINLINE void flush_point_batch(void) {
     u32 part = walk_switch(WALK_DRAWS);
@@ -2523,6 +2558,10 @@ static NOINLINE HOT void flush_cpu_batch(void) {
         u32 part;
         if (sBatchPoints) {
             flush_point_batch();
+            return;
+        }
+        if (sBatchTable) {
+            flush_table_batch();
             return;
         }
         if (sBatchState.textures[0] != NULL && sBatchState.textures[0]->atlas) {
@@ -2568,7 +2607,7 @@ static inline void flush_batch(void) {
     flush_cpu_batch();
 }
 
-static void flush_batch_for_atlas(void) {
+static NOINLINE void flush_batch_for_atlas(void) {
     flush_batch();
 }
 
@@ -2580,8 +2619,8 @@ static inline s32 batch_has_room(void) {
 /* Makes the batch one of this state with room for the triangles and vertices, flushing it first if it is full or of
  * another state. */
 static HOT void batch_reserve(const GfxDrawState *state, s32 triangles, s32 vertices) {
-    if (UNLIKELY(sBatchPoints)) {
-        flush_batch(); // Triangles never join a batch of sprite points
+    if (UNLIKELY(sBatchPoints | sBatchTable)) {
+        flush_batch(); // Triangles never join a batch of sprite points or a sprite table
     }
     if (sModelCount > 0 || sMeshPartCount > 0) {
         flush_mesh_batch();
@@ -2751,9 +2790,14 @@ static s32 sNativeRecords; // DKR_NATIVE_RECORDS (R2): sprite, billboard and fla
 static s32 sWalkReject; // DKR_WALK_REJECT: a triangle command wholly off the screen is dropped before its set-up
 static u32 sWalkRejected, sWalkRejectedTris; // Commands and triangles dropped so (profiler)
 static s32 sNativeTrackSwitch; // DKR_NATIVE_TRACK (NR4), see native_track
+static s32 sTrackBakeSwitch;  // DKR_TRACK_BAKE (P55 S1), see track_bake
+static s32 sTrackBakeCheck;   // DKR_TRACK_BAKE_CHECK: 1 the self-check, 2 the check broken on purpose (rule K6)
 static s32 sNativeGpuSwitch;   // DKR_NATIVE_GPU (core balance 2b-B): native kart (1) and object (2) draws, GPU maths
 static u32 sNGpuStats[3];      // native_gpu_draw's draws by the GPU, left out, left to the CPU
 static s32 sKartCounts;        // DKR_KART_COUNTS (P65 rank 2): the native kart batches counted (kart_count)
+static s32 sKartBatch;         // DKR_KART_BATCH (P68): 1 same-material runs as one draw, 2 slim records (native_gpu_run)
+static s32 sKartBatchCheck;    // DKR_KART_BATCH_CHECK (test builds): 1 the check, 2-4 broken on purpose (rule K6)
+static u32 sKartRunStats[4];   // Runs of 2+ records made, records merged into them, runs left (box past the band), slim
 static void kart_counts_log(void);
 static s32 sTrackMeshSwitch, sModelMeshSwitch; // DKR_TRACK_MESH (P31) and DKR_MODEL_MESH (P34), see mesh_triangles
 // DKR_GPU_TRANSFORM_KINDS: the draw kinds (port_drawtag.h, a bitmask) whose vertex loads GPU vertex maths takes; the
@@ -2844,13 +2888,32 @@ static COLD void read_switches_now(void) {
     sWalkParts = plat_switch("DKR_WALK_PARTS", !plat_old_3ds()) != 0;
     sWalkStepsSwitch = plat_switch("DKR_WALK_STEPS", 0) != 0;
     sKartCounts = plat_switch("DKR_KART_COUNTS", 0) != 0; // P65 rank 2's measurement (kart_count)
+    // P68 (proposals/3ds-kart-draw-batching-plan.md): GPU-maths kart draws batched on the CPU side (native_gpu_run).
+    // Off until an Old 3DS bench has raced it; the picture is the same either way.
+    // 1: runs merged; 2 (or 3): runs merged and slim records (bit 2 goes on top of bit 1, so one bench value sets
+    // both with DKR_PMU 2). The self-check on its own checks both.
+    sKartBatch = plat_switch("DKR_KART_BATCH", 0);
+#if PLAT_DEBUG_TOOLS
+    sKartBatchCheck = plat_switch("DKR_KART_BATCH_CHECK", 0); // 2, 3 and 4: broken on purpose (kart_batch_check)
+    if (sKartBatchCheck != 0 && sKartBatch == 0) {
+        sKartBatch = 3;
+    }
+#endif
+    sKartBatch = sKartBatch >= 2 ? 3 : sKartBatch & 1;
     // The GPU vertex maths' meshes (P31 track, P34 models): Settings > Picture > GPU vertex maths (off by default).
     sTrackMeshSwitch = plat_switch("DKR_TRACK_MESH", plat_gpu_maths_setting() >= 2) != 0;
     sGpuKinds = (u32) plat_switch("DKR_GPU_TRANSFORM_KINDS", 0xFFFF);
     sModelMeshSwitch = plat_switch("DKR_MODEL_MESH", plat_gpu_maths_setting() >= 3) != 0;
     // The native track (NR4) turns the backend's GPU vertex maths on for itself: the other kinds stay on the CPU
     // path unless DKR_GPU_TRANSFORM is on too.
-    sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", 0) != 0;
+    // On by default on an Old 3DS (switch bench run 54, b2096b8, 2026-11-23): with raw register words the native track
+    // took ~0.6 ms off the game core and ~0.9 ms off the renderer core (three rows agreed, triangle-adjusted;
+    // proposals/3ds-switch-bench-b2096b8-o3ds-results.md). The frame's fills are waited for with it (DKR_FILL_WAIT,
+    // gfx_c3d.c), the Jungle Falls tunnel fix (T1). Off on a New 3DS, which is GPU-bound.
+    sNativeTrackSwitch = plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) != 0;
+    // P55 S1 (track_bake): the native track's meshes made during the level load, not the first time each is seen.
+    sTrackBakeSwitch = plat_switch("DKR_TRACK_BAKE", 0) != 0;
+    sTrackBakeCheck = plat_switch("DKR_TRACK_BAKE_CHECK", 0);
     // Karts' vertex maths on the GPU (1) is the Old 3DS default together with raw register words (DKR_RAW_REGS): bench
     // run 50 on 62ac36e, game core -4.3 ms and renderer core -3.6 ms. Alone it only moves the work to the renderer's
     // core; 2 (objects too) was no better. Read the same way in gfx_c3d.c (sTransformWanted) and host/gfx_soft.c.
@@ -2887,18 +2950,24 @@ static COLD void read_switches_now(void) {
     sTexHandleOn = plat_switch("DKR_NATIVE_TEXHANDLE", plat_old_3ds()); // P53: on by default on an Old 3DS
     // R4: the frame run as records (nframe.c) once every native switch is on; off, the walk as ever.
     sNativeFrame = plat_switch("DKR_NATIVE_FRAME", plat_old_3ds()) != 0;
+    // P55 S4: the flat dispatcher (off until an Old 3DS bench has raced it) and its self-check.
+    sFlatFrame = plat_switch("DKR_FLAT_FRAME", 0) != 0;
+    sFlatCheck = PLAT_DEBUG_TOOLS ? plat_switch("DKR_FLAT_FRAME_CHECK", 0) : 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
     // P60 D: sprite tiles as points, the GPU's geometry shader making their corners (1: the backend's CPU makes them,
     // 2: the geometry shader where it can). Off by default until an Old 3DS bench has raced it.
     sSpriteGs = plat_switch("DKR_SPRITE_GS", 0);
-    if (plat_switch("DKR_INTERP60", 0) != 0) {
-        // The 60 Hz picture (gfx_interp.inc): draws keep their order (the opaque sort would draw them after the deltas
-        // they belong with were replaced), and sprites stay triangles (the sprite program has no delta).
-        sOpaqueSortSwitch = 0;
-        sSpriteGs = 0;
-    }
+    ikey_switches(); // DKR_INTERP60 (gfx_interp.inc): no opaque sort or sprite geometry shader while it is set
 #if PLAT_DEBUG_TOOLS
     sSpriteGsCheck = plat_switch("DKR_SPRITE_GS_CHECK", 0) != 0;
+#endif
+    // P65 rank 1: billboard sprite tiles handed over as the game's own vertices and one matrix per load, the GPU
+    // working out the corners (gfx_c3d.c: 1 the frame's transform program for one-load draws and sprite_table.v.pica
+    // for the rest, 2 sprite_table.v.pica for all, 3 the transform program for all). Off by default until an Old 3DS
+    // bench has raced it; P60 D's points take precedence when both are on.
+    sSpriteTable = plat_switch("DKR_SPRITE_TABLE", 0) != 0;
+#if PLAT_DEBUG_TOOLS
+    sSpriteTableCheck = plat_switch("DKR_SPRITE_TABLE_CHECK", 0); // 2: broken on purpose (rule K6)
 #endif
 }
 
@@ -3968,7 +4037,9 @@ typedef struct TrackMesh {
     u8 numVerts, failed;
     u8 numRuns;
     u8 changed; // The game changes these triangles in place (port_tris_changed): left to the walk for the level
+    u8 baked;   // Made by track_bake during the level load
     s16 boxMin[3], boxMax[3];
+    u32 hash; // DKR_TRACK_BAKE_CHECK: mesh_hash of the triangles and vertices it was made from
     void *mesh;
     MeshRun runs[MESH_MAX_RUNS];
 } TrackMesh;
@@ -3988,6 +4059,14 @@ static s32 sTrackBucketCount;
 static TrackBucket sTrackLate[TRACK_LATE]; // In order, one part each unless merged with the one before
 static s32 sTrackLateCount;
 static u32 sTrackStats[5]; // Batches drawn by the GPU, left out, left to the CPU, meshes made, draws
+static u32 sTrackBakedLoads = ~0u; // The gPortLevelLoads track_bake made this table for (~0: none)
+static u32 sTrisLevelNop = ~0u;    // PORT_NATIVE_OPS: the level port_nop_static_forget last ran for
+static s32 sTrackBaking;           // track_bake is filling the table
+static u32 sTrackBakeTrisHead;     // gPortTrisHead when track_bake began (native_tris_take reads the ring from it)
+static u32 sTrackNoRoom;           // Meshes left to the walk for the level: the arena was full (baked table)
+static u32 sTrackAfterLoad;        // Meshes made after the bake, in this level (DKR_TRACK_BAKE_CHECK's log)
+static u32 sTrackRemade;           // Of those, made again because the batch's first words changed (stale)
+static u32 sTrackCheckCursor, sTrackCheckCompared, sTrackCheckDiffer, sTrackCheckLogged;
 
 /* Whether a native track bucket still waiting to be drawn (track_flush) uses either texture (texture_in_use). */
 static s32 track_buckets_use(const GfxTexture *a, const GfxTexture *b) {
@@ -4023,6 +4102,9 @@ static void track_tris_mark(const void *tris) {
     for (i = 0; i < TRACK_PROBES; i++) {
         TrackMesh *c = &sTrackMeshes[(h + i) & (TRACK_TABLE_SIZE - 1)];
         if (c->tris == tris) {
+            if (UNLIKELY(sTrackBakeCheck == 2) && c->baked) {
+                return; // Rule K6: the check broken on purpose (this invalidation dropped), which it must report
+            }
             if (c->mesh != NULL) {
                 gfx_split_mesh_free(c->mesh);
                 c->mesh = NULL;
@@ -4183,6 +4265,9 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
                 return c->failed ? NULL : c;
             }
             e = c; // Stale (memory reused): made again
+            if (!sTrackBaking && sTrackBakedLoads == gPortLevelLoads) {
+                sTrackRemade++; // (counted again below as made after the load)
+            }
             if (e->mesh != NULL) {
                 gfx_split_mesh_free(e->mesh);
                 e->mesh = NULL;
@@ -4225,9 +4310,22 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
     }
     e->mesh = gfxb_mesh_create(sModelVerts, corners, sModelIndices, count * 3);
     if (e->mesh == NULL) {
+        if (sTrackBaking || sTrackBakedLoads == gPortLevelLoads) {
+            // A baked table: out of room is left to the walk for the level (failed), not tried again at every
+            // sight, each try a mesh_build for nothing (a lead for #367's long Windmill frames).
+            sTrackNoRoom++;
+            return NULL;
+        }
         e->tris = NULL; // Out of room: tried again later
         sTrackMeshCount--;
         return NULL;
+    }
+    e->baked = (u8) sTrackBaking;
+    if (sTrackBakeCheck) {
+        e->hash = mesh_hash(tris, count, src, numVerts);
+    }
+    if (!sTrackBaking && sTrackBakedLoads == gPortLevelLoads) {
+        sTrackAfterLoad++;
     }
     sTrackBytes += corners * sizeof(GfxModelVertex) + count * 3 * sizeof(u16);
     e->numRuns = built.numRuns;
@@ -4245,6 +4343,128 @@ static NOINLINE TrackMesh *track_find(const Triangle *tris, s32 count, const Ver
     e->failed = FALSE;
     sTrackStats[3]++;
     return e;
+}
+
+/*
+ * Roadmap P55 S1 (DKR_TRACK_BAKE, proposals/3ds-track-bake-s1-plan.md): the native track's meshes made once, during the
+ * level load, instead of the first time each batch is seen (P64 candidate 1: until now every batch's mesh_build and
+ * arena copy landed in the race's first frames, the race start's hitch, and again each time a new part of the track
+ * came into view). Run on the renderer thread between frames (port_gfx_textures_between_frames at the load's end,
+ * where every frame handed over is done and the game thread waits), or at the first frame of a level whose load
+ * didn't (a background load from the tracks menu, DKR_LOAD_PREWARM 0). Every batch render_level_segment can draw is
+ * made, keyed exactly as native_track looks them up (the batch's triangles), so the walk then only finds them: each
+ * frame a batch costs its box test and an index range in a bucket (track_part), never a build. The vertices stay
+ * s16 world positions in the one mesh arena; the camera's whole-number offset (transform.v.pica camoff) keeps the
+ * GPU's float24 maths exact. With a baked table a mesh the arena has no room for is left to the walk for the level
+ * (failed), instead of being built and thrown away again at every sight.
+ *
+ * DKR_TRACK_BAKE_CHECK=1 (self-check): each mesh keeps the hash of the triangles and vertices it was made from; every
+ * frame 16 of them (in turn) are hashed again, and any that differ (the game changed a batch in place without
+ * port_tris_changed, so the GPU draws an old copy) are counted and logged ("track bake check: ..."). It also counts
+ * the meshes made after the bake (batches it missed). DKR_TRACK_BAKE_CHECK=2 breaks it on purpose (rule K6): the
+ * invalidation of a baked batch the game scrolls (track_tris_mark) is dropped, which the check must report.
+ */
+#define TRACK_CHECK_PER_FRAME 16
+#define BAKE_RENDER_HIDDEN (1 << 8) // textures_sprites.h RENDER_HIDDEN (not included here)
+
+static COLD void track_bake(const char *when) {
+    unsigned long long start;
+    u32 made0, batches = 0, left = 0, seg, i;
+    if (!plat_switch("DKR_TRACK_BAKE", 0) || !plat_switch("DKR_NATIVE_TRACK", plat_old_3ds()) ||
+        gCurrentLevelModel == NULL || sTrackBakedLoads == gPortLevelLoads || !gfxb_gpu_transform()) {
+        return;
+    }
+    start = plat_time_ns();
+    sTrackBakeCheck = plat_switch("DKR_TRACK_BAKE_CHECK", 0);
+    if (sTrackMeshCount > 0) {
+        gfx_split_drain(); // Frees go through the backend's frame slot (as track_frame_start)
+        track_drop_all();
+    }
+    if (sModelCount > 0) {
+        flush_model_batch(); // Never expected between frames; mesh_build works in the model batch's arrays
+    }
+    // The changes the game reports from here on reach the baked meshes (native_tris_take); those before are in them.
+    sTrackBakeTrisHead = gPortTrisHead;
+    __sync_synchronize();
+    made0 = sTrackStats[3];
+    sTrackNoRoom = 0;
+    sTrackAfterLoad = 0;
+    sTrackRemade = 0;
+    sTrackCheckCursor = sTrackCheckCompared = sTrackCheckDiffer = sTrackCheckLogged = 0;
+    sTrackBaking = TRUE;
+    for (seg = 0; seg < (u32) gCurrentLevelModel->numberOfSegments; seg++) {
+        const LevelModelSegment *segment = &gCurrentLevelModel->segments[seg];
+        if (segment->batches == NULL) {
+            continue;
+        }
+        for (i = 0; i < (u32) segment->numberOfBatches; i++) {
+            const TriangleBatchInfo *b = &segment->batches[i];
+            s32 numVerts = (b + 1)->verticesOffset - b->verticesOffset;
+            s32 count = (b + 1)->facesOffset - b->facesOffset;
+            const Vertex *src;
+            const Triangle *tris;
+            // As render_level_segment: hidden batches are never drawn. Water is made too, even where the block makes
+            // waves: render_level_segment still draws it when waves_block_hq says the block is drawn without them.
+            if (b->flags & BAKE_RENDER_HIDDEN) {
+                continue;
+            }
+            if (count <= 0 || numVerts <= 0) {
+                continue;
+            }
+            // The pointers as the batch's commands carry them (render_level_segment's OS_K0_TO_PHYSICAL, seg_addr).
+            src = (const Vertex *) seg_addr(OS_K0_TO_PHYSICAL(&segment->vertices[b->verticesOffset]));
+            tris = (const Triangle *) seg_addr(OS_K0_TO_PHYSICAL(&segment->triangles[b->facesOffset]));
+            batches++;
+            if (track_find(tris, count, src, numVerts) == NULL) {
+                left++;
+            }
+        }
+    }
+    sTrackBaking = FALSE;
+    sTrackBakedLoads = gPortLevelLoads;
+    sTrackLoads = gPortLevelLoads; // track_frame_start: this level's table, not to be emptied
+    plat_log("track bake (%s, level load %u): %u batches, %u meshes made, %u left to the walk (%u out of room), "
+             "%u KB in %u meshes, %.1f ms", when, (unsigned) gPortLevelLoads, (unsigned) batches,
+             (unsigned) (sTrackStats[3] - made0), (unsigned) left, (unsigned) sTrackNoRoom,
+             (unsigned) (sTrackBytes / 1024), (unsigned) sTrackMeshCount, (plat_time_ns() - start) / 1e6);
+}
+
+/* Called at the end of a level load, on the renderer thread between frames (port_gfx_textures_between_frames). */
+static void track_bake_at_load(void) {
+    track_bake("during the load");
+}
+
+/* DKR_TRACK_BAKE_CHECK, at a frame's start: TRACK_CHECK_PER_FRAME baked meshes hashed again (see track_bake). */
+static NOINLINE COLD void track_bake_check_frame(void) {
+    u32 looked, compared = 0, differ = 0;
+    for (looked = 0; looked < TRACK_TABLE_SIZE && compared < TRACK_CHECK_PER_FRAME; looked++) {
+        TrackMesh *e = &sTrackMeshes[sTrackCheckCursor];
+        sTrackCheckCursor = (sTrackCheckCursor + 1) & (TRACK_TABLE_SIZE - 1);
+        if (e->tris == NULL || e->mesh == NULL || e->changed || e->failed || e->hash == 0) {
+            continue;
+        }
+        compared++;
+        if (mesh_hash(e->tris, e->numTris, e->src, e->numVerts) != e->hash) {
+            differ++;
+            if (sTrackCheckLogged < 4) {
+                sTrackCheckLogged++;
+                plat_log("track bake check: a %s mesh differs from its batch (%u triangles, %u vertices, frame %d)",
+                         e->baked ? "baked" : "later", (unsigned) e->numTris, (unsigned) e->numVerts,
+                         (int) sFrameCount);
+            }
+            e->hash = 0; // Reported once
+        }
+    }
+    if (compared > 0) {
+        sTrackCheckCompared += compared;
+        sTrackCheckDiffer += differ;
+        plat_check_report("track bake", differ != 0);
+    }
+    if (sFrameCount % 600 == 0) {
+        plat_log("track bake check: %u compared, %u differ, %u meshes made after the load (%u of them made again: "
+                 "their first words changed)", (unsigned) sTrackCheckCompared, (unsigned) sTrackCheckDiffer,
+                 (unsigned) sTrackAfterLoad, (unsigned) sTrackRemade);
+    }
 }
 
 /*
@@ -4451,11 +4671,34 @@ static COLD void frame_logs_600(void) {
         }
         __builtin_memset(sSprStats, 0, sizeof(sSprStats));
     }
+    if (sSpriteTable) {
+        plat_log("sprite table (DKR_SPRITE_TABLE): %lu tiles in %lu draws, %lu loads noted (%lu transformed late); "
+                 "tiles left the old way: %lu no load, %lu after the table declined, %lu vertices, %lu state",
+                 sTabStats[0], sTabStats[1], sTabStats[7], sTabStats[6], sTabStats[2], sTabStats[3], sTabStats[4],
+                 sTabStats[5]);
+#if PLAT_DEBUG_TOOLS
+        if (sSpriteTableCheck) {
+            plat_log("sprite table check: %lu corners compared, %lu differ%s", sTabStats[8], sTabStats[9],
+                     sTabStats[9] ? " (DIFFER)" : "");
+            plat_check_report("sprite table", sTabStats[9] != 0); /* the race's checks_run / checks_wrong */
+        }
+#endif
+        __builtin_memset(sTabStats, 0, sizeof(sTabStats));
+    }
     if (sNativeGpuSwitch) {
         plat_log("native GPU maths: %u draws by the GPU, %u left out, %u left to the CPU (GPU maths %s)",
                  (unsigned) sNGpuStats[0], (unsigned) sNGpuStats[1], (unsigned) sNGpuStats[2],
                  sGpuTransform ? "on" : "off");
         __builtin_memset(sNGpuStats, 0, sizeof(sNGpuStats));
+        if (sKartBatch) {
+            unsigned int rec, slim, cmp, wrong;
+            gfx_split_model2_counts(&rec, &slim, &cmp, &wrong);
+            plat_log("kart batching (DKR_KART_BATCH %d): %u runs of %u records merged, %u runs left (box past the "
+                     "guard band), %u slim draws; queue: %u two-group records (%u with the texture factors alone)",
+                     (int) sKartBatch, (unsigned) sKartRunStats[0], (unsigned) (sKartRunStats[0] + sKartRunStats[1]),
+                     (unsigned) sKartRunStats[2], (unsigned) sKartRunStats[3], rec, slim);
+            __builtin_memset(sKartRunStats, 0, sizeof(sKartRunStats));
+        }
     }
     if (UNLIKELY(sKartCounts)) {
         kart_counts_log();
@@ -4475,17 +4718,30 @@ static COLD void frame_env_switches(void) {
 }
 
 static void track_frame_start(void) {
+    u32 baked = sTrackBakedLoads == gPortLevelLoads; // track_bake made this level's table during its load
     sNativeTrack = sNativeTrackSwitch && sGpuTransform;
-    if (sTrackMeshCount > 0 && (!sNativeTrack || sTrackLoads != gPortLevelLoads)) {
+    if (sTrackMeshCount > 0 && (!sNativeTrack || (sTrackLoads != gPortLevelLoads && !baked))) {
         gfx_split_drain(); // Frees go through the backend's frame slot, which the second renderer thread may be using
         track_drop_all();
+        if (!sNativeTrack) {
+            sTrackBakedLoads = ~0u;
+            baked = FALSE;
+        }
     }
 #ifdef PORT_NATIVE_OPS
-    if (sTrackLoads != gPortLevelLoads) {
+    if (sTrisLevelNop != gPortLevelLoads) {
+        sTrisLevelNop = gPortLevelLoads;
         port_nop_static_forget();
     }
 #endif
+    if (sTrackBakeSwitch && sNativeTrack && !baked && sTrackLoads != gPortLevelLoads) {
+        track_bake("at the level's first frame"); // Its load didn't (a background load): the first frame does it
+        baked = sTrackBakedLoads == gPortLevelLoads;
+    }
     sTrackLoads = gPortLevelLoads;
+    if (UNLIKELY(sTrackBakeCheck) && baked) {
+        track_bake_check_frame();
+    }
     if (UNLIKELY(sOpCountOn < 0 || sCensusOn < 0)) {
         frame_env_switches();
     }
@@ -4825,7 +5081,11 @@ typedef struct NativeMesh {
     const Vertex *boxSrc; // The vertices boxMin/boxMax were taken from (the track's don't move)
     u32 boxLoads;         // gPortLevelLoads then
     s16 boxMin[3], boxMax[3];
+    u16 *gpuIdx;  // P68 (DKR_KART_BATCH bit 2): the corner triples, cull group 0's then 1's (kart_gpu_idx), or NULL
+    u16 gpuN[2];  // Their triangles in each group
+    u8 gpuOk;     // gpuIdx holds these tables' lists (cleared when native_build remakes them)
 } __attribute__((aligned(32))) NativeMesh;
+_Static_assert(sizeof(NativeMesh) == 96 || sizeof(void *) != 4, "a NativeMesh is three 32-byte lines");
 
 static NativeMesh sNativeMeshes[NATIVE_TABLE_SIZE];
 _Static_assert(NATIVE_TABLE_SIZE == 2048 && NATIVE_POOL_BYTES == 640 * 1024, "read_switches sets the limits from these");
@@ -4859,7 +5119,10 @@ static COLD NOINLINE void native_unshare(void) {
     sNativeUnshares++;
 }
 
+static u32 sNativeForgets; // native_forget_all's calls (native_gpu_run's guard)
+
 static COLD void native_forget_all(void) {
+    sNativeForgets++;
     if (sNativeShared) {
         native_unshare();
     }
@@ -4965,6 +5228,10 @@ static COLD s32 native_build(NativeMesh *e, const Triangle *tris, s32 count, s32
     e->tris = tris;
     e->checkedFrame = (u32) sFrameCount;
     e->boxSrc = NULL;
+    e->gpuOk = 0;
+    if (!reuse) {
+        e->gpuIdx = NULL; // (made again for capTris when needed)
+    }
     return TRUE;
 }
 
@@ -5059,6 +5326,20 @@ static NOINLINE void native_tris_take(void) {
     if (sTrisLevel != gPortLevelLoads || sTrisEpochSeen != gPortTrisEpoch || head - start > PORT_TRIS_RING) {
         if (sTrisLevel == gPortLevelLoads && head - start > PORT_TRIS_RING) {
             track_drop_all(); // Which track batches changed is lost: all are made again from what they hold now
+        } else if (sTrackBakedLoads == gPortLevelLoads) {
+            // P55 S1: a table baked during the load (track_bake) was made from the triangles as they were then, so the
+            // changes reported since (texture scrolls in the level's first game frames, before its first walked
+            // frame) must still reach it, or it keeps drawing the old ones (found by DKR_TRACK_BAKE_CHECK). On a new
+            // level the ring is read from where it stood at the bake; with only the epoch changed, from the tail.
+            u32 from = sTrisLevel != gPortLevelLoads ? sTrackBakeTrisHead : start;
+            if (head - from > PORT_TRIS_RING) {
+                track_drop_all(); // Lost: made again from what they hold now, at first sight
+                sTrackBakedLoads = ~0u;
+            } else {
+                for (; from != head; from++) {
+                    track_tris_mark((const Triangle *) gPortTrisRing[from % PORT_TRIS_RING]);
+                }
+            }
         }
         sTrisLevel = gPortLevelLoads;
         sTrisEpochSeen = gPortTrisEpoch;
@@ -6001,6 +6282,259 @@ static NOINLINE s32 sprite_point_try(const RspVertex *V, const Triangle *tris, s
     return TRUE;
 }
 
+/*
+ * P65 rank 1 (DKR_SPRITE_TABLE, default off; proposals/3ds-sprite-table-plan.md). A billboard load (the vertices after
+ * the anchor in slot 0) is not transformed: it is noted (tab_load_note), with its billboard matrix, anchor and fog
+ * values, and each tile that uses it hands the game's own vertices to the backend with one 4x4 matrix per load (a
+ * group, gfx_backend.h GfxTabGroup): the transform, place_billboard's scale and anchor, and the viewport fold, all
+ * affine in the vertex. The 3DS's vertex shader (sprite_table.v.pica) does the rest. A tile the table can't take
+ * (a vertex not of this load, two textures, the atlas, fog the load didn't work out, the reference renderer, tracing,
+ * audited frames) has the load transformed late (tab_load_resolve, the old code) and is drawn the old way. The walk
+ * doesn't reject tiles off the screen here: the GPU clips them.
+ */
+typedef struct TabLoad {
+    const Vertex *src; // The game's vertices, loaded from slot 1
+    s32 count;
+    float m[4][4];     // The billboard matrix it was loaded with
+    float placed[4][4]; // Its rows after place_billboard (clip x, y, z, w from x, y, z, 1), before the viewport
+    RspVertex anchor;  // Slot 0 then
+    s16 fogMul, fogOffset;
+    u8 fog;            // Loaded with fog (its factors are worked out)
+    u8 pending;        // Not yet transformed into sSprVerts (tab_load_resolve)
+    u32 serial, frame;
+    s16 boxMin[3], boxMax[3];
+} TabLoad;
+static TabLoad sTabLoad;
+static u32 sTabLoadSerial = 1, sTabGroupSerial; // The load the batch's last group is of
+static s32 sTabLoadNoted; // sTabLoad is the sprite frame's current load (sSprValid's)
+
+/* The noted load transformed into sSprVerts as load_vertices_core would have done it when it came. */
+static NOINLINE COLD void tab_load_resolve(void) {
+    s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
+    u8 lightOn = sLightOn;
+    u32 f;
+    g.fogMul = sTabLoad.fogMul;
+    g.fogOffset = sTabLoad.fogOffset;
+    sLightOn = 0;
+    load_vertices_core(sSprVerts, &sTabLoad.anchor, sTabLoad.src, sTabLoad.count, 1, sTabLoad.m, sTabLoad.fog, TRUE,
+                       &f);
+    g.fogMul = fogMul;
+    g.fogOffset = fogOffset;
+    sLightOn = lightOn;
+    sSprFlat = f;
+    sTabLoad.pending = FALSE;
+    sTabStats[6]++;
+}
+
+/* Notes a billboard load of numVerts vertices from slot 1 instead of transforming it (sSprVerts[0] is its anchor). */
+static NOINLINE void tab_load_note(const Vertex *vtx, s32 numVerts, float (*m)[4], s32 fog) {
+    const RspVertex *A = &sSprVerts[0];
+    float scaleY = 1.0f / plat_fov_tan_scale(), scaleX = scaleY / plat_aspect_scale();
+    float scaleZ = plat_camera_near() / 10.0f;
+    s32 i, j;
+    if (sTabLoadNoted && sTabLoad.pending && sTabLoad.count > numVerts) {
+        tab_load_resolve(); // Its slots past the new load stay the old load's, as they would have
+    }
+    sTabLoad.src = vtx;
+    sTabLoad.count = numVerts;
+    __builtin_memcpy(sTabLoad.m, m, sizeof(sTabLoad.m));
+    sTabLoad.anchor = *A;
+    sTabLoad.fogMul = g.fogMul;
+    sTabLoad.fogOffset = g.fogOffset;
+    sTabLoad.fog = fog != 0;
+    sTabLoad.pending = TRUE;
+    sTabLoad.serial = ++sTabLoadSerial;
+    sTabLoad.frame = (u32) sFrameCount;
+    // place_billboard: x * scaleX + anchor x, y * scaleY + anchor y, (z - 1) * scaleZ + 1 + anchor z, w + anchor w
+    for (j = 0; j < 4; j++) {
+        sTabLoad.placed[0][j] = m[j][0] * scaleX;
+        sTabLoad.placed[1][j] = m[j][1] * scaleY;
+        sTabLoad.placed[2][j] = m[j][2] * scaleZ;
+        sTabLoad.placed[3][j] = m[j][3];
+    }
+    sTabLoad.placed[0][3] += A->x;
+    sTabLoad.placed[1][3] += A->y;
+    sTabLoad.placed[2][3] += 1.0f - scaleZ + A->z;
+    sTabLoad.placed[3][3] += A->w;
+    for (j = 0; j < 3; j++) {
+        sTabLoad.boxMin[j] = 0x7FFF;
+        sTabLoad.boxMax[j] = -0x8000;
+    }
+    for (i = 0; i < numVerts; i++) {
+        const s16 *c = &vtx[i].x;
+        for (j = 0; j < 3; j++) {
+            sTabLoad.boxMin[j] = c[j] < sTabLoad.boxMin[j] ? c[j] : sTabLoad.boxMin[j];
+            sTabLoad.boxMax[j] = c[j] > sTabLoad.boxMax[j] ? c[j] : sTabLoad.boxMax[j];
+        }
+    }
+    sTabLoadNoted = TRUE;
+    sSprFlat = 0;
+    sTabStats[7]++;
+}
+
+#if PLAT_DEBUG_TOOLS
+/* DKR_SPRITE_TABLE_CHECK: each corner as gfx_tab_corner makes it (the backend's CPU and the shader's maths) against
+ * the corner the old way would have made (load_vertices_core, then sprite_corner). Counted in the log. */
+static NOINLINE COLD void sprite_table_check(const Triangle *tris, s32 count, const GfxTabVertex *o,
+                                             const GfxTabGroup *gr, s32 fog, s32 textured, const TexAxis *u0,
+                                             const TexAxis *v0) {
+    static RspVertex ref[MAX_VERTICES];
+    s16 fogMul = g.fogMul, fogOffset = g.fogOffset;
+    u8 lightOn = sLightOn;
+    Viewport vp;
+    u32 f;
+    s32 i, k, bad = 0;
+    g.fogMul = sTabLoad.fogMul;
+    g.fogOffset = sTabLoad.fogOffset;
+    sLightOn = 0;
+    ref[0] = sTabLoad.anchor;
+    load_vertices_core(ref, &sTabLoad.anchor, sTabLoad.src, sTabLoad.count, 1, sTabLoad.m, sTabLoad.fog, TRUE, &f);
+    g.fogMul = fogMul;
+    g.fogOffset = fogOffset;
+    sLightOn = lightOn;
+    viewport_init(&vp);
+    for (i = 0; i < count; i++) {
+        for (k = 0; k < 3; k++, o++) {
+            GfxVertex a, b;
+            float ps, ts;
+            s32 da;
+            gfx_tab_corner(&a, o, gr, sTabFogMul, sTabFogOffset);
+            sprite_corner(&b, &ref[tris[i].verticesArray[1 + k]], &vp, fog, u0, v0, tri_uv(&tris[i], k));
+            ps = 1e-4f * ((b.w < 0.0f ? -b.w : b.w) + (b.x < 0.0f ? -b.x : b.x) + (b.y < 0.0f ? -b.y : b.y) + 1.0f);
+            ts = 1e-4f * ((b.u0 < 0.0f ? -b.u0 : b.u0) + (b.v0 < 0.0f ? -b.v0 : b.v0) + 1.0f);
+            da = (s32) a.a - (s32) b.a;
+            if (!sprite_close(a.x, b.x, ps) || !sprite_close(a.y, b.y, ps) || !sprite_close(a.z, b.z, ps) ||
+                !sprite_close(a.w, b.w, ps) || (textured && (!sprite_close(a.u0, b.u0, ts) ||
+                                                             !sprite_close(a.v0, b.v0, ts))) ||
+                a.r != b.r || a.g != b.g || a.b != b.b || da > 1 || da < -1) {
+                if (bad++ == 0 && sTabStats[9] == 0) {
+                    plat_log("sprite table check: first difference: table (%.3f %.3f %.3f %.3f uv %.3f %.3f a %d), "
+                             "walk (%.3f %.3f %.3f %.3f uv %.3f %.3f a %d)", a.x, a.y, a.z, a.w, a.u0, a.v0, a.a, b.x,
+                             b.y, b.z, b.w, b.u0, b.v0, b.a);
+                }
+            }
+        }
+    }
+    sTabStats[8] += (unsigned long) count * 3;
+    sTabStats[9] += (unsigned long) bad;
+}
+#endif
+
+/* Draws the tile from the table (the batch); FALSE leaves it to the old way (the load not yet transformed). */
+static NOINLINE s32 sprite_table_try(const Triangle *tris, s32 count, s32 textured) {
+    GfxDrawState state;
+    TexAxis u0, v0;
+    Viewport vp;
+    GfxTabVertex *o;
+    GfxTabGroup *gr;
+    float tex[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    s32 i, k, fog, group, newGroup;
+    u8 backface;
+    if (!sTabLoadNoted || sTabLoad.frame != (u32) sFrameCount) {
+        sTabStats[2]++;
+        return FALSE;
+    }
+    if (count <= 0 || count * 3 > GFX_TAB_MAX_VERTS || REF_ACTIVE() || UNLIKELY(sTracing) || UNLIKELY(sAuditFrame)) {
+        sTabStats[4]++;
+        return FALSE;
+    }
+    backface = tris[0].flags & BACKFACE_DRAW;
+    for (i = 0; i < count; i++) {
+        const u8 *idx = &tris[i].verticesArray[1];
+        if ((tris[i].flags & BACKFACE_DRAW) != backface || idx[0] < 1 || idx[1] < 1 || idx[2] < 1 ||
+            idx[0] > sTabLoad.count || idx[1] > sTabLoad.count || idx[2] > sTabLoad.count) {
+            sTabStats[4]++;
+            return FALSE; // A vertex not of this load (the anchor, or an older load's), or mixed culling
+        }
+    }
+    fog = (g.geometryMode & G_FOG) != 0;
+    if (fog && UNLIKELY(sFogSkip) && !g.combinerShadeAlpha) {
+        fog = FALSE; // As draw_triangles_impl (P60 C): nothing reads the shade alpha
+    }
+    state = sTriState;
+    if (!textured) {
+        state.textures[0] = NULL;
+        state.textures[1] = NULL;
+    }
+    if ((fog && !sTabLoad.fog) || state.textures[1] != NULL ||
+        (state.textures[0] != NULL && sAtlasOn && ((sAtlasKinds >> sDrawKind) & 1))) {
+        sTabStats[5]++;
+        return FALSE;
+    }
+    state.cullMode = backface ? 0 : (g.vpScale[0] < 0.0f ? 2 : 1);
+    state.flat = 0;
+    if (state.textures[0] != NULL) {
+        sprite_axes(&state, &u0, &v0);
+        tex[0] = u0.scale, tex[1] = u0.offset, tex[2] = v0.scale, tex[3] = v0.offset;
+        if (u0.divide) {
+            tex[0] /= u0.size, tex[1] /= u0.size;
+        }
+        if (v0.divide) {
+            tex[2] /= v0.size, tex[3] /= v0.size;
+        }
+    }
+    newGroup = sTabGroupCount == 0 || sTabGroupSerial != sTabLoad.serial ||
+               __builtin_memcmp(sTabGroups[sTabGroupCount - 1].tex, tex, sizeof(tex)) != 0;
+    if (!sBatchTable || sTabVertCount + count * 3 > GFX_TAB_MAX_VERTS || (newGroup && sTabGroupCount == GFX_TAB_GROUPS) ||
+        sTabFogMul != (float) sTabLoad.fogMul || sTabFogOffset != (float) sTabLoad.fogOffset ||
+        !draw_states_equal(&state, &sBatchState)) {
+        if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+            flush_batch();
+        }
+        sBatchState = state;
+        sBatchTable = TRUE;
+        sTabVertCount = 0;
+        sTabGroupCount = 0;
+        sTabFogMul = (float) sTabLoad.fogMul;
+        sTabFogOffset = (float) sTabLoad.fogOffset;
+        newGroup = TRUE;
+    }
+    if (newGroup) {
+        const float(*P)[4] = sTabLoad.placed;
+        gr = &sTabGroups[sTabGroupCount++];
+        viewport_init(&vp);
+        for (k = 0; k < 4; k++) {
+            gr->m[0][k] = P[0][k] * vp.scaleX + P[3][k] * vp.transX;
+            gr->m[1][k] = P[1][k] * vp.scaleY + P[3][k] * vp.transY;
+            gr->m[2][k] = P[2][k];
+            gr->m[3][k] = P[3][k];
+        }
+#if PLAT_DEBUG_TOOLS
+        if (sSpriteTableCheck == 2) {
+            gr->m[0][3] -= sTabLoad.anchor.x * vp.scaleX; // Rule K6: the check broken on purpose (the anchor's x left out)
+        }
+#endif
+        __builtin_memcpy(gr->tex, tex, sizeof(tex));
+        __builtin_memcpy(gr->boxMin, sTabLoad.boxMin, sizeof(gr->boxMin));
+        __builtin_memcpy(gr->boxMax, sTabLoad.boxMax, sizeof(gr->boxMax));
+        sTabGroupSerial = sTabLoad.serial;
+    }
+    group = (sTabGroupCount - 1) * GFX_TAB_ROWS;
+    gr = &sTabGroups[sTabGroupCount - 1];
+    o = &sTabVerts[sTabVertCount];
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        for (k = 0; k < 3; k++, o++) {
+            const Vertex *v = &sTabLoad.src[t->verticesArray[1 + k] - 1];
+            TexCoords uv = tri_uv(t, k);
+            o->x = v->x, o->y = v->y, o->z = v->z, o->row = (s16) group;
+            o->u = uv.u, o->v = uv.v, o->fog = (s16) fog, o->pad = 0;
+            o->r = v->r, o->g = v->g, o->b = v->b, o->a = v->a;
+        }
+    }
+#if PLAT_DEBUG_TOOLS
+    if (UNLIKELY(sSpriteTableCheck)) {
+        sprite_table_check(tris, count, &sTabVerts[sTabVertCount], gr, fog, state.textures[0] != NULL, &u0, &v0);
+    }
+#endif
+    sTabVertCount += count * 3;
+    sBatchCount += count;
+    sBatchVertices += count * 3;
+    sObjTris[sDrawObj] += count;
+    sTabStats[0]++;
+    return TRUE;
+}
+
 /* A sprite tile: the vertices it loads go where the frame's appending load would have put them, and the tiles after
  * it that load none (four of five) use them again. Returns FALSE (nothing done) for a tile that loads none with no
  * load of this frame's kept. */
@@ -6026,10 +6560,15 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
         g.tiles[1] = mat->tiles[1];
         g.geometryMode = mat->fog ? (geometry | G_FOG) : (geometry & ~G_FOG);
         ws = walk_step(WS_SPR_CORNERS); // P65 rank 1's measurement: the corners a vertex shader could make
-        load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog, g.billboard,
-                           &f);
+        if (sSpriteTable && !sSpriteGs && g.billboard && dest == 1 && !flatBits && !sLightOn && !REF_ACTIVE()) {
+            tab_load_note(vtx, numVerts, g.matrices[g.curMatrix], mat->fog); // P65 rank 1: transformed only if needed
+        } else {
+            sTabLoadNoted = FALSE;
+            load_vertices_core(sSprVerts, &g.verts[0], vtx, numVerts, dest, g.matrices[g.curMatrix], mat->fog,
+                               g.billboard, &f);
+            sSprFlat = flatBits | f;
+        }
         walk_step(ws);
-        sSprFlat = flatBits | f;
         sSprFrame = (u32) sFrameCount;
         sSprValid = TRUE;
     } else if (sSprValid && sSprFrame == (u32) sFrameCount) {
@@ -6043,11 +6582,19 @@ static NOINLINE HOT s32 native_sprite_free(NMat *mat, const Vertex *vtx, s32 num
     sTriStateValid = TRUE;
     native_preset_axes(mat, textured);
     ws = walk_step(WS_SPR_TRIS);
-    if (!sSpriteGs) {
-        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
-    } else if (!sprite_point_try(sSprVerts, tris, count, textured)) {
-        sSprStats[1]++;
-        draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+    if (sTabLoadNoted && sprite_table_try(tris, count, textured)) {
+        // P65 rank 1: drawn from the table
+    } else {
+        if (sTabLoadNoted && sTabLoad.pending) {
+            tab_load_resolve(); // The old way needs the load's corners
+            sTabStats[3]++;
+        }
+        if (!sSpriteGs) {
+            draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+        } else if (!sprite_point_try(sSprVerts, tris, count, textured)) {
+            sSprStats[1]++;
+            draw_record_triangles(sSprVerts, (s32) sSprFlat, tris, count, textured);
+        }
     }
     walk_step(ws);
     sPresetAxes = NULL;
@@ -6589,18 +7136,68 @@ static NOINLINE HOT void native_remote_send(const NMat *mat, const GfxDrawState 
  */
 static GfxModelVertex sNGpuVerts[NATIVE_MAX_CORNERS];
 static u16 sNGpuIndices[2][MAX_BATCH_TRIANGLES * 3];
+
+/* A native GPU draw's state and params after its matrix (model_params_matrix): the material's state and texture
+ * factors, the fog and the light (native_gpu_draw, native_gpu_run and its check). */
+static inline __attribute__((always_inline)) void native_gpu_params(NMat *mat, s32 textured, GfxDrawState *state,
+                                                                    GfxModelParams *params) {
+    TexAxis ax[4];
+    s32 k;
+    nmat_state(mat, state, textured);
+    state->flat = 0;
+    for (k = 0; k < 4; k++) {
+        params->texScale[k] = 0.0f;
+        params->texOffset[k] = 0.0f;
+    }
+    if (state->textures[0] != NULL || state->textures[1] != NULL) {
+        nmat_axes(mat, state, textured, ax);
+        for (k = 0; k < 2; k++) {
+            if (state->textures[k] != NULL) {
+                tex_axis_factors(&ax[k * 2], &params->texScale[k * 2], &params->texOffset[k * 2]);
+                tex_axis_factors(&ax[k * 2 + 1], &params->texScale[k * 2 + 1], &params->texOffset[k * 2 + 1]);
+            }
+        }
+    }
+    params->fog = mat->fog != 0;
+    params->fogMul = params->fog ? g.fogMul : 0;
+    params->fogOffset = params->fog ? g.fogOffset : 0;
+    params->pad[0] = sLightOn ? 1 : 0;
+    params->pad[1] = params->pad[2] = 0;
+    if (sLightOn) {
+        __builtin_memcpy(params->light, sLight, sizeof(params->light));
+    } else {
+        params->light[0] = params->light[1] = params->light[2] = params->light[3] = 0.0f;
+    }
+}
+
+/* One corner of a native mesh as a model vertex: the game's position and colour, the corner's texture coordinates. */
+static inline __attribute__((always_inline)) void native_gpu_corner(GfxModelVertex *v, const Vertex *src, u32 uvWord) {
+    TexCoords uv;
+    uv.texCoords = uvWord;
+    v->x = src->x;
+    v->y = src->y;
+    v->z = src->z;
+    v->one = 1;
+    v->u = uv.u;
+    v->v = uv.v;
+    v->r = src->r;
+    v->g = src->g;
+    v->b = src->b;
+    v->a = src->a;
+}
+
 static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, s32 total, s32 count,
                                     const NativeMesh *mesh, s32 matrix, u8 frontCull) {
     GfxDrawState state;
     GfxModelParams params;
-    TexAxis ax[4];
     s16 boxMin[3], boxMax[3];
     s32 i, k, verdict, n[2] = { 0, 0 };
-    u32 numCorners = mesh->numCorners;
+    u32 numCorners = mesh->numCorners, ws;
 
     if (numCorners > NATIVE_MAX_CORNERS || count > MAX_BATCH_TRIANGLES || total <= 0) {
         return FALSE;
     }
+    ws = walk_step(WS_KART_SETUP);
     boxMin[0] = boxMax[0] = vtx[0].x;
     boxMin[1] = boxMax[1] = vtx[0].y;
     boxMin[2] = boxMax[2] = vtx[0].z;
@@ -6615,52 +7212,18 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
     verdict = gfxb_model_check(params.mtx, boxMin, boxMax);
     if (verdict == GFX_MODEL_HIDDEN) {
         sNGpuStats[1]++;
+        walk_step(ws);
         return TRUE;
     }
     if (verdict != GFX_MODEL_GPU) {
         sNGpuStats[2]++;
+        walk_step(ws);
         return FALSE;
     }
-    nmat_state(mat, &state, textured);
-    state.flat = 0;
-    for (k = 0; k < 4; k++) {
-        params.texScale[k] = 0.0f;
-        params.texOffset[k] = 0.0f;
-    }
-    if (state.textures[0] != NULL || state.textures[1] != NULL) {
-        nmat_axes(mat, &state, textured, ax);
-        for (k = 0; k < 2; k++) {
-            if (state.textures[k] != NULL) {
-                tex_axis_factors(&ax[k * 2], &params.texScale[k * 2], &params.texOffset[k * 2]);
-                tex_axis_factors(&ax[k * 2 + 1], &params.texScale[k * 2 + 1], &params.texOffset[k * 2 + 1]);
-            }
-        }
-    }
-    params.fog = mat->fog != 0;
-    params.fogMul = params.fog ? g.fogMul : 0;
-    params.fogOffset = params.fog ? g.fogOffset : 0;
-    params.pad[0] = sLightOn ? 1 : 0;
-    params.pad[1] = params.pad[2] = 0;
-    if (sLightOn) {
-        __builtin_memcpy(params.light, sLight, sizeof(params.light));
-    } else {
-        params.light[0] = params.light[1] = params.light[2] = params.light[3] = 0.0f;
-    }
+    native_gpu_params(mat, textured, &state, &params);
+    walk_step(WS_KART_LOOPS);
     for (i = 0; i < (s32) numCorners; i++) {
-        const Vertex *src = &vtx[mesh->cornerVertex[i]];
-        GfxModelVertex *v = &sNGpuVerts[i];
-        TexCoords uv;
-        uv.texCoords = mesh->cornerUv[i];
-        v->x = src->x;
-        v->y = src->y;
-        v->z = src->z;
-        v->one = 1;
-        v->u = uv.u;
-        v->v = uv.v;
-        v->r = src->r;
-        v->g = src->g;
-        v->b = src->b;
-        v->a = src->a;
+        native_gpu_corner(&sNGpuVerts[i], &vtx[mesh->cornerVertex[i]], mesh->cornerUv[i]);
     }
     for (i = 0; i < count; i++) {
         s32 group = mesh->backface[i] ? 0 : 1;
@@ -6670,6 +7233,7 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
         out[2] = mesh->triCorners[i * 3 + 2];
         n[group]++;
     }
+    walk_step(WS_KART_QUEUE);
     if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
         flush_batch(); // What the CPU path left waiting came first
     }
@@ -6688,7 +7252,361 @@ static NOINLINE s32 native_gpu_draw(NMat *mat, s32 textured, const Vertex *vtx, 
     }
     sNGpuStats[0]++;
     sTriStateValid = FALSE;
+    walk_step(ws);
     return TRUE;
+}
+
+/*
+ * P68 (DKR_KART_BATCH, default 0; proposals/3ds-kart-draw-batching-plan.md): the GPU-maths draws above, batched on
+ * the CPU side. A kart's batches of one texture follow one another as records with the same material and matrix
+ * (the game splits a texture's triangles into batches of up to 32 vertices), and each cost a draw: the box, the
+ * matrix check, the state and params, a split ring record with its header, and a backend draw with its uniforms.
+ *  - Bit 1: the records that follow this one with the same material (no command between them, so the same matrix,
+ *    draw kind, light and fog) and one vertex load are drawn with it as one model draw: one box over all of them, one
+ *    check, state and params, the corners of each in turn and each cull group's triangles in record order. Only for
+ *    opaque, depth-tested states, whose order inside the group doesn't change the picture.
+ *  - Bit 2: slim records. Each mesh's index lists for the two cull groups are made once (kart_gpu_idx) and copied
+ *    with the corner base added; the corners and indices are written straight into the split ring's record
+ *    (gfx_split_model2_begin, OP_MODEL2: both cull groups in one record, the vertices once); and the matrix, fog and
+ *    light are queued once a kart (the record carries only the texture factors when they are the last record's).
+ * Returns the commands used (2, plus 3 for each record merged), or 0 to leave the record to native_gpu_draw.
+ */
+#define KART_RUN_MAX 8
+static NOINLINE COLD void kart_count(u32 road, const Vertex *vtx, s32 total, s32 count, const NativeMesh *mesh);
+typedef struct KartRec {
+    const Vertex *vtx;
+    NativeMesh *mesh;
+    s32 total, count;
+} KartRec;
+static const Gfx *sKartSkipStart, *sKartSkipEnd; // A run whose box went past the guard band: its records go one by one
+static u32 sKartSkipFrame;                        // (in that frame)
+static u32 sKartCheckRuns, sKartCheckWrong, sKartCheckShown, sKartCheckLogFrame;
+static s32 sKartBreakArmed = TRUE; // DKR_KART_BATCH_CHECK 2 and 4 break once
+
+/* P68 bit 2: the mesh's corner triples, cull group 0's (BACKFACE_DRAW: no culling) then 1's, made once for its tables
+ * (native_build clears gpuOk). FALSE when the pool is out of room (the lists are then made each draw). */
+static NOINLINE COLD s32 kart_gpu_idx(NativeMesh *e) {
+    u32 i, group, n;
+    u16 *out;
+    if (e->gpuIdx == NULL) {
+        e->gpuIdx = (u16 *) native_alloc((u32) e->capTris * 3u * sizeof(u16));
+        if (e->gpuIdx == NULL) {
+            return FALSE;
+        }
+    }
+    out = e->gpuIdx;
+    for (group = 0; group < 2; group++) {
+        n = 0;
+        for (i = 0; i < e->numTris; i++) {
+            if ((e->backface[i] ? 0u : 1u) == group) {
+                out[0] = e->triCorners[i * 3];
+                out[1] = e->triCorners[i * 3 + 1];
+                out[2] = e->triCorners[i * 3 + 2];
+                out += 3;
+                n++;
+            }
+        }
+        e->gpuN[group] = (u16) n;
+    }
+    e->gpuOk = 1;
+    return TRUE;
+}
+
+/* Whether native_find can't forget every mesh making tables for count triangles (which would leave the run's meshes
+ * pointing at emptied entries): the table and the pool have room for the most it could take. */
+static inline s32 native_find_room(s32 count) {
+    return sNativePool != NULL && sNativeMeshCount + 1 < NATIVE_TABLE_LIMIT &&
+           sNativePoolUsed + (u32) count * (sizeof(Triangle) + 40u) + 64u <= NATIVE_POOL_LIMIT;
+}
+
+/* Rule K6 / DKR_KART_BATCH_CHECK: the draw as the old path makes it for each record (corners repacked on their own,
+ * group indices from the backface flags, the state and params made afresh), compared triangle by triangle, each
+ * corner resolved to its model vertex, with the merged draw's two groups. */
+static NOINLINE COLD void kart_batch_check(NMat *mat, s32 textured, const KartRec *rec, s32 k, s32 matrix,
+                                           const GfxDrawState *state, const GfxModelParams *params,
+                                           const GfxModelVertex *verts, u16 *const idx[2], const s32 n[2]) {
+    GfxDrawState refState;
+    GfxModelParams refParams;
+    GfxModelVertex ref[3];
+    s32 r, i, c, group, at[2] = { 0, 0 }, wrong = 0;
+    model_params_matrix(g.matrices[matrix], &refParams);
+    native_gpu_params(mat, textured, &refState, &refParams);
+    refState.cullMode = state->cullMode;
+    wrong |= __builtin_memcmp(&refState, state, sizeof(refState)) != 0;
+    wrong |= __builtin_memcmp(&refParams, params, sizeof(refParams)) != 0;
+    for (r = 0; r < k && !wrong; r++) {
+        const NativeMesh *m = rec[r].mesh;
+        for (i = 0; i < rec[r].count && !wrong; i++) {
+            group = m->backface[i] ? 0 : 1;
+            if (at[group] >= n[group]) {
+                wrong = 1; // The merged draw has fewer triangles in this group
+                break;
+            }
+            for (c = 0; c < 3; c++) {
+                u32 corner = m->triCorners[i * 3 + c];
+                native_gpu_corner(&ref[c], &rec[r].vtx[m->cornerVertex[corner]], m->cornerUv[corner]);
+                wrong |= __builtin_memcmp(&ref[c], &verts[idx[group][at[group] * 3 + c]], sizeof(GfxModelVertex)) != 0;
+            }
+            at[group]++;
+        }
+    }
+    wrong |= at[0] != n[0] || at[1] != n[1];
+    sKartCheckRuns++;
+    sKartCheckWrong += (u32) wrong;
+    plat_check_report("kart batch", wrong); /* the race's checks_run / checks_wrong (CSV "chk" cells) */
+    if (wrong && sKartCheckShown < 5) {
+        sKartCheckShown++;
+        plat_log("kart batch check: a run of %d records (%d + %d triangles) differs from the records drawn one by one",
+                 (int) k, (int) n[0], (int) n[1]);
+    }
+    if (sFrameCount != sKartCheckLogFrame && sFrameCount % 600 == 0) {
+        unsigned int rec2, slim, cmp, bad;
+        sKartCheckLogFrame = sFrameCount;
+        gfx_split_model2_counts(&rec2, &slim, &cmp, &bad);
+        plat_log("kart batch check: %lu runs compared, %lu wrong (backend params: %u compared, %u wrong)",
+                 (unsigned long) sKartCheckRuns, (unsigned long) sKartCheckWrong, cmp, bad);
+    }
+}
+
+static NOINLINE s32 native_gpu_run(NMat *mat, s32 textured, const Gfx *dl, s32 remaining, const Vertex *vtx,
+                                   s32 total, s32 count, NativeMesh *mesh, s32 matrix, u8 frontCull) {
+    KartRec rec[KART_RUN_MAX];
+    u8 made[KART_RUN_MAX]; // Bit 2: the record's mesh has its lists made once (kart_gpu_idx)
+    GfxDrawState state;
+    GfxModelParams params;
+    GfxModelVertex *verts;
+    u16 *idx[2], *ringIdx = NULL;
+    s16 boxMin[3], boxMax[3];
+    s32 i, k = 1, r, used = 2, verdict, corners, tris, n[2] = { 0, 0 }, slim = (sKartBatch & 2) != 0, sortable, brk = 0;
+    s32 late = 0; // A record so far has culled-group (1) triangles
+    s32 check = PLAT_DEBUG_TOOLS ? sKartBatchCheck : 0;
+    u32 ws, forgets = sNativeForgets;
+
+    if (mesh->numCorners > NATIVE_MAX_CORNERS || count > MAX_BATCH_TRIANGLES || total <= 0) {
+        return 0;
+    }
+    ws = walk_step(WS_KART_SETUP);
+    nmat_state(mat, &state, textured);
+    state.flat = 0;
+    sortable = opaque_sortable(&state);
+    rec[0].vtx = vtx, rec[0].mesh = mesh, rec[0].total = total, rec[0].count = count;
+    corners = mesh->numCorners;
+    tris = count;
+    for (i = 0; i < count; i++) {
+        late |= !mesh->backface[i]; // (culled group: drawn after the record's uncull group)
+    }
+    if ((sKartBatch & 1) && sortable &&
+        !(sKartSkipFrame == (u32) sFrameCount && dl > sKartSkipStart && dl < sKartSkipEnd)) {
+        // The records that follow with the same tag (material) and one vertex load (see native_record_body).
+        while (k < KART_RUN_MAX && remaining >= used + 3) {
+            const Gfx *t = dl + used; // Its tag, then its two data words
+            u32 flags = t[2].words.w0;
+            s32 nv = (s32) (flags & 0xFF), st = (s32) ((flags >> 8) & 0xFF), cnt = (s32) t[2].words.w1;
+            NativeMesh *m;
+            if (t[0].words.w0 != dl[-1].words.w0 || t[0].words.w1 != dl[-1].words.w1 || (flags & 0x60000) ||
+                (s32) ((flags >> 16) & 1) != textured || nv <= 0 || nv > MAX_VERTICES || st < nv || cnt <= 0 ||
+                tris + cnt > MAX_BATCH_TRIANGLES || !native_find_room(cnt)) {
+                break;
+            }
+            m = native_find((const Triangle *) seg_addr(t[1].words.w1), cnt, 0, 1);
+            if (sNativeForgets != forgets) {
+                walk_step(ws);
+                return 0; // (can't happen with native_find_room) Every mesh pointer is stale: one by one
+            }
+            if (m == NULL || m->maxVertex >= nv || m->numCorners > NATIVE_MAX_CORNERS ||
+                corners + m->numCorners > NATIVE_MAX_CORNERS) {
+                break;
+            }
+            {
+                // The merged draw has every record's group 0 before any group 1. That is the records' own order
+                // only while no record with group 1 triangles comes before one with group 0 triangles: a run stops
+                // there, so the GPU gets the triangles in exactly the order the one-by-one path gives (a depth tie
+                // on EverFrost Peak showed one pixel otherwise).
+                s32 g0 = 0, g1 = 0;
+                for (i = 0; i < cnt; i++) {
+                    g0 |= m->backface[i] != 0;
+                    g1 |= m->backface[i] == 0;
+                }
+                if (late && g0) {
+                    break;
+                }
+                late |= g1;
+            }
+            rec[k].vtx = (const Vertex *) seg_addr(t[1].words.w0);
+            rec[k].mesh = m;
+            rec[k].total = nv;
+            rec[k].count = cnt;
+            corners += m->numCorners;
+            tris += cnt;
+            k++;
+            used += 3;
+        }
+    }
+    if (k == 1 && !slim) {
+        walk_step(ws);
+        return 0; // native_gpu_draw as before
+    }
+    boxMin[0] = boxMax[0] = vtx[0].x;
+    boxMin[1] = boxMax[1] = vtx[0].y;
+    boxMin[2] = boxMax[2] = vtx[0].z;
+    for (r = 0; r < k; r++) {
+        const Vertex *v = rec[r].vtx;
+        for (i = 0; i < rec[r].total; i++) {
+            s16 c0 = v[i].x, c1 = v[i].y, c2 = v[i].z;
+            boxMin[0] = c0 < boxMin[0] ? c0 : boxMin[0];
+            boxMax[0] = c0 > boxMax[0] ? c0 : boxMax[0];
+            boxMin[1] = c1 < boxMin[1] ? c1 : boxMin[1];
+            boxMax[1] = c1 > boxMax[1] ? c1 : boxMax[1];
+            boxMin[2] = c2 < boxMin[2] ? c2 : boxMin[2];
+            boxMax[2] = c2 > boxMax[2] ? c2 : boxMax[2];
+        }
+    }
+    model_params_matrix(g.matrices[matrix], &params);
+    verdict = gfxb_model_check(params.mtx, boxMin, boxMax);
+    if (verdict == GFX_MODEL_CPU) {
+        // Past the guard band: the first record goes alone (its own box may pass), and so do the rest of this run.
+        if (k > 1) {
+            sKartRunStats[2]++;
+            sKartSkipFrame = (u32) sFrameCount;
+            sKartSkipStart = dl;
+            sKartSkipEnd = dl + used;
+        }
+        walk_step(ws);
+        return 0;
+    }
+    if (verdict != GFX_MODEL_HIDDEN) {
+        native_gpu_params(mat, textured, &state, &params);
+        walk_step(WS_KART_LOOPS);
+        // The group sizes, and with bit 2 each mesh's lists made once.
+        for (r = 0; r < k; r++) {
+            NativeMesh *m = rec[r].mesh;
+            made[r] = slim && (m->gpuOk || kart_gpu_idx(m));
+            if (made[r]) {
+                n[0] += m->gpuN[0];
+                n[1] += m->gpuN[1];
+            } else {
+                for (i = 0; i < rec[r].count; i++) {
+                    n[m->backface[i] ? 0 : 1]++;
+                }
+            }
+        }
+        if (check == 2 && k > 1 && sKartBreakArmed) {
+            // Rule K6's break (2): the last record's triangles left out of this run, once.
+            const NativeMesh *m = rec[k - 1].mesh;
+            sKartBreakArmed = FALSE;
+            brk = 2;
+            for (i = 0; i < rec[k - 1].count; i++) {
+                n[m->backface[i] ? 0 : 1]--;
+            }
+        }
+        walk_step(WS_KART_QUEUE);
+        if (sBatchCount > 0 || sModelCount > 0 || sMeshPartCount > 0) {
+            flush_batch(); // What the CPU path left waiting came first
+        }
+        if (!sortable) {
+            OPAQUE_FLUSH(); // Its order matters: after the held opaque draws, as the CPU path would be
+        }
+        verts = NULL;
+        if (slim) {
+            state.cullMode = 0;
+            verts = gfx_split_model2_begin(&state, &params, corners, n[0], n[1], frontCull,
+                                           check == 3 ? 3 : check != 0, &ringIdx);
+        }
+        if (verts != NULL) {
+            idx[0] = ringIdx;
+            idx[1] = ringIdx + 3 * n[0];
+        } else {
+            verts = sNGpuVerts;
+            idx[0] = sNGpuIndices[0];
+            idx[1] = sNGpuIndices[1];
+        }
+        walk_step(WS_KART_LOOPS);
+        {
+            u16 *out[2] = { idx[0], idx[1] };
+            u32 base = 0;
+            for (r = 0; r < k; r++) {
+                const NativeMesh *m = rec[r].mesh;
+                const Vertex *v = rec[r].vtx;
+                u32 nc = m->numCorners;
+                for (i = 0; i < (s32) nc; i++) {
+                    native_gpu_corner(&verts[base + i], &v[m->cornerVertex[i]], m->cornerUv[i]);
+                }
+                if (brk == 2 && r == k - 1) {
+                    // (the break: none of its triangles)
+                } else if (made[r]) {
+                    u32 add = base, j, g0 = (u32) m->gpuN[0] * 3u, g1 = (u32) m->gpuN[1] * 3u;
+                    const u16 *src = m->gpuIdx;
+                    if (check == 4 && r > 0 && sKartBreakArmed) {
+                        sKartBreakArmed = FALSE; // Rule K6's break (4): a list made once without its base, once
+                        add = 0;
+                    }
+                    for (j = 0; j < g0; j++) {
+                        out[0][j] = (u16) (src[j] + add);
+                    }
+                    for (j = 0; j < g1; j++) {
+                        out[1][j] = (u16) (src[g0 + j] + add);
+                    }
+                    out[0] += g0;
+                    out[1] += g1;
+                } else {
+                    for (i = 0; i < rec[r].count; i++) {
+                        s32 group = m->backface[i] ? 0 : 1;
+                        u16 *o = out[group];
+                        o[0] = (u16) (m->triCorners[i * 3] + base);
+                        o[1] = (u16) (m->triCorners[i * 3 + 1] + base);
+                        o[2] = (u16) (m->triCorners[i * 3 + 2] + base);
+                        out[group] = o + 3;
+                    }
+                }
+                base += nc;
+            }
+        }
+        if (UNLIKELY(check)) {
+            kart_batch_check(mat, textured, rec, k, matrix, &state, &params, verts, idx, n);
+        }
+        walk_step(WS_KART_QUEUE);
+        if (ringIdx != NULL) {
+            gfx_split_model2_end();
+        }
+        for (i = 0; i < 2; i++) {
+            if (n[i] > 0) {
+                if (ringIdx == NULL) {
+                    state.cullMode = i == 0 ? 0 : frontCull;
+                    gfx_split_draw_model(&state, &params, verts, corners, idx[i], n[i]);
+                }
+                prof_count(PROF_TRIANGLES, n[i]);
+                prof_count(PROF_DRAWS, 1);
+                sMix.kinds[sDrawKind].draws++;
+                sMix.kinds[sDrawKind].tris += (unsigned long) n[i];
+            }
+        }
+        sTriStateValid = FALSE;
+        sKartRunStats[3] += (u32) slim;
+    }
+    // Each record's bookkeeping, as native_record_body and native_gpu_draw make it for one.
+    for (r = 0; r < k; r++) {
+        s32 nv = rec[r].total;
+        if (r > 0) {
+            if (sAnyPending) {
+                forget_slots(0, nv);
+            }
+            if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+                kart_count(0 /* KC_ONE_LOAD */, rec[r].vtx, nv, rec[r].count, rec[r].mesh);
+            }
+        }
+        g.vertexIndex = 0;
+        g.flatVerts &= ~(((nv >= 64) ? ~0ULL : ((1ULL << nv) - 1)));
+        sMix.kinds[sDrawKind].verts += (unsigned long) nv;
+        sObjTris[sDrawObj] += rec[r].count;
+        sNDrawStats[0]++;
+        sNGpuStats[verdict == GFX_MODEL_HIDDEN ? 1 : 0]++;
+    }
+    if (k > 1) {
+        sKartRunStats[0]++;
+        sKartRunStats[1] += (u32) k - 1;
+    }
+    walk_step(ws);
+    return used;
 }
 
 #define VERTEX_ASM_SECTION HOT
@@ -6895,7 +7813,17 @@ static COLD void kart_counts_log(void) {
     sKcFrames = sKcTableFull = 0;
 }
 
-static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id) {
+/* P55 S4 (DKR_FLAT_FRAME): the record path built twice from this one source. flat = 1 is the flat dispatcher's
+ * (run_flat_frame): it runs only on frames with no walk steps timed, no census, no kart counts and no remote vertex maths
+ * (port_gfx_run_frame, flat_frame_ok), so those marks and paths are left out of its code, which is all it changes. */
+#define NR_STEP(s) ((flat) ? 0u : walk_step(s))
+#define NR_CENSUS(tag, cls, op)                                                                                        \
+    do {                                                                                                               \
+        if (!(flat)) {                                                                                                 \
+            CENSUS_NOTE(tag, cls, op);                                                                                 \
+        }                                                                                                              \
+    } while (0)
+static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id, const s32 flat) {
     struct {
         const Vertex *src;
         s32 count, dest, matrix;
@@ -6957,7 +7885,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     if (!mat->valid) {
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
-        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
+        NR_CENSUS(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_MATERIAL);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: not captured", (unsigned long) id);
         }
@@ -6967,7 +7895,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         mat->valid = FALSE;
         gPortNMatBad[id & (NMAT_MAX - 1)] = 1;
         sNDrawStats[2]++;
-        CENSUS_NOTE(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
+        NR_CENSUS(dl - 1, CENSUS_RECORD_DROP, CENSUS_OP_DROP_TEXTURE);
         if (UNLIKELY(sTracing)) {
             plat_log("NDRAW %03lX dropped: texture gone", (unsigned long) id);
         }
@@ -6975,9 +7903,9 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     }
     if (dl[1].words.w0 & 0x40000) {
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_SPRITE);
         }
-        walk_step(WS_SPRITES);
+        NR_STEP(WS_SPRITES);
         native_record_append(mat, numVerts > 0 ? vtx : NULL, numVerts, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -6992,12 +7920,12 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         // gets its tables remade in place (native_find).
     } else if (dynamic || g.billboard) {
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, g.billboard ? CENSUS_OP_SLOTS_BILLBOARD : CENSUS_OP_SLOTS_DYNAMIC);
         }
-        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+        if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
             kart_count(g.billboard ? KC_BILLBOARD : KC_DYNAMIC, vtx, numVerts, count, NULL);
         }
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured);
         sNDrawStats[0]++;
         return 2;
@@ -7023,7 +7951,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     if (total > MAX_VERTICES || count <= 0) {
         return 2;
     }
-    walk_step(WS_FIND);
+    NR_STEP(WS_FIND);
     {
         s32 track = !dynamic; // The level's batches (tracks.c) and models' (render_mesh): see native_find
         mesh = native_find(tris, count, dynamic, track);
@@ -7031,15 +7959,15 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
         }
     }
-    walk_step(WS_BOX);
+    NR_STEP(WS_BOX);
     if (mesh == NULL || mesh->maxVertex >= total) {
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         sNativeDeclined++;
-        if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+        if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
             kart_count(KC_NO_TABLES, vtx, total, count, NULL);
         }
         if (!sNativeRecords) {
-            CENSUS_NOTE(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
+            NR_CENSUS(dl - 1, CENSUS_RECORD_SLOTS, CENSUS_OP_SLOTS_DECLINED);
         }
         native_record_slots(mat, vtx, numVerts, start, tris, count, textured); // No tables: through the slots
         sNDrawStats[0]++;
@@ -7064,9 +7992,17 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             return 2;
         }
     }
-    walk_step(WS_PATHS);
-    if (UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
+    NR_STEP(WS_PATHS);
+    if (!flat && UNLIKELY(sKartCounts) && sDrawKind == PORT_DRAW_RACERS) {
         kart_count(dynamic ? KC_DYNAMIC : numLoads == 1 ? KC_ONE_LOAD : KC_TWO_LOADS, vtx, total, count, mesh);
+    }
+    if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
+        (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
+        !REF_ACTIVE() && !UNLIKELY(sTracing) && UNLIKELY(sKartBatch)) {
+        s32 runUsed = native_gpu_run(mat, textured, dl, remaining, vtx, total, count, mesh, loads[0].matrix, frontCull);
+        if (runUsed != 0) {
+            return runUsed; // P68: this record and any merged with it, done
+        }
     }
     if (sNativeGpuSwitch && sGpuTransform && numLoads == 1 && !dynamic && !g.billboard &&
         (sDrawKind == PORT_DRAW_RACERS || (sNativeGpuSwitch >= 2 && sDrawKind == PORT_DRAW_OBJECTS)) &&
@@ -7080,7 +8016,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         sNDrawStats[0]++;
         return 2;
     }
-    if (sRemote && sModelCount == 0 && sMeshPartCount == 0) {
+    if ((!flat && sRemote) && sModelCount == 0 && sMeshPartCount == 0) {
         // The backend thread makes this draw's vertices (DKR_NATIVE_REMOTE, see sRemote). With a batch of the walk's
         // waiting, the walk works out the screen edges first (below), as a draw wholly off the screen leaves it be.
         s32 ordered;
@@ -7139,7 +8075,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         const Vertex *src = loads[i].src;
         s32 c = loads[i].count;
         float(*m)[4] = g.matrices[loads[i].matrix];
-        walk_step(WS_TRANSFORM);
+        NR_STEP(WS_TRANSFORM);
 #ifdef HAVE_VFP_VECTORS
         // The VFP's short vectors, as the old path's loads use them on the Old 3DS (DKR_VFP_VECTORS; the native path
         // had been left on the scalar transform). P61 W3 (a): with the vertices prefetched ahead (DKR_WALK_PLD 1).
@@ -7152,7 +8088,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         {
             transform_vertices(src, c, verts, m);
         }
-        walk_step(WS_COLOUR);
+        NR_STEP(WS_COLOUR);
         for (k = 0; k < c; k++) {
             u32 rgba;
             __builtin_memcpy(&rgba, &src[k].r, 4);
@@ -7173,7 +8109,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     sObjTris[sDrawObj] += count;
     sNDrawStats[0]++;
 
-    walk_step(WS_EDGES);
+    NR_STEP(WS_EDGES);
     {
         // The screen x and y each vertex's edges are found from are kept for its corners, which would work them out
         // again (the same sums, so the same values). A batch wholly past one edge is done here.
@@ -7194,7 +8130,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
             return 2;
         }
     }
-    walk_step(WS_STATE);
+    NR_STEP(WS_STATE);
     nmat_state(mat, &state, textured);
     keepSign = (vp.scaleX * vp.scaleY < 0.0f) != (frontCull == 2) ? -1.0f : 1.0f;
     tex0 = state.textures[0] != NULL;
@@ -7230,11 +8166,11 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         su0 = u0.scale, ou0 = u0.offset, sv0 = v0.scale, ov0 = v0.offset;
     }
     direct = opaque_direct_ok(&state);
-    if (direct && sRemote) {
+    if (direct && (!flat && sRemote)) {
         // A batch was waiting (see above): it is drawn, and the backend takes the finished vertices.
         TexAxis ax[4] = {u0, v0, u1, v1};
         s32 matrices[2] = {loads[0].matrix, numLoads > 1 ? loads[1].matrix : 0};
-        walk_step(WS_PATHS);
+        NR_STEP(WS_PATHS);
         flush_batch();
         native_remote_send(mat, &state, ax, vtx, total, count, mesh, numLoads, loads[0].count, matrices, frontCull,
                            FALSE, TRUE);
@@ -7253,7 +8189,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     sBatchGeneration++;
     generation = sBatchGeneration;
     stamp = ++sNativeStamp;
-    walk_step(WS_TRIS);
+    NR_STEP(WS_TRIS);
     for (i = 0; i < count; i++) {
         const u16 *tc = &mesh->triCorners[i * 3];
         u8 batchKey;
@@ -7288,7 +8224,7 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
         if (direct) {
             if (batchKey != batchedKey || bucket->numTris >= MAX_BATCH_TRIANGLES ||
                 bucket->numVerts + 3 > MAX_BATCH_VERTICES) {
-                u32 ws = walk_step(WS_BUCKET);
+                u32 ws = NR_STEP(WS_BUCKET);
                 if (batchKey != batchedKey) {
                     bucket = opaque_bucket_find(&state);
                     batchedKey = batchKey;
@@ -7303,16 +8239,16 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
                 vcount = &bucket->numVerts;
                 stamp = ++sNativeStamp; // Corner indices are the bucket's
                 sOpaquePending = TRUE;
-                walk_step(ws);
+                NR_STEP(ws);
             }
             out = &bucket->indices[bucket->numTris++ * 3];
             directTris++;
         } else if (batchKey == batchedKey && sBatchCount > 0 && batch_has_room()) {
             out = &sBatchIndices[sBatchCount++ * 3];
         } else {
-            u32 ws = walk_step(WS_BUCKET);
+            u32 ws = NR_STEP(WS_BUCKET);
             out = batch_triangle(&state);
-            walk_step(ws);
+            NR_STEP(ws);
             batchedKey = batchKey;
             if (sBatchGeneration != generation) {
                 generation = sBatchGeneration;
@@ -7370,9 +8306,15 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
 /* The record (native_record_body) with its steps timed from its entry (P61 M2, DKR_WALK_STEPS). */
 static NOINLINE HOT s32 native_record(const Gfx *dl, s32 remaining, u32 id) {
     u32 ws = walk_step(WS_ENTRY);
-    s32 used = native_record_body(dl, remaining, id);
+    s32 used = native_record_body(dl, remaining, id, 0);
     walk_step(ws);
     return used;
+}
+
+/* P55 S4 (DKR_FLAT_FRAME): the flat dispatcher's record, with no step marks, census notes, kart counts or remote
+ * vertex maths (native_record_body with flat = 1). */
+static NOINLINE HOT s32 native_record_flat(const Gfx *dl, s32 remaining, u32 id) {
+    return native_record_body(dl, remaining, id, 1);
 }
 
 /******************************** RDP rectangles ********************************/
@@ -8779,8 +9721,73 @@ static inline void native_particle_end(u32 w1) {
  * own. dl is the word after the tag, remaining the words left in the list from there. Returns the words the tag used
  * after itself. Shared by the walk (run_command_list) and the record dispatcher (nframe.c, through gfx_frame_tag).
  */
-static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth) {
+/*
+ * P55 S4 (DKR_FLAT_FRAME): whether this frame may run on the flat dispatcher. Its record path (native_record_flat) has
+ * the step marks, census notes, kart counts and remote vertex maths compiled out, so it draws exactly what the record
+ * dispatcher draws only while all of those are off. Read once at the frame start (port_gfx_run_frame).
+ */
+static u32 sFlatStats[3]; // Frames run flat; frames that could not be (the conditions below); the check's wrong records
+static u32 sFlatChecked, sFlatLogFrame;
+static s32 sFlatBroken; // DKR_FLAT_FRAME_CHECK=2 has turned the kart counts on in this frame (put back at its end)
+
+static inline s32 flat_frame_conditions(void) {
+    return !sRemote && !sWalkStepsOn && !(sCensusOn > 0 && !sCensusSkip) && !sKartCounts;
+}
+
+static s32 flat_frame_ok(void) {
+    if (!sFlatFrame) {
+        return FALSE;
+    }
+    if (!flat_frame_conditions()) {
+        sFlatStats[1]++;
+        return FALSE;
+    }
+    sFlatStats[0]++;
+    return TRUE;
+}
+
+/*
+ * DKR_FLAT_FRAME_CHECK (test builds, rule K6): at every record the flat dispatcher runs, the conditions flat_frame_ok
+ * found at the frame start must still hold (another thread may turn the census or the profiler's steps on mid-frame,
+ * and a later change could make one of them change inside a frame); a record run flat while one of the paths it lacks
+ * is live is counted wrong (the race's checks_wrong). =2 breaks it on purpose: it turns the kart counts on at the
+ * frame's first record (put back at the frame end), so every later record must be reported. Logs "flat frame: N frames
+ * flat, M not, K records checked, W wrong" every 600 frames.
+ */
+static COLD NOINLINE void flat_check_record(void) {
+    s32 wrong;
+    if (sFlatCheck == 2 && !sFlatBroken) {
+        sFlatBroken = TRUE;
+        sKartCounts = TRUE;
+    }
+    wrong = !flat_frame_conditions();
+    sFlatChecked++;
+    sFlatStats[2] += (u32) wrong;
+    plat_check_report("flat frame", wrong);
+}
+
+static COLD void flat_frame_end(void) {
+    if (sFlatBroken) {
+        sFlatBroken = FALSE;
+        sKartCounts = FALSE;
+    }
+    if ((sFlatFrame || sFlatCheck) && sFrameCount - sFlatLogFrame >= 600) {
+        sFlatLogFrame = sFrameCount;
+        plat_log("flat frame: %lu frames flat, %lu not, %lu records checked, %lu wrong", (unsigned long) sFlatStats[0],
+                 (unsigned long) sFlatStats[1], (unsigned long) sFlatChecked, (unsigned long) sFlatStats[2]);
+    }
+}
+
+static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, s32 remaining, s32 depth,
+                                                         const s32 flat) {
     const Gfx *start = dl;
+    if (flat && (w1 & 0xFFFF0000) == PORT_NDRAW_TAG) {
+        // P55 S4: the commonest tag first (a race frame's records are ~60% DRAW), into the flat record path.
+        if (UNLIKELY(sFlatCheck)) {
+            flat_check_record();
+        }
+        return native_record_flat(dl, remaining, w1 & 0xFFFF);
+    }
     if ((w1 & 0xFFFF0000) == PORT_DRAW_TAG) {
         kind_switch(w1);
     } else if (w1 == PORT_NATIVE_TAG) {
@@ -8902,7 +9909,7 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
                 }
 #endif
                 {
-                    s32 used = run_tag(dl, w1, remaining, depth);
+                    s32 used = run_tag(dl, w1, remaining, depth, 0);
                     dl += used;
                     remaining -= used;
                 }
@@ -9143,13 +10150,23 @@ static void run_dl(const Gfx *dl, s32 maxCommands) {
  * them: these are its way in (gfx_internal.h). Each does exactly what run_command_list does for the same words.
  */
 HOT s32 gfx_frame_tag(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
-    return run_tag(data, w1, remaining, depth);
+    return run_tag(data, w1, remaining, depth, 0);
 }
 
 void gfx_frame_op(u32 w0, u32 w1) {
     u32 ws = walk_step(WS_OPS);
     native_op(w0, w1);
     walk_step(ws);
+}
+
+/* P55 S4 (DKR_FLAT_FRAME, run_flat_frame): the same, for frames with nothing timed, counted or sent to the backend's
+ * vertex maths (flat_frame_ok), so the record path is native_record_flat and a state op goes to native_op directly. */
+HOT s32 gfx_frame_tag_flat(const Gfx *data, u32 w1, s32 remaining, s32 depth) {
+    return run_tag(data, w1, remaining, depth, 1);
+}
+
+HOT void gfx_frame_op_flat(u32 w0, u32 w1) {
+    native_op(w0, w1);
 }
 
 s32 gfx_frame_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) {
@@ -9630,6 +10647,7 @@ void port_gfx_textures_between_frames(int drain) {
         if (sLoadDecoded + sLoadFreed >= 16) {
             swept = sweep_stale_textures();
         }
+        track_bake_at_load(); // P55 S1 (DKR_TRACK_BAKE): the native track's meshes, while the screen is black
         sweepNs = plat_time_ns() - mark;
         if (sLoadDecoded + sLoadFreed > 0) {
             plat_log("textures before the first frame: %d decoded, %d freed, %d stale dropped in %.1f ms during the "
@@ -9827,9 +10845,16 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
     // snapshot, drawn by the reference renderer or op counted keep the walk, which those tools read.
     if (sNativeFrame && gPortNativeOps && sNativeRecords && sTexHandleOn && port_native_leftovers() &&
         port_native_camera() && !sTracing && !snapshot && !REF_ACTIVE() && sOpCountOn <= 0) {
-        run_native_frame((const Gfx *) frameDl);
+        if (flat_frame_ok()) {
+            run_flat_frame((const Gfx *) frameDl); // P55 S4 (DKR_FLAT_FRAME)
+        } else {
+            run_native_frame((const Gfx *) frameDl);
+        }
     } else {
         run_dl((const Gfx *) frameDl, -1);
+    }
+    if (UNLIKELY(sFlatFrame || sFlatCheck)) {
+        flat_frame_end();
     }
     STALL_MARK("track flush", 0, 0);
     track_flush();

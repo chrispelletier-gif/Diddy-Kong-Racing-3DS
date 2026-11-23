@@ -442,12 +442,17 @@ static const MenuPage sScreenPage = {
     "Screen", screen_count, screen_label, screen_value, screen_change, screen_hint, "Changes show from the next frame"
 };
 
-/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the GS freeze test row
- * (gfx_c3d.c gs_ladder) restarts the game and runs before the title. The last row is a setting, not a run: the 60 Hz
- * picture (DKR_INTERP60, S8 / P39, gpu_interp.inc), tried in play from here (left / right), never an env.txt line. */
-#define TEST_ROWS 13
+/* The test run (port_autorun.c): stop the one running, or start one of its kinds; the GS freeze test row (gfx_c3d.c
+ * gs_ladder) restarts the game and runs before the title. On an Old 3DS the Shelved switches row (a New 3DS bench) is
+ * the 60 fps bench, and the last two rows turn the Old 3DS 60 fps mode and its far-kart models on or off (P55,
+ * plat.h plat_o3ds_60_mode; saved, used from the next frame). The last row is the 60 Hz picture (DKR_INTERP60,
+ * S8 / P39, gpu_interp.inc), a setting tried in play (left / right), never an env.txt line. */
+#define TEST_ROWS 15
+#define TEST_SHELVED 7
 #define TEST_GS_LADDER 11
-#define TEST_INTERP60 12
+#define TEST_60_MODE 12
+#define TEST_60_LOD 13
+#define TEST_INTERP60 14
 static int test_count(void) {
     return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
@@ -456,8 +461,13 @@ static const char *test_label(int i) {
     static const char *const sStart[TEST_ROWS] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
                                                    "Switch bench", "Whole game", "Whole game (short)",
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
-                                                   "Lean full test", "GS freeze test", "60 Hz picture" };
-    return port_autorun_enabled() ? "Stop the test run" : sStart[i];
+                                                   "Lean full test", "GS freeze test",
+                                                   "60 fps mode (Old 3DS)", "60 fps: far karts simpler",
+                                                   "60 Hz picture" };
+    if (port_autorun_enabled()) {
+        return "Stop the test run";
+    }
+    return i == TEST_SHELVED && plat_old_3ds() ? "60 fps bench" : sStart[i];
 }
 
 /* The 60 Hz picture row's value: DKR_INTERP60 (0 off, 1 interpolated, 2 extrapolated), with DKR_INTERP60_CHECK. */
@@ -475,6 +485,11 @@ static void test_value(int i, char *out, int size) {
         snprintf(out, size, "%s", port_text(sInterp[test_interp60_value()]));
         return;
     }
+    if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
+        int on = i == TEST_60_MODE ? plat_o3ds_60_setting() : plat_o3ds_60_lod_setting();
+        snprintf(out, size, "%s", port_text(on ? "On" : "Off"));
+        return;
+    }
     out[0] = '\0';
 }
 
@@ -488,6 +503,8 @@ static const char *test_hint(int i) {
         "Quick test, profiler off as in a player's build",
         "Full test, profiler off as in a player's build",
         "Restarts the game; ~1 min, may need power-offs",
+        "Old 3DS: 60 fps in 2D, AA off; 3D stays 30",
+        "Test: other karts' models swap sooner at 60",
         "Old 3DS at 30 fps, 3D off: a picture every retrace" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
@@ -502,7 +519,13 @@ static const char *test_hint(int i) {
                  (sets * 13 + 1) / 2);
         return sSwitchHint;
     }
-    if (i == 7) {
+    if (i == TEST_SHELVED && plat_old_3ds()) {
+        long sets = port_autorun_shelved_count() + 1;
+        snprintf(sSwitchHint, sizeof(sSwitchHint), port_text("60 fps mode, 3 heavy tracks x %ld sets, ~%ld min"), sets,
+                 (sets * 13 + 1) / 2);
+        return sSwitchHint;
+    }
+    if (i == TEST_SHELVED) {
         long sets = port_autorun_shelved_count() + 1;
         if (sets < 2) {
             return "Shelved switches: a New 3DS bench";
@@ -523,6 +546,15 @@ static void test_change(int i, int step) {
         return; // A setting: the menu stays open
     }
     (void) step;
+    if (!port_autorun_enabled() && (i == TEST_60_MODE || i == TEST_60_LOD)) {
+        // A setting, not a run: the page stays open.
+        if (i == TEST_60_MODE) {
+            plat_set_o3ds_60_setting(!plat_o3ds_60_setting());
+        } else {
+            plat_set_o3ds_60_lod_setting(!plat_o3ds_60_lod_setting());
+        }
+        return;
+    }
     if (port_autorun_enabled()) {
         port_autorun_request(0);
     } else if (i == TEST_GS_LADDER) {
