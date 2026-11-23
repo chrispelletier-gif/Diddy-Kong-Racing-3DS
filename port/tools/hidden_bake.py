@@ -159,7 +159,7 @@ def cmd_bake(args):
                "DKR_HIDDEN_BAKE_OUT": out, "DKR_HIDDEN_BAKE_THREADS": str(args.threads)}
         if args.configs:
             env["DKR_HIDDEN_BAKE_CONFIGS"] = args.configs
-        log = run_game(args.exe, args.rom, work, env)
+        log = run_game(args.exe, args.rom, work, env, timeout=7 * 24 * 3600)  # a dense bake takes hours
         lines = [l for l in log.splitlines() if l.startswith("hidden bake: level")]
         ok = "hidden bake: every level done" in log
         print("level %d: %s\n  %s" % (level, "done" if ok else "FAILED (see %s/log.txt)" % work,

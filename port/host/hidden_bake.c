@@ -328,6 +328,7 @@ static void cell_mask(HbCell *c, const HbConfig *cf) {
 typedef struct {
     int x, y, z, seg;
     int numCells, firstCell; /* its cells: sCellRefs[firstCell ...] */
+    int order;               /* coarse lattice points first (build_points) */
     HbCell **cells;
 } HbPoint;
 
@@ -339,6 +340,7 @@ static pthread_mutex_t sLock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long long sTested, sVisited;
 static time_t sStart;
 
+static int sNoCull; /* DKR_HIDDEN_BAKE_NO_CULL=1: rasterise every batch on every face (the old bake, to compare) */
 static float sEps; /* the farthest any eye a table allows is from its nearest sample position (units) */
 
 typedef struct {
@@ -378,12 +380,81 @@ static void face_at(const float *rot, const HbPoint *p, float out[16]) {
     }
 }
 
+static short (*sBatchBox)[6]; /* each batch's bounding box (min x y z, max x y z) */
+
+static void batch_boxes(const HiddenLevel *lv) {
+    int b, i;
+    sBatchBox = realloc(sBatchBox, sizeof(*sBatchBox) * (lv->totalBatches > 0 ? lv->totalBatches : 1));
+    for (b = 0; b < lv->totalBatches; b++) {
+        const HiddenBatch *hb = &lv->batches[b];
+        const short *v = hb->verts;
+        short *bx = sBatchBox[b];
+        bx[0] = bx[1] = bx[2] = 32767;
+        bx[3] = bx[4] = bx[5] = -32768;
+        for (i = 0; i < hb->numVerts; i++, v += 5) { /* 10-byte vertices: x, y, z, colour */
+            int a;
+            for (a = 0; a < 3; a++) {
+                bx[a] = v[a] < bx[a] ? v[a] : bx[a];
+                bx[a + 3] = v[a] > bx[a + 3] ? v[a] : bx[a + 3];
+            }
+        }
+    }
+}
+
+/* 1 when the batch's box lies wholly outside one side plane of the face's 90 degree view (widened by a few pixels for
+ * the tests' widened coverage), so it can draw no pixel on that face; the rasteriser would leave it out anyway. */
+static int batch_off_face(const float *vp, const short *bx) {
+    int out[4] = { 1, 1, 1, 1 }, i;
+    const float m = 1.0f + 8.0f / sRes;
+    for (i = 0; i < 8; i++) {
+        float x = bx[(i & 1) ? 3 : 0], y = bx[(i & 2) ? 4 : 1], z = bx[(i & 4) ? 5 : 2];
+        float cx = x * vp[0] + y * vp[4] + z * vp[8] + vp[12];
+        float cy = x * vp[1] + y * vp[5] + z * vp[9] + vp[13];
+        float cw = (x * vp[3] + y * vp[7] + z * vp[11] + vp[15]) * m;
+        out[0] &= cx > cw;
+        out[1] &= cx < -cw;
+        out[2] &= cy > cw;
+        out[3] &= cy < -cw;
+        if (!(out[0] | out[1] | out[2] | out[3])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 1 when some cell of the point has not seen batch b yet. */
+static int batch_open(const HbPoint *p, int b) {
+    int i;
+    for (i = 0; i < p->numCells; i++) {
+        if (!__atomic_load_n(&p->cells[i]->seen[b], __ATOMIC_RELAXED)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void do_point(HbWork *w, HbPoint *p) {
     const HiddenLevel *lv = sLv;
-    int f, s, b, i;
+    int f, s, b, open;
     w->pt = p;
     for (f = 0; f < 6; f++) {
-        float vp[16];
+        float vp[16], vt[16];
+        face_at(sTestFace[f], p, vt);
+        // A face with no batch left to decide (every cell here has seen each one that can show on it) changes
+        // nothing: skip its occluders and shrink too. Seen only grows, so the tables do not depend on this.
+        open = 0;
+        for (s = 0; s < lv->numSegments && !open; s++) {
+            if (!lv->allowed[p->seg * lv->numSegments + s]) {
+                continue;
+            }
+            for (b = lv->firstBatch[s]; b < lv->firstBatch[s + 1] && !open; b++) {
+                open = !(lv->batches[b].kind & HIDDEN_BATCH_ALWAYS) && batch_open(p, b) &&
+                       (sNoCull || !batch_off_face(vt, sBatchBox[b]));
+            }
+        }
+        if (!open && !sNoCull) {
+            continue;
+        }
         face_at(sOccFace[f], p, vp);
         ocr_begin(&w->occ, vp);
         for (s = 0; s < lv->numSegments; s++) {
@@ -392,14 +463,13 @@ static void do_point(HbWork *w, HbPoint *p) {
             }
             for (b = lv->firstBatch[s]; b < lv->firstBatch[s + 1]; b++) {
                 const HiddenBatch *hb = &lv->batches[b];
-                if (hb->kind & HIDDEN_BATCH_OCCLUDER) {
+                if ((hb->kind & HIDDEN_BATCH_OCCLUDER) && (sNoCull || !batch_off_face(vp, sBatchBox[b]))) {
                     ocr_batch(&w->occ, hb->verts, hb->numVerts, hb->tris, hb->numTris, 0);
                 }
             }
         }
         ocr_shrink(&w->occ, w->eroded, w->tab, sEps);
-        face_at(sTestFace[f], p, vp);
-        memcpy(w->test.m, vp, sizeof(w->test.m));
+        memcpy(w->test.m, vt, sizeof(w->test.m));
         w->test.testDepth = w->eroded;
         w->face = f;
         for (s = 0; s < lv->numSegments; s++) {
@@ -408,14 +478,8 @@ static void do_point(HbWork *w, HbPoint *p) {
             }
             for (b = lv->firstBatch[s]; b < lv->firstBatch[s + 1]; b++) {
                 const HiddenBatch *hb = &lv->batches[b];
-                int all = 1;
-                if (hb->kind & HIDDEN_BATCH_ALWAYS) {
-                    continue;
-                }
-                for (i = 0; i < p->numCells && all; i++) {
-                    all = __atomic_load_n(&p->cells[i]->seen[b], __ATOMIC_RELAXED);
-                }
-                if (all) {
+                if ((hb->kind & HIDDEN_BATCH_ALWAYS) || !batch_open(p, b) ||
+                    (!sNoCull && batch_off_face(vt, sBatchBox[b]))) {
                     continue;
                 }
                 w->batch = b;
@@ -548,6 +612,23 @@ static void build_cells(HbConfig *cf, int level) {
     }
 }
 
+/* How coarse a lattice the point also belongs to (0: only the finest, up to 4: every 16th point on each axis). */
+static int lattice_order(int x, int y, int z, int stepXZ, int stepY) {
+    int a = x / stepXZ, b = y / stepY, c = z / stepXZ, k = 0;
+    while (k < 4 && ((a | b | c) & ((2 << k) - 1)) == 0) {
+        k++;
+    }
+    return k;
+}
+
+static int cmp_point_order(const void *a, const void *b) {
+    const HbPoint *p = a, *q = b;
+    if (p->order != q->order) {
+        return p->order > q->order ? -1 : 1;
+    }
+    return p->firstCell < q->firstCell ? -1 : p->firstCell > q->firstCell; // then as built
+}
+
 /* The sample positions: lattice points near the finest logged boxes, each with the cells (of every config) it serves. */
 static void build_points(int level, int stepXZ, int stepY) {
     // Every eye inside a gate (the logged box plus its margins) is within half a step on each axis of a sample
@@ -582,6 +663,7 @@ static void build_points(int level, int stepXZ, int stepY) {
                     int c;
                     memset(&pt, 0, sizeof(pt));
                     pt.x = x;
+                    pt.order = lattice_order(x, y, z, stepXZ, stepY);
                     pt.y = y;
                     pt.z = z;
                     pt.seg = seg;
@@ -625,6 +707,9 @@ static void build_points(int level, int stepXZ, int stepY) {
             }
         }
     }
+    // Coarse lattice points first: their seen sets fill in early, so the fine points between them mostly find every
+    // batch on a face already seen and skip the face (do_point). The tables do not depend on the order.
+    qsort(sPoints, sNumPoints, sizeof(HbPoint), cmp_point_order);
     for (i = 0; i < sNumPoints; i++) {
         sPoints[i].cells = sCellRefs + sPoints[i].firstCell;
     }
@@ -774,6 +859,12 @@ int hidden_bake_level(const HiddenLevel *lv) {
     sRes = e != NULL ? atoi(e) : 512;
     e = getenv("DKR_HIDDEN_BAKE_MAX_POINTS");
     maxPoints = e != NULL ? atoi(e) : maxPoints;
+    e = getenv("DKR_HIDDEN_BAKE_STEP"); // "XZ/Y" lattice step in units (default 16/8)
+    if (e != NULL && atoi(e) > 0) {
+        const char *sl = strchr(e, '/');
+        stepXZ = atoi(e);
+        stepY = sl != NULL && atoi(sl + 1) > 0 ? atoi(sl + 1) : stepXZ / 2;
+    }
     e = getenv("DKR_HIDDEN_BAKE_CONFIGS");
     if (e == NULL) {
         e = "1x8,2x8,4x8,1x16,2x16,4x16";
@@ -798,6 +889,8 @@ int hidden_bake_level(const HiddenLevel *lv) {
         }
         e++;
     }
+    sNoCull = getenv("DKR_HIDDEN_BAKE_NO_CULL") != NULL;
+    batch_boxes(lv);
     cube_setup();
     yaw_setup(&sConfigs[0]);
     for (c = 0; c < sNumConfigs; c++) {
@@ -816,6 +909,16 @@ int hidden_bake_level(const HiddenLevel *lv) {
                  stepXZ, stepY);
         stepXZ *= 2;
         stepY *= 2;
+    }
+    if (getenv("DKR_HIDDEN_BAKE_COUNT") != NULL) { // only count the sample positions (plans a long bake)
+        plat_log("hidden bake: level %d, count only: %d sample positions at %d/%d units", lv->level, sNumPoints,
+                 stepXZ, stepY);
+        sLevelsLeft[lv->level] = 0;
+        if (--sNumLevelsLeft == 0) {
+            plat_log("hidden bake: every level done");
+            exit(0);
+        }
+        return 1;
     }
     // The cube's six views: occluders cut where every real view would cut them, tests where none would (the real
     // views' corners are within 55 degrees of their centre; the cube's faces' within 55 too)

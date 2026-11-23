@@ -235,25 +235,52 @@ void ocr_erode(OcrCtx *c, float *eroded) {
     c->testDepth = eroded;
 }
 
+/* The radius (pixels) eps moves an edge by at pixel (x, y) of depth d (ocr_shrink's rule). */
+static inline int shrink_radius(float eps, float d, float u, float v, int W) {
+    float rf = eps * d * (1.0f + u * u + v * v) * (float) W * 0.5f;
+    return rf >= OCR_SHRINK_MAX ? OCR_SHRINK_MAX : (int) rf + 1;
+}
+
 void ocr_shrink(OcrCtx *c, float *eroded, float *tab, float eps) {
     const int W = c->w, H = c->h;
     const float *L[OCR_SHRINK_LEVELS];
-    int k, x, y;
+    int k, x, y, maxN = 1, levels;
+    // Only the pyramid levels some pixel needs (the bake's faces of open sky or far scenery need few)
+    for (y = 0; y < H && maxN < 2 * OCR_SHRINK_MAX + 1; y++) {
+        float v = 1.0f - (y + 0.5f) * 2.0f / H;
+        for (x = 0; x < W; x++) {
+            float d = c->depth[y * W + x];
+            if (d > 0.0f) {
+                int n = 2 * shrink_radius(eps, d, (x + 0.5f) * 2.0f / W - 1.0f, v, W) + 1;
+                maxN = n > maxN ? n : maxN;
+            }
+        }
+    }
+    for (levels = 1; (2 << (levels - 1)) <= maxN && levels < OCR_SHRINK_LEVELS; levels++) {
+    }
     L[0] = c->depth;
-    // L[k] (x, y): the farthest (smallest 1/w) of the 2^k square from (x, y), clamped at the far edges
-    for (k = 1; k < OCR_SHRINK_LEVELS; k++) {
+    // L[k] (x, y): the farthest (smallest 1/w) of the 2^k square from (x, y), clamped at the far edges. Built as a
+    // row pass then a column pass in place (row y only reads rows y and y + st, not yet written); same values as the
+    // four-corner minimum.
+    for (k = 1; k < levels; k++) {
         float *o = tab + (size_t) (k - 1) * W * H;
         const float *in = L[k - 1];
         int st = 1 << (k - 1);
         for (y = 0; y < H; y++) {
-            int y2 = y + st < H ? y + st : H - 1;
+            const float *r = in + (size_t) y * W;
+            float *q = o + (size_t) y * W;
+            for (x = 0; x + st < W; x++) {
+                q[x] = r[x + st] < r[x] ? r[x + st] : r[x];
+            }
+            for (; x < W; x++) {
+                q[x] = r[W - 1] < r[x] ? r[W - 1] : r[x];
+            }
+        }
+        for (y = 0; y < H; y++) {
+            float *q = o + (size_t) y * W;
+            const float *q2 = o + (size_t) (y + st < H ? y + st : H - 1) * W;
             for (x = 0; x < W; x++) {
-                int x2 = x + st < W ? x + st : W - 1;
-                float a = in[y * W + x], b = in[y * W + x2], e = in[y2 * W + x], f = in[y2 * W + x2];
-                a = b < a ? b : a;
-                a = e < a ? e : a;
-                a = f < a ? f : a;
-                o[y * W + x] = a;
+                q[x] = q2[x] < q[x] ? q2[x] : q[x];
             }
         }
         L[k] = o;
@@ -261,15 +288,14 @@ void ocr_shrink(OcrCtx *c, float *eroded, float *tab, float eps) {
     for (y = 0; y < H; y++) {
         float v = 1.0f - (y + 0.5f) * 2.0f / H;
         for (x = 0; x < W; x++) {
-            float u = (x + 0.5f) * 2.0f / W - 1.0f, d = c->depth[y * W + x], rf, m;
+            float u = (x + 0.5f) * 2.0f / W - 1.0f, d = c->depth[y * W + x], m;
             int r, n, x0, y0, s;
             if (d <= 0.0f) {
                 eroded[y * W + x] = 0.0f;
                 continue;
             }
             // The angle eps moves an edge by at this depth, over the smallest angle a pixel takes here
-            rf = eps * d * (1.0f + u * u + v * v) * (float) W * 0.5f;
-            r = rf >= OCR_SHRINK_MAX ? OCR_SHRINK_MAX : (int) rf + 1;
+            r = shrink_radius(eps, d, u, v, W);
             n = 2 * r + 1;
             x0 = x - r;
             y0 = y - r;
