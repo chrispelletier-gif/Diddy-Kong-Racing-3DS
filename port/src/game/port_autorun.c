@@ -446,6 +446,12 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "flat dispatcher (S4 step 1)", { "DKR_FLAT_FRAME", NULL, NULL }, 0, 1, 0, 0 },
     { "flat dispatcher, self-check (1 lap, chk: 0 wrong)", { "DKR_FLAT_FRAME", "DKR_FLAT_FRAME_CHECK", NULL }, 0, 1, 1,
       1 },
+    // P55 S4 stage 2 (2026-11-23): on flat frames, DRAW records find their tables by a handle kept per material id and
+    // track records reuse the camera's clip matrix (DKR_FLAT_RES). Host cache model: about -4% instruction cache misses
+    // in the walk on top of the flat dispatcher. Read the game core ms against the flat dispatcher row above.
+    { "flat dispatcher + record handles (S4 stage 2)", { "DKR_FLAT_FRAME", "DKR_FLAT_RES", NULL }, 0, 1, 0, 0 },
+    { "flat record handles, self-check (1 lap, chk: 0 wrong)",
+      { "DKR_FLAT_FRAME", "DKR_FLAT_RES", "DKR_FLAT_RES_CHECK", NULL }, 0, 1, 1, 1 },
     // P68 (2026-11-23, proposals/3ds-kart-draw-batching-plan.md): GPU-maths kart batches with the same material drawn
     // as one draw (DKR_KART_BATCH 1), and slim records on top (2: index lists made once, corners written into the
     // queue, both cull groups in one record, matrix/fog/light once a kart). Est. -0.4..-1.0 ms game core, -0.3..-0.6

@@ -282,6 +282,12 @@ controls) work there, as do these renderer switches:
   same frames, fewer instruction cache misses. `DKR_FLAT_FRAME_CHECK=1` (test builds) checks at every flat record that
   those conditions still hold (chk cells; logs `flat frame: N frames flat, M not, K records checked, 0 wrong` every 600
   frames); `=2` is broken on purpose (rule K6: turns the kart counts on mid-frame, so every later record is reported))
+- `DKR_FLAT_RES=1` (roadmap P55 S4 stage 2, off by default, flat frames only: a DRAW record finds its tables through a
+  handle kept by its material id, two lists per id, instead of the tables' hash search (the same freshness rules), and
+  a track record reuses the previous one's clip matrix while no matrix or viewport was written. `DKR_FLAT_RES_CHECK=1`
+  (test builds) compares each handle with the tables' own search and each reused matrix with one worked out anew
+  (chk cells; logs `flat res: ... K checked, 0 wrong` every 600 frames); `=2` is broken on purpose (rule K6: each
+  frame's first comparison is given a wrong value, so it must report))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)

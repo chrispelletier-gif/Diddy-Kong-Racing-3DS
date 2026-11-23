@@ -1823,6 +1823,11 @@ static s32 sNativeFrame; // DKR_NATIVE_FRAME (read_switches): the record dispatc
 /* P55 S4 (DKR_FLAT_FRAME, read_switches): the flat dispatcher (nframe.c run_flat_frame) on frames flat_frame_ok allows.
  * DKR_FLAT_FRAME_CHECK (test builds): its self-check (flat_check_record); 2 breaks the frame's conditions on purpose. */
 static s32 sFlatFrame, sFlatCheck;
+/* P55 S4 stage 2 (DKR_FLAT_RES, read_switches; flat frames only, sFlatNow): records as an index range + uniforms.
+ * A DRAW record finds its tables through a handle kept by its material id (res_find), not the table's hash probe, and
+ * a track record reuses the record before's clip matrix while no matrix or viewport was written (res_params_matrix). DKR_FLAT_RES_CHECK (test builds): res_check_*; 2 breaks it on purpose. */
+static s32 sFlatRes, sFlatResCheck, sFlatNow;
+static u32 sMtxGen; // Bumped by each matrix or viewport write (stage 2's key)
 static s32 sTexHandleOn; // DKR_NATIVE_TEXHANDLE (read_switches): 1 on, 2 also checks each capture against a lookup
 /* Textures set by handle; learned during frames; texture lists run all the same (not a plain texture load);
  * captures that took the handle's texture; with DKR_NATIVE_TEXHANDLE=2, captures where it differed from a lookup. */
@@ -2653,6 +2658,7 @@ static NOINLINE HOT void load_matrix(const Mtx *mtx, s32 index) {
     const s32 *m = (const s32 *) mtx;
     float *out = &g.matrices[index][0][0];
     s32 k;
+    sMtxGen++; // (P55 S4 stage 2's key)
 #pragma GCC unroll 1
     for (k = 0; k < 8; k++) {
         s32 intPart = m[k];
@@ -2951,6 +2957,8 @@ static COLD void read_switches_now(void) {
     // P55 S4: the flat dispatcher (off until an Old 3DS bench has raced it) and its self-check.
     sFlatFrame = plat_switch("DKR_FLAT_FRAME", 0) != 0;
     sFlatCheck = PLAT_DEBUG_TOOLS ? plat_switch("DKR_FLAT_FRAME_CHECK", 0) : 0;
+    sFlatRes = plat_switch("DKR_FLAT_RES", 0) != 0;
+    sFlatResCheck = PLAT_DEBUG_TOOLS ? plat_switch("DKR_FLAT_RES_CHECK", 0) : 0;
     sBoxCheck = plat_getenv("DKR_BOX_CHECK") != NULL;
     // P60 D: sprite tiles as points, the GPU's geometry shader making their corners (1: the backend's CPU makes them,
     // 2: the geometry shader where it can). Off by default until an Old 3DS bench has raced it.
@@ -4465,6 +4473,53 @@ static NOINLINE COLD void track_bake_check_frame(void) {
 }
 
 /*
+ * P55 S4 stage 2 (DKR_FLAT_RES): a track record's matrix. A race frame's track records share the camera matrix, so
+ * the clip matrix the record before worked out (model_params_matrix: the viewport and its divisions folded in) is kept
+ * with the matrix slot and write count (sMtxGen) it came from and reused while neither changed. (Keeping the texture
+ * and fog factors too was tried: a state op comes between most track records, and comparing their inputs cost more
+ * than working them out.) Emptied at each frame start.
+ */
+static u32 sResMtxIndex, sResMtxGenKept; // The matrix the kept one was worked out from (g.curMatrix, sMtxGen)
+static GfxModelParams sResParams; // The kept matrix (mtx)
+static s32 sResMtxValid;
+static u32 sResStats[5];  // Track matrix reuses, DRAW handle hits, misses; the check's compared, wrong
+static s32 sResBroken;    // DKR_FLAT_RES_CHECK=2 has broken this frame's first comparison
+
+/* DKR_FLAT_RES_CHECK (test builds, rule K6): a reused value against the one worked out anew; =2 changes the frame's first
+ * reused value before comparing, so each frame must report one wrong. The record draws the new value either way. */
+static COLD NOINLINE void res_check(const void *kept, const void *fresh, u32 bytes) {
+    u8 copy[sizeof(GfxModelParams)];
+    s32 wrong;
+    __builtin_memcpy(copy, kept, bytes);
+    if (sFlatResCheck == 2 && !sResBroken) {
+        sResBroken = TRUE;
+        copy[0] ^= 0x40;
+    }
+    wrong = __builtin_memcmp(copy, fresh, bytes) != 0;
+    sResStats[3]++;
+    sResStats[4] += (u32) wrong;
+    plat_check_report("flat res", wrong);
+}
+
+static inline void res_params_matrix(float (*m)[4], GfxModelParams *params) {
+    if (sResMtxValid && sResMtxIndex == (u32) g.curMatrix && sResMtxGenKept == sMtxGen) {
+        sResStats[0]++;
+        if (UNLIKELY(sFlatResCheck)) {
+            model_params_matrix(m, params);
+            res_check(sResParams.mtx, params->mtx, sizeof(params->mtx));
+            return;
+        }
+        __builtin_memcpy(params->mtx, sResParams.mtx, sizeof(params->mtx));
+        return;
+    }
+    model_params_matrix(m, params);
+    sResMtxIndex = (u32) g.curMatrix;
+    sResMtxGenKept = sMtxGen;
+    __builtin_memcpy(sResParams.mtx, params->mtx, sizeof(params->mtx));
+    sResMtxValid = TRUE;
+}
+
+/*
  * The PORT_TRACK_TAG at dl[-1]: draws the track batch whose vertex load and triangles follow and returns how many
  * commands it used, or 0 to leave them to the walk.
  */
@@ -4512,7 +4567,11 @@ static NOINLINE s32 native_track(const Gfx *dl, s32 remaining) {
         }
         return 0;
     }
-    model_params_matrix(m, &params);
+    if (sFlatNow && sFlatRes) {
+        res_params_matrix(m, &params); // P55 S4 stage 2
+    } else {
+        model_params_matrix(m, &params);
+    }
     verdict = gfxb_model_check(params.mtx, e->boxMin, e->boxMax);
     if (verdict == GFX_MODEL_CPU) {
         sTrackStats[2]++;
@@ -5373,6 +5432,58 @@ static void native_tris_mark(const Triangle *tris) {
     }
 }
 
+/* native_find for an entry e that holds these triangles (e->tris == tris, e->numTris == count): compared or skipped
+ * as they need, remade if changed. Also P55 S4 stage 2's resident handle (res_find), which knows e already. */
+/* native_hit's comparison (and remaking when changed): its rare part, out of line. */
+static NOINLINE NativeMesh *native_hit_compare(NativeMesh *e, const Triangle *tris, s32 count, s32 track, s32 skip) {
+    if (native_tris_same(e->copy, tris, count)) {
+        e->checkedFrame = (u32) sFrameCount;
+        e->trisStamp = track ? sTrisValid : 0;
+        return e->usable ? e : NULL;
+    }
+    if (skip) {
+        sTrisMissed++;
+        if (UNLIKELY(sTrisMissed < 20)) {
+            plat_log("NDRAW triangles %p changed without port_tris_changed (frame %u)", (const void *) tris,
+                     (unsigned) sFrameCount);
+        }
+    }
+    e->checkedFrame = (u32) sFrameCount;
+    e->trisStamp = track ? sTrisValid : 0;
+    if (e->copy != NULL && native_uv_update(e, tris, count)) {
+        return e->usable ? e : NULL;
+    }
+    // Changed: new tables (the old ones' room is only won back when all are forgotten, unless they are
+    // remade in place)
+    if (!native_build(e, tris, count, e->copy != NULL)) {
+        native_forget_all();
+        return NULL;
+    }
+    return e->usable ? e : NULL;
+}
+
+static inline __attribute__((always_inline)) NativeMesh *native_hit(NativeMesh *e, const Triangle *tris, s32 count,
+                                                                    s32 dynamic, s32 track) {
+    if (!dynamic && e->checkedFrame == (u32) sFrameCount) {
+        // Already checked this frame: a model drawn for several objects (trees, props,
+        // the same kart part twice) compares its triangles once.
+        return e->usable ? e : NULL;
+    }
+    s32 skip = 0;
+    if (track) {
+        // Unchanged since its last comparison unless the game said it changed them
+        // (native_tris_take). Every 64th frame in turn they are compared anyway, which counts any change made
+        // without port_tris_changed (sTrisMissed).
+        skip = e->trisStamp == sTrisValid;
+        if (skip && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
+            e->checkedFrame = (u32) sFrameCount;
+            sTrisSkipped++;
+            return e->usable ? e : NULL;
+        }
+    }
+    return native_hit_compare(e, tris, count, track, skip);
+}
+
 static NOINLINE HOT NativeMesh *native_find(const Triangle *tris, s32 count, s32 dynamic, s32 track) {
     // Triangle lists are 16-byte aligned, so the product's low bits would only start a search in a quarter of the
     // table; its top bits are spread over all of it.
@@ -5395,47 +5506,7 @@ static NOINLINE HOT NativeMesh *native_find(const Triangle *tris, s32 count, s32
             return e->usable ? e : NULL;
         }
         if (e->tris == tris && e->numTris == count) {
-            if (!dynamic && e->checkedFrame == (u32) sFrameCount) {
-                // Already checked this frame: a model drawn for several objects (trees, props,
-                // the same kart part twice) compares its triangles once.
-                return e->usable ? e : NULL;
-            }
-            s32 skip = 0;
-            if (track) {
-                // Unchanged since its last comparison unless the game said it changed them
-                // (native_tris_take). Every 64th frame in turn they are compared anyway, which counts any change made
-                // without port_tris_changed (sTrisMissed).
-                skip = e->trisStamp == sTrisValid;
-                if (skip && ((sFrameCount + (u32) (e - sNativeMeshes)) & 63) != 0) {
-                    e->checkedFrame = (u32) sFrameCount;
-                    sTrisSkipped++;
-                    return e->usable ? e : NULL;
-                }
-            }
-            if (native_tris_same(e->copy, tris, count)) {
-                e->checkedFrame = (u32) sFrameCount;
-                e->trisStamp = track ? sTrisValid : 0;
-                return e->usable ? e : NULL;
-            }
-            if (skip) {
-                sTrisMissed++;
-                if (UNLIKELY(sTrisMissed < 20)) {
-                    plat_log("NDRAW triangles %p changed without port_tris_changed (frame %u)", (const void *) tris,
-                             (unsigned) sFrameCount);
-                }
-            }
-            e->checkedFrame = (u32) sFrameCount;
-            e->trisStamp = track ? sTrisValid : 0;
-            if (e->copy != NULL && native_uv_update(e, tris, count)) {
-                return e->usable ? e : NULL;
-            }
-            // Changed: new tables (the old ones' room is only won back when all are forgotten, unless they are
-            // remade in place)
-            if (!native_build(e, tris, count, e->copy != NULL)) {
-                native_forget_all();
-                return NULL;
-            }
-            return e->usable ? e : NULL;
+            return native_hit(e, tris, count, dynamic, track);
         }
     }
     if (probes == NATIVE_TABLE_SIZE || sNativeMeshCount >= NATIVE_TABLE_LIMIT) {
@@ -7820,6 +7891,80 @@ static COLD void kart_counts_log(void) {
             CENSUS_NOTE(tag, cls, op);                                                                                 \
         }                                                                                                              \
     } while (0)
+/*
+ * P55 S4 stage 2 (DKR_FLAT_RES): a DRAW record's resident handle. A record's material id names one capture site, which
+ * draws the same triangles frame after frame (a kart part, a track segment's batch), so the table entry native_find
+ * found for it last is kept by that id and tried first: the triangles' pointer and count are compared with the
+ * entry's, then native_hit does what native_find would have done on finding it (the same freshness rules). Anything
+ * else (another list under that id, the tables emptied) takes native_find and keeps what it finds.
+ */
+typedef struct ResHandle {
+    const Triangle *tris[2]; // Two ways: one material often draws two lists in turn (a kart's two sides, wheels)
+    NativeMesh *mesh[2];
+} ResHandle;
+static ResHandle sResHandles[NMAT_MAX];
+
+/* DKR_FLAT_RES_CHECK: the handle's entry against the table's own search (native_find's, which then draws). */
+static COLD NOINLINE NativeMesh *res_find_checked(NativeMesh *kept, const Triangle *tris, s32 count) {
+    NativeMesh *found = native_find(tris, count, FALSE, TRUE), *probe = NULL;
+    u32 h = (u32) ((u32) ((size_t) tris >> 4) * 2654435761u) >> (32 - 11), probes;
+    if (found == NULL) {
+        found = native_find(tris, count, FALSE, TRUE);
+    }
+    for (probes = 0; probes < NATIVE_TABLE_SIZE; probes++) {
+        NativeMesh *e = &sNativeMeshes[(h + probes) & (NATIVE_TABLE_SIZE - 1)];
+        if (e->tris == NULL) {
+            break;
+        }
+        if (e->tris == tris && e->numTris == count) {
+            probe = e;
+            break;
+        }
+    }
+    if (sFlatResCheck == 2 && !sResBroken) {
+        sResBroken = TRUE;
+        kept = &sNativeMeshes[(kept - sNativeMeshes + 1) & (NATIVE_TABLE_SIZE - 1)];
+    }
+    sResStats[3]++;
+    sResStats[4] += (u32) (probe != kept);
+    plat_check_report("flat res", probe != kept);
+    return found;
+}
+
+static NOINLINE NativeMesh *res_find_miss(ResHandle *h, const Triangle *tris, s32 count) {
+    NativeMesh *mesh = native_find(tris, count, FALSE, TRUE);
+    if (mesh == NULL) {
+        mesh = native_find(tris, count, FALSE, TRUE); // The tables were full and have just been emptied
+    }
+    sResStats[2]++;
+    h->tris[1] = h->tris[0]; // The newest first
+    h->mesh[1] = h->mesh[0];
+    h->tris[0] = tris;
+    h->mesh[0] = mesh;
+    return mesh;
+}
+
+static inline __attribute__((always_inline)) NativeMesh *res_find(u32 id, const Triangle *tris, s32 count) {
+    ResHandle *h = &sResHandles[id & (NMAT_MAX - 1)];
+    NativeMesh *e = h->mesh[0];
+    if (h->tris[0] != tris && h->tris[1] == tris) {
+        e = h->mesh[1];
+    }
+    if (__builtin_expect(e != NULL && e->tris == tris && e->numTris == count, 1)) {
+        sResStats[1]++;
+        if (UNLIKELY(sFlatResCheck)) {
+            return res_find_checked(e, tris, count);
+        }
+        e = native_hit(e, tris, count, FALSE, TRUE);
+        if (UNLIKELY(e == NULL)) {
+            // Unusable now, or remade and the tables emptied: native_find as before (after a forget_all it retries)
+            return res_find_miss(h, tris, count);
+        }
+        return e;
+    }
+    return res_find_miss(h, tris, count);
+}
+
 static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *dl, s32 remaining, u32 id, const s32 flat) {
     struct {
         const Vertex *src;
@@ -7951,9 +8096,13 @@ static inline __attribute__((always_inline)) s32 native_record_body(const Gfx *d
     NR_STEP(WS_FIND);
     {
         s32 track = !dynamic; // The level's batches (tracks.c) and models' (render_mesh): see native_find
-        mesh = native_find(tris, count, dynamic, track);
-        if (mesh == NULL) {
-            mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
+        if (flat && !dynamic && sFlatRes) {
+            mesh = res_find(id, tris, count); // P55 S4 stage 2: the record's resident handle
+        } else {
+            mesh = native_find(tris, count, dynamic, track);
+            if (mesh == NULL) {
+                mesh = native_find(tris, count, dynamic, track); // The tables were full and have just been emptied
+            }
         }
     }
     NR_STEP(WS_BOX);
@@ -9395,6 +9544,7 @@ static NOINLINE HOT s32 native_ext(u32 w0, u32 w1, const Gfx *where, s32 depth) 
             const Vp *vp = (const Vp *) seg_addr(w1);
             s32 i;
             for (i = 0; i < 3; i++) {
+                sMtxGen++;
                 g.vpScale[i] = vp->vp.vscale[i] * 0.25f;
                 g.vpTrans[i] = vp->vp.vtrans[i] * 0.25f;
             }
@@ -9682,6 +9832,7 @@ static NOINLINE void native_particle_begin(const Gfx *dl) {
     load_vertices_now((const Vertex *) seg_addr(dl[0].words.w0), 1, 0, g.matrices[g.curMatrix],
                       (g.geometryMode & G_FOG) != 0, g.billboard);
     g.vertexIndex = 1;
+    sMtxGen++;
     __builtin_memcpy(g.matrices[2], seg_addr(dl[0].words.w1), sizeof(g.matrices[2]));
     g.curMatrix = 2;
     g.billboard = 1;
@@ -9728,6 +9879,8 @@ static s32 flat_frame_ok(void) {
         return FALSE;
     }
     sFlatStats[0]++;
+    sFlatNow = TRUE;
+    sResMtxValid = FALSE; // P55 S4 stage 2: a matrix is reused within a frame only
     return TRUE;
 }
 
@@ -9752,6 +9905,8 @@ static COLD NOINLINE void flat_check_record(void) {
 }
 
 static COLD void flat_frame_end(void) {
+    sFlatNow = FALSE;
+    sResBroken = FALSE;
     if (sFlatBroken) {
         sFlatBroken = FALSE;
         sKartCounts = FALSE;
@@ -9760,6 +9915,11 @@ static COLD void flat_frame_end(void) {
         sFlatLogFrame = sFrameCount;
         plat_log("flat frame: %lu frames flat, %lu not, %lu records checked, %lu wrong", (unsigned long) sFlatStats[0],
                  (unsigned long) sFlatStats[1], (unsigned long) sFlatChecked, (unsigned long) sFlatStats[2]);
+        if (sFlatRes) {
+            plat_log("flat res: %lu track matrices reused, %lu handle hits, %lu misses, %lu checked, %lu wrong",
+                     (unsigned long) sResStats[0], (unsigned long) sResStats[1], (unsigned long) sResStats[2],
+                     (unsigned long) sResStats[3], (unsigned long) sResStats[4]);
+        }
     }
 }
 
@@ -9813,6 +9973,7 @@ static inline __attribute__((always_inline)) s32 run_tag(const Gfx *dl, u32 w1, 
         }
     } else if ((w1 & 0xFFFF0000) == PORT_MTXF_TAG && remaining >= 1) {
         u32 index = w1 & 3;
+        sMtxGen++;
         __builtin_memcpy(g.matrices[index], seg_addr(dl->words.w0), sizeof(g.matrices[index]));
         g.curMatrix = index;
         dl++;
@@ -9913,6 +10074,7 @@ static HOT_WALK void run_command_list(const Gfx *dl, s32 maxCommands, s32 depth)
                     const Vp *vp = (const Vp *) seg_addr(w1);
                     s32 i;
                     for (i = 0; i < 3; i++) {
+                        sMtxGen++;
                         g.vpScale[i] = vp->vp.vscale[i] * 0.25f;
                         g.vpTrans[i] = vp->vp.vtrans[i] * 0.25f;
                     }
