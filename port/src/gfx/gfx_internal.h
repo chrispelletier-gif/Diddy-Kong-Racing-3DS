@@ -30,6 +30,11 @@ s32 gfx_frame_census_on(void);
 
 /* nframe.c: runs a frame's list as records (DKR_NATIVE_FRAME). */
 void run_native_frame(const Gfx *start);
+/* P55 S4 (DKR_FLAT_FRAME): the same with the flat record path, on the frames gfx_rdp.c's flat_frame_ok allows. */
+void run_flat_frame(const Gfx *start);
+/* Its handlers: gfx_frame_tag with the record tag first and native_record_flat, and a state op without step marks. */
+s32 gfx_frame_tag_flat(const Gfx *data, u32 w1, s32 remaining, s32 depth);
+void gfx_frame_op_flat(u32 w0, u32 w1);
 
 #endif
 #endif

@@ -260,6 +260,14 @@ controls) work there, as do these renderer switches:
   C3D_FrameEnd, after` with the command list parts a frame, on its own log line and in `autorun_cores.txt`.
   `DKR_FRAME_PARTS_CHECK=1` (default) checks the parts add up to the bucket within 5% (chk cells, `ok`/`WRONG`);
   `=2` is broken on purpose (rule K6: the largest part left out of the sum; must report WRONG); `0` off
+- `DKR_FLAT_FRAME=1` (roadmap P55 S4 step 1, off by default: race frames on the flat dispatcher, `nframe.c`
+  `run_flat_frame`: the record dispatcher with the record tag tested first, state ops straight to `native_op` and the
+  record path built a second time without the step marks, census notes, kart counts and remote vertex maths
+  (`native_record_flat`). It runs only on frames that use none of those (no `DKR_WALK_STEPS` frame being timed, no
+  `DKR_WALK_CENSUS`, no `DKR_KART_COUNTS`, `DKR_NATIVE_REMOTE` 0); other frames take the record dispatcher. Same draws,
+  same frames, fewer instruction cache misses. `DKR_FLAT_FRAME_CHECK=1` (test builds) checks at every flat record that
+  those conditions still hold (chk cells; logs `flat frame: N frames flat, M not, K records checked, 0 wrong` every 600
+  frames); `=2` is broken on purpose (rule K6: turns the kart counts on mid-frame, so every later record is reported))
 - `DKR_GFX_TEST=1` (draws a reference quad)
 - `DKR_STATE_CACHE=0` (sends every GPU setting for every batch again, instead of only the ones that changed)
 - `DKR_STATE_CACHE=2` (only the settings that changed, even when the texture changes; this hung the GPU on hardware)

@@ -624,6 +624,35 @@ jobs:
             exit 1
           fi
 
+      - name: Flat dispatcher check
+        # P55 S4 step 1: DKR_FLAT_FRAME runs race frames on the flat dispatcher (nframe.c run_flat_frame, the record
+        # path native_record_flat), which must draw frames identical to the record dispatcher's with the Old 3DS
+        # defaults, its self-check on (DKR_FLAT_FRAME_CHECK=1) reporting 0 wrong. Mode 2 is the check broken on purpose
+        # (rule K6: the kart counts turned on mid-frame, a path the flat record lacks) and must report wrong records.
+        run: |
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_FLAT_FRAME=1 \
+            --head-env DKR_FLAT_FRAME_CHECK=1 --out "$RUNNER_TEMP/flat-frame" --max-images 0 --no-repeat-check \
+            --fail-on-diff
+          DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --head-env DKR_FLAT_FRAME=1 --head-env DKR_FLAT_FRAME_CHECK=2 --only levels \
+            --out "$RUNNER_TEMP/flat-frame-broken" --max-images 0 --no-repeat-check
+          logs=$(find "$RUNNER_TEMP/flat-frame/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/flat-frame-broken/runs" -path "*/head/log.txt")
+          grep -h "flat frame:" $logs $broken | tail -n 6
+          if ! grep -q "flat frame: [1-9][0-9]* frames flat, .* [1-9][0-9]* records checked, 0 wrong" $logs; then
+            echo "::error::The flat dispatcher never ran a frame, or its self-check found records run flat with a path it lacks."
+            exit 1
+          fi
+          if grep -q "flat frame: .* [1-9][0-9]* wrong" $logs; then
+            echo "::error::The flat dispatcher's self-check found records run flat with a path it lacks (see above)."
+            exit 1
+          fi
+          if ! grep -q "flat frame: .* [1-9][0-9]* wrong" $broken; then
+            echo "::error::The flat dispatcher check broken on purpose (DKR_FLAT_FRAME_CHECK=2) reported nothing."
+            exit 1
+          fi
+
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

@@ -429,6 +429,15 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "sprite table, walk steps timed (1 lap)", { "DKR_SPRITE_TABLE=1", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
     { "sprite table, self-check (1 lap, chk: 0 wrong)", { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", NULL }, 0, 1,
       1, 1 },
+    // P55 S4 step 1 (2026-11-23, proposals/3ds-old3ds-s4-flat-dispatcher-plan.md): race frames run by the flat
+    // dispatcher (DKR_FLAT_FRAME: the record dispatcher with the record tag first, state ops straight to native_op and
+    // its record path built without the step marks, census notes, kart counts and remote vertex maths, which only run
+    // on frames that use none of them). Host estimate -0.3..-1.0 ms game core, unmeasured on hardware; judged on the
+    // game core ms (4-track mean, triangle-adjusted) against the usual races. The self-check row must say 0 wrong (log:
+    // "flat frame: N frames flat, M not, K records checked, 0 wrong").
+    { "flat dispatcher (S4 step 1)", { "DKR_FLAT_FRAME", NULL, NULL }, 0, 1, 0, 0 },
+    { "flat dispatcher, self-check (1 lap, chk: 0 wrong)", { "DKR_FLAT_FRAME", "DKR_FLAT_FRAME_CHECK", NULL }, 0, 1, 1,
+      1 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
