@@ -53,7 +53,9 @@ import sys
 # copy beside native_record and run_native_frame in .text.hot.game. A frame runs one copy or the other, so the code a
 # frame executes doesn't grow (on the host's 16 KB cache model it took 28% fewer instruction cache misses); hot_span
 # grows by the copy: 85,192 in the branch's CI debug build (75,056 before).
-BUDGETS = {"hot_span": 86920, "walk_set": 23644, "backend_set": 21136}
+# P55 S4 stage 2 (DKR_FLAT_RES, record handles: res_find, native_hit split out of native_find) on the mega test branch:
+# walk_set 23,884 in 131c9d4's CI debug build (hot_span 86,252, within its budget).
+BUDGETS = {"hot_span": 86920, "walk_set": 23884, "backend_set": 21136}
 # Report-only totals (no budget yet: printed, never failed on).
 REPORTED = ("game_set", "game_span", "walk_span", "backend_span")
 SLACK = 1024
