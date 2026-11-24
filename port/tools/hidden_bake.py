@@ -150,6 +150,10 @@ def cmd_bake(args):
     os.makedirs(out, exist_ok=True)
 
     def one(level):
+        done = glob.glob(os.path.join(out, "*", "hidden_%d.bin" % level))
+        if done and not os.path.exists(os.path.join(out, "hidden_%d.ckpt" % level)):
+            print("level %d: already baked (%d tables in %s), skipped" % (level, len(done), out), flush=True)
+            return True  # (a restarted bake picks up where it stopped: done levels skipped, the rest resume)
         work = os.path.abspath(os.path.join(args.work, "L%d" % level))
         os.makedirs(work, exist_ok=True)
         poses = os.path.join(args.work, "poses_%d.txt" % level)
