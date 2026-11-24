@@ -438,7 +438,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "GPU time by kind, native track, anti-aliasing off (P65 5b: vertices or pixels)",
       { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0 },
     { "GPU time by kind, slim track shader, light program switch (P65 5b)",
-      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 0 },
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM=1", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 0 },
     // Rank 3: the see-through water's heights and colours worked out by waves.v.pica (DKR_WAVE_SHADER), the game's
     // per-vertex loop gone from the game core for tiles the GPU draws (log "wave shader: N tiles drawn by the GPU").
     // Then its self-check (DKR_WAVE_SHADER_CHECK): every tile the CPU way, compared with the shader's sums; the log line
@@ -568,7 +568,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // = fixed cheaply; this one freezing too = not the switch (the shader itself or something else). The log's "slim
     // shaders:" lines count the splits ("after a list split").
     { "slim track, list split before each switch (freeze diagnosis, 1 lap)",
-      { "DKR_TRACK_SLIM=1", "DKR_NATIVE_TRACK=1", "DKR_PROG_SWITCH", NULL }, 0, 2, 1, 1 },
+      { "DKR_TRACK_SLIM=1", "DKR_NATIVE_TRACK=1", "DKR_PROG_SWITCH=2", NULL }, 0, 1, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
