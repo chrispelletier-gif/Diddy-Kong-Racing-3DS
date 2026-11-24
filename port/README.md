@@ -258,6 +258,27 @@ controls) work there, as do these renderer switches:
   (backend params: P compared, Q wrong)`). Broken on purpose (rule K6), each must report 1 wrong: `=2` leaves one run's
   last record out, `=3` has the backend keep one record's old texture factors, `=4` adds no base to one record's
   ready-made index list
+- `DKR_KART_RESIDENT=1` (roadmap P68 step 4, off by default; plan section 8): GPU-maths kart pieces whose vertices
+  have not changed for 4 frames are drawn from a mesh kept in GPU memory (their corners and both cull groups' index
+  lists, made once with `gfxb_mesh_create`), with the frame's matrix, texture factors, fog and light: no box loop,
+  corner repack, index copy or vertices through the queue. Each draw compares the game's vertices with a copy (the
+  shadow); a change frees the kept mesh (after the GPU is done with it) and the piece goes the usual way again. At most
+  8 meshes are made a frame; a run (`DKR_KART_BATCH` bit 1) only merges pieces that are all kept or all not (one
+  `OP_MESHES` record of parts for each cull group). Same frames. Logs `kart pieces kept on the GPU (DKR_KART_RESIDENT):
+  ...` with the kart batching line. `DKR_KART_RESIDENT_CHECK=1` (test builds; turns it on) makes every kept draw again
+  the usual way and compares the vertices with the shadow, the box with the kept box and every triangle's corners with
+  the kept mesh's (chk cells; log `kart resident check: N kept draws compared, M wrong`, `0 wrong` expected). Broken on
+  purpose (rule K6), each must report: `=2` takes changed vertices as unchanged once, `=3` makes one kept box too small
+- `DKR_KART_MTX2=1` (roadmap P68 step 5, off by default): kart batches of two vertex loads with their own matrices
+  (render_mesh's vertOverride, about 6 a frame) go to the GPU with `transform2.v.pica` (DVLE 8,
+  `GFX_MODEL_PROG_MTX2`) instead of the CPU path: each corner's `one` (1 or 2) picks the matrix, the second one is
+  queued before the draw (`gfxb_model_mtx2`) and written to stab rows 54..57 with the first's camera offset. No `mova`:
+  both products are made and the unpicked one multiplied by 0 (bit-identical to `transform.v.pica` with the picked
+  matrix, `port/tools/pica_sim.py`, CI "Shader checks"). Declined while vertices are lit on the GPU and on 60 Hz picture
+  frames. Watched like the other shaders (`kart_mtx2.txt`). Logs `two-matrix kart draws (DKR_KART_MTX2): ...`. Host:
+  1 pixel in 2 of 112 frames differs from the CPU path (rounding). `DKR_KART_MTX2_CHECK=1` (test builds; turns it on)
+  makes every corner again with its own load's matrix and compares (chk cells; log `kart two-matrix check: N draws
+  compared, M wrong`); `=2` (rule K6) puts one corner on the other matrix once and must report 1 wrong
 - `DKR_SPLIT_LINES=1` (roadmap P66, off by default: the two-core renderer's queue hands its head to the backend every
   `DKR_SPLIT_PUBLISH_KB` (default 2; 0 = every record, as before) instead of after every record, the walk reads the
   backend's tail only when its copy says the queue is short of room, and the backend reads the head only when it has

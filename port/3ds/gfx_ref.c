@@ -29,6 +29,9 @@
 #define gfxb_wave_tile refb_wave_tile
 #define gfxb_wave_tile_call refb_wave_tile_call
 #define gfxb_wave_shader_ok refb_wave_shader_ok
+#define gfxb_model_mtx2 refb_model_mtx2
+#define gfxb_model_mtx2_call refb_model_mtx2_call
+#define gfxb_model_mtx2_ok refb_model_mtx2_ok
 #define gfxb_interp_frame refb_interp_frame
 #define gfxb_interp_call refb_interp_call
 #define gfxb_interp_check_counts refb_interp_check_counts

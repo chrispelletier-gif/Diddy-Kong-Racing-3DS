@@ -601,6 +601,37 @@ jobs:
             exit 1
           fi
 
+      - name: Kart resident check
+        # P68 step 4: DKR_KART_RESIDENT draws unchanged kart pieces from meshes kept on the GPU, so the same build must
+        # draw identical frames with its self-check on (DKR_KART_RESIDENT_CHECK=1: every kept draw made again the usual
+        # way and compared), on top of slim kart runs with the Old 3DS defaults, and report 0 wrong. Modes 2 and 3 are
+        # the check broken on purpose (rule K6: changed vertices taken as unchanged; a kept box too small) and must
+        # report it.
+        run: |
+          DKR_HOST_OLD3DS=1 DKR_KART_BATCH=2 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+            --head port/build/host/dkr --base port/build/host/dkr --head-env DKR_KART_RESIDENT_CHECK=1 --only levels \
+            --out "$RUNNER_TEMP/kart-resident" --max-images 0 --no-repeat-check --fail-on-diff
+          for m in 2 3; do
+            DKR_HOST_OLD3DS=1 DKR_KART_BATCH=2 python3 port/tools/frame_regression.py \
+              --rom "$RUNNER_TEMP/rom/baserom.z64" --head port/build/host/dkr --head-env DKR_KART_RESIDENT_CHECK=$m \
+              --only levels --out "$RUNNER_TEMP/kart-resident-broken$m" --max-images 0 --no-repeat-check
+          done
+          logs=$(find "$RUNNER_TEMP/kart-resident/runs" -path "*/head/log.txt")
+          grep -h "kart pieces kept\|kart resident check" $logs | tail -n 4
+          if grep -q "kart resident check: a kept mesh" $logs; then
+            echo "::error::A kept kart mesh differs from the piece drawn the usual way (see the log line above)."
+            exit 1
+          fi
+          if ! grep -q "kart resident check: [1-9][0-9]* kept draws compared, 0 wrong" $logs; then
+            echo "::error::The kart resident check never compared a kept draw (the switch never engaged)."
+            exit 1
+          fi
+          for m in 2 3; do
+            if ! grep -q "kart resident check: a kept mesh" $(find "$RUNNER_TEMP/kart-resident-broken$m/runs" -path "*/head/log.txt"); then
+              echo "::error::The kart resident check broken on purpose (DKR_KART_RESIDENT_CHECK=$m) reported nothing."
+              exit 1
+            fi
+          done
       - name: 60 Hz picture check
         # S8 / P39 (proposals/3ds-interp60-plan.md): DKR_INTERP60=1 on two races (Whale Bay, then the desert track;
         # the attract demo before them). The host draws each frame's in-between picture from the walk's deltas
@@ -773,6 +804,31 @@ jobs:
             exit 1
           fi
 
+      - name: Kart two-matrix check
+        # P68 step 5: DKR_KART_MTX2 draws two-load kart batches with the two-matrix shader; its self-check makes every
+        # corner again with its own load's matrix (DKR_KART_MTX2_CHECK=1) and must report 0 wrong with the Old 3DS
+        # defaults. Mode 2 is the check broken on purpose (rule K6: one corner on the other matrix) and must report it.
+        run: |
+          for m in 1 2; do
+            DKR_HOST_OLD3DS=1 python3 port/tools/frame_regression.py --rom "$RUNNER_TEMP/rom/baserom.z64" \
+              --head port/build/host/dkr --head-env DKR_KART_MTX2_CHECK=$m --only levels \
+              --out "$RUNNER_TEMP/kart-mtx2-$m" --max-images 0 --no-repeat-check
+          done
+          logs=$(find "$RUNNER_TEMP/kart-mtx2-1/runs" -path "*/head/log.txt")
+          broken=$(find "$RUNNER_TEMP/kart-mtx2-2/runs" -path "*/head/log.txt")
+          grep -h "two-matrix kart\|kart two-matrix check" $logs | tail -n 2
+          if grep -q "kart two-matrix check: a draw" $logs; then
+            echo "::error::A two-matrix kart draw differs from its corners made with their own load's matrix."
+            exit 1
+          fi
+          if ! grep -q "kart two-matrix check: [1-9][0-9]* draws compared, 0 wrong" $logs; then
+            echo "::error::The kart two-matrix check never compared a draw (the switch never engaged)."
+            exit 1
+          fi
+          if ! grep -q "kart two-matrix check: a draw" $broken; then
+            echo "::error::The kart two-matrix check broken on purpose (DKR_KART_MTX2_CHECK=2) reported nothing."
+            exit 1
+          fi
       # P56 D: the 3DS backend (port/3ds/gfx_c3d.c) on the PC through the real citro3d, fed the draws the host build
       # records in the frame regression scenarios. Fails when this commit changes the backend's command words
       # (unless the commit message says "backend-change: expected") or when the state cache leaves a GPU register

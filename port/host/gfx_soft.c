@@ -1081,12 +1081,37 @@ int gfxb_frame_cuts_line(int reader, char *out, int size) { // P57 E step 2: the
     return 0;
 }
 
+/* P68 step 5 (GFX_MODEL_PROG_MTX2): the second matrix, as transform2.v.pica picks it by the vertex's `one`. */
+static float sMtx2[4][4];
+
+void gfxb_model_mtx2(const float m[4][4]) {
+    memcpy(sMtx2, m, sizeof(sMtx2));
+}
+
+void gfxb_model_mtx2_call(void *payload) {
+    gfxb_model_mtx2((const float(*)[4]) payload);
+}
+
+int gfxb_model_mtx2_ok(void) {
+    return 1;
+}
+
 void gfxb_draw_model(const GfxDrawState *state, const GfxModelParams *params, const GfxModelVertex *verts, int numVerts,
                      const unsigned short *indices, int numTriangles) {
     static GfxVertex sConverted[GFX_MAX_BATCH_VERTICES];
+    GfxModelParams second;
     int i;
     if (numVerts > GFX_MAX_BATCH_VERTICES) {
         numVerts = GFX_MAX_BATCH_VERTICES;
+    }
+    if (params->pad[1] == GFX_MODEL_PROG_MTX2) {
+        second = *params;
+        memcpy(second.mtx, sMtx2, sizeof(sMtx2));
+        for (i = 0; i < numVerts; i++) {
+            gfx_model_to_vertex(&sConverted[i], &verts[i], verts[i].one == 2 ? &second : params);
+        }
+        gfxb_draw_indexed(state, sConverted, numVerts, indices, numTriangles);
+        return;
     }
     for (i = 0; i < numVerts; i++) {
         gfx_model_to_vertex(&sConverted[i], &verts[i], params);

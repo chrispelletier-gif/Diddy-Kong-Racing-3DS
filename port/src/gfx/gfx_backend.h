@@ -362,6 +362,10 @@ typedef struct GfxModelParams {
 #define GFX_MODEL_PROG_ANY 0
 #define GFX_MODEL_PROG_TRACK 1
 #define GFX_MODEL_PROG_WAVES 2
+/* MTX2 (P68 step 5, DKR_KART_MTX2): a kart batch of two vertex loads with their own matrices (the head turned apart from
+ * the body), drawn with transform2.v.pica: a vertex whose `one` is 2 is transformed by the last gfxb_model_mtx2's
+ * matrix (laid out as GfxModelParams.mtx), the rest (one = 1) by params->mtx. w is 1 for both. */
+#define GFX_MODEL_PROG_MTX2 3
 
 /* GPU vertex lighting: the grey of a vertex whose colour holds its normal (signed bytes). */
 static inline unsigned char gfx_light_shade(unsigned char r, unsigned char g, unsigned char b, const float l[4]) {
@@ -501,6 +505,12 @@ void gfxb_wave_table_call(void *payload);
 void gfxb_wave_tile(const float unif[16]);
 void gfxb_wave_tile_call(void *payload);
 int gfxb_wave_shader_ok(void); // The wave program can draw (found in the blob, not hung the GPU in an earlier run)
+
+/* GFX_MODEL_PROG_MTX2's second matrix (P68 step 5), copied; _call takes the 16 floats as a queued call's payload.
+ * gfxb_model_mtx2_ok: the two-matrix program can draw (found in the blob, not hung the GPU in an earlier run). */
+void gfxb_model_mtx2(const float m[4][4]);
+void gfxb_model_mtx2_call(void *payload);
+int gfxb_model_mtx2_ok(void);
 
 /* A model vertex the way the CPU path makes it, for backends without GPU vertex maths and for comparisons. */
 static inline void gfx_model_to_vertex(GfxVertex *out, const GfxModelVertex *in, const GfxModelParams *p) {

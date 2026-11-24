@@ -1,0 +1,109 @@
+; Vertex shader for kart batches of two vertex loads (P68 step 5, DKR_KART_MTX2; GFX_MODEL_PROG_MTX2): transform.v.pica
+; with a second matrix. About 6 of a frame's kart batches load their vertices in two parts, each with its own matrix
+; (render_mesh's vertOverride: the second part moved apart from the first, the racer's head), so they went to the CPU
+; path. Here the vertex's fourth position component (GfxModelVertex.one, 1 or 2) picks the matrix: 1 mtx, 2 the four
+; stab rows 54..57 (the sprite table shader's uniform array, which the waves use rows 0..53 of; gfx_c3d.c writes these
+; before every two-matrix draw). No mova (no address register at all): both products are made and the one not picked
+; is multiplied by 0, so the result is the picked product bit for bit (p * 1 + q * 0 = p), the same as
+; transform.v.pica with that matrix (checked on the PC by port/tools/pica_sim.py, CI "Shader checks"). w is 1 for
+; both. The rest is transform.v.pica's, unchanged.
+; Rules for a shader that a real 3DS runs (transform.v.pica): every output register written whole, once, no branches.
+
+.entry transform2_main
+
+; Uniforms: transform.v.pica's (same names, so the same registers in every program of the blob), then stab
+.fvec eye     ; Stereo 3D: the position moves across (clip y) by eye.x * w + eye.y, as in shader.v.pica
+.fvec mtx[4]  ; Rows: each output coordinate's factors for the vertex's x, y, z and 1 (the first load's matrix)
+.fvec camoff  ; Whole numbers taken off the position first (w = 0), so the matrix's own offset stays small
+.fvec texa    ; Texture coordinates: t0 = v1 * texa.xy + texb.xy, t1 = v1 * texa.zw + v2 * texc.zw + texb.zw
+.fvec texc
+.fvec texb
+.fvec fogp    ; Fog factor = clamp(z / w * fogp.x + fogp.y, 0, 1) replaces the colour's alpha when fogp.z = 1
+.fvec lightv  ; GPU vertex lighting (fogp.w = 1): grey = clamp(lightv.w + max(n . lightv.xyz, 0), 0, 1), with the
+              ; colour's bytes the normal as signed bytes (127 = 1)
+.fvec stab[75] ; Rows 54..57: the second load's matrix, laid out as mtx
+
+.constf consts(0.00392156862745098, 0.0, 1.0, 0.0001)
+.alias rgba_scale consts.xxxx
+.alias zeros consts.yyyy
+.alias ones consts.zzzz
+.alias tiny consts.wwww
+.constf lconsts(127.5, -256.0, 0.0, 0.0)
+.alias half_byte lconsts.xxxx
+.alias minus_256 lconsts.yyyy
+
+; Outputs
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+; Inputs
+.alias inpos v0
+.alias intc0 v1
+.alias intc1 v2
+.alias inclr v3
+
+.proc transform2_main
+	; Position: both matrices' products, the one the vertex's w (1 or 2) doesn't pick multiplied by 0
+	add r0, -camoff, inpos
+	add r13, -ones, r0.wwww
+	add r12, ones, -r13
+	mov r0.w, ones
+	dp4 r1.x, mtx[0], r0
+	dp4 r1.y, mtx[1], r0
+	dp4 r1.z, mtx[2], r0
+	dp4 r1.w, mtx[3], r0
+	dp4 r14.x, stab[54], r0
+	dp4 r14.y, stab[55], r0
+	dp4 r14.z, stab[56], r0
+	dp4 r14.w, stab[57], r0
+	mul r1, r12, r1
+	mul r14, r13, r14
+	add r1, r1, r14
+
+	; Fog factor, from z before the depth clamp below
+	max r2, tiny, r1.wwww
+	rcp r2, r2.x
+	mul r2, r2, r1.zzzz
+	mul r2, fogp.xxxx, r2
+	add r2, fogp.yyyy, r2
+	max r2, zeros, r2
+	min r2, ones, r2
+
+	; Colour, the alpha replaced by the fog factor when fogp.z is 1
+	mul r3, rgba_scale, inclr
+
+	; Lit colour, used when fogp.w is 1: the normal from the colour's bytes (above 127 are negative)
+	slt r8, half_byte, inclr
+	mul r8, minus_256, r8
+	add r8, inclr, r8
+	dp3 r9, lightv, r8
+	max r9, zeros, r9
+	add r9, lightv.wwww, r9
+	min r9, ones, r9
+	add r10, r9, -r3
+	mul r10, fogp.wwww, r10
+	add r3.xyz, r3, r10
+	add r4, r2, -r3.wwww
+	mul r4, fogp.zzzz, r4
+	add r3.w, r3, r4
+
+	; Stereo offset, then the depth clamp (the N64 has no far plane)
+	mul r5, eye.xxxx, r1.wwww
+	add r5, eye.yyyy, r5
+	add r1.y, r1, r5
+	min r1.z, zeros, r1
+
+	; Texture coordinates
+	mul r6, texa, intc0.xyxy
+	mul r7, texc, intc1.xyxy
+	add r6, r6, r7
+	add r6, texb, r6
+
+	mov outpos, r1
+	mov outtc0, r6
+	mov outtc1, r6.zwzw
+	mov outclr, r3
+	end
+.end

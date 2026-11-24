@@ -481,6 +481,19 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
     { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
     { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P68 step 4 (2026-11-23, plan section 8): kart pieces whose vertices haven't changed for 4 frames are drawn from
+    // meshes kept on the GPU (DKR_KART_RESIDENT): no box loop, corner repack, index copy or vertices through the queue.
+    // Host, Whale Bay: about 40% of kart records drawn so. Est. -0.2..-0.6 ms game core (unmeasured). Alone and on top
+    // of slim runs (value 2 sets both); the self-check row must say 0 wrong (log "kart resident check").
+    { "kart pieces kept on the GPU (P68 4)", { "DKR_KART_RESIDENT", NULL, NULL }, 0, 1, 1, 0 },
+    { "kart pieces kept on the GPU + slim runs (P68 2+4)", { "DKR_KART_BATCH", "DKR_KART_RESIDENT", NULL }, 0, 2, 0, 0 },
+    { "kart pieces kept, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_RESIDENT_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    // P68 step 5 (2026-11-23): the ~6 kart batches a frame with two vertex loads (two matrices, the racer's head) drawn
+    // by the GPU with transform2.v.pica (DKR_KART_MTX2) instead of the CPU path. Small (est. -0.1..-0.3 ms game core,
+    // unmeasured). The first race with it writes kart_mtx2.txt ("testing", then "passed"); a lock leaves it off later.
+    // The self-check row must say 0 wrong (log "kart two-matrix check").
+    { "two-matrix kart draws by the GPU (P68 5)", { "DKR_KART_MTX2", NULL, NULL }, 0, 1, 0, 0 },
+    { "two-matrix kart draws, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_MTX2_CHECK", NULL, NULL }, 0, 1, 1, 1 },
     // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
     // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
     // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
