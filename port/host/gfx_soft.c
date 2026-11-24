@@ -25,10 +25,43 @@
 static int W = GFX_SCREEN_WIDTH;
 static int sWide;
 
-static uint8_t sColor[MAX_W * H * 4];
-static float sDepth[MAX_W * H];
-static float sDepthF[MAX_W * H];          // With DKR_DEPTH_BITS: the float depth buffer kept alongside, for comparing
-static uint32_t sWinQ[MAX_W * H], sWinF[MAX_W * H]; // The opaque triangle each depth test left showing
+/*
+ * The whole-screen buffers, 3.9 MB. On the PC they are a static block as before. Built into the 3DS as the reference
+ * renderer (3ds/gfx_ref.c defines GFX_SOFT_HEAP_BUFFERS), only a snapshot or DKR_DIFF_EVERY draws with it, so there
+ * they come from the heap when it starts (gfxb_init) instead of sitting in the executable: as static arrays they took
+ * about 2.5 MB of the Old 3DS's heap all the time, which 41de820 ran out of (textures drawn white). gfxb_soft_ready
+ * says whether they could be had.
+ */
+typedef struct SoftBuffers {
+    uint8_t color[MAX_W * H * 4];
+    float depth[MAX_W * H];
+    float depthF[MAX_W * H];             // With DKR_DEPTH_BITS: the float depth buffer kept alongside, for comparing
+    uint32_t winQ[MAX_W * H], winF[MAX_W * H]; // The opaque triangle each depth test left showing
+    uint8_t tag[MAX_W * H];              // Clipping sweep: 0 not drawn by 3D this frame, 1 drawn, 2 close level geometry, 3 close object
+    float backW[MAX_W * H], visW[MAX_W * H]; // Clipping sweep's inside detection (below)
+    uint8_t fragLast[MAX_W * H];         // frag_stats.inc: the kind that last wrote each pixel this frame, +1 (0: the clear)
+    uint8_t fragSky[MAX_W * H];          // frag_stats.inc: sky fragments rasterized at each pixel this frame
+} SoftBuffers;
+#ifdef GFX_SOFT_HEAP_BUFFERS
+static SoftBuffers *sSoft;
+#else
+static SoftBuffers sSoftStatic;
+static SoftBuffers *const sSoft = &sSoftStatic;
+#endif
+#define sColor (sSoft->color)
+#define sDepth (sSoft->depth)
+#define sDepthF (sSoft->depthF)
+#define sWinQ (sSoft->winQ)
+#define sWinF (sSoft->winF)
+#define sTag (sSoft->tag)
+#define sBackW (sSoft->backW)
+#define sVisW (sSoft->visW)
+#define sFragLast (sSoft->fragLast)
+#define sFragSky (sSoft->fragSky)
+
+int gfxb_soft_ready(void) {
+    return sSoft != NULL;
+}
 static uint32_t sTriId;
 static volatile int sFramesRendered;
 static int sMipmaps = -1, sColour = -1; // DKR_MIPMAP, DKR_COLOUR: see read_upgrade_settings
@@ -48,13 +81,13 @@ static const char *sDumpDir;
  * directory (sweep_NNNNN.png), with DKR_CLIP_SWEEP_MASK=1 also a copy marking those pixels.
  */
 static FILE *sSweep;
-static uint8_t sTag[MAX_W * H]; // 0 not drawn by 3D this frame, 1 drawn, 2 close level geometry, 3 close object
+// sTag (SoftBuffers): 0 not drawn by 3D this frame, 1 drawn, 2 close level geometry, 3 close object
 extern int gGfxSweepLevel;      // gfx_rdp.c: the triangles use the level model's vertices
 static int sTagNear;            // The triangle being drawn was cut by the near plane
 static float sTagMaxArea;
 // Inside detection: the nearest distance at each pixel of a level triangle that culling dropped because it faces away
 // (the camera is behind that surface: inside a wall, a rock or the ground), and of what was drawn there.
-static float sBackW[MAX_W * H], sVisW[MAX_W * H];
+// (sBackW and sVisW: SoftBuffers)
 // How close (in the game's units, along the view) a surface has to be to count: the camera trails the kart by 120 to
 // 190, so only something between them (a wall, scenery, another kart) is this close.
 #define NEAR_DISTANCE 30.0f
@@ -76,6 +109,11 @@ static int sIpMode, sIpReplaying;
 
 void gfxb_init(void) {
     const char *env = getenv("DKR_DUMP_EVERY");
+#ifdef GFX_SOFT_HEAP_BUFFERS
+    if (sSoft == NULL && (sSoft = calloc(1, sizeof(SoftBuffers))) == NULL) {
+        return; // No room: the reference renderer stays off (gfxb_soft_ready)
+    }
+#endif
     if (getenv("DKR_CLIP_SWEEP") != NULL) {
         extern int gGfxSweep;
         gGfxSweep = 1;

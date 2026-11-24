@@ -126,6 +126,7 @@ static s32 sTracing; // This frame is the traced one (DKR_TRACE_FRAME, or a snap
  */
 #ifdef PORT_GFX_REFERENCE
 void refb_init(void);
+int refb_ready(void); // Its whole-screen buffers could be had from the heap (3ds/gfx_ref.c)
 void refb_start_frame(void);
 void refb_end_frame(void);
 void refb_clear_color(const short rect[4], unsigned char r, unsigned char g, unsigned char b, unsigned char a);
@@ -138,6 +139,7 @@ void gfxb_log_draws(int snapshotFrame);
 static s32 sDiffEvery;
 static s32 sRefActive;
 static s32 sRefInitialised;
+static s32 sSnapGpuOnly; // A snapshot without the reference renderer (no memory): the GPU's picture only
 #define REF_CALL(call)                                                                                                 \
     do {                                                                                                               \
         if (UNLIKELY(sRefActive)) {                                                                                    \
@@ -11716,6 +11718,10 @@ void port_gfx_init(void) {
             if (sDiffEvery > 0) {
                 refb_init();
                 sRefInitialised = TRUE;
+                if (!refb_ready()) {
+                    plat_log("DKR_DIFF_EVERY: no memory for the reference renderer, left off");
+                    sDiffEvery = 0;
+                }
             }
         }
 #endif
@@ -11728,11 +11734,15 @@ void port_gfx_init(void) {
 static COLD void start_snapshot(void) {
     char path[256];
     gPlatSnapshotRequested = 0;
-    if (!sRefInitialised) {
-        refb_init();
+    if (!sRefInitialised || !refb_ready()) {
+        refb_init(); // (Tries the heap again if it was short last time)
         sRefInitialised = TRUE;
     }
-    sRefActive = TRUE;
+    sRefActive = refb_ready(); // Without its buffers, the snapshot has the GPU's picture and the log only
+    if (!sRefActive) {
+        sSnapGpuOnly = TRUE;
+        plat_log("snapshot: no memory for the reference renderer's picture");
+    }
     sTraceFrame = sFrameCount;
     plat_log_keep();
     plat_snprintf(path, sizeof(path), "%s/diff_%05d_log.txt", plat_data_dir(), (int) sFrameCount);
@@ -11917,6 +11927,11 @@ NOINLINE void port_gfx_run_frame(const void *frameDl, int solo) {
 #ifdef PORT_GFX_REFERENCE
     if (UNLIKELY(sRefActive)) {
         end_reference_frame();
+    } else if (UNLIKELY(sSnapGpuOnly)) {
+        char path[256];
+        sSnapGpuOnly = FALSE;
+        plat_snprintf(path, sizeof(path), "%s/diff_%05d_gpu.bin", plat_data_dir(), (int) sFrameCount);
+        gfxb_capture_frame(path);
     }
 #endif
 }

@@ -48,6 +48,9 @@
 #define gfxb_sprite_table refb_sprite_table
 #define gfxb_draw_sprite_table refb_draw_sprite_table
 #define host_frames_rendered ref_frames_rendered
+#define gfxb_soft_ready refb_ready
+// The whole-screen buffers from the heap, only once a snapshot or DKR_DIFF_EVERY starts it (refb_init)
+#define GFX_SOFT_HEAP_BUFFERS 1
 #include <stdlib.h>
 // None of the host renderer's own debug settings apply here.
 #define getenv(name) ((char *) 0)

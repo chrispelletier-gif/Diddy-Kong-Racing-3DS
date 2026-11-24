@@ -20,8 +20,7 @@
 #endif
 static int sFragDrawNo; // This frame's draws so far (DKR_FRAG_STATS=4)
 static int sFragStats = -1, sFragKind;
-static uint8_t sFragLast[MAX_W * H]; // The kind that last wrote each pixel this frame, +1 (0: the clear)
-static uint8_t sFragSky[MAX_W * H];  // Sky fragments rasterized at each pixel this frame
+// sFragLast and sFragSky: gfx_soft.c's SoftBuffers
 static unsigned long long sOracleBand[4], sOracleRect; // Sky fragments a scissor could leave out (bands 1,4,16,64; one rect)
 static unsigned long long sFragRaster[PROF_KINDS + 2], sFragPass[PROF_KINDS + 2], sFragHidden[PROF_KINDS + 2],
     sFragBlend[PROF_KINDS + 2], sFragNoDepth[PROF_KINDS + 2], sFragTris[PROF_KINDS + 2], sFragDraws[PROF_KINDS + 2];
