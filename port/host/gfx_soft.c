@@ -1257,8 +1257,23 @@ static GfxVertex *sIpVerts;
 static int sIpNumVerts, sIpCapVerts;
 static float (*sIpDeltas)[4][4];
 static int sIpNumDeltas, sIpCapDeltas;
-static uint8_t sIpStartColor[MAX_W * H * 4], sIpPrev[MAX_W * H * 4], sIpMid[MAX_W * H * 4];
-static float sIpStartDepth[MAX_W * H], sIpStartDepthF[MAX_W * H];
+/*
+ * The in-between picture's whole-screen copies (3 MB), taken from the heap only when the 60 Hz picture is on. As
+ * static arrays they sat in the 3DS build too (3ds/gfx_ref.c builds this file in as the reference renderer, where
+ * getenv is always NULL so the mode is never on): 41de820's executable took 3.5 MB more memory than b2096b8's, the
+ * Old 3DS's heap ran out at the first cutscene, textures could not be made and were drawn white (karts white, smoke
+ * as squares, missing text), and sending a bug report crashed.
+ */
+typedef struct IpBuffers {
+    uint8_t startColor[MAX_W * H * 4], prev[MAX_W * H * 4], mid[MAX_W * H * 4], real[MAX_W * H * 4];
+    float startDepth[MAX_W * H], startDepthF[MAX_W * H], realDepth[MAX_W * H], realDepthF[MAX_W * H];
+} IpBuffers;
+static IpBuffers *sIpBuf;
+#define sIpStartColor (sIpBuf->startColor)
+#define sIpPrev (sIpBuf->prev)
+#define sIpMid (sIpBuf->mid)
+#define sIpStartDepth (sIpBuf->startDepth)
+#define sIpStartDepthF (sIpBuf->startDepthF)
 static unsigned int sIpStats[6]; /* Frames two pictures, one; moving frames compared, in between; checks, wrong */
 
 static void ip_read(void) {
@@ -1270,6 +1285,10 @@ static void ip_read(void) {
         sIpDump = e != NULL ? atoi(e) : 0;
         e = getenv("DKR_INTERP60_CHECK");
         sIpCheck = e != NULL ? atoi(e) : 0;
+        if (sIpMode && (sIpBuf = calloc(1, sizeof(IpBuffers))) == NULL) {
+            fprintf(stderr, "60 Hz picture: no memory for its pictures, left off\n");
+            sIpMode = 0;
+        }
         sIpRead = 1;
     }
 }
@@ -1381,8 +1400,9 @@ static double ip_diff(const uint8_t *a, const uint8_t *b) {
 
 /* gfxb_end_frame, before the frame is dumped: the in-between picture, from the kept draws. */
 static void ip_frame_end(void) {
-    static uint8_t sReal[MAX_W * H * 4];
-    static float sRealDepth[MAX_W * H], sRealDepthF[MAX_W * H];
+#define sReal (sIpBuf->real)
+#define sRealDepth (sIpBuf->realDepth)
+#define sRealDepthF (sIpBuf->realDepthF)
     int i, t, savedFrag = sFragStats;
     if (!sIpMode) {
         return;
