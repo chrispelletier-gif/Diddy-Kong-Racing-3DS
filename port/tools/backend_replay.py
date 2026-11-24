@@ -19,11 +19,18 @@ for the PC, and writes down the PICA200 command words of every draw and the GPU 
   walk   (once the backend has DKR_WALK_VERTS, PR #563) the Old 3DS records with the walk making each draw's
          vertices (REPLAY_WALK=1 DKR_WALK_VERTS=1 DKR_WALK_VERTS_CHECK=1) against the lean draw: every draw's
          command words and vertex data must be the same, and the backend's own self-check must count 0 differ.
+  prog   (once the backend has DKR_PROG_SWITCH, the Old 3DS race 19 freeze fix) the levels scenario recorded as an Old
+         3DS (DKR_HOST_OLD3DS=1, so the native track's model draws are in it), replayed with the slim track shader
+         (DKR_TRACK_SLIM=1) and the old full program switch (DKR_PROG_SWITCH=0) against the light one (=1): the registers
+         and uniforms must be the same at every draw, the light run must write no program set-up register (GEOSTAGE,
+         VSH_COM_MODE, outmaps, ...) after the first draw of a frame, and the light switch broken on purpose
+         (DKR_PROG_SWITCH_BREAK=1, rule K6: no entry point) must be reported.
 
   backend_replay.py deps --dir DEPS
   backend_replay.py build --deps DEPS --port PORT_DIR --out DIR
   backend_replay.py record --exe port/build/host/dkr --rom baserom.z64 --out RECORDS
   backend_replay.py check --records RECORDS --head HEAD_REPLAY [--base BASE_REPLAY] --out DIR [--expected]
+  backend_replay.py prog --exe port/build/host/dkr --rom baserom.z64 --head HEAD_REPLAY --out DIR
   backend_replay.py ci --deps DEPS --exe dkr --rom baserom.z64 --work DIR [--base-port OLD/port]
 
 `ci` does all four (the "Backend replay" step in .github/workflows/Port.yml). Writes DIR/report.md (also appended to
@@ -136,8 +143,8 @@ def build(deps, port, out):
     return os.path.join(os.path.abspath(out), "c3d_replay")
 
 
-def record_one(exe, rom, scenario, out_dir, every):
-    run_dir = os.path.join(out_dir, "run-" + scenario["name"])
+def record_one(exe, rom, scenario, out_dir, every, extra_env=None, suffix=""):
+    run_dir = os.path.join(out_dir, "run-" + scenario["name"] + suffix)
     os.makedirs(run_dir, exist_ok=True)
     link = os.path.join(run_dir, "baserom.z64")
     if not os.path.exists(link):
@@ -146,10 +153,11 @@ def record_one(exe, rom, scenario, out_dir, every):
         with open(os.path.join(frame_regression.TOOLS_DIR, "testdata", scenario["save"]), "rb") as src, \
                 open(os.path.join(run_dir, "eeprom.bin"), "wb") as dst:
             dst.write(src.read())
-    path = os.path.join(out_dir, scenario["name"] + ".rec")
+    path = os.path.join(out_dir, scenario["name"] + suffix + ".rec")
     env = dict(os.environ)
     env.update(scenario["env"])
     env.update(RECORD_ENV)
+    env.update(extra_env or {})
     env.update({"DKR_LOCKSTEP": "1", "DKR_DATA_DIR": run_dir, "DKR_FRAMES": str(scenario["frames"]),
                 "DKR_BACKEND_RECORD": path, "DKR_BACKEND_RECORD_EVERY": str(every)})
     with open(os.path.join(run_dir, "log.txt"), "w") as log:
@@ -477,6 +485,135 @@ def check(records, head, base, out_dir, expected):
     return ok
 
 
+# The prog check (DKR_PROG_SWITCH): the program set-up registers shaderProgramConfigure writes (libctru 2.7.0) besides
+# the entry point; the light switch must write none of them in the middle of a frame. GEOSTAGE_CONFIG and
+# GEOSTAGE_CONFIG2 count only when written with the set-up's byte mask (3): citro3d's draws write other bytes of them.
+PROG_SETUP_REGS = {
+    0x229: "GEOSTAGE_CONFIG", 0x253: "GEOSTAGE_CONFIG2", 0x244: "VSH_COM_MODE", 0x2BD: "VSH_OUTMAP_MASK",
+    0x24A: "VSH_OUTMAP_TOTAL1", 0x251: "VSH_OUTMAP_TOTAL2", 0x04F: "SH_OUTMAP_TOTAL", 0x064: "SH_OUTATTR_MODE",
+    0x06F: "SH_OUTATTR_CLOCK",
+}
+for _o in range(7):
+    PROG_SETUP_REGS[0x050 + _o] = "SH_OUTMAP_O%d" % _o
+PROG_MASKED = (0x229, 0x253)
+PROG_ENTRY = 0x2BA
+PROG_RECORD_ENV = {"DKR_HOST_OLD3DS": "1"}
+PROG_REPLAY = {"REPLAY_OLD3DS": "1", "DKR_TRACK_SLIM": "1"}
+
+
+def written_regs(words):
+    """The (register, byte mask) pairs a run of command words (value, header, extra..., pad) writes."""
+    regs = set()
+    i = 0
+    while i + 2 <= len(words):
+        header = words[i + 1]
+        reg, extra, consecutive = header & 0x3FF, (header >> 20) & 0xFF, (header >> 31) != 0
+        mask = (header >> 16) & 0xF
+        for k in range(extra + 1):
+            regs.add(((reg + k) & 0x3FF if consecutive else reg, mask))
+        i += 2 + extra + (extra & 1)
+    return regs
+
+
+def scan_setup(words_path):
+    """Per run: (draws after a frame's first whose words write a program set-up register, entry point writes after a
+    frame's first draw, the first few such draws)."""
+    setup = entries = 0
+    shown = []
+    with open(words_path) as f:
+        for line in f:
+            head, _, rest = line.partition(":")
+            parts = head.split()
+            if len(parts) != 2 or parts[1] == "job":
+                continue
+            draw = int(parts[1])
+            words = [int(w, 16) for w in rest.split("|")[0].split()]
+            regs = written_regs(words)
+            if draw == 0:
+                continue  # The frame's first draw: the frame start's full bind may land before it
+            if any(r == PROG_ENTRY for r, _ in regs):
+                entries += 1
+            bad = sorted(set(r for r, m in regs if r in PROG_SETUP_REGS and (r not in PROG_MASKED or m == 3)))
+            if bad:
+                setup += 1
+                if len(shown) < MAX_SHOWN:
+                    shown.append("frame %s draw %d: %s" % (parts[0], draw, ", ".join(PROG_SETUP_REGS[r] for r in bad)))
+    return setup, entries, shown
+
+
+def check_prog(head, rec, out_dir):
+    """The prog check (see the top). Returns (ok, report lines)."""
+    os.makedirs(out_dir, exist_ok=True)
+    lines = ["### Program switch (DKR_PROG_SWITCH): the light switch against the full one, slim track shader, Old 3DS",
+             ""]
+    runs = {"full": {"DKR_PROG_SWITCH": "0"}, "light": {"DKR_PROG_SWITCH": "1"},
+            "broken": {"DKR_PROG_SWITCH": "1", "DKR_PROG_SWITCH_BREAK": "1"}}
+    res = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        jobs = {}
+        for name, env in runs.items():
+            e = dict(PROG_REPLAY)
+            e.update(env)
+            jobs[name] = pool.submit(replay, head, rec, e, os.path.join(out_dir, "prog-%s.words" % name),
+                                     os.path.join(out_dir, "prog-%s.state" % name))
+        for name, j in jobs.items():
+            try:
+                res[name] = j.result()
+            except RuntimeError as e:
+                lines.append("- replay failed (%s):\n\n```\n%s\n```" % (name, e))
+                return False, lines
+    with open(os.path.join(out_dir, "prog-diff.txt"), "w") as d:
+        draws, diff, shown = compare_states(os.path.join(out_dir, "prog-full.state"),
+                                            os.path.join(out_dir, "prog-light.state"), "levels, Old 3DS", d,
+                                            ("full", "light"))
+        bdraws, bdiff, bshown = compare_states(os.path.join(out_dir, "prog-full.state"),
+                                               os.path.join(out_dir, "prog-broken.state"), "broken on purpose", d,
+                                               ("full", "broken"))
+    full_setup, full_entries, _ = scan_setup(os.path.join(out_dir, "prog-full.words"))
+    light_setup, light_entries, light_shown = scan_setup(os.path.join(out_dir, "prog-light.words"))
+    ok = diff == 0 and light_setup == 0 and bdiff > 0 and full_setup > 0 and light_entries > 0
+    lines.append("| run | draws | draws whose registers differ from the full switch | draws after a frame's first with "
+                 "program set-up words | ... with an entry point write | words/draw |")
+    lines.append("|---|---|---|---|---|---|")
+    lines.append("| full (0) | %d | - | %d | %d | %.1f |" % (draws, full_setup, full_entries, res["full"]["words/draw"]))
+    lines.append("| light (1) | %d | %d | %d | %d | %.1f |" % (draws, diff, light_setup, light_entries,
+                                                             res["light"]["words/draw"]))
+    lines.append("| light, broken on purpose (K6) | %d | %d | - | - | %.1f |" % (bdraws, bdiff,
+                                                                              res["broken"]["words/draw"]))
+    lines.append("")
+    if full_setup == 0 or light_entries == 0:
+        lines.append("**No program switches in the record: the check saw nothing (the slim track shader didn't draw).**")
+    if diff:
+        lines.append("**The light switch leaves different registers or uniforms (%d draws).**" % diff)
+        lines += ["```"] + shown[:MAX_SHOWN] + ["```"]
+    if light_setup:
+        lines.append("**The light switch wrote program set-up registers mid-frame (%d draws).**" % light_setup)
+        lines += ["```"] + light_shown + ["```"]
+    if bdiff == 0:
+        lines.append("**The check broken on purpose (no entry point) was not reported: the check is blind.**")
+    if ok:
+        lines.append("The light switch leaves the same registers and uniforms as the full one at every draw, writes no "
+                     "program set-up register after a frame's first draw, and the broken run was reported (%d draws)."
+                     % bdiff)
+    for name in runs:
+        for ext in (".words", ".state"):
+            path = os.path.join(out_dir, "prog-%s%s" % (name, ext))
+            if os.path.exists(path):
+                os.remove(path)
+    return ok, lines
+
+
+def has_prog_switch(port_dir):
+    with open(os.path.join(port_dir, "3ds", "gfx_c3d.c")) as f:
+        return "DKR_PROG_SWITCH" in f.read()
+
+
+def record_prog(exe, rom, out_dir, every=RECORD_EVERY):
+    frame_regression.prepare_scenarios()
+    scenario = [s for s in frame_regression.SCENARIOS if s["name"] == "levels"][0]
+    return record_one(exe, rom, scenario, out_dir, every, PROG_RECORD_ENV, "-old3ds")
+
+
 def expected_change():
     text = os.environ.get("PR_BODY", "")
     try:
@@ -507,6 +644,12 @@ def main():
     p.add_argument("--base")
     p.add_argument("--out", required=True)
     p.add_argument("--expected", action="store_true")
+    p = sub.add_parser("prog")
+    p.add_argument("--exe", required=True)
+    p.add_argument("--rom", required=True)
+    p.add_argument("--head", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--record", help="an Old 3DS levels record made before (else one is made)")
     p = sub.add_parser("ci")
     p.add_argument("--deps", required=True)
     p.add_argument("--exe", required=True)
@@ -526,6 +669,11 @@ def main():
     elif args.cmd == "check":
         recs = sorted(os.path.join(args.records, n) for n in os.listdir(args.records) if n.endswith(".rec"))
         sys.exit(0 if check(recs, args.head, args.base, args.out, args.expected or expected_change()) else 1)
+    elif args.cmd == "prog":
+        rec = args.record or record_prog(args.exe, args.rom, os.path.join(args.out, "records"))
+        ok, lines = check_prog(args.head, rec, args.out)
+        print("\n".join(lines))
+        sys.exit(0 if ok else 1)
     else:
         fetch_deps(args.deps)
         head = build(args.deps, PORT_DIR, os.path.join(args.work, "replay-head"))
@@ -538,6 +686,17 @@ def main():
         recs = record(args.exe, args.rom, os.path.join(args.work, "records"), args.every)
         out = os.path.join(args.work, "out")
         ok = check(recs, head, base, out, expected_change())
+        if has_prog_switch(PORT_DIR):
+            rec = record_prog(args.exe, args.rom, os.path.join(args.work, "records"), args.every)
+            prog_ok, lines = check_prog(head, rec, out)
+            text = "\n".join(lines) + "\n"
+            with open(os.path.join(out, "report.md"), "a") as f:
+                f.write("\n" + text)
+            if os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                    f.write("\n" + text)
+            print(text)
+            ok = ok and prog_ok
         # The replays' outputs are hundreds of MB; the report and the diffs stay.
         for name in os.listdir(out):
             if name.endswith(".words") or name.endswith(".state"):

@@ -429,18 +429,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // moving means its cost is the vertices (the slim shader's 26 instructions instead of 39 can help); dropping a lot
     // means pixels (the shader can't). Then the slim shader itself (DKR_TRACK_SLIM, log "slim shaders: ... slim track
     // draws"), timed the same way. Both measurements.
+    // The slim row froze an Old 3DS on 2faee86 (race 19, 2026-11-24, proposals/3ds-race19-slim-freeze-plan.md): the
+    // switch to and from track.v.pica wrote citro3d's whole program set-up right after a draw. It is now raced with
+    // the light program switch (DKR_PROG_SWITCH=1: entry point and constants only), as are the waves, sprite table and
+    // two-matrix rows below; its own marker track_slim_m1.txt (track_slim.txt keeps race 19's "hung"). The log's
+    // "program switch: light for track 1, ..." line at start-up must say 1 for the shader rows, and the "slim shaders:"
+    // lines count the light switches and the most in a frame.
     { "GPU time by kind, native track, anti-aliasing off (P65 5b: vertices or pixels)",
       { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0 },
-    { "GPU time by kind, native track with the slim track shader (P65 5b)",
-      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM" }, 0, 1, 1, 0 },
+    { "GPU time by kind, slim track shader, light program switch (P65 5b)",
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 0 },
     // Rank 3: the see-through water's heights and colours worked out by waves.v.pica (DKR_WAVE_SHADER), the game's
     // per-vertex loop gone from the game core for tiles the GPU draws (log "wave shader: N tiles drawn by the GPU").
     // Then its self-check (DKR_WAVE_SHADER_CHECK): every tile the CPU way, compared with the shader's sums; the log line
     // "wave shader check" must say "differ on 0" and "the CPU way on 0". The first race with the wave shader writes
     // wave_shader.txt ("testing", then "passed"); a lock there leaves it off in later runs.
-    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", NULL, NULL }, 0, 1, 0, 0 },
-    { "water waves, self-check (1 lap, chk: differ on 0)", { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", NULL }, 0, 1, 1,
-      1 },
+    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0 },
+    { "water waves, self-check (1 lap, chk: differ on 0)",
+      { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1 },
     // P65 rank 1 (2026-11-23, proposals/3ds-sprite-table-plan.md): billboard sprite tiles handed to the GPU as the
     // game's own vertices with one matrix per load (DKR_SPRITE_TABLE), so the game core no longer works out their
     // corners (run 54: sprite set-up + corners + tris 1.5-2.2 ms timed). 1: draws of one load by the frame's transform
@@ -449,12 +455,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (4-track mean, triangle-adjusted) with the GPU and renderer core within +0.5 ms. Placed before the GS rows: a
     // lock leaves sprite_table.txt "testing" and the next start leaves the table shader off. The log's "sprite table"
     // lines count tiles, draws and the routes; the self-check row must say 0 wrong (chk; log "0 differ").
-    { "sprite table, one-load draws by the transform program (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL, NULL }, -1, 1, 0,
-      0 },
-    { "sprite table, every draw by the table shader (P65 rank 1)", { "DKR_SPRITE_TABLE", NULL, NULL }, -1, 2, 1, 0 },
-    { "sprite table, walk steps timed (1 lap)", { "DKR_SPRITE_TABLE=1", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
-    { "sprite table, self-check (1 lap, chk: 0 wrong)", { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", NULL }, 0, 1,
-      1, 1 },
+    { "sprite table, one-load draws by the transform program (P65 rank 1)",
+      { "DKR_SPRITE_TABLE", "DKR_PROG_SWITCH=1", NULL }, -1, 1, 0, 0 },
+    { "sprite table, every draw by the table shader (P65 rank 1)", { "DKR_SPRITE_TABLE", "DKR_PROG_SWITCH=1", NULL }, -1,
+      2, 1, 0 },
+    { "sprite table, walk steps timed (1 lap)", { "DKR_SPRITE_TABLE=1", "DKR_WALK_STEPS", "DKR_PROG_SWITCH=1", NULL }, 0,
+      1, 1, 1 },
+    { "sprite table, self-check (1 lap, chk: 0 wrong)",
+      { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1 },
     // P55 S4 step 1 (2026-11-23, proposals/3ds-old3ds-s4-flat-dispatcher-plan.md): race frames run by the flat
     // dispatcher (DKR_FLAT_FRAME: the record dispatcher with the record tag first, state ops straight to native_op and
     // its record path built without the step marks, census notes, kart counts and remote vertex maths, which only run
@@ -492,8 +500,9 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // by the GPU with transform2.v.pica (DKR_KART_MTX2) instead of the CPU path. Small (est. -0.1..-0.3 ms game core,
     // unmeasured). The first race with it writes kart_mtx2.txt ("testing", then "passed"); a lock leaves it off later.
     // The self-check row must say 0 wrong (log "kart two-matrix check").
-    { "two-matrix kart draws by the GPU (P68 5)", { "DKR_KART_MTX2", NULL, NULL }, 0, 1, 0, 0 },
-    { "two-matrix kart draws, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_MTX2_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    { "two-matrix kart draws by the GPU (P68 5)", { "DKR_KART_MTX2", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0 },
+    { "two-matrix kart draws, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_MTX2_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0,
+      1, 1, 1 },
     // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
     // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
     // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
@@ -552,6 +561,14 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
       0, 4, 1, 1 },
     { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, -1, 2, 1, 1 },
+    // Race 19 freeze diagnosis (2026-11-24, proposals/3ds-race19-slim-freeze-plan.md section 6), last as a lock stops
+    // the run: the slim track shader with the command list split before each program switch (DKR_PROG_SWITCH=2), so
+    // the GPU has finished every draw before the old full program set-up is written. Marker track_slim_m2.txt. Answer
+    // key: this passes and race 19 (the old switch) froze = the mid-frame set-up was the cause; the light row passing
+    // = fixed cheaply; this one freezing too = not the switch (the shader itself or something else). The log's "slim
+    // shaders:" lines count the splits ("after a list split").
+    { "slim track, list split before each switch (freeze diagnosis, 1 lap)",
+      { "DKR_TRACK_SLIM=1", "DKR_NATIVE_TRACK=1", "DKR_PROG_SWITCH", NULL }, 0, 2, 1, 1 },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*

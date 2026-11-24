@@ -446,13 +446,16 @@ static const MenuPage sScreenPage = {
  * gs_ladder) restarts the game and runs before the title. On an Old 3DS the Shelved switches row (a New 3DS bench) is
  * the 60 fps bench, and the last two rows turn the Old 3DS 60 fps mode and its far-kart models on or off (P55,
  * plat.h plat_o3ds_60_mode; saved, used from the next frame). The last row is the 60 Hz picture (DKR_INTERP60,
- * S8 / P39, gpu_interp.inc), a setting tried in play (left / right), never an env.txt line. */
-#define TEST_ROWS 15
+ * S8 / P39, gpu_interp.inc), a setting tried in play (left / right), never an env.txt line. The slim track shader row
+ * (DKR_TRACK_SLIM with DKR_PROG_SWITCH, the race 19 freeze fix) is one too: off, with the light program switch, or
+ * with the command list split before each switch (the freeze diagnosis); each way has its own hang marker. */
+#define TEST_ROWS 16
 #define TEST_SHELVED 7
 #define TEST_GS_LADDER 11
 #define TEST_60_MODE 12
 #define TEST_60_LOD 13
 #define TEST_INTERP60 14
+#define TEST_SLIM 15
 static int test_count(void) {
     return port_autorun_enabled() ? 1 : TEST_ROWS;
 }
@@ -463,7 +466,7 @@ static const char *test_label(int i) {
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
                                                    "Lean full test", "GS freeze test",
                                                    "60 fps mode (Old 3DS)", "60 fps: far karts simpler",
-                                                   "60 Hz picture" };
+                                                   "60 Hz picture", "Slim track shader" };
     if (port_autorun_enabled()) {
         return "Stop the test run";
     }
@@ -479,8 +482,22 @@ static int test_interp60_value(void) {
     return mode == 1 || mode == 2 ? mode : 0;
 }
 
+/* The slim track shader row's value: 0 off, 1 DKR_TRACK_SLIM with the light program switch, 2 with the list split. */
+static int test_slim_value(void) {
+    int mode = plat_switch("DKR_PROG_SWITCH", 0);
+    if (!plat_switch("DKR_TRACK_SLIM", 0)) {
+        return 0;
+    }
+    return mode == 2 ? 2 : 1;
+}
+
 static void test_value(int i, char *out, int size) {
     static const char *const sInterp[4] = { "Off", "Smooth", "Ahead", "Smooth + check" };
+    static const char *const sSlim[3] = { "Off", "Light switch", "Split list" };
+    if (i == TEST_SLIM && !port_autorun_enabled()) {
+        snprintf(out, size, "%s", port_text(sSlim[test_slim_value()]));
+        return;
+    }
     if (i == TEST_INTERP60 && !port_autorun_enabled()) {
         snprintf(out, size, "%s", port_text(sInterp[test_interp60_value()]));
         return;
@@ -505,7 +522,8 @@ static const char *test_hint(int i) {
         "Restarts the game; ~1 min, may need power-offs",
         "Old 3DS: 60 fps in 2D, AA off; 3D stays 30",
         "Test: other karts' models swap sooner at 60",
-        "Old 3DS at 30 fps, 3D off: a picture every retrace" };
+        "Old 3DS at 30 fps, 3D off: a picture every retrace",
+        "Native track's shader; split = freeze diagnosis" };
     static char sSwitchHint[64];
     if (port_autorun_enabled()) {
         return "The results so far go out as a report";
@@ -538,6 +556,13 @@ static const char *test_hint(int i) {
 }
 
 static void test_change(int i, int step) {
+    if (i == TEST_SLIM && !port_autorun_enabled()) {
+        // Off, Light switch, Split list. The native track draws on the GPU on an Old 3DS by default.
+        int v = (test_slim_value() + (step < 0 ? 2 : 1)) % 3;
+        plat_override_switch("DKR_TRACK_SLIM", v != 0 ? 1 : -1);
+        plat_override_switch("DKR_PROG_SWITCH", v != 0 ? v : -1);
+        return; // A setting: the menu stays open
+    }
     if (i == TEST_INTERP60 && !port_autorun_enabled()) {
         // Off, Smooth, Ahead, Smooth + check (the self-check's counts go to log.txt every 10 s).
         int v = (test_interp60_value() + (step < 0 ? 3 : 1)) % 4;

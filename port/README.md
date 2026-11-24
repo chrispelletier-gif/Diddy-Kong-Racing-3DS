@@ -293,6 +293,16 @@ controls) work there, as do these renderer switches:
   instead of 39, same outputs bit for bit (checked on the PC, CI "Shader checks"). Needs `DKR_NATIVE_TRACK`. Logs
   `slim shaders: N program switches, N slim track draws ...` every 600 frames; `track_slim.txt` on the SD card holds
   its hang marker (`testing` until 30 frames drew, then `passed`; a start that finds `testing` leaves it off))
+- `DKR_PROG_SWITCH` (2026-11-24, Old 3DS switch bench race 19 froze with `DKR_TRACK_SLIM`;
+  proposals/3ds-race19-slim-freeze-plan.md; off by default): how a mid-frame switch between the model programs
+  (transform, slim track, waves, two-matrix; and the sprite table's) is written. `0` as before, citro3d's whole program
+  set-up right after the previous draw; `1` light: only the entry point, constants and bool uniforms (the programs
+  share one DVLP and their outputs, checked at start-up: log `program switch: light for track 1, ...`); `2` the command
+  list split before each switch, then the old set-up (freeze diagnosis). Each mode has its own hang markers
+  (`track_slim_m1.txt`, `wave_shader_m2.txt`, ...; mode 0 keeps the old names), written at a frame start or once a
+  frame is done, never mid-list. The `slim shaders:` log line adds the most switches in a frame and the light / split
+  counts. Test run > Slim track shader (Off / Light switch / Split list) sets both switches.
+  `DKR_PROG_SWITCH_BREAK=1` (host replay check only, rule K6) leaves the light switch's entry point out.
 - `DKR_WAVE_SHADER=1` (custom shader plan P65 rank 3, off by default: the see-through water's high detail tiles get
   their heights and colours from `3ds/waves.v.pica` instead of the game's per-vertex loop. Each tile's mesh (grid,
   height table indices as the level started, colour bytes) is made once a level; a frame sends each tile's offset,

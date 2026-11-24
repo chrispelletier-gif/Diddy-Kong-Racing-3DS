@@ -53,6 +53,7 @@ typedef struct C3DContextStart {
     size_t cmdBufSize;
     float cmdBufUsage;
     u32 flags; // Which groups of settings C3Di_UpdateContext writes next (citro3d's C3DiF_ bits, below)
+    shaderProgram_s *program; // The bound program (C3D_BindProgram; DKR_PROG_SWITCH's light switch reads it)
 } C3DContextStart;
 extern C3DContextStart __C3D_Context;
 // Where citro3d's own code (C3D_TexBind) finds the flags.
@@ -746,6 +747,7 @@ static void sprite_gs_init(void);
 static void sprite_gs_frame_drawn(int frame);
 static void sprite_gs_log(void);
 static void sprite_table_init(void);
+static void prog_light_init(void); // With the model programs (DKR_PROG_SWITCH)
 static void sprite_table_frame_drawn(int frame);
 static void sprite_table_log(void);
 /* citro3d's own function that writes the changed settings to the command list (not in its public header). */
@@ -2024,6 +2026,7 @@ void gfxb_init(void) {
     init_interp(); // gpu_interp.inc
     sprite_gs_init();
     sprite_table_init();
+    prog_light_init(); // DKR_PROG_SWITCH=1: which programs can be switched the light way
 
     init_vertex_formats();
     alloc_frame_slots();
@@ -4430,6 +4433,7 @@ rest:
 /* At the start of a frame: binds the program the frame is drawn with, and watches the first frames drawn with the
  * transform one (see above). */
 static int sInterpBound;
+static shaderProgram_s *sProgBase; // The frame's program (set here; defined with the model programs below)
 static void interp_use_locations(int interp);
 static void transform_frame_start(void) {
     int on = sTransformWanted && sProgramTUsable && !sTransformHung;
@@ -4437,6 +4441,7 @@ static void transform_frame_start(void) {
     if (on != sTransformOn || interp != sInterpBound) {
         sInterpBound = interp;
         C3D_BindProgram(!on ? &sProgram : interp ? &sProgramI : &sProgramT);
+        sProgBase = !on ? &sProgram : interp ? &sProgramI : &sProgramT; // What model_program(PROG_T) binds
         sEyeUniform = !on ? sEyeUniformP : interp ? sEyeUniformI : sEyeUniformT;
         interp_use_locations(interp);
         sUnifKnown = 0;
@@ -4464,47 +4469,89 @@ static void transform_frame_drawn(int frame) {
  * Slimmer vertex shaders for some kinds of model draws (custom shader plan P65, proposals/3ds-custom-shader-plan.md
  * 5b and rank 3). Both are in the game's blob next to transform.v.pica and share its uniforms (picasso gives uniforms
  * of the same name the same registers), so a switch between them keeps every uniform the GPU has:
- *  - track.v.pica (DVLE 5, DKR_TRACK_SLIM): the native track's batches (gfx_rdp.c native_track marks them
+ *  - track.v.pica (DVLE 6, DKR_TRACK_SLIM): the native track's batches (gfx_rdp.c native_track marks them
  *    GFX_MODEL_PROG_TRACK) without the light path and second texture factor the track never uses: 26 instructions of
  *    the 39, the same results bit for bit (port/tools/pica_sim.py checks it in CI);
- *  - waves.v.pica (DVLE 6, DKR_WAVE_SHADER): wave tiles' heights and colours worked out on the GPU (gfxb_draw_waves).
+ *  - waves.v.pica (DVLE 7, DKR_WAVE_SHADER): wave tiles' heights and colours worked out on the GPU (gfxb_draw_waves);
+ *  - transform2.v.pica (DVLE 8, DKR_KART_MTX2): kart batches of two vertex loads, each with its own matrix.
  * The program is switched only where the kind of draw changes: the sorted opaque track is drawn as a run of buckets,
  * and the waves as a run of tiles, so a frame has a few switches. Each switch is written twice (the GPU misses some
  * settings written right after a draw, see drain_before_draw) and its draw's settings and uniforms too.
- * Each shader is watched like transform.v.pica: track_slim.txt / wave_shader.txt say "testing" from its first draw
- * until 30 frames with it have been drawn, then "passed"; a start that finds "testing" (the console hung) writes
- * "hung" and leaves that shader off until its version below changes.
+ * Each shader is watched like transform.v.pica: track_slim.txt / wave_shader.txt / kart_mtx2.txt say "testing" from
+ * its first draw until 30 frames with it have been drawn, then "passed"; a start that finds "testing" (the console
+ * hung) writes "hung" and leaves that shader off until its version below changes.
+ *
+ * How a switch is written (DKR_PROG_SWITCH, Old 3DS bench race 19 freeze, proposals/3ds-race19-slim-freeze-plan.md):
+ *  0: as before, citro3d's whole program set-up (GEOSTAGE_CONFIG, VSH_COM_MODE, entry point, outmaps, AttrInfo) twice,
+ *     right after the previous draw. The slim track row froze an Old 3DS so (run of 2faee86, race 19);
+ *  1: light: the programs share one DVLP, have no geometry shader and the same outmaps (checked at start-up, light_ok),
+ *     so only the entry point, the program's constants and bool uniforms are written (each twice); nothing that
+ *     reconfigures the shader units while the previous draw's vertices may still be in them;
+ *  2: diagnosis: the command list split before each switch (the GPU finishes everything before it), then the old way.
+ * Each mode has its own marker files (track_slim_m1.txt ...), so a freeze in one mode leaves the others to be tried.
+ * The marker is written at the start of a frame that wants the shader (before any draw) or once a frame is done, never
+ * from the middle of building a frame's command list.
  */
 #define SLIM_TEST_VERSION 1
 #define WAVE_TEST_VERSION 1
 #define MTX2_TEST_VERSION 1
 enum { PROG_T, PROG_K, PROG_W, PROG_2 };
 typedef struct ShaderTest {
-    const char *file, *what;
+    const char *file[3], *what; // file: the marker for each DKR_PROG_SWITCH mode (0 keeps the name it always had)
     int version, hung, testFrame; // testFrame: the first frame drawn with it, -1 before, -2 once it passed
+    int mode;    // The DKR_PROG_SWITCH mode file[] was read for, -1 before
+    int armed;   // "testing" is on the SD card for this mode (written at a frame start that wanted the shader)
+    int pending; // Drawn before it was armed: "testing" written once a frame is done (model_programs_frame_drawn)
 } ShaderTest;
-static ShaderTest sSlimTest = { "track_slim.txt", "slim track shader", SLIM_TEST_VERSION, 0, -1 };
-static ShaderTest sWaveTest = { "wave_shader.txt", "wave shader", WAVE_TEST_VERSION, 0, -1 };
-static ShaderTest sMtx2Test = { "kart_mtx2.txt", "two-matrix shader", MTX2_TEST_VERSION, 0, -1 };
+static ShaderTest sSlimTest = { { "track_slim.txt", "track_slim_m1.txt", "track_slim_m2.txt" }, "slim track shader",
+                                SLIM_TEST_VERSION, 0, -1, -1, 0, 0 };
+static ShaderTest sWaveTest = { { "wave_shader.txt", "wave_shader_m1.txt", "wave_shader_m2.txt" }, "wave shader",
+                                WAVE_TEST_VERSION, 0, -1, -1, 0, 0 };
+static ShaderTest sMtx2Test = { { "kart_mtx2.txt", "kart_mtx2_m1.txt", "kart_mtx2_m2.txt" }, "two-matrix shader",
+                                MTX2_TEST_VERSION, 0, -1, -1, 0, 0 };
 static shaderProgram_s sProgramK, sProgramW, sProgram2;
 static int sProgramKUsable, sProgramWUsable, sProgram2Usable;
 static int sProgCur = PROG_T;  // The model program citro3d has bound while sTransformOn
 static int sSlimWanted;        // DKR_TRACK_SLIM
 static int sSlimOn;            // This frame's
 static int sProgFirst;         // The program was just switched: the draw's settings and uniforms are written twice
-static unsigned int sProgStats[5]; // Switches, slim draws, wave draws, slim draws declined (not marked unlit), two-matrix draws
+// Switches, slim draws, wave draws, slim draws declined (not marked unlit), two-matrix draws, light switches, list
+// splits before a switch (mode 2), shader draws left to the frame's program in a 60 Hz picture frame.
+static unsigned int sProgStats[8];
+static unsigned int sProgFrameSwitches, sProgMaxFrame; // This frame's switches, and the most in a frame (600 frames)
+static int sProgSwitchMode;    // DKR_PROG_SWITCH (read with the frame's switches)
+static int sWaveSwitchOn, sMtx2SwitchOn; // DKR_WAVE_SHADER, DKR_KART_MTX2 (or its check): the walk may tag draws for them
+static shaderProgram_s *sProgBase = &sProgramT; // The frame's program (transform_frame_start): what PROG_T binds
+static int sInterpWanted;      // DKR_INTERP60 (defined with the frame's switches below)
+static shaderProgram_s sProgramST; // sprite_table.v.pica (defined with the sprite table below)
+static int sSpriteTableUsable;     // (Likewise)
+// Whether a program may be switched to and from the light way (light_ok), for PROG_T..PROG_2, then these:
+enum { LIGHT_I = 4, LIGHT_P, LIGHT_ST, LIGHT_COUNT };
+static u8 sProgLight[LIGHT_COUNT];
 
 static void shader_test_write(const ShaderTest *t, const char *what) {
     char path[256], text[32];
-    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file);
+    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file[t->mode > 0 ? t->mode : 0]);
     snprintf(text, sizeof(text), "%s %d\n", what, t->version);
     plat_save_file(path, text, strlen(text));
 }
 
-static void PLAT_COLD shader_test_read(ShaderTest *t) {
+/* What an earlier run left in the marker of this switch mode; again whenever the mode changes (bench races do). */
+static void PLAT_COLD shader_test_read(ShaderTest *t, int mode) {
     char path[256], text[32];
     int got;
-    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file);
+    if (mode < 0 || mode > 2) {
+        mode = 0;
+    }
+    if (t->mode >= 0 && t->armed && t->testFrame == -1) {
+        shader_test_write(t, "unused"); // Armed but never drawn in that mode: not a hang
+    }
+    t->mode = mode;
+    t->hung = 0;
+    t->testFrame = -1;
+    t->armed = 0;
+    t->pending = 0;
+    snprintf(path, sizeof(path), "%s/%s", plat_data_dir(), t->file[mode]);
     got = plat_load_file_start(path, text, sizeof(text) - 1);
     if (got > 0) {
         text[got] = '\0';
@@ -4512,20 +4559,39 @@ static void PLAT_COLD shader_test_read(ShaderTest *t) {
             (strncmp(text, "hung ", 5) == 0 && atoi(text + 5) == t->version)) {
             t->hung = 1;
             shader_test_write(t, "hung");
-            plat_log("%s: left off, the GPU hung with it in an earlier run (%s)", t->what, t->file);
+            plat_log("%s: left off, the GPU hung with it in an earlier run (%s)", t->what, t->file[mode]);
         }
     }
 }
 
+/* At a frame start (model_programs_frame_start, before any draw of the frame): "testing" on the SD card once the
+ * shader is wanted, so that a lock at its first draws leaves the marker; "unused" again if it is no longer wanted
+ * before it was ever drawn. */
+static void PLAT_COLD shader_test_arm(ShaderTest *t, int wanted) {
+    if (wanted && !t->armed && !t->hung && t->testFrame == -1) {
+        t->armed = 1;
+        shader_test_write(t, "testing");
+    } else if (!wanted && t->armed && t->testFrame == -1) {
+        t->armed = 0;
+        shader_test_write(t, "unused");
+    }
+}
+
+/* At its draws, in the middle of building a frame: only notes it (no SD card access there, plan 5c). */
 static inline void shader_test_used(ShaderTest *t) {
     if (__builtin_expect(t->testFrame == -1, 0)) {
         t->testFrame = sFrameCount;
-        shader_test_write(t, "testing");
-        plat_log("%s: first drawn (frame %d)", t->what, sFrameCount);
+        t->pending = !t->armed;
+        plat_log("%s: first drawn (frame %d, program switch mode %d)", t->what, sFrameCount, t->mode);
     }
 }
 
 static void shader_test_drawn(ShaderTest *t, int frame) {
+    if (__builtin_expect(t->pending, 0)) {
+        t->pending = 0;
+        t->armed = 1;
+        shader_test_write(t, "testing");
+    }
     if (t->testFrame >= 0 && frame >= t->testFrame + TRANSFORM_TEST_FRAMES) {
         t->testFrame = -2;
         shader_test_write(t, "passed");
@@ -4611,7 +4677,7 @@ void gfxb_wave_tile_call(void *payload) {
 }
 
 int gfxb_wave_shader_ok(void) {
-    return sProgramWUsable && !sWaveTest.hung;
+    return sProgramWUsable && !sWaveTest.hung && !sInterpWanted; // (No interpolation delta in waves.v.pica)
 }
 
 /* Uniform vectors as words: the start register, then their values (the order citro3d's C3D_FVec keeps). */
@@ -4669,9 +4735,121 @@ static void PLAT_COLD init_model_programs(void) {
     }
     plat_log("slim shaders: track %s, waves %s, two matrices %s (stab row %d)", sProgramKUsable ? "found" : "NOT usable",
              sProgramWUsable ? "found" : "NOT usable", sProgram2Usable ? "found" : "NOT usable", sMtx2Loc);
-    shader_test_read(&sSlimTest);
-    shader_test_read(&sWaveTest);
-    shader_test_read(&sMtx2Test);
+    sProgSwitchMode = plat_switch("DKR_PROG_SWITCH", 0);
+    if (sProgSwitchMode < 0 || sProgSwitchMode > 2) {
+        sProgSwitchMode = 0;
+    }
+    shader_test_read(&sSlimTest, sProgSwitchMode);
+    shader_test_read(&sWaveTest, sProgSwitchMode);
+    shader_test_read(&sMtx2Test, sProgSwitchMode);
+}
+
+/* Whether a switch between p and transform.v.pica can be the light one (DKR_PROG_SWITCH=1): the same shader code (one
+ * DVLP, so no code upload), no geometry shader on either, and the same outputs (outmap mask, mode, clock and all 8
+ * outmap words), so the only program set-up words that differ are the entry point. */
+static int PLAT_COLD light_ok(const shaderProgram_s *p) {
+    const DVLE_s *a, *b;
+    int i;
+    if (p == NULL || p->vertexShader == NULL || sProgramT.vertexShader == NULL || p->geometryShader != NULL ||
+        sProgramT.geometryShader != NULL) {
+        return 0;
+    }
+    a = p->vertexShader->dvle;
+    b = sProgramT.vertexShader->dvle;
+    if (a == NULL || b == NULL || a->dvlp != b->dvlp || a->outmapMask != b->outmapMask || a->outmapMode != b->outmapMode ||
+        a->outmapClock != b->outmapClock) {
+        return 0;
+    }
+    for (i = 0; i < 8; i++) {
+        if (a->outmapData[i] != b->outmapData[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void PLAT_COLD prog_light_init(void) {
+    sProgLight[PROG_T] = sProgramTUsable;
+    sProgLight[PROG_K] = sProgramTUsable && sProgramKUsable && light_ok(&sProgramK);
+    sProgLight[PROG_W] = sProgramTUsable && sProgramWUsable && light_ok(&sProgramW);
+    sProgLight[PROG_2] = sProgramTUsable && sProgram2Usable && light_ok(&sProgram2);
+    sProgLight[LIGHT_I] = sProgramTUsable && sProgramI.vertexShader != NULL && light_ok(&sProgramI);
+    sProgLight[LIGHT_P] = sProgramTUsable && light_ok(&sProgram);
+    sProgLight[LIGHT_ST] = sProgramTUsable && sSpriteTableUsable && light_ok(&sProgramST);
+    plat_log("program switch: light for track %d, waves %d, two matrices %d, 60 Hz picture %d, pass-through %d, sprite "
+             "table %d",
+             sProgLight[PROG_K], sProgLight[PROG_W], sProgLight[PROG_2], sProgLight[LIGHT_I], sProgLight[LIGHT_P],
+             sProgLight[LIGHT_ST]);
+}
+
+/* The light flag of a program (sProgLight), 0 for one not known here. */
+static int prog_light_of(const shaderProgram_s *p) {
+    return p == &sProgramT    ? sProgLight[PROG_T]
+           : p == &sProgramK  ? sProgLight[PROG_K]
+           : p == &sProgramW  ? sProgLight[PROG_W]
+           : p == &sProgram2  ? sProgLight[PROG_2]
+           : p == &sProgramI  ? sProgLight[LIGHT_I]
+           : p == &sProgram   ? sProgLight[LIGHT_P]
+           : p == &sProgramST ? sProgLight[LIGHT_ST]
+                              : 0;
+}
+
+/*
+ * Binds p now, inside the frame being built, the light way (DKR_PROG_SWITCH=1): citro3d binds it (its bookkeeping:
+ * the context's program, constants and bool uniforms marked), but its program set-up (shaderProgramConfigure) and
+ * AttrInfo are not written unless they were already waiting for another reason; the constants and bool uniforms go out
+ * (C3Di_UpdateContext), then the entry point and the constants once more each, twice in all, as every switch setting
+ * is. The context's program is p, so a later full bind (frame start, HOME menu return) still configures it all.
+ * DKR_PROG_SWITCH_BREAK (K6, host check only): the entry point left out, which the replay's state compare must report.
+ * 0: the old program or p can't be switched the light way, or citro3d wants a code upload (nothing done then).
+ */
+static int PLAT_COLD prog_bind_light(shaderProgram_s *p) {
+    const u32 keep = (1u << 8) | (1u << 2); // citro3d's C3DiF_Program, C3DiF_AttrInfo
+    const u32 code = (1u << 11) | (1u << 12); // C3DiF_VshCode, C3DiF_GshCode
+    static int sBreak = -1;
+    const shaderProgram_s *old = (const shaderProgram_s *) __C3D_Context.program;
+    shaderInstance_s *vs = p->vertexShader;
+    u32 pending, entry;
+    int t, i;
+    if (old == p) {
+        return 1;
+    }
+    if (!prog_light_of(p) || !prog_light_of(old) || (__C3D_Context.flags & code) != 0) {
+        return 0;
+    }
+    if (sBreak < 0) {
+        sBreak = plat_switch("DKR_PROG_SWITCH_BREAK", 0) != 0;
+    }
+    pending = __C3D_Context.flags & keep;
+    C3D_BindProgram(p);
+    if ((__C3D_Context.flags & code) != 0) {
+        return -1; // (Not reached with one DVLP: the caller does the full set-up then)
+    }
+    __C3D_Context.flags &= ~keep | pending;
+    C3Di_UpdateContext();
+    entry = 0x7FFF0000u | (vs->dvle->mainOffset & 0xFFFF);
+    for (t = 0; t < 2; t++) {
+        if (!sBreak) {
+            GPUCMD_AddWrite(GPUREG_VSH_ENTRYPOINT, entry);
+        }
+        for (i = 0; i < vs->numFloat24Uniforms; i++) {
+            GPUCMD_AddIncrementalWrites(GPUREG_VSH_FLOATUNIFORM_CONFIG, (u32 *) &vs->float24Uniforms[i], 4);
+        }
+    }
+    sProgStats[5]++;
+    return 1;
+}
+
+/* Binds a program that isn't a model program's switch (the sprite table's and sprite GS's returns, ...) the light way
+ * when DKR_PROG_SWITCH=1 allows, else citro3d's way (C3D_BindProgram + C3Di_UpdateContext). */
+static void PLAT_COLD prog_bind_now(shaderProgram_s *p) {
+    int r = sProgSwitchMode == 1 ? prog_bind_light(p) : 0;
+    if (r == 0) {
+        C3D_BindProgram(p);
+    }
+    if (r <= 0) {
+        C3Di_UpdateContext();
+    }
 }
 
 void gfxb_model_mtx2(const float m[4][4]) {
@@ -4683,7 +4861,7 @@ void gfxb_model_mtx2_call(void *payload) {
 }
 
 int gfxb_model_mtx2_ok(void) {
-    return sProgram2Usable && !sMtx2Test.hung;
+    return sProgram2Usable && !sMtx2Test.hung && !sInterpWanted; // (No interpolation delta in transform2.v.pica)
 }
 
 /* Before a two-matrix draw (model_draw_begin, after set_model_uniforms gave the camera offset): the second matrix's
@@ -4713,21 +4891,43 @@ static void PLAT_COLD mtx2_uniforms_write(void) {
 }
 
 /* Binds a model program now, inside the frame being built, and writes its settings twice. */
+/* PROG_T is the frame's program (sProgBase: transform.v.pica, or interp.v.pica in a 60 Hz picture frame). How it is
+ * written: DKR_PROG_SWITCH (sProgSwitchMode, see above). */
 static void PLAT_COLD model_program(int prog) {
-    C3D_BindProgram(prog == PROG_K ? &sProgramK : prog == PROG_W ? &sProgramW : prog == PROG_2 ? &sProgram2 : &sProgramT);
-    C3Di_UpdateContext();
-    __C3D_Context.flags |= 1u << 8; // citro3d's C3DiF_Program: the program's settings (not its code) once more
-    C3Di_UpdateContext();
+    shaderProgram_s *p = prog == PROG_K ? &sProgramK : prog == PROG_W ? &sProgramW : prog == PROG_2 ? &sProgram2 : sProgBase;
+    int light = 0;
+    if (sProgSwitchMode == 2 && sSlots[sRec].numParts < MAX_LIST_PARTS - 2) {
+        // Diagnosis: the GPU finishes everything so far (vertices flushed for its first part) before the switch.
+        flush_new_vertices();
+        split_command_list();
+        sProgStats[6]++;
+    }
+    if (sProgSwitchMode == 1) {
+        light = prog_bind_light(p);
+    }
+    if (light <= 0) {
+        if (light == 0) {
+            C3D_BindProgram(p);
+        }
+        C3Di_UpdateContext();
+        __C3D_Context.flags |= 1u << 8; // citro3d's C3DiF_Program: the program's settings (not its code) once more
+        C3Di_UpdateContext();
+    }
     sProgCur = prog;
     sProgFirst = 1;
     sProgStats[0]++;
+    sProgFrameSwitches++;
 }
 
 /* The program a model draw uses (model_draw_begin), bound if it isn't. */
 static inline void model_program_for(const GfxModelParams *params) {
     int want = PROG_T;
     if (__builtin_expect(params->pad[1] != GFX_MODEL_PROG_ANY, 0)) {
-        if (params->pad[1] == GFX_MODEL_PROG_WAVES) {
+        if (sInterpBound) {
+            // A 60 Hz picture frame: the slim programs have no interpolation delta, so the frame's program draws it
+            // (the walk doesn't tag wave or two-matrix draws while DKR_INTERP60 is on: gfxb_wave_shader_ok).
+            sProgStats[7]++;
+        } else if (params->pad[1] == GFX_MODEL_PROG_WAVES) {
             want = PROG_W;
             sProgStats[2]++;
             shader_test_used(&sWaveTest);
@@ -4755,15 +4955,30 @@ static inline void model_program_for(const GfxModelParams *params) {
  * the counts every 600 frames. */
 static void model_programs_frame_start(void) {
     if (sTransformOn && sProgCur != PROG_T) {
-        C3D_BindProgram(&sProgramT);
+        C3D_BindProgram(sProgBase); // Before the frame's first draw, in a new command list: the full set-up
     }
     sProgCur = PROG_T;
-    sSlimOn = sSlimWanted && sProgramKUsable && !sSlimTest.hung && sTransformOn;
-    if (sFrameCount % 600 == 0 && (sProgStats[0] | sProgStats[1] | sProgStats[2]) != 0) {
-        plat_log("slim shaders: %u program switches, %u slim track draws, %u wave draws, %u track draws lit (left to "
-                 "the transform shader), %u two-matrix kart draws, in 600 frames",
-                 sProgStats[0], sProgStats[1], sProgStats[2], sProgStats[3], sProgStats[4]);
+    if (sProgSwitchMode != sSlimTest.mode) { // DKR_PROG_SWITCH changed (a bench race): that mode's markers
+        shader_test_read(&sSlimTest, sProgSwitchMode);
+        shader_test_read(&sWaveTest, sProgSwitchMode);
+        shader_test_read(&sMtx2Test, sProgSwitchMode);
+    }
+    sSlimOn = sSlimWanted && sProgramKUsable && !sSlimTest.hung && sTransformOn && !sInterpBound;
+    shader_test_arm(&sSlimTest, sSlimOn);
+    shader_test_arm(&sWaveTest, sWaveSwitchOn && sProgramWUsable && sTransformOn && !sInterpWanted);
+    shader_test_arm(&sMtx2Test, sMtx2SwitchOn && sProgram2Usable && sTransformOn && !sInterpWanted);
+    if (sProgFrameSwitches > sProgMaxFrame) {
+        sProgMaxFrame = sProgFrameSwitches;
+    }
+    sProgFrameSwitches = 0;
+    if (sFrameCount % 600 == 0 && (sProgStats[0] | sProgStats[1] | sProgStats[2] | sProgStats[7]) != 0) {
+        plat_log("slim shaders: %u program switches (most %u in a frame; %u light, %u after a list split; switch mode "
+                 "%d), %u slim track draws, %u wave draws, %u track draws lit (left to the transform shader), %u "
+                 "two-matrix kart draws, %u left to the 60 Hz picture's program, in 600 frames",
+                 sProgStats[0], sProgMaxFrame, sProgStats[5], sProgStats[6], sProgSwitchMode, sProgStats[1],
+                 sProgStats[2], sProgStats[3], sProgStats[4], sProgStats[7]);
         memset(sProgStats, 0, sizeof(sProgStats));
+        sProgMaxFrame = 0;
     }
 }
 
@@ -4908,6 +5123,12 @@ static void read_switches(void) {
                        plat_switch("DKR_WAVE_SHADER", 0) != 0; // P65 rank 3: wave tiles need it too
     sUnifTwice = plat_switch("DKR_UNIF_TWICE", 1) != 0;
     sSlimWanted = plat_switch("DKR_TRACK_SLIM", 0) != 0; // P65 5b: the native track's slim shader (model_program_for)
+    sProgSwitchMode = plat_switch("DKR_PROG_SWITCH", 0); // How a program switch is written (model_program)
+    if (sProgSwitchMode < 0 || sProgSwitchMode > 2) {
+        sProgSwitchMode = 0;
+    }
+    sWaveSwitchOn = plat_switch("DKR_WAVE_SHADER", 0) != 0;
+    sMtx2SwitchOn = plat_switch("DKR_KART_MTX2", 0) != 0 || plat_switch("DKR_KART_MTX2_CHECK", 0) != 0;
     raw_read_switches(); // DKR_RAW_REGS, DKR_RAW_REGS_CHECK
     sStereoOnce = plat_switch("DKR_STEREO_ONCE", plat_stereo_once_setting()) != 0;
 #ifdef PICA_ALL
@@ -7985,6 +8206,7 @@ static int __attribute__((noinline)) draw_sprites_gs(const GfxDrawState *state, 
     C3D_BindProgram(&sProgram);
     C3Di_UpdateContext();
     write_eye(0.0f, 0.0f);
+    sProgCur = PROG_T; // (Only drawn without GPU vertex maths, where sProgBase is sProgram)
     sSpriteGsStats[0]++;
     sSpriteGsStats[1] += (unsigned long) n;
     if (sSpriteGsTestFrame == -1) {
@@ -8193,8 +8415,7 @@ static int __attribute__((noinline)) draw_table_gpu(const GfxDrawState *state, c
     if (first) {
         write_settings_twice(state, &su0, &sv0, &su1, &sv1);
     }
-    C3D_BindProgram(&sProgramST);
-    C3Di_UpdateContext();
+    prog_bind_now(&sProgramST); // The light way with DKR_PROG_SWITCH=1, where its outputs allow (prog_light_init)
     // Each group's rows: the matrix as to_screen maps a position (x' = y, y' = -x * 3D width, z' = (z - w) / 2), then
     // the texture row: s = u * x + y, t = v * z + w with the padded size and flipped t (write_vertices).
     for (i = 0; i < numGroups; i++) {
@@ -8234,9 +8455,9 @@ static int __attribute__((noinline)) draw_table_gpu(const GfxDrawState *state, c
     }
     sVboUsed += bytes;
     sFrameTriangles += tris;
-    // Back to the frame's program, set on the GPU now.
-    C3D_BindProgram(sTransformOn ? &sProgramT : &sProgram);
-    C3Di_UpdateContext();
+    // Back to the frame's program, set on the GPU now (transform.v.pica, or interp.v.pica in a 60 Hz picture frame).
+    prog_bind_now(sProgBase);
+    sProgCur = PROG_T; // A slim program bound before the table draw is no longer bound
     sStabStats[0]++;
     sStabStats[1] += (unsigned long) numVerts;
     if (sSpriteTableTestFrame == -1) {
