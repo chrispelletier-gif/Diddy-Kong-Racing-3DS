@@ -40,6 +40,9 @@ long port_autorun_enabled(void);
 void port_autorun_request(long start);
 long port_autorun_switch_count(void);
 long port_autorun_shelved_count(void);
+long port_autorun_batch_count(void);
+const char *port_autorun_batch_label(long index);
+long port_autorun_batch_info(long index, long *races, long *minutes, long *shader);
 void gfxb_gs_ladder_arm(void);
 
 typedef struct MenuPage {
@@ -456,11 +459,73 @@ static const MenuPage sScreenPage = {
 #define TEST_60_LOD 13
 #define TEST_INTERP60 14
 #define TEST_SLIM 15
-static int test_count(void) {
-    return port_autorun_enabled() ? 1 : TEST_ROWS;
+/* On an Old 3DS the bench batches come first (Bench 1 to 15, port_autorun.c enum BenchBatch: the switch bench a few
+ * features at a time, owner 2026-11-26), then the rows above: test_row gives a row's number among those, or -1 - the
+ * batch's index for a batch. */
+#ifndef PORT_AUTORUN_BATCH_REQUEST
+#define PORT_AUTORUN_BATCH_REQUEST 100 // (port.h: port_autorun_request's 100 + a batch's index)
+#endif
+static int test_batches(void) {
+    return (int) port_autorun_batch_count();
 }
 
+static int test_row(int i) {
+    return i < test_batches() ? -1 - i : i - test_batches();
+}
+
+static int test_count(void) {
+    return port_autorun_enabled() ? 1 : test_batches() + TEST_ROWS;
+}
+
+static const char *test_label_row(int i);
+static void test_value_row(int i, char *out, int size);
+static const char *test_hint_row(int i);
+static void test_change_row(int i, int step);
+
 static const char *test_label(int i) {
+    int row = test_row(i);
+    if (port_autorun_enabled()) {
+        return "Stop the test run";
+    }
+    return row < 0 ? port_autorun_batch_label(-1 - row) : test_label_row(row);
+}
+
+static void test_value(int i, char *out, int size) {
+    int row = test_row(i);
+    if (row < 0 || port_autorun_enabled()) {
+        out[0] = '\0';
+        return;
+    }
+    test_value_row(row, out, size);
+}
+
+static const char *test_hint(int i) {
+    static char sBatchHint[64];
+    int row = test_row(i);
+    long races, minutes, shader;
+    if (port_autorun_enabled() || row >= 0) {
+        return test_hint_row(port_autorun_enabled() ? 0 : row);
+    }
+    port_autorun_batch_info(-1 - row, &races, &minutes, &shader);
+    snprintf(sBatchHint, sizeof(sBatchHint), port_text(shader ? "%ld races, ~%ld min; shader, may freeze" :
+                                                                "%ld races, ~%ld min"),
+             races, minutes);
+    return sBatchHint;
+}
+
+static void test_change(int i, int step) {
+    int row = test_row(i);
+    if (row >= 0 || port_autorun_enabled()) {
+        test_change_row(port_autorun_enabled() ? 0 : row, step);
+        return;
+    }
+    port_autorun_request(PORT_AUTORUN_BATCH_REQUEST + (-1 - row));
+    // The run turns on at the game's next frame.
+    svcSleepThread(200 * 1000 * 1000);
+    sResult = MENU_CLOSE;
+}
+
+static const char *test_label_row(int i) {
     static const char *const sStart[TEST_ROWS] = { "Full test",    "Quick test", "Boss fights",        "GPU bench",
                                                    "Switch bench", "Whole game", "Whole game (short)",
                                                    "Shelved switches", "Lean switch bench", "Lean quick test",
@@ -491,7 +556,7 @@ static int test_slim_value(void) {
     return mode == 2 ? 2 : 1;
 }
 
-static void test_value(int i, char *out, int size) {
+static void test_value_row(int i, char *out, int size) {
     static const char *const sInterp[4] = { "Off", "Smooth", "Ahead", "Smooth + check" };
     static const char *const sSlim[3] = { "Off", "Light switch", "Split list" };
     if (i == TEST_SLIM && !port_autorun_enabled()) {
@@ -510,7 +575,7 @@ static void test_value(int i, char *out, int size) {
     out[0] = '\0';
 }
 
-static const char *test_hint(int i) {
+static const char *test_hint_row(int i) {
     static const char *const sStart[TEST_ROWS] = {
         "Every track and character, ~8 hours", "5 slowest tracks twice, ~20 minutes",
         "All 10 boss races once, ~30 minutes", "3 heavy tracks x 5 GPU settings, ~30 min",
@@ -555,7 +620,7 @@ static const char *test_hint(int i) {
     return sStart[i];
 }
 
-static void test_change(int i, int step) {
+static void test_change_row(int i, int step) {
     if (i == TEST_SLIM && !port_autorun_enabled()) {
         // Off, Light switch, Split list. The native track draws on the GPU on an Old 3DS by default.
         int v = (test_slim_value() + (step < 0 ? 2 : 1)) % 3;

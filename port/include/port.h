@@ -226,6 +226,12 @@ s32 port_autorun_quit_race(void);
 void port_autorun_request(s32 start);
 s32 port_autorun_switch_count(void);
 s32 port_autorun_shelved_count(void);
+/* The Old 3DS bench batches (Test run > Bench 1 to 15; none on a New 3DS): port_autorun_request(PORT_AUTORUN_BATCH_REQUEST
+ * + index) starts one. */
+#define PORT_AUTORUN_BATCH_REQUEST 100
+s32 port_autorun_batch_count(void);
+const char *port_autorun_batch_label(s32 index);
+s32 port_autorun_batch_info(s32 index, s32 *races, s32 *minutes, s32 *shader);
 void port_autorun_frame(s32 updateRate);
 /* Publishes what the player's kart is doing (plat_set_game_note) once a frame; in every build, tilt steering needs it. */
 void port_game_note_frame(void);

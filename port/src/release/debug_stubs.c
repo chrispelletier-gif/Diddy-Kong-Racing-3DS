@@ -43,6 +43,21 @@ s32 port_autorun_shelved_count(void) {
     return 0;
 }
 
+s32 port_autorun_batch_count(void) {
+    return 0;
+}
+
+const char *port_autorun_batch_label(s32 index) {
+    (void) index;
+    return "";
+}
+
+s32 port_autorun_batch_info(s32 index, s32 *races, s32 *minutes, s32 *shader) {
+    (void) index;
+    *races = *minutes = *shader = 0;
+    return 0;
+}
+
 void port_autorun_frame(s32 updateRate) {
     (void) updateRate;
 }

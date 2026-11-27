@@ -132,6 +132,8 @@ static const PortText sFrench[] = {
     { "Lean full test", "Test complet allege" },
     { "GS freeze test", "Test de gel GS" },
     { "60 fps bench", "Banc 60 IPS" },
+    { "%ld races, ~%ld min", "%ld courses, ~%ld min" },
+    { "%ld races, ~%ld min; shader, may freeze", "%ld courses, ~%ld min ; shader, peut geler" },
     { "60 fps mode (Old 3DS)", "Mode 60 IPS (Old 3DS)" },
     { "60 fps: far karts simpler", "60 IPS : karts lointains simplifies" },
     { "Old 3DS: 60 fps in 2D, AA off; 3D stays 30", "Old 3DS : 60 IPS en 2D, sans AA ; la 3D reste a 30" },

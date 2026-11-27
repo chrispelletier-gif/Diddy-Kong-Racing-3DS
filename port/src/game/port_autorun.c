@@ -42,6 +42,8 @@
  *   DKR_AUTORUN_SWITCH_CONFIGS=n,...  The races' switch sets: 0 every switch at its usual setting, n switch n-1 of
  *                                     sSwitches flipped, and with two switches or more a last one with all of
  *                                     them flipped together (default all).
+ *   DKR_AUTORUN_SWITCH_BATCH=n        Old 3DS: only bench batch n (enum BenchBatch; the Test run menu's Bench n
+ *                                     buttons start them on the console, no env.txt needed).
  * Its files are switch_bench_state.txt and switch_bench_results.csv (with "config" and "pct_60fps" columns, as the
  * GPU benchmark's).
  *
@@ -196,7 +198,58 @@ typedef struct BenchSwitch {
     s8 alone; // A measurement, not a setting: left out of the race with every switch flipped together.
     s8 check; // Checks a bug fix, not performance: raced for one lap (user rule 2026-11-01). When every row is one,
               // the usual races are one lap too.
+    s8 batch; // The Old 3DS bench batch (enum BenchBatch) the row is raced in; 0 in the other lists.
 } BenchSwitch;
+
+/*
+ * The Old 3DS switch bench in small batches (owner, 2026-11-26: the long bench froze in a shader race again, so features
+ * are tested a few at a time). Each batch is its own Test run button: its rows on Whale Bay and Jungle Falls against the
+ * usual settings there, its 1-lap check rows on Whale Bay only, and no all-together race; a freeze loses only that
+ * batch. Safest and most proven first; the shader batches last, and the two that froze (slim track: race 19 on
+ * 2faee86; sprite GS: run 50) each alone. The Switch bench button still races every row (the batches' union).
+ */
+enum BenchBatch {
+    BATCH_NONE,
+    BATCH_BASICS,
+    BATCH_UNCAPPED,
+    BATCH_3D,
+    BATCH_TRACK_BAKE,
+    BATCH_FLAT,
+    BATCH_FRAME_END_A,
+    BATCH_FRAME_END_B,
+    BATCH_KART_BATCH,
+    BATCH_KART_RESIDENT,
+    BATCH_INTERP60,
+    BATCH_SPRITE_TABLE,
+    BATCH_WAVES,
+    BATCH_KART_MTX2,
+    BATCH_SLIM,
+    BATCH_SPRITE_GS,
+    BATCH_COUNT
+};
+/* The Test run buttons' labels (at most 24 characters: the menu's row) and whether the batch has a shader that can
+ * freeze the console (the hint says so). */
+static const struct {
+    const char *label;
+    s8 shader;
+} sBatchInfo[BATCH_COUNT] = {
+    { "", 0 },
+    { "Bench 1: basics", 0 },
+    { "Bench 2: uncapped", 0 },
+    { "Bench 3: 3D at 30 fps", 0 },
+    { "Bench 4: track at load", 0 },
+    { "Bench 5: flat dispatcher", 0 },
+    { "Bench 6: frame end A", 0 },
+    { "Bench 7: frame end B", 0 },
+    { "Bench 8: kart batching", 0 },
+    { "Bench 9: karts on GPU", 0 },
+    { "Bench 10: 60 Hz picture", 1 },
+    { "Bench 11: sprite table", 1 },
+    { "Bench 12: water waves", 1 },
+    { "Bench 13: two-matrix", 1 },
+    { "Bench 14: slim track", 1 },
+    { "Bench 15: sprite GS", 1 },
+};
 
 /* Command list splits (P19) are off by default (#153), early depth (P20) was dropped (#155), the white-line
  * diagnostics (P28) are off for good, and switch bench #176 settled the Phase 7b switches on the New 3DS: the depth
@@ -343,8 +396,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // (the walk is inside it), logic, objects...) and the walk's steps (DKR_WALK_STEPS, any non-zero value: "walk
     // steps (ms a frame, racers / track / objects / all)", one frame in 16). PMU 1: I-cache misses; PMU 2: D-cache
     // read misses.
-    { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1 },
-    { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1 },
+    { "walk steps timed, I-cache (PMU 1, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 1, 1, 1, BATCH_BASICS },
+    { "walk steps timed, D-cache (PMU 2, 1 lap)", { "DKR_PMU", "DKR_WALK_STEPS", NULL }, 0, 2, 1, 1, BATCH_BASICS },
     // P64 (2026-11-22, proposals/3ds-breakthrough-candidates.md). The walk steps rows above also split the sprites step
     // (candidate 4; with P65's finer split): "sprites" (the record's checks, state and axes), "sprite corners" (their
     // vertex maths) and "sprite tris" (their drawing): corners + tris is what a vertex shader table of sprites would
@@ -354,52 +407,52 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // with the fills finished first, DKR_FILL_WAIT, -0.7 / -1.0), so both are the Old 3DS default now and their rows
     // went. This row races them off, to confirm the new default on every track. The TLB rows (candidate 3, large
     // pages) went too: ~1k main TLB misses a frame, far under the ~5k gate.
-    { "native track off (the default before run 54)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1, 0, 1, 0 },
+    { "native track off (the default before run 54)", { "DKR_NATIVE_TRACK", "DKR_FILL_WAIT", NULL }, -1, 0, 1, 0, BATCH_BASICS },
     // P55 S1 (2026-11-23, proposals/3ds-track-bake-s1-plan.md): the native track's meshes made during the level load
     // (DKR_TRACK_BAKE, gfx_rdp.c track_bake) instead of the first time each batch is seen. Read the race start (the
     // results' start columns and autorun_hitches.txt: the first racing frames no longer build meshes), both cores'
     // ms, and the log's "track bake (during the load ...)" lines (ms, KB, "0 out of room"). The self-check row hashes
     // the baked meshes again as it races and must say 0 wrong (log: "track bake check: N compared, 0 differ").
-    { "native track built during the load (S1)", { "DKR_TRACK_BAKE", NULL, NULL }, 0, 1, 0, 0 },
+    { "native track built during the load (S1)", { "DKR_TRACK_BAKE", NULL, NULL }, 0, 1, 0, 0, BATCH_TRACK_BAKE },
     { "native track built during the load, self-check (1 lap, chk: 0 wrong)",
-      { "DKR_TRACK_BAKE", "DKR_TRACK_BAKE_CHECK", NULL }, 0, 1, 1, 1 },
+      { "DKR_TRACK_BAKE", "DKR_TRACK_BAKE_CHECK", NULL }, 0, 1, 1, 1, BATCH_TRACK_BAKE },
     // The split ring's position as a mask instead of a software divide (DKR_SPLIT_MASK, default 1 on every console:
     // proposals/3ds-arm11-c-tips-audit.md item 1, estimated -0.05..-0.25 ms game core). The same positions either way;
     // this row races the old divide, so the usual races against it say what the mask gained.
-    { "split ring position by divide (the old way)", { "DKR_SPLIT_MASK", NULL, NULL }, -1, 0, 1, 0 },
+    { "split ring position by divide (the old way)", { "DKR_SPLIT_MASK", NULL, NULL }, -1, 0, 1, 0, BATCH_BASICS },
     // Anti-aliasing off (2026-11-23): does 2x anti-aliasing's GPU memory traffic slow the game core's cache misses
     // (guess 0-0.5 ms)? The usual races are 2x (the bench's own setting); this row races without it, full laps. The
     // picture trade-off is the owner's call, whatever it gains.
-    { "usual, anti-aliasing off", { "BENCH_AA", NULL, NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    { "usual, anti-aliasing off", { "BENCH_AA", NULL, NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0, BATCH_BASICS },
     // P55 gates 0 and 3 (proposals/3ds-perf-audit-2026-11-23.md item 1): the Old 3DS ceiling on today's defaults. The
     // plain uncapped row went in #561, before raw words, karts on the GPU, the vertex loop, fog skip and the native
     // track, so 60 fps was never measured with them. Full laps; the results' ceiling columns are the answer. The AA
     // row's cap is "NAME=value" (the bench's own 30 cap is set after the rows, so the other races keep it); BENCH_AA
     // can't be: an unset "NAME=value" would take the bench's own 2x away in every other race.
-    { "uncapped (60 cap), usual", { "DKR_FPS_PIN", NULL, NULL }, -1, 60, 1, 0 },
-    { "uncapped (60 cap), anti-aliasing off", { "BENCH_AA", "DKR_FPS_PIN=60", NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0 },
+    { "uncapped (60 cap), usual", { "DKR_FPS_PIN", NULL, NULL }, -1, 60, 1, 0, BATCH_UNCAPPED },
+    { "uncapped (60 cap), anti-aliasing off", { "BENCH_AA", "DKR_FPS_PIN=60", NULL }, PLAT_AA_2X, PLAT_AA_OFF, 1, 0, BATCH_UNCAPPED },
     // G5g (audit item 2): stereo 3D at 30 on the Old 3DS, never benched (code on master since #487). DKR_STEREO3D=2
     // draws in 3D whatever the slider says (no anti-aliasing in 3D); then the stereo frame recorded once for both
     // eyes (DKR_STEREO_ONCE), then with the walk's culling kept for both eyes (DKR_STEREO_CULL). The two extra
     // switches are "NAME=value", so every other race keeps its own default. Full laps.
-    { "3D at 30 fps", { "DKR_STEREO3D", "DKR_STEREO_ONCE=0", "DKR_STEREO_CULL=0", NULL }, 0, 2, 1, 0 },
+    { "3D at 30 fps", { "DKR_STEREO3D", "DKR_STEREO_ONCE=0", "DKR_STEREO_CULL=0", NULL }, 0, 2, 1, 0, BATCH_3D },
     { "3D at 30 fps, recorded once for both eyes", { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=0", NULL },
-      0, 2, 1, 0 },
+      0, 2, 1, 0, BATCH_3D },
     { "3D at 30 fps, recorded once, culled in the walk",
-      { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=1", NULL }, 0, 2, 1, 0 },
+      { "DKR_STEREO3D", "DKR_STEREO_ONCE=1", "DKR_STEREO_CULL=1", NULL }, 0, 2, 1, 0, BATCH_3D },
     // Uncapped (PR #556): the bench's 30 fps cap lifted to the 60 fps one (DKR_FPS_PIN; game logic steps by the
     // retraces each frame took, port_rate.c), so the results' ceiling columns say what the Old 3DS could reach.
     // Bench #560 (a80eb00): uncapped, the Old 3DS shows no more than at its 30 cap (ceiling 30-36 fps, 0% of frames
     // within 16.7 ms, the renderer's core the longest), so the plain uncapped row went: every race's ceiling columns
     // already say it. The parts-timed row stays, for where the renderer's core time goes while it is cut.
     { "uncapped (60 cap), walk/draw parts timed (costs fps)",
-      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0 }, // -1: parts' own default per console
+      { "DKR_FPS_PIN", "DKR_WALK_PARTS", "DKR_DRAW_PARTS", NULL }, -1, 60, 1, 0, BATCH_UNCAPPED }, // -1: parts' own default per console
     // P59 D (2026-11-22, proposals/3ds-profiler-tabs-gpu-hang-plan.md): GPU hang #576 came within a frame of the
     // profiler's readout redraw, with the owner flipping its pages. This bug-check row shows the readout and turns its
     // page every 3 frames (DKR_PROF_PAGE_FLIP), in races and on the results and menus between them (no hang in run
     // 50's 12 stress races; kept as a hang guard). A hang writes gpu_hang.txt with its "GPU and system state" section
     // (P59 C).
-    { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1 },
+    { "page flip stress (1 lap)", { "DKR_PROF_PAGE_FLIP", NULL, NULL }, 0, 3, 1, 1, BATCH_BASICS },
     // P55 S3 / P60 F (gpu_raw.inc): the raw register words' self-check, one lap on top of the new defaults: each reused
     // block is made again through citro3d and compared. The results' checks columns (chk) must say 0 wrong, and the
     // log's "raw GPU words: ..." lines end "0 differ".
@@ -407,7 +460,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // each row's variables to their usual setting, rows in order, so a usual 0 here turned DKR_RAW_REGS off in the
     // usual races and every other row, and run 52 raced the new defaults without raw words.
     { "raw register words, self-check (1 lap, chk: 0 wrong)", { "DKR_RAW_REGS", "DKR_RAW_REGS_CHECK", NULL }, -1, 1, 1,
-      1 },
+      1, BATCH_BASICS },
     // Run 54 settled P63 (buckets handed over without copying, DKR_SPLIT_REF: -0.04 ms game core, expected -0.4) and
     // P66 (the split ring's hand-off in batches, DKR_SPLIT_LINES: -0.3 ms, inside the noise); both self-checks said 0
     // wrong. Their five rows went; the switches stay, default off.
@@ -422,7 +475,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // corners and the share of vertices animation moved, a frame ("kart batches" log line every 600 frames;
     // DKR_KART_COUNTS). Rank 2 (GPU-resident kart meshes) stops if corners x ~15 cycles + two-load batches < 0.4 ms.
     // Host, Whale Bay (DKR_HOST_OLD3DS): ~130 one-load batches, ~1,470 corners, ~14% of vertices moved; 11 two-load.
-    { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1 },
+    { "kart batch counts (1 lap)", { "DKR_KART_COUNTS", NULL, NULL }, 0, 1, 1, 1, BATCH_BASICS },
     // P65 5b and rank 3 (2026-11-23, proposals/3ds-custom-shader-plan.md). First the measurement the slim track
     // shader's worth rests on: the native track's GPU time by kind again with anti-aliasing off (BENCH_AA_OFF), so a
     // quarter of the pixels. Against "GPU time by kind, native track on the GPU": the track kind's GPU ms barely
@@ -436,17 +489,17 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // "program switch: light for track 1, ..." line at start-up must say 1 for the shader rows, and the "slim shaders:"
     // lines count the light switches and the most in a frame.
     { "GPU time by kind, native track, anti-aliasing off (P65 5b: vertices or pixels)",
-      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0 },
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "BENCH_AA_OFF" }, 0, 1, 1, 0, BATCH_SLIM },
     { "GPU time by kind, slim track shader, light program switch (P65 5b)",
-      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM=1", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 0 },
+      { "DKR_GPU_KINDS", "DKR_NATIVE_TRACK=1", "DKR_TRACK_SLIM=1", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 0, BATCH_SLIM },
     // Rank 3: the see-through water's heights and colours worked out by waves.v.pica (DKR_WAVE_SHADER), the game's
     // per-vertex loop gone from the game core for tiles the GPU draws (log "wave shader: N tiles drawn by the GPU").
     // Then its self-check (DKR_WAVE_SHADER_CHECK): every tile the CPU way, compared with the shader's sums; the log line
     // "wave shader check" must say "differ on 0" and "the CPU way on 0". The first race with the wave shader writes
     // wave_shader.txt ("testing", then "passed"); a lock there leaves it off in later runs.
-    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0 },
+    { "water waves worked out by the GPU (P65 rank 3)", { "DKR_WAVE_SHADER", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0, BATCH_WAVES },
     { "water waves, self-check (1 lap, chk: differ on 0)",
-      { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1 },
+      { "DKR_WAVE_SHADER", "DKR_WAVE_SHADER_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1, BATCH_WAVES },
     // P65 rank 1 (2026-11-23, proposals/3ds-sprite-table-plan.md): billboard sprite tiles handed to the GPU as the
     // game's own vertices with one matrix per load (DKR_SPRITE_TABLE), so the game core no longer works out their
     // corners (run 54: sprite set-up + corners + tris 1.5-2.2 ms timed). 1: draws of one load by the frame's transform
@@ -456,28 +509,28 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // lock leaves sprite_table.txt "testing" and the next start leaves the table shader off. The log's "sprite table"
     // lines count tiles, draws and the routes; the self-check row must say 0 wrong (chk; log "0 differ").
     { "sprite table, one-load draws by the transform program (P65 rank 1)",
-      { "DKR_SPRITE_TABLE", "DKR_PROG_SWITCH=1", NULL }, -1, 1, 0, 0 },
+      { "DKR_SPRITE_TABLE", "DKR_PROG_SWITCH=1", NULL }, -1, 1, 0, 0, BATCH_SPRITE_TABLE },
     { "sprite table, every draw by the table shader (P65 rank 1)", { "DKR_SPRITE_TABLE", "DKR_PROG_SWITCH=1", NULL }, -1,
-      2, 1, 0 },
+      2, 1, 0, BATCH_SPRITE_TABLE },
     { "sprite table, walk steps timed (1 lap)", { "DKR_SPRITE_TABLE=1", "DKR_WALK_STEPS", "DKR_PROG_SWITCH=1", NULL }, 0,
-      1, 1, 1 },
+      1, 1, 1, BATCH_SPRITE_TABLE },
     { "sprite table, self-check (1 lap, chk: 0 wrong)",
-      { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1 },
+      { "DKR_SPRITE_TABLE=1", "DKR_SPRITE_TABLE_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 1, 1, BATCH_SPRITE_TABLE },
     // P55 S4 step 1 (2026-11-23, proposals/3ds-old3ds-s4-flat-dispatcher-plan.md): race frames run by the flat
     // dispatcher (DKR_FLAT_FRAME: the record dispatcher with the record tag first, state ops straight to native_op and
     // its record path built without the step marks, census notes, kart counts and remote vertex maths, which only run
     // on frames that use none of them). Host estimate -0.3..-1.0 ms game core, unmeasured on hardware; judged on the
     // game core ms (4-track mean, triangle-adjusted) against the usual races. The self-check row must say 0 wrong (log:
     // "flat frame: N frames flat, M not, K records checked, 0 wrong").
-    { "flat dispatcher (S4 step 1)", { "DKR_FLAT_FRAME", NULL, NULL }, 0, 1, 0, 0 },
+    { "flat dispatcher (S4 step 1)", { "DKR_FLAT_FRAME", NULL, NULL }, 0, 1, 0, 0, BATCH_FLAT },
     { "flat dispatcher, self-check (1 lap, chk: 0 wrong)", { "DKR_FLAT_FRAME", "DKR_FLAT_FRAME_CHECK", NULL }, 0, 1, 1,
-      1 },
+      1, BATCH_FLAT },
     // P55 S4 stage 2 (2026-11-23): on flat frames, DRAW records find their tables by a handle kept per material id and
     // track records reuse the camera's clip matrix (DKR_FLAT_RES). Host cache model: about -4% instruction cache misses
     // in the walk on top of the flat dispatcher. Read the game core ms against the flat dispatcher row above.
-    { "flat dispatcher + record handles (S4 stage 2)", { "DKR_FLAT_FRAME", "DKR_FLAT_RES", NULL }, 0, 1, 0, 0 },
+    { "flat dispatcher + record handles (S4 stage 2)", { "DKR_FLAT_FRAME", "DKR_FLAT_RES", NULL }, 0, 1, 0, 0, BATCH_FLAT },
     { "flat record handles, self-check (1 lap, chk: 0 wrong)",
-      { "DKR_FLAT_FRAME", "DKR_FLAT_RES", "DKR_FLAT_RES_CHECK", NULL }, 0, 1, 1, 1 },
+      { "DKR_FLAT_FRAME", "DKR_FLAT_RES", "DKR_FLAT_RES_CHECK", NULL }, 0, 1, 1, 1, BATCH_FLAT },
     // P68 (2026-11-23, proposals/3ds-kart-draw-batching-plan.md): GPU-maths kart batches with the same material drawn
     // as one draw (DKR_KART_BATCH 1), and slim records on top (2: index lists made once, corners written into the
     // queue, both cull groups in one record, matrix/fog/light once a kart). Est. -0.4..-1.0 ms game core, -0.3..-0.6
@@ -485,24 +538,24 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // steps row splits "other paths" into "kart set-up", "kart corners" and "kart queue"; the self-check row (which
     // turns the batching on itself) must say 0 wrong.
     // (Bit 1 alone is left out of the all-together race, where the slim row below sets the same switch.)
-    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0 },
-    { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0 },
-    { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1 },
-    { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    { "kart runs merged (P68 1)", { "DKR_KART_BATCH", NULL, NULL }, 0, 1, 1, 0, BATCH_KART_BATCH },
+    { "kart runs merged + slim records (P68 2)", { "DKR_KART_BATCH", NULL, NULL }, 0, 2, 0, 0, BATCH_KART_BATCH },
+    { "kart batching, walk steps timed (PMU 2, 1 lap)", { "DKR_KART_BATCH", "DKR_WALK_STEPS", "DKR_PMU" }, 0, 2, 1, 1, BATCH_KART_BATCH },
+    { "kart batching, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_BATCH_CHECK", NULL, NULL }, 0, 1, 1, 1, BATCH_KART_BATCH },
     // P68 step 4 (2026-11-23, plan section 8): kart pieces whose vertices haven't changed for 4 frames are drawn from
     // meshes kept on the GPU (DKR_KART_RESIDENT): no box loop, corner repack, index copy or vertices through the queue.
     // Host, Whale Bay: about 40% of kart records drawn so. Est. -0.2..-0.6 ms game core (unmeasured). Alone and on top
     // of slim runs (value 2 sets both); the self-check row must say 0 wrong (log "kart resident check").
-    { "kart pieces kept on the GPU (P68 4)", { "DKR_KART_RESIDENT", NULL, NULL }, 0, 1, 1, 0 },
-    { "kart pieces kept on the GPU + slim runs (P68 2+4)", { "DKR_KART_BATCH", "DKR_KART_RESIDENT", NULL }, 0, 2, 0, 0 },
-    { "kart pieces kept, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_RESIDENT_CHECK", NULL, NULL }, 0, 1, 1, 1 },
+    { "kart pieces kept on the GPU (P68 4)", { "DKR_KART_RESIDENT", NULL, NULL }, 0, 1, 1, 0, BATCH_KART_RESIDENT },
+    { "kart pieces kept on the GPU + slim runs (P68 2+4)", { "DKR_KART_BATCH", "DKR_KART_RESIDENT", NULL }, 0, 2, 0, 0, BATCH_KART_RESIDENT },
+    { "kart pieces kept, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_RESIDENT_CHECK", NULL, NULL }, 0, 1, 1, 1, BATCH_KART_RESIDENT },
     // P68 step 5 (2026-11-23): the ~6 kart batches a frame with two vertex loads (two matrices, the racer's head) drawn
     // by the GPU with transform2.v.pica (DKR_KART_MTX2) instead of the CPU path. Small (est. -0.1..-0.3 ms game core,
     // unmeasured). The first race with it writes kart_mtx2.txt ("testing", then "passed"); a lock leaves it off later.
     // The self-check row must say 0 wrong (log "kart two-matrix check").
-    { "two-matrix kart draws by the GPU (P68 5)", { "DKR_KART_MTX2", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0 },
+    { "two-matrix kart draws by the GPU (P68 5)", { "DKR_KART_MTX2", "DKR_PROG_SWITCH=1", NULL }, 0, 1, 0, 0, BATCH_KART_MTX2 },
     { "two-matrix kart draws, self-check (1 lap, chk: 0 wrong)", { "DKR_KART_MTX2_CHECK", "DKR_PROG_SWITCH=1", NULL }, 0,
-      1, 1, 1 },
+      1, 1, 1, BATCH_KART_MTX2 },
     // S8 / P39 (2026-11-23, proposals/3ds-interp60-plan.md): the 60 Hz picture by interpolation. The game and its
     // frames stay at 30 Hz; each frame's GPU commands run twice, the first time with every draw moved half a step back
     // (gpu_interp.inc), so a new picture reaches the screen every retrace. A picture mode, not a speed-up: read the
@@ -511,8 +564,8 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // as one; walk: matched, new, not sane). The self-check row checks every delta the walk makes (C D against C')
     // and the backend's conversion of it to the 3DS screen (CSV chk: 0 wrong). Normal laps for the first, one lap for
     // the check. Off by default; tried in play from Test run > 60 Hz picture.
-    { "60 Hz picture, interpolated (S8 / P39)", { "DKR_INTERP60", NULL, NULL }, 0, 1, 1, 0 },
-    { "60 Hz picture, self-check (1 lap, chk: 0 wrong)", { "DKR_INTERP60", "DKR_INTERP60_CHECK", NULL }, 0, 1, 1, 1 },
+    { "60 Hz picture, interpolated (S8 / P39)", { "DKR_INTERP60", NULL, NULL }, 0, 1, 1, 0, BATCH_INTERP60 },
+    { "60 Hz picture, self-check (1 lap, chk: 0 wrong)", { "DKR_INTERP60", "DKR_INTERP60_CHECK", NULL }, 0, 1, 1, 1, BATCH_INTERP60 },
     // GS freeze test 2, step 10 (2026-11-23, plan section 3b): the GS hang ladder's steps all passed on the Old 3DS,
     // yet P60 D's sprite geometry shader (DKR_SPRITE_GS=2) froze it in run 50. These rows race it again, last in the
     // list as a lock stops the run: only the first sprite batch of a frame through the geometry shader, then the first
@@ -527,7 +580,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // bucket (chk: 0 wrong in every usual race). This row breaks the check on purpose (rule K6: the largest part left
     // out of the sum): its chk must say 1 wrong and the line "check (broken on purpose): ... WRONG".
     { "frame parts check broken on purpose (K6, 1 lap)", { "DKR_FRAME_PARTS_CHECK", NULL, NULL },
-      -1, 2, 1, 1 },
+      -1, 2, 1, 1, BATCH_FRAME_END_A },
     // P57 E step 2 (2026-11-23, same plan): cuts for the frame start/end parts, each off by default until this bench
     // picks it. Compare the row's renderer core ms and its "backend frame start/end" parts with the usual race's (the
     // part named in brackets should drop), and the fps; the flashes column must not change. The log's "frame
@@ -538,29 +591,29 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     //  - queue start on a game core helper (C3D_FrameEnd): above the game (1) or in its idle time (2); "by the
     //    renderer" counts the starts the helper was 3 ms late for;
     //  - all three together; then each self-check broken on purpose (rule K6, 1 lap): chk must say 1 wrong.
-    { "frame end: merged flush (P57 E2)", { "DKR_FE_FLUSH", NULL, NULL }, -1, 1, 1, 0 },
-    { "frame end: merged flush, clean only", { "DKR_FE_FLUSH", NULL, NULL }, -1, 2, 0, 0 },
+    { "frame end: merged flush (P57 E2)", { "DKR_FE_FLUSH", NULL, NULL }, -1, 1, 1, 0, BATCH_FRAME_END_A },
+    { "frame end: merged flush, clean only", { "DKR_FE_FLUSH", NULL, NULL }, -1, 2, 0, 0, BATCH_FRAME_END_A },
     { "frame end: present on VBlank event", { "DKR_FE_PRESENT_EVENT", NULL, NULL }, -1, 1, 0,
-      0 },
+      0, BATCH_FRAME_END_A },
     { "frame end: queue helper above game",
-      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 1, 0, 0 },
+      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 1, 0, 0, BATCH_FRAME_END_B },
     { "frame end: queue helper in game idle",
-      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 2, 1, 0 },
+      { "DKR_FE_QUEUE_HELPER", NULL, NULL }, -1, 2, 1, 0, BATCH_FRAME_END_B },
     { "frame end: all three cuts",
-      { "DKR_FE_FLUSH=2", "DKR_FE_PRESENT_EVENT", "DKR_FE_QUEUE_HELPER", NULL }, -1, 1, 1, 0 },
+      { "DKR_FE_FLUSH=2", "DKR_FE_PRESENT_EVENT", "DKR_FE_QUEUE_HELPER", NULL }, -1, 1, 1, 0, BATCH_FRAME_END_B },
     { "frame end flush check broken (K6, 1 lap)", { "DKR_FE_FLUSH=1", "DKR_FE_FLUSH_CHECK", NULL }, -1, 2,
-      1, 1 },
+      1, 1, BATCH_FRAME_END_A },
     // (At the 60 cap, so that frames come fast enough for a swap to be pending at all: with no present wait in the race
     // the line says 0 VBlank waits and the check isn't counted.)
     { "present check broken (K6, 1 lap)",
-      { "DKR_FE_PRESENT_EVENT=1", "DKR_FPS_PIN=60", "DKR_FE_PRESENT_CHECK", NULL }, -1, 2, 1, 1 },
+      { "DKR_FE_PRESENT_EVENT=1", "DKR_FPS_PIN=60", "DKR_FE_PRESENT_CHECK", NULL }, -1, 2, 1, 1, BATCH_FRAME_END_A },
     { "queue helper check broken (K6, 1 lap)", { "DKR_FE_QUEUE_HELPER=1", "DKR_FE_QUEUE_CHECK", NULL }, -1,
-      2, 1, 1 },
+      2, 1, 1, BATCH_FRAME_END_B },
     { "sprite GS, first batch a frame only (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
-      0, 1, 1, 1 },
+      0, 1, 1, 1, BATCH_SPRITE_GS },
     { "sprite GS, first 4 batches a frame (GS freeze test 2, 1 lap)", { "DKR_SPRITE_GS=2", "DKR_SPRITE_GS_CAP", NULL },
-      0, 4, 1, 1 },
-    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, -1, 2, 1, 1 },
+      0, 4, 1, 1, BATCH_SPRITE_GS },
+    { "sprite GS, every batch (run 50's freeze, 1 lap)", { "DKR_SPRITE_GS", NULL, NULL }, -1, 2, 1, 1, BATCH_SPRITE_GS },
     // Race 19 freeze diagnosis (2026-11-24, proposals/3ds-race19-slim-freeze-plan.md section 6), last as a lock stops
     // the run: the slim track shader with the command list split before each program switch (DKR_PROG_SWITCH=2), so
     // the GPU has finished every draw before the old full program set-up is written. Marker track_slim_m2.txt. Answer
@@ -568,7 +621,7 @@ static const BenchSwitch sSwitchesOld3ds[] = {
     // = fixed cheaply; this one freezing too = not the switch (the shader itself or something else). The log's "slim
     // shaders:" lines count the splits ("after a list split").
     { "slim track, list split before each switch (freeze diagnosis, 1 lap)",
-      { "DKR_TRACK_SLIM=1", "DKR_NATIVE_TRACK=1", "DKR_PROG_SWITCH=2", NULL }, 0, 1, 1, 1 },
+      { "DKR_TRACK_SLIM=1", "DKR_NATIVE_TRACK=1", "DKR_PROG_SWITCH=2", NULL }, 0, 1, 1, 1, BATCH_SLIM },
     { NULL, { NULL, NULL, NULL, NULL, NULL }, 0, 0 },
 };
 /*
@@ -624,13 +677,100 @@ static const BenchSwitch sSwitches60[] = {
 };
 static s32 sShort; // (Defined again below: the whole game run's short variant, the shelved switches bench (New 3DS)
                    // or the 60 fps bench (Old 3DS))
+/* The Old 3DS bench batch being raced (enum BenchBatch; 0: the whole switch bench), and its rows: sSwitchesOld3ds's
+ * with that batch, in their order, then the empty entry. */
+static s32 sBatch;
+static BenchSwitch sBatchRows[ARRAY_COUNT(sSwitchesOld3ds)];
+static s32 sBatchCount; // Rows, not counting the empty entry
+#define BENCH_BATCH (plat_old_3ds() && !sShort && sBatch > 0)
+/* The switch bench's list, and its races a track: the usual settings, then each switch flipped. */
 #define sSwitches                                                                                                      \
-    (plat_old_3ds() ? (sShort ? sSwitches60 : sSwitchesOld3ds) : sShort ? sSwitchesShelved : sSwitchesNew3ds)
-// The usual settings, then each switch flipped
+    (plat_old_3ds() ? (sShort ? sSwitches60 : sBatch > 0 ? sBatchRows : sSwitchesOld3ds)                              \
+     : sShort       ? sSwitchesShelved                                                                                 \
+                    : sSwitchesNew3ds)
 #define SWITCH_CONFIGS                                                                                                 \
-    (plat_old_3ds() ? (sShort ? (s32) ARRAY_COUNT(sSwitches60) : (s32) ARRAY_COUNT(sSwitchesOld3ds))                   \
+    (plat_old_3ds() ? (sShort ? (s32) ARRAY_COUNT(sSwitches60)                                                         \
+                       : sBatch > 0 ? sBatchCount + 1                                                                   \
+                                    : (s32) ARRAY_COUNT(sSwitchesOld3ds))                                              \
      : sShort       ? (s32) ARRAY_COUNT(sSwitchesShelved)                                                              \
                     : (s32) ARRAY_COUNT(sSwitchesNew3ds))
+
+/* Picks the bench batch to race (0 or out of range: the whole switch bench) and gathers its rows. */
+static void batch_select(s32 batch) {
+    static const BenchSwitch sEnd = { NULL, { NULL }, 0, 0, 0, 0, 0 };
+    s32 i;
+    sBatch = plat_old_3ds() && batch > 0 && batch < BATCH_COUNT ? batch : 0;
+    sBatchCount = 0;
+    for (i = 0; sBatch > 0 && sSwitchesOld3ds[i].name != NULL; i++) {
+        if (sSwitchesOld3ds[i].batch == sBatch) {
+            sBatchRows[sBatchCount++] = sSwitchesOld3ds[i];
+        }
+    }
+    sBatchRows[sBatchCount] = sEnd;
+}
+
+/* A batch's rows, and how many of them are 1-lap checks. */
+static void batch_rows(s32 batch, s32 *rows, s32 *checks) {
+    s32 i;
+    *rows = *checks = 0;
+    for (i = 0; sSwitchesOld3ds[i].name != NULL; i++) {
+        if (sSwitchesOld3ds[i].batch == batch) {
+            (*rows)++;
+            *checks += sSwitchesOld3ds[i].check != 0;
+        }
+    }
+}
+
+/* The tracks a batch races (Whale Bay, then Jungle Falls for its tunnel; the 1-lap checks race the first only), and
+ * how many: one when every row is a check. */
+static const s8 sBatchTracks[] = { 8, 29 };
+static s32 batch_track_count(s32 batch) {
+    s32 rows, checks;
+    batch_rows(batch, &rows, &checks);
+    return rows > checks ? (s32) ARRAY_COUNT(sBatchTracks) : 1;
+}
+
+/* Whether a bench batch leaves out config (a race's settings) on its track t: its 1-lap checks race the first only. */
+static s32 batch_skips(s32 t, s32 config) {
+    return BENCH_BATCH && t > 0 && config >= 1 && config < SWITCH_CONFIGS && sSwitches[config - 1].check;
+}
+
+/* The races of the batch picked (batch_select) as build_short_list lays them out with the default tracks. */
+static s32 batch_race_count(void) {
+    s32 t, config, races = 0;
+    for (t = 0; t < batch_track_count(sBatch); t++) {
+        for (config = 0; config < SWITCH_CONFIGS; config++) {
+            races += !batch_skips(t, config);
+        }
+    }
+    return races;
+}
+
+/* Test run menu: the Old 3DS bench batches (0 on a New 3DS), each one's button label, and its races and minutes (a
+ * full race about 2.5 minutes with the load and results, a 1-lap race about 1.2). */
+s32 port_autorun_batch_count(void) {
+    return plat_old_3ds() ? BATCH_COUNT - 1 : 0;
+}
+
+const char *port_autorun_batch_label(s32 index) {
+    return index >= 0 && index < BATCH_COUNT - 1 ? sBatchInfo[index + 1].label : "";
+}
+
+s32 port_autorun_batch_info(s32 index, s32 *races, s32 *minutes, s32 *shader) {
+    s32 batch = index + 1, rows, checks, tracks, full, ones;
+    *races = *minutes = *shader = 0;
+    if (batch < 1 || batch >= BATCH_COUNT) {
+        return FALSE;
+    }
+    batch_rows(batch, &rows, &checks);
+    tracks = batch_track_count(batch);
+    full = rows > checks ? (rows - checks + 1) * tracks : 0; // Performance rows and the usual races
+    ones = checks + (rows > checks ? 0 : 1);                  // Checks (and an all-check batch's usual race)
+    *races = full + ones;
+    *minutes = (full * 25 + ones * 12 + 9) / 10;
+    *shader = sBatchInfo[batch].shader;
+    return TRUE;
+}
 /* Whether this switch bench run is the Old 3DS 60 fps bench. */
 #define BENCH_60 (plat_old_3ds() && sShort)
 /* With two switches or more (not counting the cost rows), a last race flips them all together: gains don't always add
@@ -640,7 +780,7 @@ static s32 switch_all_config(void) {
     for (i = 0; i < SWITCH_CONFIGS - 1; i++) {
         settings += !sSwitches[i].alone;
     }
-    return settings >= 2 ? SWITCH_CONFIGS : -1;
+    return settings >= 2 && !BENCH_BATCH ? SWITCH_CONFIGS : -1; // (A batch has no all-together race)
 }
 #define SWITCH_ALL switch_all_config()
 
@@ -920,7 +1060,7 @@ static const char *const sVehicleNames[3] = { "car", "hover", "plane" };
 enum Request {
     REQUEST_NONE, REQUEST_START, REQUEST_STOP, REQUEST_BENCH, REQUEST_QUICK, REQUEST_BOSS, REQUEST_SWITCH,
     REQUEST_WHOLE, REQUEST_WHOLE_SHORT, REQUEST_SWITCH_SHELVED, REQUEST_SWITCH_LEAN, REQUEST_QUICK_LEAN,
-    REQUEST_FULL_LEAN
+    REQUEST_FULL_LEAN, REQUEST_SWITCH_BATCH
 };
 
 typedef struct ModeInfo {
@@ -1281,14 +1421,17 @@ static void build_short_list(void) {
     s32 numBenchConfigs = config_count();
     s32 newSwitch = sMode == MODE_SWITCH && !plat_old_3ds();
     s32 oldSwitch = sMode == MODE_SWITCH && plat_old_3ds();
+    s32 batch = oldSwitch && BENCH_BATCH;
     const s8 *defaultTracks = boss        ? sBossTracks
                               : quick     ? sQuickTracks
                               : newSwitch ? sSwitchTracksNew3ds
+                              : batch     ? sBatchTracks
                               : oldSwitch ? sSwitchTracksOld3ds
                                           : sBenchTracks;
     s32 numDefault = boss        ? (s32) ARRAY_COUNT(sBossTracks)
                      : quick     ? (s32) ARRAY_COUNT(sQuickTracks)
                      : newSwitch ? (s32) ARRAY_COUNT(sSwitchTracksNew3ds)
+                     : batch     ? batch_track_count(sBatch)
                      : oldSwitch ? (s32) ARRAY_COUNT(sSwitchTracksOld3ds)
                                  : (s32) ARRAY_COUNT(sBenchTracks);
     const char *prefix = boss                    ? "DKR_AUTORUN_BOSS"
@@ -1330,6 +1473,9 @@ static void build_short_list(void) {
             continue;
         }
         for (pass = 0; pass < passes && sNumRaces < MAX_RACES; pass++) {
+            if (batch && batch_skips(t, configs[pass])) {
+                continue;
+            }
             sRaces[sNumRaces].track = tracks[t];
             sRaces[sNumRaces].character = character[0];
             sRaces[sNumRaces].vehicle = leveltable_vehicle_default(tracks[t]);
@@ -1474,9 +1620,10 @@ static void save_state_recorded(s32 running, s32 recorded) {
     char text[200];
     plat_snprintf(text, sizeof(text),
                   "active=%d\nconfig=%08x\nrun=%d\nnext=%d\nrunning=%d\nrecorded=%d\nfinished=%d\nproblems=%d\n"
-                  "short=%d\nreported=%d\nlean=%d\n",
+                  "short=%d\nreported=%d\nlean=%d\nbatch=%d\n",
                   (int) (sEnabled > 0), (unsigned int) sConfigHash, (int) sRun, (int) sNext, (int) running,
-                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt, (int) sLeanRun);
+                  (int) recorded, (int) sFinished, (int) sProblems, (int) sShort, (int) sReportedAt, (int) sLeanRun,
+                  (int) sBatch);
     io_queue(state_file(), text, NULL, FALSE);
 }
 
@@ -2193,6 +2340,10 @@ s32 port_autorun_enabled(void) {
             if (env != NULL && env[0] != '0') {
                 sMode = mode;
                 sShort = (mode == MODE_WHOLE || mode == MODE_SWITCH) && env[0] == '2';
+                // (A host or test start of one Old 3DS bench batch; on the console the batches are buttons.)
+                batch_select(mode == MODE_SWITCH && !sShort && plat_getenv("DKR_AUTORUN_SWITCH_BATCH") != NULL
+                                 ? port_atoi(plat_getenv("DKR_AUTORUN_SWITCH_BATCH"))
+                                 : 0);
             }
         }
         for (mode = MODE_FULL + 1; mode < MODE_COUNT && sMode == MODE_FULL; mode++) {
@@ -2204,6 +2355,7 @@ s32 port_autorun_enabled(void) {
                     sMode = mode;
                     sShort = state_value(text, "short", 0);
                     sLeanRun = state_value(text, "lean", 0);
+                    batch_select(mode == MODE_SWITCH && !sShort ? state_value(text, "batch", 0) : 0);
                 }
             }
         }
@@ -2241,6 +2393,9 @@ static void init(void) {
         }
     } else if (sMode == MODE_SWITCH) {
         hash_text(BENCH_60 ? "60 fps bench" : sShort ? "shelved switches" : "switch bench");
+        if (BENCH_BATCH) {
+            hash_text(sBatchInfo[sBatch].label); // Each batch is its own run.
+        }
         for (i = 0; i < (s32) ARRAY_COUNT(switchNames); i++) {
             hash_text(plat_getenv(switchNames[i]));
         }
@@ -2398,9 +2553,17 @@ s32 port_autorun_shelved_count(void) {
 /*
  * From any thread (the bottom screen's buttons): start the test run (1), the GPU benchmark (2), the quick test (3), the
  * boss fights (4), the switch bench (5), the whole game run (6, or 7 for its short variant) or the shelved switches
- * bench (8), the lean switch bench (9), lean quick test (10) or lean full test (11), or stop whichever is going (0), at the next game frame.
+ * bench (8), the lean switch bench (9), lean quick test (10) or lean full test (11), an Old 3DS bench batch
+ * (PORT_AUTORUN_BATCH_REQUEST + its index), or stop whichever is going (0), at the next game frame.
  */
+static s32 sRequestBatch; // The batch REQUEST_SWITCH_BATCH asks for
+
 void port_autorun_request(s32 start) {
+    if (start >= PORT_AUTORUN_BATCH_REQUEST && start < PORT_AUTORUN_BATCH_REQUEST + BATCH_COUNT - 1) {
+        sRequestBatch = start - PORT_AUTORUN_BATCH_REQUEST + 1; // (Before the request, which another thread reads)
+        sRequest = REQUEST_SWITCH_BATCH;
+        return;
+    }
     sRequest = start == 11  ? REQUEST_FULL_LEAN
                : start == 10 ? REQUEST_QUICK_LEAN
                : start == 9 ? REQUEST_SWITCH_LEAN
@@ -2850,6 +3013,16 @@ static void status_text(char *text, s32 size, const char *mode, s32 next, s32 co
 }
 
 static const char *mode_name(void) {
+    if (sMode == MODE_SWITCH && BENCH_BATCH) {
+        static char sName[32];
+        s32 i;
+        for (i = 0; sBatchInfo[sBatch].label[i] != '\0' && i < (s32) sizeof(sName) - 1; i++) {
+            char c = sBatchInfo[sBatch].label[i];
+            sName[i] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
+        }
+        sName[i] = '\0';
+        return sName;
+    }
     return sMode == MODE_BENCH    ? "GPU BENCH"
            : sMode == MODE_SWITCH ? (BENCH_60 ? "60 FPS BENCH" : sShort ? "SHELVED SWITCHES" : "SWITCH BENCH")
            : sMode == MODE_QUICK  ? "QUICK TEST"
@@ -3833,8 +4006,9 @@ static void send_results(const char *why) {
     static char summary[8192];
     s32 length;
     io_flush(); // The summaries and the attached files read the results back.
-    plat_snprintf(title, sizeof(title), "[3DS test run] %s%srun %d: %d of %d races, %d problems (%s)",
-                  sLeanRun ? "lean " : "", sMode == MODE_BENCH    ? "GPU benchmark "
+    plat_snprintf(title, sizeof(title), "[3DS test run] %s%s%s%srun %d: %d of %d races, %d problems (%s)",
+                  sLeanRun ? "lean " : "", BENCH_BATCH ? sBatchInfo[sBatch].label : "", BENCH_BATCH ? " " : "",
+                  sMode == MODE_BENCH    ? "GPU benchmark "
                   : sMode == MODE_SWITCH ? (BENCH_60 ? "60 fps bench " : sShort ? "shelved switches " : "switch bench ")
                   : sMode == MODE_QUICK  ? "quick test "
                   : sMode == MODE_BOSS  ? "boss fights "
@@ -3932,6 +4106,7 @@ static void turn_off(const char *why) {
         apply_config(-1); // Back to the player's settings.
     }
     sLeanRun = 0;
+    batch_select(0);
     plat_override_switch("DKR_PROF_LEAN", 0); // Frame history back for bug reports
     sMode = MODE_FULL;
     prof_set_status(NULL);
@@ -4012,8 +4187,12 @@ static void handle_request(void) {
     if ((request == REQUEST_START || request == REQUEST_BENCH || request == REQUEST_QUICK || request == REQUEST_BOSS ||
          request == REQUEST_SWITCH || request == REQUEST_SWITCH_SHELVED || request == REQUEST_WHOLE ||
          request == REQUEST_WHOLE_SHORT || request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN ||
-         request == REQUEST_FULL_LEAN) &&
+         request == REQUEST_FULL_LEAN || request == REQUEST_SWITCH_BATCH) &&
         !port_autorun_active()) {
+        batch_select(request == REQUEST_SWITCH_BATCH ? sRequestBatch : 0);
+        if (request == REQUEST_SWITCH_BATCH) {
+            request = REQUEST_SWITCH;
+        }
         sLeanRun = request == REQUEST_SWITCH_LEAN || request == REQUEST_QUICK_LEAN || request == REQUEST_FULL_LEAN;
         request = request == REQUEST_SWITCH_LEAN  ? REQUEST_SWITCH
                   : request == REQUEST_QUICK_LEAN ? REQUEST_QUICK
@@ -4479,6 +4658,49 @@ int port_autorun_override_check(char *report, int size) {
         if (at >= size - 1) {
             at = size - 1;
         }
+    }
+    if (plat_old_3ds()) {
+        // The bench batches (Test run > Bench 1 to 15): every Old 3DS row in one batch, no batch empty, each batch's
+        // races as its button says, and a planted row with no batch reported (rule K6).
+        static const BenchSwitch sPlanted[] = {
+            { "planted, in no batch", { "DKR_PLANTED_ONE", NULL }, 0, 1, 0, 0, BATCH_NONE },
+            { NULL, { NULL }, 0, 0, 0, 0, 0 },
+        };
+        s32 b, unbatched = 0, planted = 0, total = 0;
+        for (k = 0; sSwitchesOld3ds[k].name != NULL; k++) {
+            if (sSwitchesOld3ds[k].batch <= BATCH_NONE || sSwitchesOld3ds[k].batch >= BATCH_COUNT) {
+                unbatched++;
+                at += plat_snprintf(report + at, size - at, "bench batches: row \"%s\" is in no batch\n",
+                                    sSwitchesOld3ds[k].name);
+            }
+        }
+        for (k = 0; sPlanted[k].name != NULL; k++) {
+            planted += sPlanted[k].batch <= BATCH_NONE || sPlanted[k].batch >= BATCH_COUNT;
+        }
+        failures += unbatched + (planted != 1);
+        for (b = 1; b < BATCH_COUNT; b++) {
+            s32 want, minutes, shader;
+            port_autorun_batch_info(b - 1, &want, &minutes, &shader);
+            s32 races;
+            batch_select(b);
+            races = batch_race_count();
+            total += races;
+            if (sBatchCount == 0 || races != want || SWITCH_ALL >= 0) {
+                failures++;
+                at += plat_snprintf(report + at, size - at,
+                                    "bench batch %d (%s): %d rows, %d races, button says %d, all-together race %d\n",
+                                    (int) b, sBatchInfo[b].label, (int) sBatchCount, (int) races, (int) want,
+                                    (int) SWITCH_ALL);
+            }
+            if (at >= size - 1) {
+                at = size - 1;
+            }
+        }
+        batch_select(0);
+        at += plat_snprintf(report + at, size - at,
+                            "bench batches: %d batches, %d races, %d rows in no batch; planted row %s\n",
+                            (int) (BATCH_COUNT - 1), (int) total, (int) unbatched,
+                            planted == 1 ? "reported, ok" : "NOT reported, FAILED");
     }
     at += plat_snprintf(report + at, size - at, "switch bench override check (%s list): %d races, %d rows, %d failures\n",
                         plat_old_3ds() ? "Old 3DS" : "New 3DS", (int) races, (int) rows, (int) failures);
